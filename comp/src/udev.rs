@@ -230,6 +230,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     for command in state.config.session.prepare.clone() {
         state.run_and_wait(&command);
     }
+    let shell = state.config.session.shell.clone();
+    state.spawn_privileged(&shell);
     for command in state.config.session.startup.clone() {
         state.spawn(&command);
     }

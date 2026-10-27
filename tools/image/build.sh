@@ -45,8 +45,10 @@ stage_components() {
 	install -D -m 0755 "$target/release/bunt-settings" "$out/stage/usr/bin/bunt-settings"
 	install -D -m 0644 "$repo/settings/data/org.buntos.Settings.desktop" \
 		"$out/stage/usr/share/applications/org.buntos.Settings.desktop"
-	install -D -m 0644 "$repo/settings/data/org.buntos.Settings.svg" \
-		"$out/stage/usr/share/icons/hicolor/scalable/apps/org.buntos.Settings.svg"
+	local icon
+	for icon in "$repo"/shell/data/icons/*.svg "$repo/settings/data/org.buntos.Settings.svg"; do
+		install -D -m 0644 "$icon" "$out/stage/usr/share/icons/hicolor/scalable/apps/$(basename "$icon")"
+	done
 }
 
 if [[ $# -eq 0 ]]; then

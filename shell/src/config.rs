@@ -21,12 +21,28 @@ pub struct Dock {
     pub items: Vec<DockItem>,
 }
 
+/// Dock 항목. 설치된 앱(.desktop 파일)이거나 셸에 들어 있는 항목이다
 #[derive(Debug, Deserialize)]
-pub struct DockItem {
-    /// .desktop 파일 ID (예: "org.gnome.TextEditor.desktop")
-    pub app: String,
-    /// 이름으로 쓸 Fluent 메시지 ID. 없으면 .desktop 파일의 이름을 쓴다
-    pub label: Option<String>,
+#[serde(untagged)]
+pub enum DockItem {
+    App {
+        /// .desktop 파일 ID (예: "org.gnome.TextEditor.desktop")
+        app: String,
+        /// 이름으로 쓸 Fluent 메시지 ID. 없으면 .desktop 파일의 이름을 쓴다
+        label: Option<String>,
+    },
+    Builtin {
+        builtin: Builtin,
+        /// 이름으로 쓸 Fluent 메시지 ID
+        label: String,
+    },
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Builtin {
+    /// 모든 앱 목록
+    Apps,
 }
 
 impl Config {
@@ -53,12 +69,16 @@ mod tests {
     fn built_in_config_parses() {
         let config: Config = toml::from_str(DEFAULT).unwrap();
         assert!(!config.dock.items.is_empty());
-        assert!(
-            config
-                .dock
-                .items
-                .iter()
-                .all(|item| item.app.ends_with(".desktop"))
-        );
+        assert!(config.dock.items.iter().all(|item| match item {
+            DockItem::App { app, .. } => app.ends_with(".desktop"),
+            DockItem::Builtin { .. } => true,
+        }));
+        assert!(config.dock.items.iter().any(|item| matches!(
+            item,
+            DockItem::Builtin {
+                builtin: Builtin::Apps,
+                ..
+            }
+        )));
     }
 }

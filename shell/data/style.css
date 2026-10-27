@@ -3,81 +3,260 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+/* 레이어 창 자체는 투명하다. 보이는 모양은 안쪽 위젯이 그린다 */
 window.bunt-menubar,
 window.bunt-menubar.background,
 window.bunt-dock,
-window.bunt-dock.background {
+window.bunt-dock.background,
+window.bunt-banner,
+window.bunt-banner.background {
   background: none;
   background-color: transparent;
   box-shadow: none;
   font-family: "Pretendard", sans-serif;
 }
 
+/* 메뉴바: macOS처럼 투명한 배경에 흰 글씨. 앞의 창이 화면을 채우면(최대화, 전체 화면) 검은 배경 */
 .bar {
   min-height: 28px;
-  padding: 0 14px;
-  background: rgba(246, 246, 248, 0.78);
-  color: #1d1d1f;
+  padding: 0 8px;
+  background-color: transparent;
+  color: #ffffff;
   font-size: 13px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: background-color 200ms ease-out;
 }
 
-/* 로고 메뉴 버튼 (GtkMenuButton 안의 button) */
-.bar .logo > button {
+.bar.solid {
+  background-color: #000000;
+  text-shadow: none;
+}
+
+/* GTK 메뉴 막대의 기본 바탕과 밑줄을 없앤다 */
+.bar menubar {
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+
+/* 메뉴바의 단추(로고, 네트워크, 시계)와 앱 메뉴 항목 */
+.bar menubutton > button,
+.bar menubar > item {
   min-height: 0;
-  padding: 1px 8px;
+  padding: 2px 9px;
   border: none;
   border-radius: 6px;
   background: none;
   box-shadow: none;
   color: inherit;
-  font-weight: 800;
-  letter-spacing: 0.02em;
 }
 
-.bar .logo > button:hover,
-.bar .logo > button:checked {
-  background: rgba(0, 0, 0, 0.08);
+.bar menubutton > button:hover,
+.bar menubutton > button:checked,
+.bar menubar > item:hover,
+.bar menubar > item:selected {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.bar menubutton image {
+  -gtk-icon-size: 16px;
+  -gtk-icon-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.bar.solid menubutton image {
+  -gtk-icon-shadow: none;
+}
+
+/* 앞에 있는 앱의 이름은 굵게 */
+.bar menubar.app-menus > item:first-child {
+  font-weight: 700;
 }
 
 .bar .clock {
   font-weight: 500;
 }
 
-/* 그림자가 창 경계에서 잘리지 않도록 창 안쪽에 여백을 둔다 */
+/* Dock */
 .dock {
+  /* 그림자가 창 경계에서 잘리지 않도록 창 안쪽에 여백을 둔다 */
   margin: 16px;
-  padding: 6px 10px;
+  padding: 6px 10px 4px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.6);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
 }
 
-.dock-item {
-  padding: 4px;
+button.dock-item,
+menubutton.dock-item > button {
+  padding: 4px 4px 2px;
   border: none;
   border-radius: 14px;
   background: none;
   box-shadow: none;
 }
 
-.dock-item:hover {
+button.dock-item:hover,
+menubutton.dock-item > button:hover,
+menubutton.dock-item > button:checked {
   background: rgba(0, 0, 0, 0.08);
 }
 
-/* 시스템 설정에서 어둡게를 고르면 창에 dark 클래스가 붙는다 */
-.dark .bar {
-  background: rgba(30, 30, 32, 0.78);
-  color: #f5f5f7;
+/* 실행 중인 앱 아이콘 아래의 점 */
+.running-dot {
+  min-width: 4px;
+  min-height: 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.7);
 }
 
-.dark .bar .logo > button:hover,
-.dark .bar .logo > button:checked,
-.dark .dock-item:hover {
-  background: rgba(255, 255, 255, 0.12);
+.dock-separator {
+  margin: 8px 2px;
+  min-width: 1px;
+  background: rgba(0, 0, 0, 0.2);
 }
 
+/* 모든 앱 목록 */
+popover.launcher > contents {
+  padding: 18px;
+  border-radius: 22px;
+}
+
+.launcher-search {
+  min-height: 32px;
+}
+
+.launcher-tile {
+  padding: 10px 4px;
+  border: none;
+  border-radius: 14px;
+  background: none;
+  box-shadow: none;
+}
+
+.launcher-tile:hover {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+/* 알림 센터: 바탕 없이 카드만 떠 있다 */
+popover.notification-center-popover,
+popover.notification-center-popover > contents {
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+}
+
+.notification-center {
+  padding: 4px 6px 8px;
+}
+
+.center-title,
+.center-empty {
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.center-title {
+  margin-left: 4px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.center-empty {
+  padding: 8px 0;
+}
+
+button.center-clear {
+  padding: 2px 10px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.85);
+  color: #1d1d1f;
+  font-size: 12px;
+}
+
+.notification-card {
+  padding: 12px;
+  border-radius: 18px;
+  /* 컴포지터에 흐림 효과가 아직 없어 뒤 창이 비치지 않을 만큼만 투명하게 한다 */
+  background: rgba(246, 246, 248, 0.98);
+  color: #1d1d1f;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+.card-app {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.6);
+}
+
+.card-time {
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.5);
+}
+
+.card-summary {
+  font-weight: 700;
+}
+
+button.card-close {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.08);
+  box-shadow: none;
+  -gtk-icon-size: 10px;
+}
+
+.calendar-widget calendar {
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+.widget-weekday {
+  color: #e0443e;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.widget-day {
+  font-size: 40px;
+  font-weight: 300;
+}
+
+/* 시스템 설정에서 어둡게를 고르면 Dock과 알림 창에 dark 클래스가 붙는다. 메뉴바는 늘 흰 글씨다 */
 .dark .dock {
   background: rgba(40, 40, 44, 0.55);
   border-color: rgba(255, 255, 255, 0.14);
+}
+
+.dark button.dock-item:hover,
+.dark menubutton.dock-item > button:hover,
+.dark menubutton.dock-item > button:checked,
+.dark .launcher-tile:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.dark .running-dot {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.dark .dock-separator {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.dark .notification-card {
+  background: rgba(44, 44, 48, 0.98);
+  color: #f5f5f7;
+}
+
+.dark .card-app,
+.dark .card-time {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.dark button.card-close {
+  background: rgba(255, 255, 255, 0.14);
 }

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 buntOS contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Dock의 모든 앱 목록 단추
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5a5f6b"/>
+      <stop offset="1" stop-color="#2c2f36"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#background)"/>
+  <rect x="21" y="21" width="22" height="22" rx="7" fill="#ff5f57"/>
+  <rect x="53" y="21" width="22" height="22" rx="7" fill="#febc2e"/>
+  <rect x="85" y="21" width="22" height="22" rx="7" fill="#28c840"/>
+  <rect x="21" y="53" width="22" height="22" rx="7" fill="#4a9df8"/>
+  <rect x="53" y="53" width="22" height="22" rx="7" fill="#a35bf0"/>
+  <rect x="85" y="53" width="22" height="22" rx="7" fill="#ff7ab8"/>
+  <rect x="21" y="85" width="22" height="22" rx="7" fill="#5ac8fa"/>
+  <rect x="53" y="85" width="22" height="22" rx="7" fill="#ffd60a"/>
+  <rect x="85" y="85" width="22" height="22" rx="7" fill="#30d158"/>
+</svg>

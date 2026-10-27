@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 메뉴바: 로고 메뉴(시스템 설정, 다시 시작, 시스템 종료)와 시계
+//! 메뉴바: 왼쪽에 로고 메뉴(시스템 설정, 다시 시작, 시스템 종료)와 앞에 있는 앱의 메뉴,
+//! 오른쪽에 네트워크 아이콘과 날짜·시간(누르면 알림 센터). macOS처럼 평소에는 배경이 투명하고
+//! 글씨가 흰색이며, 앞에 있는 창이 화면을 채우면(최대화, 전체 화면) 배경이 검은색이 된다.
 
 use std::rc::Rc;
 
@@ -9,11 +11,21 @@ use bunt_i18n::Translations;
 use gtk4::{self as gtk, gio, glib, prelude::*};
 use gtk4_layer_shell::{Edge, LayerShell};
 
-use crate::{interface_settings, layer_window};
+use crate::{
+    appmenu, interface_settings, layer_window, network, notification_center,
+    notifications::Notifications, toplevels::Toplevels,
+};
 
 const SETTINGS_APP: &str = "org.buntos.Settings.desktop";
+/// 로고 메뉴의 아이콘 (shell/data/icons). 없으면 글자로 보인다
+const LOGO_ICON: &str = "org.buntos.Logo-symbolic";
 
-pub fn build(app: &gtk::Application, tr: &Rc<Translations>) -> gtk::ApplicationWindow {
+pub fn build(
+    app: &gtk::Application,
+    tr: &Rc<Translations>,
+    toplevels: Option<&Toplevels>,
+    notifications: &Notifications,
+) -> gtk::ApplicationWindow {
     let window = layer_window(app, "bunt-menubar");
     for edge in [Edge::Top, Edge::Left, Edge::Right] {
         window.set_anchor(edge, true);
@@ -21,9 +33,31 @@ pub fn build(app: &gtk::Application, tr: &Rc<Translations>) -> gtk::ApplicationW
     window.auto_exclusive_zone_enable();
 
     add_actions(app, tr);
+    let start = gtk::Box::builder().spacing(2).build();
+    start.append(&logo_menu(tr));
+    if let Some(toplevels) = toplevels {
+        start.append(&appmenu::build(tr, toplevels));
+    }
+    let end = gtk::Box::builder().spacing(2).build();
+    end.append(&network::indicator(tr));
+    end.append(&clock(tr, notifications));
+
     let bar = gtk::CenterBox::builder().css_classes(["bar"]).build();
-    bar.set_start_widget(Some(&logo_menu(tr)));
-    bar.set_end_widget(Some(&clock(tr)));
+    bar.set_start_widget(Some(&start));
+    bar.set_end_widget(Some(&end));
+    if let Some(toplevels) = toplevels {
+        let bar = bar.clone();
+        toplevels.subscribe(move |toplevels| {
+            let fills_screen = toplevels
+                .active()
+                .is_some_and(|active| active.maximized || active.fullscreen);
+            if fills_screen {
+                bar.add_css_class("solid");
+            } else {
+                bar.remove_css_class("solid");
+            }
+        });
+    }
 
     window.set_child(Some(&bar));
     window.present();
@@ -41,11 +75,18 @@ fn logo_menu(tr: &Translations) -> gtk::MenuButton {
     menu.append_section(None, &system);
     menu.append_section(None, &power);
 
-    // 레이블을 자식으로 두면 펼침 화살표가 붙지 않는다
-    let label = gtk::Label::new(Some(&tr.get("menubar-logo")));
+    // 아이콘이나 레이블을 자식으로 두면 펼침 화살표가 붙지 않는다
+    let has_logo = gtk::gdk::Display::default()
+        .is_some_and(|display| gtk::IconTheme::for_display(&display).has_icon(LOGO_ICON));
+    let child: gtk::Widget = if has_logo {
+        gtk::Image::from_icon_name(LOGO_ICON).upcast()
+    } else {
+        gtk::Label::new(Some(&tr.get("menubar-logo"))).upcast()
+    };
     gtk::MenuButton::builder()
-        .child(&label)
+        .child(&child)
         .menu_model(&menu)
+        .tooltip_text(tr.get("menubar-logo"))
         .css_classes(["logo"])
         .build()
 }
@@ -157,8 +198,9 @@ fn request_power(power: Power) {
     );
 }
 
-fn clock(tr: &Translations) -> gtk::Label {
-    let label = gtk::Label::builder().css_classes(["clock"]).build();
+/// 날짜와 시간. 누르면 알림 센터가 열린다
+fn clock(tr: &Rc<Translations>, notifications: &Notifications) -> gtk::MenuButton {
+    let label = gtk::Label::new(None);
     let formats = [
         tr.get("menubar-clock-format-12h"),
         tr.get("menubar-clock-format-24h"),
@@ -180,5 +222,9 @@ fn clock(tr: &Translations) -> gtk::Label {
         update(&ticking);
         glib::ControlFlow::Continue
     });
-    label
+    gtk::MenuButton::builder()
+        .child(&label)
+        .popover(&notification_center::popover(notifications, tr))
+        .css_classes(["clock"])
+        .build()
 }

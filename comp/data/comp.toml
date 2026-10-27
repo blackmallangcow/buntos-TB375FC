@@ -28,7 +28,10 @@ prepare = [
         "GSK_RENDERER", "XCURSOR_THEME", "XCURSOR_SIZE",
     ],
 ]
-# prepare 다음에 실행할 프로그램
-startup = [["bunt-shell"]]
+# 셸(메뉴바, Dock). 창 목록·창 조작 프로토콜(wlr-foreign-toplevel)을 쓸 수 있는
+# 특권 클라이언트로 띄운다. 다른 앱에는 이 프로토콜이 보이지 않는다
+shell = ["bunt-shell"]
+# 그 밖에 셸 다음에 실행할 프로그램
+startup = []
 # Alt+Enter로 여는 터미널
 terminal = ["foot"]

@@ -28,7 +28,15 @@ fn main() -> glib::ExitCode {
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
-    app.connect_startup(|_| load_style());
+    app.connect_startup(|app| {
+        load_style();
+        // 메뉴바의 앱 메뉴("시스템 설정 종료")가 D-Bus로 부르는 동작
+        let quit = gio::ActionEntry::builder("quit")
+            .activate(|app: &gtk::Application, _, _| app.quit())
+            .build();
+        app.add_action_entries([quit]);
+        app.set_accels_for_action("app.quit", &["<Control>q"]);
+    });
 
     let tr = Rc::new(Translations::load(TRANSLATIONS));
     let window: RefCell<Option<SettingsWindow>> = RefCell::new(None);

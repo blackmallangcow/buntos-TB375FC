@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 buntOS contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+메뉴바 로고 메뉴의 임시 로고: 소문자 b. 기호 아이콘이라 GTK가 글씨 색으로 칠한다
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <rect x="2.5" y="1" width="2.5" height="14" rx="1.25" fill="#2e3436"/>
+  <path fill="#2e3436" fill-rule="evenodd" d="M9 5a5 5 0 1 0 0 10a5 5 0 1 0 0-10zM9 7.5a2.5 2.5 0 1 1 0 5a2.5 2.5 0 1 1 0-5z"/>
+</svg>

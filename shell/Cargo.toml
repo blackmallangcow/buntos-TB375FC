@@ -12,8 +12,13 @@ publish.workspace = true
 
 [dependencies]
 bunt-i18n = { path = "../i18n" }
+gdk4-wayland = { version = "0.11", features = ["wayland_crate"] }
 gio-unix = "0.22"
 gtk4 = { version = "0.11", features = ["v4_12"] }
 gtk4-layer-shell = "0.8"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+# gtk4-layer-shell은 libwayland-client보다 먼저 링크돼야 동작한다. libwayland-client를 직접 링크하지
+# 않고 실행 중에 연다(dlopen). GTK가 이미 연 라이브러리를 같이 쓴다
+wayland-client = { version = "0.31", features = ["dlopen"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

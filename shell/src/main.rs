@@ -1,11 +1,17 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! bunt-shell: 메뉴바와 Dock (wlr-layer-shell 클라이언트, ARCHITECTURE 5.2)
+//! bunt-shell: 메뉴바, Dock, 알림 (wlr-layer-shell 클라이언트, ARCHITECTURE 5.2)
 
+mod appmenu;
 mod config;
 mod dock;
+mod launcher;
 mod menubar;
+mod network;
+mod notification_center;
+mod notifications;
+mod toplevels;
 
 use std::rc::Rc;
 
@@ -13,7 +19,7 @@ use bunt_i18n::{Sources, Translations};
 use gtk4::{self as gtk, gio, glib, prelude::*};
 use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 
-use crate::config::Config;
+use crate::{config::Config, notifications::Notifications, toplevels::Toplevels};
 
 const APP_ID: &str = "org.buntos.Shell";
 const STYLE: &str = include_str!("../data/style.css");
@@ -33,8 +39,21 @@ fn main() -> glib::ExitCode {
         let config = Config::load();
         let tr = Rc::new(Translations::load(TRANSLATIONS));
         load_style();
-        let windows = vec![menubar::build(app, &tr), dock::build(app, &config, &tr)];
-        follow_color_scheme(windows);
+        let toplevels =
+            gtk::gdk::Display::default().and_then(|display| Toplevels::connect(&display));
+        if toplevels.is_none() {
+            eprintln!(
+                "bunt-shell: the window list is unavailable; app menus and Dock indicators are off"
+            );
+        }
+        let notifications = Notifications::start();
+        let menubar = menubar::build(app, &tr, toplevels.as_ref(), &notifications);
+        let dock = dock::build(app, &config, &tr, toplevels.as_ref());
+        let banner = notification_center::banner(app, &notifications, &tr);
+        if let Some(toplevels) = &toplevels {
+            hide_dock_in_fullscreen(&dock, toplevels);
+        }
+        follow_color_scheme(vec![menubar, dock, banner]);
     });
     app.run()
 }
@@ -69,7 +88,17 @@ fn interface_settings() -> Option<gio::Settings> {
     Some(gio::Settings::new(INTERFACE_SCHEMA))
 }
 
-/// 시스템 설정에서 고른 밝게·어둡게(color-scheme)를 메뉴바와 Dock에 적용한다.
+/// 앞에 있는 창이 전체 화면이면 Dock을 숨긴다 (macOS와 같다)
+fn hide_dock_in_fullscreen(dock: &gtk::ApplicationWindow, toplevels: &Toplevels) {
+    let dock = dock.clone();
+    toplevels.subscribe(move |toplevels| {
+        let fullscreen = toplevels.active().is_some_and(|active| active.fullscreen);
+        dock.set_visible(!fullscreen);
+    });
+}
+
+/// 시스템 설정에서 고른 밝게·어둡게(color-scheme)를 Dock, 알림 카드, 메뉴에 적용한다.
+/// 메뉴바 자체는 macOS처럼 늘 흰 글씨를 쓴다.
 fn follow_color_scheme(windows: Vec<gtk::ApplicationWindow>) {
     let Some(settings) = interface_settings() else {
         return;
@@ -83,7 +112,7 @@ fn follow_color_scheme(windows: Vec<gtk::ApplicationWindow>) {
     });
 }
 
-/// 메뉴 같은 GTK 기본 위젯은 prefer-dark로, 메뉴바와 Dock의 자체 CSS는 dark 클래스로 바꾼다
+/// 메뉴 같은 GTK 기본 위젯은 prefer-dark로, 자체 CSS는 창의 dark 클래스로 바꾼다
 fn apply_color_scheme(settings: &gio::Settings, windows: &[gtk::ApplicationWindow]) {
     let dark = settings.string("color-scheme") == "prefer-dark";
     if let Some(gtk_settings) = gtk::Settings::default() {

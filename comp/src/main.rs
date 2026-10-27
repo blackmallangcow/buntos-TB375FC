@@ -9,6 +9,7 @@ mod grabs;
 mod input;
 mod render;
 mod state;
+mod toplevels;
 mod udev;
 
 fn main() {

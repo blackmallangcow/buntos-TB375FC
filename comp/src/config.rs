@@ -41,6 +41,10 @@ pub struct Session {
     /// startup보다 먼저, 하나씩 끝날 때까지 기다리며 실행하는 명령
     #[serde(default)]
     pub prepare: Vec<Vec<String>>,
+    /// 셸. 창 목록·창 조작 프로토콜을 쓸 수 있는 특권 클라이언트로 띄운다
+    #[serde(default)]
+    pub shell: Vec<String>,
+    #[serde(default)]
     pub startup: Vec<Vec<String>>,
     pub terminal: Vec<String>,
 }
