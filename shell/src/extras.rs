@@ -6,7 +6,10 @@
 //! 어느 항목을 메뉴 막대에 보일지는 사용자가 시스템 설정의 메뉴 막대 페이지에서 정한다
 //! (HIG: "Let people — not your app — decide").
 
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use gtk4::{self as gtk, gio, prelude::*};
 
@@ -20,7 +23,11 @@ pub type Listeners<T> = std::cell::RefCell<Vec<Box<dyn Fn(&T)>>>;
 pub struct Menu {
     popover: gtk::Popover,
     content: gtk::Box,
+    /// 열기 직전에 내용을 그리는 함수 (on_show)
+    fill: Rc<RefCell<Option<Fill>>>,
 }
+
+type Fill = Rc<dyn Fn(&Menu)>;
 
 /// 메뉴의 한 줄: 동그란 아이콘, 이름, 설명, 오른쪽 아이콘들 (Wi-Fi 네트워크, Bluetooth 기기)
 pub struct Row<'a> {
@@ -44,20 +51,32 @@ impl Menu {
             .build();
         // css_classes로 정하면 기본 클래스(background)가 빠진다
         popover.add_css_class("extra-popover");
-        Self { popover, content }
+        follow_pointer(&content);
+        Self {
+            popover,
+            content,
+            fill: Rc::default(),
+        }
     }
 
     pub fn popover(&self) -> &gtk::Popover {
         &self.popover
     }
 
-    /// 열 때마다 fill로 내용을 다시 그린다
+    /// 열 때마다 fill로 내용을 다시 그린다. 팝오버가 뜨기 전에(메뉴 막대 단추의 create-popup)
+    /// 그린다. 뜬 뒤에 그리면 크기가 바뀌어 팝오버가 다시 배치되고, 그 사이 GTK가 옛 위치로
+    /// 포인터를 계산해 아래쪽 항목이 가리킨 것처럼 칠해진다
     pub fn on_show(&self, fill: impl Fn(&Menu) + 'static) {
-        let menu = self.clone();
-        self.popover.connect_show(move |_| {
-            menu.clear();
-            fill(&menu);
-        });
+        self.fill.replace(Some(Rc::new(fill)));
+    }
+
+    fn refill(&self) {
+        self.content.remove_css_class("pointer-moved");
+        let fill = self.fill.borrow().clone();
+        if let Some(fill) = fill {
+            self.clear();
+            fill(self);
+        }
     }
 
     pub fn clear(&self) {
@@ -220,14 +239,36 @@ impl Menu {
     }
 }
 
+/// 포인터가 메뉴 안에서 실제로 움직인 뒤에만 가리킨 줄을 칠하게 한다 (pointer-moved 클래스).
+/// 메뉴가 뜰 때 GTK가 포인터가 메뉴 위에 있다고 보고 아래쪽 줄에 hover를 줄 때가 있다.
+/// 그 처음 위치에서 벗어나는 움직임이 와야 실제 포인터로 본다. macOS도 포인터가 메뉴에
+/// 들어오기 전에는 항목을 칠하지 않는다
+fn follow_pointer(content: &gtk::Box) {
+    let motion = gtk::EventControllerMotion::new();
+    let start: Rc<Cell<Option<(f64, f64)>>> = Rc::default();
+    let entered = start.clone();
+    motion.connect_enter(move |_, x, y| entered.set(Some((x, y))));
+    let moved = start.clone();
+    motion.connect_leave(move |_| moved.set(None));
+    let target = content.clone();
+    motion.connect_motion(move |_, x, y| match start.get() {
+        Some((x0, y0)) if (x - x0).abs() + (y - y0).abs() < 2.0 => {}
+        _ => target.add_css_class("pointer-moved"),
+    });
+    content.add_controller(motion);
+}
+
 /// 메뉴 막대에 놓는 단추
 pub fn button(child: &impl IsA<gtk::Widget>, menu: &Menu, tooltip: &str) -> gtk::MenuButton {
-    gtk::MenuButton::builder()
+    let button = gtk::MenuButton::builder()
         .child(child)
         .popover(menu.popover())
         .tooltip_text(tooltip)
         .css_classes(["status-item"])
-        .build()
+        .build();
+    let menu = menu.clone();
+    button.set_create_popup_func(move |_| menu.refill());
+    button
 }
 
 /// 메뉴 막대 항목을 보일지: 사용자가 켰고(org.buntos.shell의 키) 장치나 서비스가 있을 때.
