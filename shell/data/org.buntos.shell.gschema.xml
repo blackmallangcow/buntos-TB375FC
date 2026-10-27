@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 buntOS contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+bunt-shell 설정. 시스템 설정의 "메뉴 막대"와 "키보드", "배터리" 페이지가 바꾸고 셸이 바로 따른다.
+배경화면은 공용 키(org.gnome.desktop.background picture-uri),
+방해 금지는 org.gnome.desktop.notifications show-banners를 쓴다.
+-->
+<schemalist>
+  <schema id="org.buntos.shell" path="/org/buntos/shell/">
+    <key name="show-wifi" type="b">
+      <default>true</default>
+      <summary>메뉴 막대에 Wi-Fi 상태 보기</summary>
+    </key>
+    <key name="show-bluetooth" type="b">
+      <default>false</default>
+      <summary>메뉴 막대에 Bluetooth 보기</summary>
+    </key>
+    <key name="show-sound" type="b">
+      <default>true</default>
+      <summary>메뉴 막대에 사운드 보기</summary>
+    </key>
+    <key name="show-battery" type="b">
+      <default>true</default>
+      <summary>메뉴 막대에 배터리(전원) 상태 보기</summary>
+    </key>
+    <key name="show-battery-percentage" type="b">
+      <default>false</default>
+      <summary>배터리 아이콘 옆에 남은 양(%) 보기</summary>
+    </key>
+    <key name="show-input-source" type="b">
+      <default>true</default>
+      <summary>메뉴 막대에 입력 소스(한/영) 보기</summary>
+    </key>
+    <key name="show-status-items" type="b">
+      <default>true</default>
+      <summary>앱이 넣는 메뉴 막대 항목(StatusNotifierItem) 보기</summary>
+    </key>
+    <key name="recent-apps" type="as">
+      <default>[]</default>
+      <summary>최근에 실행한 앱 (.desktop ID, 최근 것이 먼저). 모든 앱 패널의 첫 줄</summary>
+    </key>
+  </schema>
+</schemalist>

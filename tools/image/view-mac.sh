@@ -37,5 +37,6 @@ exec qemu-system-aarch64 \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=virtio,format=raw,file=$image,snapshot=on" \
 	-device virtio-gpu-pci -device virtio-keyboard-pci -device virtio-tablet-pci \
+	-audiodev coreaudio,id=snd0 -device virtio-sound-pci,audiodev=snd0 \
 	-nic user,model=virtio-net-pci \
 	-display cocoa

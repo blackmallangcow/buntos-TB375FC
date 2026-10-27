@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 화면 모드(밝게·어둡게): 반쯤 채운 원 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" fill-rule="evenodd" d="M8 1.5A6.5 6.5 0 1 0 8 14.5A6.5 6.5 0 1 0 8 1.5ZM8 2.9A5.1 5.1 0 0 1 8 13.1Z"/>
+</svg>

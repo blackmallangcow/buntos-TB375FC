@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 저전력 모드: 잎 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" d="M14 2C7.5 2 3 5 3 10C3 11.2 3.3 12.2 3.8 12.9L2.3 14.4L3.1 15.2L4.6 13.7C5.4 14.2 6.4 14.5 7.5 14.5C12 14.5 14 9 14 2ZM5.2 12.6C6.6 9.6 8.6 7.2 11.6 5.2C9.3 7.4 7.6 9.8 6.4 13.1Z"/>
+</svg>

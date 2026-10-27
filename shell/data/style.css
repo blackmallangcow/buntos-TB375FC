@@ -9,11 +9,15 @@ window.bunt-menubar.background,
 window.bunt-dock,
 window.bunt-dock.background,
 window.bunt-banner,
-window.bunt-banner.background {
+window.bunt-banner.background,
+window.bunt-launcher,
+window.bunt-launcher.background,
+window.bunt-wallpaper,
+window.bunt-wallpaper.background {
   background: none;
   background-color: transparent;
   box-shadow: none;
-  font-family: "Pretendard", sans-serif;
+  font-family: var(--font-family);
 }
 
 /* 메뉴바: macOS처럼 투명한 배경에 흰 글씨. 앞의 창이 화면을 채우면(최대화, 전체 화면) 검은 배경 */
@@ -21,14 +25,14 @@ window.bunt-banner.background {
   min-height: 28px;
   padding: 0 8px;
   background-color: transparent;
-  color: #ffffff;
-  font-size: 13px;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  color: var(--on-wallpaper);
+  font-size: var(--text-body);
+  text-shadow: var(--on-wallpaper-shadow);
   transition: background-color 200ms ease-out;
 }
 
 .bar.solid {
-  background-color: #000000;
+  background-color: var(--menubar-solid);
   text-shadow: none;
 }
 
@@ -45,7 +49,7 @@ window.bunt-banner.background {
   min-height: 0;
   padding: 2px 9px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: none;
   box-shadow: none;
   color: inherit;
@@ -55,16 +59,31 @@ window.bunt-banner.background {
 .bar menubutton > button:checked,
 .bar menubar > item:hover,
 .bar menubar > item:selected {
-  background: rgba(255, 255, 255, 0.22);
+  background: var(--on-wallpaper-hover);
 }
 
-.bar menubutton image {
+/* 메뉴바 단추의 아이콘. 팝오버 안 아이콘에는 닿지 않게 단추 바로 아래만 고른다 */
+.bar menubutton > button image {
   -gtk-icon-size: 16px;
-  -gtk-icon-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  -gtk-icon-shadow: var(--on-wallpaper-shadow);
 }
 
-.bar.solid menubutton image {
+.bar.solid menubutton > button image {
   -gtk-icon-shadow: none;
+}
+
+/* 입력 소스: 테두리 안의 글자 (macOS 입력 메뉴의 "A", "한") */
+.input-badge {
+  min-width: 12px;
+  padding: 0 3px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  font-size: var(--text-footnote);
+  font-weight: 700;
+}
+
+.status-percent {
+  font-size: var(--text-callout);
 }
 
 /* 앞에 있는 앱의 이름은 굵게 */
@@ -76,22 +95,22 @@ window.bunt-banner.background {
   font-weight: 500;
 }
 
-/* Dock */
+/* Dock: 유리 판 */
 .dock {
   /* 그림자가 창 경계에서 잘리지 않도록 창 안쪽에 여백을 둔다 */
-  margin: 16px;
+  margin: var(--space-4);
   padding: 6px 10px 4px;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  border-radius: var(--radius-xl);
+  background: var(--glass);
+  border: 1px solid var(--glass-highlight);
+  box-shadow: var(--shadow-menu), 0 0 0 1px var(--glass-outline);
 }
 
 button.dock-item,
 menubutton.dock-item > button {
   padding: 4px 4px 2px;
   border: none;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: none;
   box-shadow: none;
 }
@@ -99,7 +118,7 @@ menubutton.dock-item > button {
 button.dock-item:hover,
 menubutton.dock-item > button:hover,
 menubutton.dock-item > button:checked {
-  background: rgba(0, 0, 0, 0.08);
+  background: var(--hover);
 }
 
 /* 실행 중인 앱 아이콘 아래의 점 */
@@ -107,35 +126,388 @@ menubutton.dock-item > button:checked {
   min-width: 4px;
   min-height: 4px;
   border-radius: 2px;
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--label);
 }
 
 .dock-separator {
   margin: 8px 2px;
   min-width: 1px;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--separator);
 }
 
-/* 모든 앱 목록 */
-popover.launcher > contents {
-  padding: 18px;
-  border-radius: 22px;
+/* 모든 앱 (macOS 26 응용 프로그램 창): 화면을 덮는 투명한 창 가운데의 유리 패널 */
+.launcher-panel {
+  padding: var(--space-3) var(--space-5) var(--space-2);
+  border-radius: var(--radius-2xl);
+  background: var(--glass);
+  border: 1px solid var(--glass-highlight);
+  box-shadow: var(--shadow-panel), 0 0 0 1px var(--glass-outline);
+  color: var(--label);
+  opacity: 0;
+  transform: scale(0.97);
+  transition: opacity 140ms ease-out, transform var(--duration) ease-out;
 }
 
-.launcher-search {
-  min-height: 32px;
+.launcher-panel.shown {
+  opacity: 1;
+  transform: none;
 }
 
-.launcher-tile {
-  padding: 10px 4px;
+.launcher-header {
+  padding: var(--space-1) var(--space-1) var(--space-2);
+}
+
+/* 검색 칸은 테두리 없이 제목처럼 크게 쓴다 */
+entry.launcher-search {
+  min-height: 34px;
+  padding: 0;
   border: none;
-  border-radius: 14px;
   background: none;
+  box-shadow: none;
+  outline: none;
+  color: var(--label);
+  font-size: var(--text-title2);
+}
+
+entry.launcher-search > image {
+  opacity: 0;
+  min-width: 0;
+  margin: 0;
+}
+
+.launcher-separator {
+  min-height: 1px;
+  margin: 0 var(--space-1);
+  background: var(--separator);
+}
+
+.launcher-chips {
+  padding: var(--space-2) var(--space-1);
+}
+
+button.launcher-chip {
+  min-height: 0;
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--glass-fill);
+  box-shadow: none;
+  color: var(--label);
+  font-size: var(--text-callout);
+}
+
+button.launcher-chip:hover {
+  background: var(--hover);
+}
+
+button.launcher-chip:checked {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.launcher-scroller {
+  margin-top: var(--space-1);
+}
+
+.launcher-grid {
+  padding: var(--space-2) 0;
+}
+
+flowboxchild.launcher-tile {
+  padding: var(--space-2) var(--space-1);
+  border-radius: var(--radius-lg);
+  font-size: var(--text-callout);
+}
+
+flowboxchild.launcher-tile:hover {
+  background: var(--hover);
+}
+
+flowboxchild.launcher-tile:active {
+  background: var(--pressed);
+}
+
+flowboxchild.launcher-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.launcher-empty {
+  color: var(--label-secondary);
+  font-size: var(--text-title3);
+}
+
+/* 메뉴: 로고·앱 메뉴, 메뉴 막대 항목, 제어 센터. macOS 26의 유리 메뉴.
+ * 메뉴바의 흰 글씨와 그림자를 물려받지 않게 다시 정한다 */
+popover.menu > contents,
+popover.extra-popover > contents {
+  padding: 5px;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--glass-strong);
+  box-shadow: var(--shadow-menu), 0 0 0 1px var(--glass-outline), inset 0 1px var(--glass-highlight);
+  color: var(--label);
+  text-shadow: none;
+  -gtk-icon-shadow: none;
+}
+
+popover.menu modelbutton {
+  min-height: 22px;
+  padding: 1px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--label);
+}
+
+/* macOS처럼 가리킨 메뉴 항목은 강조색으로 칠한다 */
+popover.menu modelbutton:hover,
+popover.menu modelbutton:selected {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+popover.menu modelbutton:disabled {
+  color: var(--label-tertiary);
+}
+
+popover.menu modelbutton accelerator {
+  color: var(--label-secondary);
+}
+
+popover.menu modelbutton:hover accelerator {
+  color: var(--accent-fg);
+}
+
+popover.menu separator {
+  min-height: 1px;
+  margin: 4px 10px;
+  background: var(--separator);
+}
+
+.extra-menu {
+  min-width: 270px;
+}
+
+.extra-title {
+  padding: 5px 10px;
+  font-weight: 700;
+}
+
+.extra-value {
+  font-weight: 400;
+  color: var(--label-secondary);
+}
+
+.extra-section {
+  padding: 8px 10px 2px;
+  font-size: var(--text-footnote);
+  font-weight: 600;
+  color: var(--label-secondary);
+}
+
+.extra-text {
+  padding: 2px 10px 4px;
+  font-size: var(--text-callout);
+  color: var(--label-secondary);
+}
+
+.extra-separator {
+  min-height: 1px;
+  margin: 5px 10px;
+  background: var(--separator);
+}
+
+button.extra-row {
+  min-height: 0;
+  padding: 4px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  box-shadow: none;
+  color: var(--label);
+  font-weight: 400;
+}
+
+button.extra-row:hover {
+  background: var(--hover);
+}
+
+.extra-row .row-icon {
+  min-width: 26px;
+  min-height: 26px;
+  border-radius: 13px;
+  background: var(--control-bg);
+  -gtk-icon-size: 14px;
+}
+
+.extra-row .row-icon.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.extra-row .row-trailing {
+  -gtk-icon-size: 14px;
+  color: var(--label-secondary);
+}
+
+.extra-row .row-check {
+  -gtk-icon-size: 12px;
+}
+
+.extra-subtitle {
+  font-size: var(--text-footnote);
+  color: var(--label-secondary);
+}
+
+/* 스위치 (macOS: 켜면 강조색) */
+.extra-menu switch {
+  min-width: 30px;
+  min-height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--control-bg);
   box-shadow: none;
 }
 
-.launcher-tile:hover {
-  background: rgba(0, 0, 0, 0.07);
+.extra-menu switch:checked {
+  background: var(--accent);
+}
+
+.extra-menu switch > image {
+  opacity: 0;
+}
+
+.extra-menu switch > slider {
+  min-width: 16px;
+  min-height: 16px;
+  margin: 1px;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--knob);
+  box-shadow: var(--shadow-control);
+}
+
+/* 음량·밝기 막대 (macOS 26 제어 센터의 굵은 막대) */
+.slider-row scale {
+  padding: 0;
+}
+
+.slider-row scale trough {
+  min-height: 22px;
+  border-radius: var(--radius-capsule);
+  background: var(--control-bg);
+}
+
+.slider-row scale highlight {
+  min-height: 22px;
+  border-radius: var(--radius-capsule);
+  background: var(--knob);
+}
+
+.slider-row scale slider {
+  min-width: 22px;
+  min-height: 22px;
+  margin: 0;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--knob);
+  box-shadow: var(--shadow-control);
+}
+
+button.slider-icon {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 13px;
+  background: none;
+  box-shadow: none;
+  color: var(--label);
+}
+
+button.slider-icon:hover {
+  background: var(--hover);
+}
+
+/* 제어 센터 */
+popover.control-center-popover > contents {
+  padding: 10px;
+  border-radius: var(--radius-xl);
+}
+
+.control-center {
+  min-width: 310px;
+  margin-bottom: 4px;
+}
+
+.cc-module {
+  padding: 10px;
+  border-radius: var(--radius-lg);
+  background: var(--glass-fill);
+  box-shadow: inset 0 0 0 1px var(--glass-highlight);
+}
+
+.cc-module.small {
+  padding: 8px 4px;
+}
+
+/* 누르면 켜고 끄는 칸: 연결 모듈 안의 줄, 또는 모듈 전체 */
+button.cc-button {
+  min-height: 0;
+  padding: 4px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: none;
+  box-shadow: none;
+  color: var(--label);
+  font-weight: 400;
+}
+
+button.cc-button:hover {
+  background: var(--hover);
+}
+
+button.cc-button.cc-module {
+  padding: 10px;
+  border-radius: var(--radius-lg);
+  background: var(--glass-fill);
+  box-shadow: inset 0 0 0 1px var(--glass-highlight);
+}
+
+button.cc-button.cc-module.small {
+  padding: 8px 4px;
+}
+
+button.cc-button.cc-module:hover {
+  background: var(--glass-highlight);
+}
+
+image.cc-toggle {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 15px;
+  background: var(--control-bg);
+  color: var(--label);
+  -gtk-icon-size: 14px;
+}
+
+image.cc-toggle.on {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.cc-title {
+  font-size: var(--text-callout);
+  font-weight: 600;
+}
+
+.cc-status {
+  font-size: var(--text-footnote);
+  color: var(--label-secondary);
+}
+
+.cc-caption {
+  font-size: var(--text-caption);
 }
 
 /* 알림 센터: 바탕 없이 카드만 떠 있다 */
@@ -153,8 +525,8 @@ popover.notification-center-popover > contents {
 
 .center-title,
 .center-empty {
-  color: #ffffff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  color: var(--on-wallpaper);
+  text-shadow: var(--on-wallpaper-shadow);
 }
 
 .center-title {
@@ -169,30 +541,30 @@ popover.notification-center-popover > contents {
 
 button.center-clear {
   padding: 2px 10px;
-  border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.85);
-  color: #1d1d1f;
-  font-size: 12px;
+  border-radius: var(--radius-capsule);
+  background: var(--glass-strong);
+  color: var(--label);
+  font-size: var(--text-callout);
 }
 
 .notification-card {
-  padding: 12px;
+  padding: var(--space-3);
   border-radius: 18px;
-  /* 컴포지터에 흐림 효과가 아직 없어 뒤 창이 비치지 않을 만큼만 투명하게 한다 */
-  background: rgba(246, 246, 248, 0.98);
-  color: #1d1d1f;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  background: var(--glass-strong);
+  color: var(--label);
+  text-shadow: none;
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--glass-outline);
 }
 
 .card-app {
-  font-size: 12px;
+  font-size: var(--text-callout);
   font-weight: 600;
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--label-secondary);
 }
 
 .card-time {
-  font-size: 11px;
-  color: rgba(0, 0, 0, 0.5);
+  font-size: var(--text-footnote);
+  color: var(--label-secondary);
 }
 
 .card-summary {
@@ -204,7 +576,7 @@ button.card-close {
   min-height: 18px;
   padding: 0;
   border-radius: 9px;
-  background: rgba(0, 0, 0, 0.08);
+  background: var(--control-bg);
   box-shadow: none;
   -gtk-icon-size: 10px;
 }
@@ -216,7 +588,7 @@ button.card-close {
 }
 
 .widget-weekday {
-  color: #e0443e;
+  color: var(--red);
   font-size: 13px;
   font-weight: 600;
 }
@@ -226,37 +598,4 @@ button.card-close {
   font-weight: 300;
 }
 
-/* 시스템 설정에서 어둡게를 고르면 Dock과 알림 창에 dark 클래스가 붙는다. 메뉴바는 늘 흰 글씨다 */
-.dark .dock {
-  background: rgba(40, 40, 44, 0.55);
-  border-color: rgba(255, 255, 255, 0.14);
-}
-
-.dark button.dock-item:hover,
-.dark menubutton.dock-item > button:hover,
-.dark menubutton.dock-item > button:checked,
-.dark .launcher-tile:hover {
-  background: rgba(255, 255, 255, 0.12);
-}
-
-.dark .running-dot {
-  background: rgba(255, 255, 255, 0.85);
-}
-
-.dark .dock-separator {
-  background: rgba(255, 255, 255, 0.25);
-}
-
-.dark .notification-card {
-  background: rgba(44, 44, 48, 0.98);
-  color: #f5f5f7;
-}
-
-.dark .card-app,
-.dark .card-time {
-  color: rgba(255, 255, 255, 0.6);
-}
-
-.dark button.card-close {
-  background: rgba(255, 255, 255, 0.14);
-}
+/* 어둡게: 창에 dark 클래스가 붙으면 theme/tokens.css의 변수가 바뀐다. 메뉴바 글자는 늘 흰색이다 */

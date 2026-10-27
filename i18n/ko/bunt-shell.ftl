@@ -47,4 +47,67 @@ notifications-date-format = %-m월 %-d일
 
 dock-terminal = 터미널
 dock-apps = 앱
-launcher-search = 검색
+launcher-search = 응용 프로그램 검색
+launcher-empty = 일치하는 앱이 없습니다
+launcher-category-utilities = 유틸리티
+launcher-category-developer = 개발자 도구
+launcher-category-productivity = 생산성
+launcher-category-creativity = 창의력
+launcher-category-internet = 인터넷
+launcher-category-entertainment = 엔터테인먼트
+launcher-category-games = 게임
+launcher-category-education = 교육 및 참고
+launcher-category-other = 기타
+
+## 메뉴 막대 항목 (Wi-Fi, 배터리, 사운드, Bluetooth, 입력 소스)
+
+network-title = 네트워크
+network-settings = 네트워크 설정…
+wifi-title = Wi-Fi
+wifi-known = 알고 있는 네트워크
+wifi-other = 기타 네트워크
+wifi-none = 찾은 네트워크 없음
+wifi-settings = Wi-Fi 설정…
+power-title = 전원
+power-battery = 배터리
+power-battery-percent = 배터리 { $percent }%
+power-adapter = 전원 어댑터 사용 중
+power-source-adapter = 전원: 전원 어댑터
+power-source-battery = 전원: 배터리
+power-fully-charged = 완전히 충전됨
+power-until-full = 완전히 충전될 때까지 { $time }
+power-remaining = 남은 시간 { $time }
+power-duration = { $hours ->
+    [0] { $minutes }분
+   *[other] { $hours }시간 { $minutes }분
+}
+power-mode = 전원 모드
+power-mode-low = 저전력 모드
+power-mode-automatic = 자동
+power-mode-high = 고성능
+power-settings = 배터리 설정…
+sound-title = 사운드
+sound-output = 출력
+bluetooth-title = Bluetooth
+bluetooth-devices = 기기
+bluetooth-no-devices = 연결한 기기 없음
+bluetooth-connected = 연결됨
+bluetooth-settings = Bluetooth 설정…
+input-source-title = 입력 소스
+input-source-abc = ABC
+input-source-hangul = 2벌식
+input-source-shortcut = Ctrl+Space 또는 한/영 키로 전환
+input-source-settings = 키보드 설정…
+
+## 제어 센터
+
+cc-title = 제어 센터
+cc-on = 켬
+cc-off = 끔
+cc-wired = 이더넷
+cc-unavailable = 사용할 수 없음
+cc-focus = 방해 금지
+cc-dark-mode = 다크 모드
+cc-low-power = 저전력 모드
+cc-display = 디스플레이
+cc-edit = 메뉴 막대 설정…

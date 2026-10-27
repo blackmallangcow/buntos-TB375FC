@@ -47,4 +47,67 @@ notifications-date-format = %b %-d
 
 dock-terminal = Terminal
 dock-apps = Apps
-launcher-search = Search
+launcher-search = Search Applications
+launcher-empty = No Matching Apps
+launcher-category-utilities = Utilities
+launcher-category-developer = Developer Tools
+launcher-category-productivity = Productivity
+launcher-category-creativity = Creativity
+launcher-category-internet = Internet
+launcher-category-entertainment = Entertainment
+launcher-category-games = Games
+launcher-category-education = Education & Reference
+launcher-category-other = Other
+
+## Menu bar extras (Wi-Fi, battery, sound, Bluetooth, input sources)
+
+network-title = Network
+network-settings = Network Settings…
+wifi-title = Wi-Fi
+wifi-known = Known Networks
+wifi-other = Other Networks
+wifi-none = No Networks Found
+wifi-settings = Wi-Fi Settings…
+power-title = Power
+power-battery = Battery
+power-battery-percent = Battery { $percent }%
+power-adapter = Using Power Adapter
+power-source-adapter = Power Source: Power Adapter
+power-source-battery = Power Source: Battery
+power-fully-charged = Fully Charged
+power-until-full = { $time } until full
+power-remaining = { $time } remaining
+power-duration = { $hours ->
+    [0] { $minutes } min
+   *[other] { $hours } hr { $minutes } min
+}
+power-mode = Power Mode
+power-mode-low = Low Power Mode
+power-mode-automatic = Automatic
+power-mode-high = High Power
+power-settings = Battery Settings…
+sound-title = Sound
+sound-output = Output
+bluetooth-title = Bluetooth
+bluetooth-devices = Devices
+bluetooth-no-devices = No Paired Devices
+bluetooth-connected = Connected
+bluetooth-settings = Bluetooth Settings…
+input-source-title = Input Source
+input-source-abc = ABC
+input-source-hangul = 2-Set Korean
+input-source-shortcut = Switch with Ctrl+Space or the Han/Eng key
+input-source-settings = Keyboard Settings…
+
+## Control Center
+
+cc-title = Control Center
+cc-on = On
+cc-off = Off
+cc-wired = Ethernet
+cc-unavailable = Unavailable
+cc-focus = Do Not Disturb
+cc-dark-mode = Dark Mode
+cc-low-power = Low Power Mode
+cc-display = Display
+cc-edit = Menu Bar Settings…

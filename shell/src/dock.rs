@@ -12,16 +12,37 @@ use gtk4_layer_shell::{Edge, LayerShell};
 
 use crate::{
     config::{Builtin, Config, DockItem},
-    launcher, layer_window,
+    launcher::{self, Launcher},
+    layer_window,
     toplevels::Toplevels,
 };
 
 /// 앱을 실행한다. D-Bus로 활성화하는 앱이면 GIO가 D-Bus로 띄운다
 pub fn launch(info: &impl IsA<gio::AppInfo>, widget: &impl IsA<gtk::Widget>) {
     let context = widget.display().app_launch_context();
-    if let Err(err) = info.launch(&[], Some(&context)) {
-        let name = info.as_ref().display_name();
-        eprintln!("bunt-shell: failed to start {name}: {err}");
+    match info.launch(&[], Some(&context)) {
+        Ok(()) => launcher::remember(info),
+        Err(err) => {
+            let name = info.as_ref().display_name();
+            eprintln!("bunt-shell: failed to start {name}: {err}");
+        }
+    }
+}
+
+/// 앱이 실행 중이면 그 창을 앞으로 가져오고, 아니면 실행한다
+pub fn activate_or_launch(
+    info: &impl IsA<gio::AppInfo>,
+    toplevels: Option<&Toplevels>,
+    widget: &impl IsA<gtk::Widget>,
+) {
+    let app_id = info.as_ref().id().map(|id| app_id_of(&id).to_owned());
+    let raised = toplevels
+        .zip(app_id)
+        .is_some_and(|(toplevels, app_id)| toplevels.activate_app(&app_id));
+    if raised {
+        launcher::remember(info);
+    } else {
+        launch(info, widget);
     }
 }
 
@@ -61,12 +82,13 @@ fn app_button(
         .css_classes(["dock-item"])
         .build();
     let (target, toplevels) = (app_id.to_owned(), toplevels.cloned());
-    button.connect_clicked(move |button| {
-        let raised = toplevels
-            .as_ref()
-            .is_some_and(|toplevels| toplevels.activate_app(&target));
-        if !raised && let Some(info) = &info {
-            launch(info, button);
+    button.connect_clicked(move |button| match &info {
+        Some(info) => activate_or_launch(info, toplevels.as_ref(), button),
+        // .desktop 파일이 없는 실행 중인 앱: 창만 앞으로 가져온다
+        None => {
+            if let Some(toplevels) = &toplevels {
+                toplevels.activate_app(&target);
+            }
         }
     });
     let item = AppItem {
@@ -95,6 +117,7 @@ pub fn build(
     config: &Config,
     tr: &Translations,
     toplevels: Option<&Toplevels>,
+    launcher: &Launcher,
 ) -> gtk::ApplicationWindow {
     let window = layer_window(app, "bunt-dock");
     window.set_anchor(Edge::Bottom, true);
@@ -114,9 +137,7 @@ pub fn build(
                 builtin: Builtin::Apps,
                 label,
             } => {
-                let button =
-                    launcher::button(&tr.get(label), &tr.get("launcher-search"), icon_size);
-                dock.append(&button);
+                dock.append(&launcher::dock_button(launcher, &tr.get(label), icon_size));
             }
             DockItem::App { app, label } => {
                 let Some(info) = gio_unix::DesktopAppInfo::new(app) else {

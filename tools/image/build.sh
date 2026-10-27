@@ -7,6 +7,9 @@
 #   tools/image/build.sh qemu-aarch64        자체 컴포넌트와 이미지 빌드 (mkosi -f build)
 #   tools/image/build.sh qemu-aarch64 --ephemeral=yes vm   빌드한 이미지를 임시 복사본으로 부팅
 # 산출물은 저장소 밖 $BUNTOS_BUILD_DIR/<보드>에 둔다 (기본 ~/buntos-build).
+# BUNTOS_IMAGE_DIR을 주면 이미지만 그 디렉터리에 만든다 (다른 사람이 띄운 VM이 기본 이미지를
+# 쓰는 동안 따로 빌드해 시험할 때). tools/image/vmctl.sh도 같은 변수를 읽는다.
+# 이 파일은 실행 중에도 bash가 이어 읽으므로, 빌드가 도는 동안 고칠 때는 새 파일로 바꿔 넣는다.
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -19,7 +22,7 @@ if [[ ! -f "$bsp" ]]; then
 fi
 
 build_root="${BUNTOS_BUILD_DIR:-$HOME/buntos-build}"
-out="$build_root/$board"
+out="${BUNTOS_IMAGE_DIR:-$build_root/$board}"
 mkdir -p "$out"
 mkosi=$(command -v mkosi || echo "$HOME/.local/bin/mkosi")
 extra=()
@@ -45,6 +48,19 @@ stage_components() {
 	install -D -m 0755 "$target/release/bunt-settings" "$out/stage/usr/bin/bunt-settings"
 	install -D -m 0644 "$repo/settings/data/org.buntos.Settings.desktop" \
 		"$out/stage/usr/share/applications/org.buntos.Settings.desktop"
+	install -D -m 0644 "$repo/shell/data/org.buntos.shell.gschema.xml" \
+		"$out/stage/usr/share/glib-2.0/schemas/org.buntos.shell.gschema.xml"
+	# 기본 배경화면 (tools/wallpapers/generate.py). 만드는 데 몇 분 걸리므로 생성기가 바뀌었을 때만
+	# 다시 만든다
+	local wallpapers="$build_root/wallpapers" stamp
+	stamp=$(sha256sum "$repo/tools/wallpapers/generate.py" | cut -d' ' -f1)
+	if [[ "$(cat "$wallpapers/.stamp" 2>/dev/null)" != "$stamp" ]]; then
+		rm -rf "$wallpapers"
+		python3 -I "$repo/tools/wallpapers/generate.py" "$wallpapers"
+		echo "$stamp" >"$wallpapers/.stamp"
+	fi
+	install -d "$out/stage/usr/share/backgrounds/buntos"
+	install -m 0644 "$wallpapers"/*.png "$out/stage/usr/share/backgrounds/buntos/"
 	local icon
 	for icon in "$repo"/shell/data/icons/*.svg "$repo/settings/data/org.buntos.Settings.svg"; do
 		install -D -m 0644 "$icon" "$out/stage/usr/share/icons/hicolor/scalable/apps/$(basename "$icon")"
@@ -52,6 +68,25 @@ stage_components() {
 }
 
 if [[ $# -eq 0 ]]; then
+	# 같은 이미지는 한 번에 하나만 빌드한다. tools/image/vmctl.sh는 이 잠금을 공유로 잡아
+	# 빌드 중에는 그 이미지로 VM을 띄우지 않는다
+	exec 9>"$out.lock"
+	if ! flock -n 9; then
+		echo "다른 빌드가 끝나기를 기다린다 ($out.lock)" >&2
+		flock 9
+	fi
+	# mkosi vm(tests/e2e, screenshot.sh)은 도는 동안 이미지를 잠가 빌드를 막는다. 2분까지 기다리고,
+	# 그래도 돌면 알리고 끝낸다
+	local_vm() { pgrep -f -- "--output-directory=$out vm" >/dev/null; }
+	for _ in $(seq 1 12); do
+		local_vm || break
+		echo "이 이미지로 띄운 VM(mkosi vm)이 끝나기를 기다린다" >&2
+		sleep 10
+	done
+	if local_vm; then
+		echo "이 이미지로 띄운 VM(mkosi vm)이 아직 돈다. VM을 멈추거나 BUNTOS_IMAGE_DIR로 다른 디렉터리에 빌드한다" >&2
+		exit 1
+	fi
 	stage_components
 	if [[ -d "$out/stage" ]]; then
 		extra+=(--extra-tree="$out/stage")

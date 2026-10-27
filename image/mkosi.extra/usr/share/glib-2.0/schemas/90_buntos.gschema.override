@@ -15,3 +15,8 @@ monospace-font-name='Noto Sans Mono CJK KR 11'
 [org.gnome.desktop.wm.preferences]
 # 창 최소화는 아직 없으므로 창 버튼은 최대화와 닫기만 둔다
 button-layout='appmenu:maximize,close'
+
+[org.gnome.desktop.background]
+# 기본 배경화면 (tools/wallpapers/generate.py). 그리는 것은 bunt-shell이다
+picture-uri='file:///usr/share/backgrounds/buntos/buntos-dawn.png'
+picture-uri-dark='file:///usr/share/backgrounds/buntos/buntos-dawn.png'

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 메뉴바: 왼쪽에 로고 메뉴(시스템 설정, 다시 시작, 시스템 종료)와 앞에 있는 앱의 메뉴,
-//! 오른쪽에 네트워크 아이콘과 날짜·시간(누르면 알림 센터). macOS처럼 평소에는 배경이 투명하고
-//! 글씨가 흰색이며, 앞에 있는 창이 화면을 채우면(최대화, 전체 화면) 배경이 검은색이 된다.
+//! 오른쪽에 메뉴 막대 항목(입력 소스, Bluetooth, 사운드, 배터리, Wi-Fi), 제어 센터,
+//! 날짜·시간(누르면 알림 센터). macOS처럼 평소에는 배경이 투명하고 글씨가 흰색이며,
+//! 앞에 있는 창이 화면을 채우면(최대화, 전체 화면) 배경이 검은색이 된다.
 
 use std::rc::Rc;
 
@@ -12,11 +13,17 @@ use gtk4::{self as gtk, gio, glib, prelude::*};
 use gtk4_layer_shell::{Edge, LayerShell};
 
 use crate::{
-    appmenu, interface_settings, layer_window, network, notification_center,
-    notifications::Notifications, toplevels::Toplevels,
+    appmenu, bluetooth, control_center,
+    control_center::Services,
+    input_source::{self, InputSources},
+    interface_settings, layer_window, network, notification_center,
+    notifications::Notifications,
+    power, sound, status_items,
+    toplevels::Toplevels,
 };
 
-const SETTINGS_APP: &str = "org.buntos.Settings.desktop";
+/// 시스템 설정 앱의 실행 파일. 인자는 처음 보여 줄 페이지 이름이다
+const SETTINGS_COMMAND: &str = "bunt-settings";
 /// 로고 메뉴의 아이콘 (shell/data/icons). 없으면 글자로 보인다
 const LOGO_ICON: &str = "org.buntos.Logo-symbolic";
 
@@ -25,6 +32,8 @@ pub fn build(
     tr: &Rc<Translations>,
     toplevels: Option<&Toplevels>,
     notifications: &Notifications,
+    services: &Services,
+    input_sources: &InputSources,
 ) -> gtk::ApplicationWindow {
     let window = layer_window(app, "bunt-menubar");
     for edge in [Edge::Top, Edge::Left, Edge::Right] {
@@ -38,8 +47,17 @@ pub fn build(
     if let Some(toplevels) = toplevels {
         start.append(&appmenu::build(tr, toplevels));
     }
+    // 오른쪽 항목은 macOS와 같은 순서다: ... 배터리, Wi-Fi, 제어 센터, 시계
     let end = gtk::Box::builder().spacing(2).build();
-    end.append(&network::indicator(tr));
+    // 앱이 넣는 항목은 시스템 항목 왼쪽에 둔다
+    end.append(&status_items::build());
+    end.append(&control_center::focus_extra(tr));
+    end.append(&input_source::extra(tr, input_sources));
+    end.append(&bluetooth::extra(tr, &services.bluetooth));
+    end.append(&sound::extra(tr, &services.sound));
+    end.append(&power::extra(tr, &services.power));
+    end.append(&network::extra(tr, &services.network));
+    end.append(&control_center::extra(tr, services));
     end.append(&clock(tr, notifications));
 
     let bar = gtk::CenterBox::builder().css_classes(["bar"]).build();
@@ -109,20 +127,27 @@ fn add_actions(app: &gtk::Application, tr: &Rc<Translations>) {
     app.add_action_entries([about, settings, restart, power_off]);
 }
 
-/// 시스템 설정 앱을 연다. page는 .desktop 파일의 동작 이름이다 (예: "about").
-fn open_settings(page: Option<&str>) {
-    let Some(info) = gio_unix::DesktopAppInfo::new(SETTINGS_APP) else {
-        eprintln!("bunt-shell: {SETTINGS_APP} is not installed");
-        return;
+/// 시스템 설정 앱을 연다. page는 페이지 이름이다 (예: "about", "wifi", "battery").
+/// 이미 떠 있으면 그 창이 그 페이지로 바뀐다
+pub fn open_settings(page: Option<&str>) {
+    let command = match page {
+        Some(page) => format!("{SETTINGS_COMMAND} {page}"),
+        None => SETTINGS_COMMAND.to_owned(),
+    };
+    let info = match gio::AppInfo::create_from_commandline(
+        &command,
+        Some(SETTINGS_COMMAND),
+        gio::AppInfoCreateFlags::NONE,
+    ) {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("bunt-shell: {command}: {err}");
+            return;
+        }
     };
     let context = gtk::gdk::Display::default().map(|display| display.app_launch_context());
-    match page {
-        Some(action) => info.launch_action(action, context.as_ref()),
-        None => {
-            if let Err(err) = info.launch(&[], context.as_ref()) {
-                eprintln!("bunt-shell: failed to start {SETTINGS_APP}: {err}");
-            }
-        }
+    if let Err(err) = info.launch(&[], context.as_ref()) {
+        eprintln!("bunt-shell: failed to start {command}: {err}");
     }
 }
 

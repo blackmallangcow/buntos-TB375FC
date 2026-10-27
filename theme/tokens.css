@@ -1,0 +1,149 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * buntOS 공통 디자인 토큰. bunt-shell과 bunt-settings가 자기 style.css보다 먼저 읽는다
+ * (concat!(include_str!("../../theme/tokens.css"), include_str!("../data/style.css"))).
+ * 기준은 macOS 26(Liquid Glass)과 Apple HIG다. 앱 CSS에는 색, 모서리, 글자 크기 숫자를 직접 쓰지 않고
+ * 여기 있는 변수를 쓴다. 어둡게는 창에 붙는 dark 클래스가 변수를 바꾼다.
+ * GTK 4.16 이상이 CSS 변수를 읽는다 (이미지의 GTK는 4.24).
+ */
+
+:root {
+  /* 시스템 색 (HIG 2025 값, 밝게) */
+  --red: rgb(255, 56, 60);
+  --orange: rgb(255, 141, 40);
+  --yellow: rgb(255, 204, 0);
+  --green: rgb(52, 199, 89);
+  --mint: rgb(0, 200, 179);
+  --teal: rgb(0, 195, 208);
+  --cyan: rgb(0, 192, 232);
+  --blue: rgb(0, 136, 255);
+  --indigo: rgb(97, 85, 245);
+  --purple: rgb(203, 48, 224);
+  --pink: rgb(255, 45, 85);
+  --brown: rgb(172, 127, 94);
+  --gray: rgb(142, 142, 147);
+
+  /* 강조색: 선택한 목록 항목, 켠 스위치, 기본 단추, 진행 막대 */
+  --accent: var(--blue);
+  --accent-fg: #ffffff;
+  /* 사이드바에서 고른 항목 (macOS 26 시스템 설정에서 잰 값) */
+  --selection: rgb(34, 109, 237);
+
+  /* 글자 */
+  --label: rgba(0, 0, 0, 0.85);
+  --label-secondary: rgba(0, 0, 0, 0.5);
+  --label-tertiary: rgba(0, 0, 0, 0.26);
+  --separator: rgba(0, 0, 0, 0.1);
+
+  /* 바탕 */
+  --content-bg: #ffffff;
+  /* 설정 화면의 묶음 상자 (흰 바탕 위 #f7f7f7) */
+  --group-bg: rgba(0, 0, 0, 0.03);
+  --sidebar-bg: rgb(236, 236, 238);
+  /* 누를 수 있는 것의 바탕: 가리킬 때, 누를 때 */
+  --hover: rgba(0, 0, 0, 0.06);
+  --pressed: rgba(0, 0, 0, 0.1);
+  /* 스위치 끔, 슬라이더 홈, 칩 */
+  --control-bg: rgba(0, 0, 0, 0.09);
+
+  /* 유리 재질 (메뉴, 팝오버, 패널, Dock). bunt-comp가 셸 표면 뒤를 흐리게 하므로(comp.toml
+   * [effects] blur) 뒤의 색이 비친다. 흐림을 끄면 뒤 창의 글자가 겹쳐 보일 수 있다.
+   * glass-strong은 글이 많은 곳(메뉴, 제어 센터), glass는 넓은 패널(모든 앱, Dock) */
+  --glass: rgba(255, 255, 255, 0.6);
+  --glass-strong: rgba(246, 246, 248, 0.8);
+  /* 유리 가장자리: 안쪽 밝은 선과 바깥 얇은 선 */
+  --glass-highlight: rgba(255, 255, 255, 0.6);
+  --glass-outline: rgba(0, 0, 0, 0.12);
+  /* 유리 위의 모듈(제어 센터 칸, 칩) */
+  --glass-fill: rgba(255, 255, 255, 0.45);
+
+  /* 메뉴 막대와 배경화면 위 글자: 밝게·어둡게와 상관없이 흰 글씨에 그림자 (macOS와 같다).
+   * 앞의 창이 화면을 채우면 메뉴 막대 바탕이 검정이 된다 */
+  --on-wallpaper: #ffffff;
+  --on-wallpaper-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --on-wallpaper-hover: rgba(255, 255, 255, 0.22);
+  --menubar-solid: #000000;
+  /* 스위치·막대 손잡이 */
+  --knob: #ffffff;
+
+  /* 그림자 */
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.18);
+  --shadow-menu: 0 10px 28px rgba(0, 0, 0, 0.2);
+  --shadow-panel: 0 20px 60px rgba(0, 0, 0, 0.3);
+  --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.15);
+
+  /* 모서리 */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-2xl: 28px;
+  --radius-capsule: 9999px;
+
+  /* 간격 (4px 단위) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* 글자 크기 (macOS 텍스트 스타일). 글꼴은 Pretendard */
+  --font-family: "Pretendard", sans-serif;
+  --text-large-title: 26px;
+  --text-title1: 22px;
+  --text-title2: 17px;
+  --text-title3: 15px;
+  --text-body: 13px;
+  --text-callout: 12px;
+  --text-footnote: 11px;
+  --text-caption: 10px;
+
+  /* 움직임 */
+  --duration-fast: 120ms;
+  --duration: 200ms;
+  --duration-slow: 320ms;
+}
+
+.dark {
+  --red: rgb(255, 66, 69);
+  --orange: rgb(255, 146, 48);
+  --yellow: rgb(255, 214, 0);
+  --green: rgb(48, 209, 88);
+  --mint: rgb(0, 218, 195);
+  --teal: rgb(0, 210, 224);
+  --cyan: rgb(60, 211, 254);
+  --blue: rgb(0, 145, 255);
+  --indigo: rgb(109, 124, 255);
+  --purple: rgb(219, 52, 242);
+  --pink: rgb(255, 55, 95);
+  --brown: rgb(183, 138, 102);
+  --gray: rgb(142, 142, 147);
+
+  --accent: var(--blue);
+  --selection: rgb(10, 95, 220);
+
+  --label: rgba(255, 255, 255, 0.85);
+  --label-secondary: rgba(255, 255, 255, 0.55);
+  --label-tertiary: rgba(255, 255, 255, 0.25);
+  --separator: rgba(255, 255, 255, 0.12);
+
+  --content-bg: rgb(30, 30, 32);
+  --group-bg: rgba(255, 255, 255, 0.05);
+  --sidebar-bg: rgb(40, 40, 43);
+  --hover: rgba(255, 255, 255, 0.08);
+  --pressed: rgba(255, 255, 255, 0.14);
+  --control-bg: rgba(255, 255, 255, 0.14);
+
+  --glass: rgba(36, 36, 40, 0.6);
+  --glass-strong: rgba(40, 40, 44, 0.8);
+  --glass-highlight: rgba(255, 255, 255, 0.14);
+  --glass-outline: rgba(0, 0, 0, 0.5);
+  --glass-fill: rgba(255, 255, 255, 0.1);
+
+  --shadow-menu: 0 10px 28px rgba(0, 0, 0, 0.45);
+  --shadow-panel: 0 20px 60px rgba(0, 0, 0, 0.55);
+}

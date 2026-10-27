@@ -10,7 +10,10 @@ use bunt_i18n::{FluentArgs, Translations};
 use gtk4::{self as gtk, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use crate::notifications::{Change, Notification, Notifications};
+use crate::{
+    control_center::do_not_disturb,
+    notifications::{Change, Notification, Notifications},
+};
 
 /// 배너가 보이는 시간 (초)
 const BANNER_SECONDS: u32 = 5;
@@ -286,6 +289,10 @@ pub fn banner(
         let Some(notification) = notifications.get(*id) else {
             return;
         };
+        // 방해 금지 중에는 배너 없이 알림 센터에만 쌓는다
+        if do_not_disturb() {
+            return;
+        }
         let content = card(&notification, notifications, &tr);
         content.set_width_request(PANEL_WIDTH);
         window.set_child(Some(&content));
