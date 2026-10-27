@@ -6,7 +6,7 @@
 use std::rc::Rc;
 
 use bunt_i18n::FluentArgs;
-use gtk4 as gtk;
+use gtk4::{self as gtk, prelude::*};
 
 use super::Context;
 use crate::{
@@ -17,9 +17,9 @@ use crate::{
 /// (로캘, 그 언어로 쓴 언어 이름). 이미지의 mkosi.postinst.chroot가 만드는 로캘과 맞춘다
 const LANGUAGES: [(&str, &str); 2] = [("ko_KR.UTF-8", "한국어"), ("en_US.UTF-8", "English")];
 
-pub fn build(context: &Rc<Context>) -> gtk::ScrolledWindow {
+pub fn build(context: &Rc<Context>) -> gtk::Widget {
     let tr = &context.tr;
-    let (scroller, column) = page(&tr.get("page-language"));
+    let (scroller, column) = page();
     let list = group(&column, None, Some(&tr.get("language-description")));
 
     let dropdown = gtk::DropDown::from_strings(&LANGUAGES.map(|(_, name)| name));
@@ -47,7 +47,7 @@ pub fn build(context: &Rc<Context>) -> gtk::ScrolledWindow {
         }
     });
     list.append(&row(&tr.get("language-display"), &dropdown));
-    scroller
+    scroller.upcast()
 }
 
 /// 로캘 이름(ko_KR.UTF-8)이나 언어 코드(ko)가 같은 언어를 가리키는지

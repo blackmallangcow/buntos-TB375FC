@@ -13,9 +13,9 @@ use crate::{
     widgets::{group, page, row},
 };
 
-pub fn build(context: &Rc<Context>) -> gtk::ScrolledWindow {
+pub fn build(context: &Rc<Context>) -> gtk::Widget {
     let tr = &context.tr;
-    let (scroller, column) = page(&tr.get("page-datetime"));
+    let (scroller, column) = page();
     let list = group(&column, None, None);
     list.append(&automatic_row(context));
     list.append(&row(
@@ -28,7 +28,7 @@ pub fn build(context: &Rc<Context>) -> gtk::ScrolledWindow {
             &clock_format_switch(&settings),
         ));
     }
-    scroller
+    scroller.upcast()
 }
 
 /// 시간대 목록과 지금 시간대는 timedated에서 받아 온다. 목록에서 이름으로 찾을 수 있다

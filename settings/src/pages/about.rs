@@ -11,12 +11,16 @@ use gtk4::{self as gtk, glib, prelude::*};
 use super::Context;
 use crate::{
     system::{self, HOSTNAME},
-    widgets::{group, info_row, page, row},
+    widgets::{BadgeSize, Tint, badge, group, info_row, page, row},
 };
 
-pub fn build(context: &Rc<Context>) -> gtk::ScrolledWindow {
+/// 셸이 설치하는 buntOS 로고 (shell/data/icons)
+const LOGO: &str = "org.buntos.Logo-symbolic";
+
+pub fn build(context: &Rc<Context>) -> gtk::Widget {
     let tr = &context.tr;
-    let (scroller, column) = page(&tr.get("page-about"));
+    let (scroller, column) = page();
+    column.append(&hero(tr));
 
     let device = group(&column, Some(&tr.get("about-device-group")), None);
     device.append(&row(&tr.get("about-device-name"), &device_name(context)));
@@ -49,7 +53,39 @@ pub fn build(context: &Rc<Context>) -> gtk::ScrolledWindow {
     if let Some(display) = display_description(tr) {
         hardware.append(&info_row(&tr.get("about-display"), &display));
     }
-    scroller
+    scroller.upcast()
+}
+
+/// 맨 위: 큰 로고, 이름, 운영체제 (macOS의 "정보" 첫머리)
+fn hero(tr: &Translations) -> gtk::Box {
+    let theme = gtk::gdk::Display::default().map(|display| gtk::IconTheme::for_display(&display));
+    let logo = if theme.is_some_and(|theme| theme.has_icon(LOGO)) {
+        LOGO
+    } else {
+        "computer-symbolic"
+    };
+    let hero = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .halign(gtk::Align::Center)
+        .css_classes(["about-hero"])
+        .build();
+    hero.append(&badge(logo, Tint::Graphite, BadgeSize::Large));
+    hero.append(
+        &gtk::Label::builder()
+            .label("buntOS")
+            .css_classes(["about-name"])
+            .build(),
+    );
+    hero.append(
+        &gtk::Label::builder()
+            .label(os_description(tr))
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .css_classes(["about-version"])
+            .build(),
+    );
+    hero
 }
 
 /// 기기 이름(호스트 이름) 입력란과 변경 버튼. 이름은 hostnamed로 바꾼다

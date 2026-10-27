@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! bunt-settings: 시스템 설정 (정보, 모양, 날짜와 시간, 언어).
+//! bunt-settings: 시스템 설정. macOS 26 시스템 설정을 본뜬 화면으로 Wi-Fi, Bluetooth, 네트워크,
+//! 배터리, 화면 모드, 메뉴 막대, 배경화면, 디스플레이, 키보드, 언어, 날짜와 시간, 정보를 바꾼다.
 //! ADR-001의 잠정안에 따라 libadwaita 없이 GTK4와 자체 CSS로 만든다.
 
+mod dbus;
+mod network_manager;
 mod pages;
 mod system;
 mod widgets;
@@ -17,7 +20,11 @@ use gtk4::{self as gtk, gio, glib, prelude::*};
 use crate::{pages::Page, window::SettingsWindow};
 
 const APP_ID: &str = "org.buntos.Settings";
-const STYLE: &str = include_str!("../data/style.css");
+/// 공통 디자인 토큰(theme/tokens.css) 다음에 이 앱의 CSS
+const STYLE: &str = concat!(
+    include_str!("../../theme/tokens.css"),
+    include_str!("../data/style.css")
+);
 const TRANSLATIONS: &Sources = &[
     ("ko", include_str!("../../i18n/ko/bunt-settings.ftl")),
     ("en", include_str!("../../i18n/en/bunt-settings.ftl")),

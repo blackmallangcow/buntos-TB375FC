@@ -5,14 +5,14 @@
 Type=Application
 Name=System Settings
 Name[ko]=시스템 설정
-Comment=Change the device name, appearance, date and time, and language
-Comment[ko]=기기 이름, 모양, 날짜와 시간, 언어를 바꿉니다
+Comment=Change Wi-Fi, Bluetooth, network, battery, displays, wallpaper, keyboard, and more
+Comment[ko]=Wi-Fi, Bluetooth, 네트워크, 배터리, 디스플레이, 배경화면, 키보드 등을 바꿉니다
 Exec=bunt-settings
 Icon=org.buntos.Settings
 Terminal=false
 Categories=GTK;Settings;
-Keywords=Preferences;Settings;
-Keywords[ko]=설정;환경설정;
+Keywords=Preferences;Settings;Wi-Fi;Bluetooth;Network;Battery;Display;Wallpaper;Keyboard;
+Keywords[ko]=설정;환경설정;와이파이;블루투스;네트워크;배터리;디스플레이;배경화면;키보드;
 StartupNotify=true
 Actions=about;
 
