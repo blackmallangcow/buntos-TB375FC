@@ -1,0 +1,53 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+window.bunt-menubar,
+window.bunt-menubar.background,
+window.bunt-dock,
+window.bunt-dock.background {
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+  font-family: "Pretendard", sans-serif;
+}
+
+.bar {
+  min-height: 28px;
+  padding: 0 14px;
+  background: rgba(246, 246, 248, 0.78);
+  color: #1d1d1f;
+  font-size: 13px;
+}
+
+.bar .logo {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.bar .clock {
+  font-weight: 500;
+}
+
+/* 그림자가 창 경계에서 잘리지 않도록 창 안쪽에 여백을 둔다 */
+.dock {
+  margin: 16px;
+  padding: 6px 10px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.dock-item {
+  padding: 4px;
+  border: none;
+  border-radius: 14px;
+  background: none;
+  box-shadow: none;
+}
+
+.dock-item:hover {
+  background: rgba(0, 0, 0, 0.08);
+}

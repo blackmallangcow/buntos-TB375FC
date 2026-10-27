@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# bunt-comp 기본 설정. /etc/buntos/comp.toml이 있으면 그 파일을 쓴다.
+
+[wallpaper]
+# 위에서 아래로 이어지는 그라데이션
+top = "#5b7cfa"
+bottom = "#f2a7c3"
+
+[keyboard]
+layout = "us"
+repeat-delay = 200
+repeat-rate = 25
+
+[cursor]
+theme = "Adwaita"
+size = 24
+
+[session]
+# 컴포지터가 뜬 뒤 실행할 프로그램
+startup = [["bunt-shell"]]
+# Alt+Enter로 여는 터미널
+terminal = ["foot"]

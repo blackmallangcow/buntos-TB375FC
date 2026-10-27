@@ -1,0 +1,18 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# mkosi가 패키지 설치 뒤 이미지 안(chroot)에서 실행한다.
+set -euo pipefail
+
+# 로캘: 한국어와 영어를 기본 이미지에 넣는다 (ARCHITECTURE 7장)
+sed -i -E 's/^# *(ko_KR\.UTF-8 UTF-8)/\1/; s/^# *(en_US\.UTF-8 UTF-8)/\1/' /etc/locale.gen
+locale-gen
+
+# Phase 0 개발용 사용자. 사용자 계정을 설계하기 전까지 tty1 자동 로그인으로 그래픽 세션을 연다.
+# 비특권 빌드에서는 파일 소유자를 바꿀 수 없으므로 홈 디렉터리는 부팅 때 만든다
+# (/usr/lib/tmpfiles.d/buntos-home.conf). 암호는 잠가 두며, 자동 로그인과 sudo에는 필요 없다.
+if ! id buntos >/dev/null 2>&1; then
+	useradd --no-create-home --home-dir /home/buntos --shell /bin/bash \
+		--groups sudo,video,render,input buntos
+fi

@@ -1,3 +1,8 @@
 # 로컬 도구(나리야) 설정. 실행 환경마다 다른 로컬 설정이므로 저장소에 넣지 않는다
 opencode.json
 attachments/
+
+# mkosi를 image/에서 직접 실행했을 때의 산출물 (tools/image/build.sh는 저장소 밖에 둔다)
+/image/mkosi.output/
+/image/mkosi.cache/
+/image/mkosi.builddir/

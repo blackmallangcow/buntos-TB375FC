@@ -15,6 +15,10 @@ packages=(
 	debian-archive-keyring dosfstools mtools e2fsprogs btrfs-progs erofs-utils squashfs-tools cpio zstd xz-utils
 	# 이미지 부팅(QEMU, UEFI 펌웨어)과 x86-64 교차 빌드(binfmt)
 	qemu-system-arm qemu-system-x86 qemu-utils qemu-efi-aarch64 ovmf qemu-user-binfmt swtpm swtpm-tools virtiofsd
+	# 자체 컴포넌트(Rust) 빌드. 툴체인은 rust-toolchain.toml에 고정한 버전을 rustup으로 받는다
+	build-essential pkg-config rustup
+	libudev-dev libinput-dev libgbm-dev libseat-dev libxkbcommon-dev libegl-dev libgles-dev libdrm-dev
+	libwayland-dev libpixman-1-dev libgtk-4-dev libgtk4-layer-shell-dev
 )
 
 sudo apt-get update
@@ -30,3 +34,7 @@ if [[ "$("$HOME/.local/bin/mkosi" --version 2>/dev/null || true)" != "mkosi ${MK
 	pipx install --force "git+https://github.com/systemd/mkosi.git@${MKOSI_VERSION}"
 fi
 pipx ensurepath
+
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$repo/rust-toolchain.toml")
+rustup toolchain install "$toolchain" --profile minimal --component clippy --component rustfmt

@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# bunt-shell 기본 설정. /etc/buntos/shell.toml이 있으면 그 파일을 쓴다.
+
+[dock]
+icon-size = 48
+# 화면 아래 가장자리와의 간격. Dock 그림자용 여백(style.css)이 따로 있다
+margin-bottom = 0
+
+[[dock.items]]
+icon = "foot"
+# Fluent 메시지 ID (i18n/<언어>/bunt-shell.ftl)
+label = "dock-terminal"
+command = ["foot"]

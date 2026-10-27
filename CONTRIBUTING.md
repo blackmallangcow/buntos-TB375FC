@@ -27,7 +27,9 @@ Rust 파일의 예:
 // SPDX-License-Identifier: GPL-3.0-or-later
 ```
 
+- 다른 프로젝트의 코드를 가져오면 원래 저작권 표기와 라이선스를 헤더에 함께 적습니다. 예: `comp/src/grabs.rs`는 Smithay 예제에서 가져와 `GPL-3.0-or-later AND MIT`입니다
 - 어떤 라이선스를 처음 쓰게 되면 원문을 `LICENSES/`에 추가합니다 (`reuse download <SPDX-ID>`)
+- 코드 디렉터리는 `REUSE.toml`에 `GPL-3.0-or-later` 기본 표기가 있습니다. reuse가 한글이 든 파일의 헤더를 읽지 못할 때가 있어서입니다. 그래도 새 파일에는 헤더를 답니다
 - 제출 전에 `reuse lint`로 확인합니다. CI도 같은 검사를 합니다
 
 ## 커널과 DTS

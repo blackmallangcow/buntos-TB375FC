@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# buntOS 그래픽 세션을 시작한다. tty1 로그인 셸에서 실행된다 (/etc/profile.d/buntos-session.sh).
+
+export LANG=ko_KR.UTF-8
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=buntOS
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
+# 컴포지터가 아직 dmabuf를 지원하지 않아 GTK는 CPU로 그린다
+export GSK_RENDERER=cairo
+
+exec systemd-cat --identifier=bunt-comp bunt-comp

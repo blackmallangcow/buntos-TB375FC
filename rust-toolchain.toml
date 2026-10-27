@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# ADR-004: 자체 컴포넌트는 Debian rustc가 아니라 여기 고정한 툴체인으로 빌드한다
+
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

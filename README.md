@@ -2,14 +2,17 @@
 
 태블릿 폼팩터의 개발용 Unix 워크스테이션을 목표로 하는 오픈소스 OS입니다. 안드로이드 태블릿에서 막혀 있던 셸 제어, 개발환경 구성, 테스트 호스팅, 앱 간 제어를 완전히 열린 스택 위에서 제공하려고 합니다.
 
-*English: buntOS is an open-source OS that aims to turn tablets into fully open Unix development workstations: Debian-based, mainline Linux, a Rust/Smithay Wayland compositor, and an AI-friendly control plane. The project is in the design phase, and the design documents are written in Korean.*
+*English: buntOS is an open-source OS that aims to turn tablets into fully open Unix development workstations: Debian-based, mainline Linux, a Rust/Smithay Wayland compositor, and an AI-friendly control plane. The project is in Phase 0 (foundation: building and booting the same image recipe on x86-64 and arm64), and the design documents are written in Korean.*
 
 ## 현재 상태
 
-설계 단계입니다. 아직 코드와 빌드 이미지가 없습니다.
+Phase 0(기반)을 진행하고 있습니다. x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅하고, arm64 이미지에서는 자체 컴포지터(bunt-comp)와 메뉴바·Dock(bunt-shell)의 첫 버전이 뜹니다. Apple Silicon Mac에서는 이 이미지를 QEMU 창으로 띄워 볼 수 있습니다([개발 환경](docs/dev/environment.md) 4장). AI 제어 계층 코드는 아직 없습니다.
+
+![buntOS 그래픽 세션 v0: 그라데이션 배경, 상단 메뉴바와 시계, 하단 Dock, 터미널 창](docs/images/desktop-v0.png)
 
 - 설계안: [docs/design/ARCHITECTURE.md](docs/design/ARCHITECTURE.md)
 - 결정 자료와 근거: [docs/design/DECISION-BRIEF.md](docs/design/DECISION-BRIEF.md)
+- 개발 환경과 이미지 빌드: [docs/dev/environment.md](docs/dev/environment.md)
 
 ## 핵심 방향
 
