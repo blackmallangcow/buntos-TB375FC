@@ -1,11 +1,12 @@
-# buntOS 설계 결정 자료 v0.3
+# buntOS 설계 결정 자료 v0.3.1
 
 - 작성일: 2026-10-27
 - 변경 이력
+  - v0.3.1 (2026-10-27): 공개 준비를 반영했다. 토큰 교체 불필요 확인, 이력 정리, README·CONTRIBUTING·REUSE 추가, 저장소 위치(`blackmallangcow/buntOS`) 지정
   - v0.3 (2026-10-27): 오픈소스 공개를 전제로 ADR-004·006·009·010·011·012를 확정했다. ADR-010은 공개 저장소 보안 권고에 따라 v0.2 권고(공개 저장소에 Mac self-hosted 러너 연결)를 철회하고 호스티드 러너 중심으로 바꿨다. 공개 전 필수 작업(0.3절)을 추가했다
   - v0.2 (2026-10-27): 실기기 전략을 mainline 단일로 확정하고 구 Track A(벤더 커널 하이브리드)를 폐기했다. 그에 따라 ADR-002 결정, ADR-007·008 폐기, ADR-011 개편, ADR-012 신설. 개방성 정의와 EL2/KVM 실측은 [ARCHITECTURE.md](ARCHITECTURE.md) 2.1절, 12.1절에 반영했다
   - v0.1 (2026-10-27): 최초 작성
-- 대상: [ARCHITECTURE.md](ARCHITECTURE.md) v0.3의 13장
+- 대상: [ARCHITECTURE.md](ARCHITECTURE.md) v0.3.1의 13장
 - 표기
   - **[확인]** 공개 자료로 확인함. 괄호 안 번호는 문서 끝 출처(S번호)
   - **[추정]** 근거에서 유도한 판단이며 검증이 필요함
@@ -42,13 +43,13 @@
 
 ### 0.3 공개 전 필수 작업
 
-저장소를 공개하기 전에 끝내야 한다.
+저장소 [`blackmallangcow/buntOS`](https://github.com/blackmallangcow/buntOS)를 공개로 전환하기 전에 끝내야 한다.
 
-1. **토큰 교체** (미완료): `opencode.json`의 `X-Nariya-Token`은 나리야 앱(`orchestrator` 프로세스, `127.0.0.1:43117`)에 접속하는 인증 토큰이다. MCP 엔드포인트와 Qwen·DeepSeek 모델 프록시(`/plan/code`)가 같은 값 하나를 쓴다. 정리 전 이력의 첫 커밋부터 들어 있었으므로 나리야 쪽에서 새로 발급받아 교체한다 (값은 이 문서에 적지 않는다)
+1. **토큰 교체** (불필요, 2026-10-27 사용자 확인): `opencode.json`의 `X-Nariya-Token`은 나리야 플랫폼에 접속하는 클라이언트 신원 토큰이다. 플랫폼이 재시작될 때마다 바뀌어 곧바로 폐기되고, 나리야 클라이언트는 자체 클라이언트라 외부에 없다. 따라서 노출돼도 문제가 없다
 2. **이력 정리** (2026-10-27 완료): 모든 커밋에서 `opencode.json`과 `attachments/`를 제거했다. 두 경로만 담았던 나리야 자동 커밋 3개는 비어서 빠졌고, 커밋 해시가 바뀌었다. 저장소의 모든 객체에서 토큰 값이 0건임을 확인했다
 3. **재유입 방지** (2026-10-27 완료): `.gitignore`에 두 경로를 추가했다. 나리야가 이 파일들을 강제로 커밋하는지는 다음 작업 때 확인한다
-4. **ADR-006 이행**: `LICENSES/`에 라이선스 원문(GPL-3.0-or-later, MIT, Apache-2.0, CC-BY-SA-4.0)을 두고, 파일마다 SPDX 헤더를 달고, CI에 `reuse lint`를 넣고, CONTRIBUTING에 DCO(`Signed-off-by`) 규칙을 적는다
-5. **ADR-004 이행**: README에 "forky 정식 릴리스 전 빌드는 보안 지원 없음"을 표시한다
+4. **ADR-006 이행** (2026-10-27 완료): 현재 파일의 라이선스를 `REUSE.toml`로 표기했다(문서 CC-BY-SA-4.0, 저장소 설정 파일 GPL-3.0-or-later). `LICENSES/`에는 지금 쓰는 두 라이선스 원문만 두고, MIT·Apache-2.0 원문은 SDK 코드가 생길 때 추가한다. REUSE는 쓰이지 않는 라이선스 원문이 있으면 규격 위반으로 판정하기 때문이다. CI에 `reuse lint`를 넣었고 CONTRIBUTING에 DCO 규칙을 적었다
+5. **ADR-004 이행** (2026-10-27 완료): README에 forky 정식 릴리스 전 빌드는 보안 지원이 없다고 표시했다
 
 ---
 
@@ -258,7 +259,7 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 | B | PR용 aarch64 e2e를 공개 저장소에 연결한 M4 Mac self-hosted 러너로 돌린다 (v0.2 권고) | GitHub 권고 위반. 포크 PR 코드가 개인 Mac에서 실행된다 → **철회** |
 | C | 호스티드 러너 + 리뷰를 마친 코드에 한해 Mac에서 가속 실행 (비공개 미러 저장소의 self-hosted 러너 또는 메인테이너 로컬 실행) | arm64 러너에 KVM이 없을 때의 보완책 |
 
-**결정 (2026-10-27): 저장소는 GitHub 공개 저장소로 한다. CI는 A를 기본으로 하고, arm64 러너에 KVM이 없으면 C로 보완한다.**
+**결정 (2026-10-27): 저장소는 GitHub 공개 저장소(`blackmallangcow/buntOS`)로 한다. CI는 A를 기본으로 하고, arm64 러너에 KVM이 없으면 C로 보완한다.**
 - x86-64 e2e: 호스티드 Linux 러너에서 KVM 가속으로 전체 시나리오를 돌린다.
 - aarch64 e2e: Phase 0 첫 주에 `ubuntu-24.04-arm`에서 `ls -l /dev/kvm`을 실험해 확정한다.
   - KVM 있음 → 호스티드 arm64 러너에서 전체 시나리오 (A)

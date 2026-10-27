@@ -1,8 +1,9 @@
-# buntOS 설계안 v0.3
+# buntOS 설계안 v0.3.1
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
 - 개정 이력
+  - v0.3.1 (2026-10-27): 9.4에 저장소 위치(`blackmallangcow/buntOS`)를 명시했다
   - v0.3 (2026-10-27): 오픈소스 공개를 전제로 ADR-004·006·009·010·011·012를 확정해 반영했다(D2, D10, 2.1절, 4.1, 4.2, 9.2, 9.4, 10장, 11장, 12장, 13장)
   - v0.2 (2026-10-27): 실기기 전략을 mainline 단일로 바꾸고 벤더 커널 하이브리드(구 Track A)를 폐기했다. 개방성 정의(D8, 2.1절), 개발환경 비차단 원칙(D9), EL2/KVM 실측(12.1절)을 추가했다
 - 결정 근거: [DECISION-BRIEF.md](DECISION-BRIEF.md)
@@ -362,7 +363,7 @@ const shot = await app.screenshot();        // 폴백용 창 단위 캡처
 
 ### 9.4 CI 구성 (ADR-010)
 
-- 저장소: GitHub 공개 저장소
+- 저장소: GitHub 공개 저장소 [`blackmallangcow/buntOS`](https://github.com/blackmallangcow/buntOS)
 - x86-64 e2e: GitHub 호스티드 Linux 러너에서 KVM 가속으로 전체 시나리오를 돌린다
 - aarch64 e2e: Phase 0 첫 주에 호스티드 arm64 러너(`ubuntu-24.04-arm`)의 `/dev/kvm` 유무를 확인해 둘 중 하나로 확정한다
   - KVM 있음: 호스티드 arm64 러너에서 전체 시나리오
