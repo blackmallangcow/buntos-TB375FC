@@ -7,6 +7,9 @@
   overlay:PATH     디스크에 임시 qcow2 덮어쓰기(PATH)를 씌운다. 빌드한 이미지는 읽기만 한다
   cont             멈춘 VM을 이어서 실행한다 (QEMU를 -S로 띄웠을 때)
   click:X,Y        화면 좌표(X, Y)를 왼쪽 버튼으로 누른다 (가상 태블릿 필요)
+  dclick:X,Y       두 번 누른다 (예: 제목 표시줄을 두 번 눌러 최대화)
+  drag:X1,Y1,X2,Y2 왼쪽 버튼을 누른 채 (X1, Y1)에서 (X2, Y2)로 끈다
+  move:X,Y         포인터만 옮긴다
   keys:A+B         키를 함께 누른다 (QEMU qcode 이름, 예: alt+ret)
   type:TEXT        영문 소문자·숫자를 한 글자씩 입력한다
   sleep:SECONDS    기다린다
@@ -66,17 +69,42 @@ class Qmp:
         # screendump 없이 크기를 알 방법이 없어 QEMU 기본 해상도를 쓴다
         return 1280, 800
 
-    def click(self, x, y):
+    def move(self, x, y):
         width, height = self.screen_size()
         events = [
             {"type": "abs", "data": {"axis": "x", "value": x * ABS_MAX // (width - 1)}},
             {"type": "abs", "data": {"axis": "y", "value": y * ABS_MAX // (height - 1)}},
         ]
         self.command("input-send-event", events=events)
+
+    def button(self, down):
+        self.command("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
+
+    def click(self, x, y, count=1):
+        # 팝업 메뉴가 닫힌 직후의 첫 포인터 이동은 컴포지터(smithay)가 팝업 그랩을 푸는 데 쓰고
+        # 버리므로, 두 번 옮겨 누르는 위치가 반영되게 한다
+        self.move(x + 1, y)
+        time.sleep(0.05)
+        self.move(x, y)
         time.sleep(0.3)
-        for down in (True, False):
-            self.command("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
-            time.sleep(0.1)
+        # 두 번 누르기로 인식되도록 누르는 간격을 짧게 둔다
+        for _ in range(count):
+            for down in (True, False):
+                self.button(down)
+                time.sleep(0.05)
+        time.sleep(0.1)
+
+    def drag(self, x1, y1, x2, y2, steps=12):
+        self.move(x1, y1)
+        time.sleep(0.3)
+        self.button(True)
+        time.sleep(0.1)
+        for step in range(1, steps + 1):
+            self.move(x1 + (x2 - x1) * step // steps, y1 + (y2 - y1) * step // steps)
+            time.sleep(0.05)
+        time.sleep(0.1)
+        self.button(False)
+        time.sleep(0.1)
 
     def keys(self, names):
         self.command("send-key", keys=[{"type": "qcode", "data": name} for name in names])
@@ -93,9 +121,14 @@ def main():
             )
         elif kind == "cont":
             qmp.command("cont")
-        elif kind == "click":
+        elif kind in ("click", "dclick", "move"):
             x, y = (int(value) for value in argument.split(","))
-            qmp.click(x, y)
+            if kind == "move":
+                qmp.move(x, y)
+            else:
+                qmp.click(x, y, count=2 if kind == "dclick" else 1)
+        elif kind == "drag":
+            qmp.drag(*(int(value) for value in argument.split(",")))
         elif kind == "keys":
             qmp.keys(argument.split("+"))
         elif kind == "type":

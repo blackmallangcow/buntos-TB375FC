@@ -23,10 +23,10 @@ pub struct Dock {
 
 #[derive(Debug, Deserialize)]
 pub struct DockItem {
-    pub icon: String,
-    /// Fluent 메시지 ID
-    pub label: String,
-    pub command: Vec<String>,
+    /// .desktop 파일 ID (예: "org.gnome.TextEditor.desktop")
+    pub app: String,
+    /// 이름으로 쓸 Fluent 메시지 ID. 없으면 .desktop 파일의 이름을 쓴다
+    pub label: Option<String>,
 }
 
 impl Config {
@@ -58,7 +58,7 @@ mod tests {
                 .dock
                 .items
                 .iter()
-                .all(|item| !item.command.is_empty())
+                .all(|item| item.app.ends_with(".desktop"))
         );
     }
 }

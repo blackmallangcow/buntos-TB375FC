@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 buntOS contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9aa5b8"/>
+      <stop offset="1" stop-color="#4c576b"/>
+    </linearGradient>
+    <linearGradient id="gear" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d3d9e3"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#background)"/>
+  <g transform="translate(64 64)" fill="#f1f4f8">
+    <rect x="-8" y="-44" width="16" height="20" rx="3"/>
+    <rect x="-8" y="-44" width="16" height="20" rx="3" transform="rotate(45)"/>
+    <rect x="-8" y="-44" width="16" height="20" rx="3" transform="rotate(90)"/>
+    <rect x="-8" y="-44" width="16" height="20" rx="3" transform="rotate(135)"/>
+    <rect x="-8" y="-44" width="16" height="20" rx="3" transform="rotate(180)"/>
+    <rect x="-8" y="-44" width="16" height="20" rx="3" transform="rotate(225)"/>
+    <rect x="-8" y="-44" width="16" height="20" rx="3" transform="rotate(270)"/>
+    <rect x="-8" y="-44" width="16" height="20" rx="3" transform="rotate(315)"/>
+  </g>
+  <circle cx="64" cy="64" r="31" fill="url(#gear)"/>
+  <circle cx="64" cy="64" r="21" fill="none" stroke="#8b96aa" stroke-width="3"/>
+  <circle cx="64" cy="64" r="11" fill="#5d687d"/>
+</svg>

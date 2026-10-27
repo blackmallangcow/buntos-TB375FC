@@ -21,9 +21,22 @@ window.bunt-dock.background {
   font-size: 13px;
 }
 
-.bar .logo {
+/* 로고 메뉴 버튼 (GtkMenuButton 안의 button) */
+.bar .logo > button {
+  min-height: 0;
+  padding: 1px 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  box-shadow: none;
+  color: inherit;
   font-weight: 800;
   letter-spacing: 0.02em;
+}
+
+.bar .logo > button:hover,
+.bar .logo > button:checked {
+  background: rgba(0, 0, 0, 0.08);
 }
 
 .bar .clock {
@@ -50,4 +63,21 @@ window.bunt-dock.background {
 
 .dock-item:hover {
   background: rgba(0, 0, 0, 0.08);
+}
+
+/* 시스템 설정에서 어둡게를 고르면 창에 dark 클래스가 붙는다 */
+.dark .bar {
+  background: rgba(30, 30, 32, 0.78);
+  color: #f5f5f7;
+}
+
+.dark .bar .logo > button:hover,
+.dark .bar .logo > button:checked,
+.dark .dock-item:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.dark .dock {
+  background: rgba(40, 40, 44, 0.55);
+  border-color: rgba(255, 255, 255, 0.14);
 }

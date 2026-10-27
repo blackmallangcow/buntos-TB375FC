@@ -1,0 +1,10 @@
+// SPDX-FileCopyrightText: 2026 buntOS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Phase 0 개발용: 사용자 계정과 권한 모델을 설계하기 전까지, 자기 세션에 있는 buntos 사용자는
+// 인증 없이 관리 작업(시간대, 기기 이름, 다시 시작 등)을 한다. /etc/sudoers.d/buntos-dev와 같은 취지다
+polkit.addRule(function (action, subject) {
+    if (subject.user === "buntos" && subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

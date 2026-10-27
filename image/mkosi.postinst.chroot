@@ -16,3 +16,8 @@ if ! id buntos >/dev/null 2>&1; then
 	useradd --no-create-home --home-dir /home/buntos --shell /bin/bash \
 		--groups sudo,video,render,input buntos
 fi
+
+# 패키지 설치 뒤에 넣은 파일을 반영한다: GSettings 기본값(90_buntos.gschema.override)과
+# 시스템 설정 앱 아이콘. 아이콘 캐시가 낡으면 GTK가 새 아이콘을 찾지 못한다
+glib-compile-schemas /usr/share/glib-2.0/schemas
+gtk-update-icon-cache --quiet --force /usr/share/icons/hicolor

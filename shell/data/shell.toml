@@ -8,8 +8,29 @@ icon-size = 48
 # 화면 아래 가장자리와의 간격. Dock 그림자용 여백(style.css)이 따로 있다
 margin-bottom = 0
 
+# Dock에 놓을 앱. app은 .desktop 파일 ID이고, 설치되지 않은 앱은 건너뛴다.
+# 이름과 아이콘은 .desktop 파일에서 가져온다. label을 주면 그 Fluent 메시지(i18n/<언어>/bunt-shell.ftl)를 이름으로 쓴다
 [[dock.items]]
-icon = "foot"
-# Fluent 메시지 ID (i18n/<언어>/bunt-shell.ftl)
+app = "org.gnome.Nautilus.desktop"
+
+[[dock.items]]
+app = "foot.desktop"
 label = "dock-terminal"
-command = ["foot"]
+
+[[dock.items]]
+app = "org.gnome.TextEditor.desktop"
+
+[[dock.items]]
+app = "org.gnome.Calculator.desktop"
+
+[[dock.items]]
+app = "org.gnome.Loupe.desktop"
+
+[[dock.items]]
+app = "org.gnome.Papers.desktop"
+
+[[dock.items]]
+app = "org.gnome.SystemMonitor.desktop"
+
+[[dock.items]]
+app = "org.buntos.Settings.desktop"

@@ -11,12 +11,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-fluent-bundle = "0.16"
-gtk4 = "0.11"
+bunt-i18n = { path = "../i18n" }
+gio-unix = "0.22"
+gtk4 = { version = "0.11", features = ["v4_12"] }
 gtk4-layer-shell = "0.8"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
-unic-langid = "0.9"
-
-[dev-dependencies]
-fluent-syntax = "0.12"

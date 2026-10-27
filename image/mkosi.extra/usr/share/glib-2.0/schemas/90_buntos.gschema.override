@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# GNOME 공용 설정의 buntOS 기본값. 사용자가 시스템 설정에서 바꾸면 그 값(dconf)을 쓴다.
+# mkosi.postinst.chroot에서 glib-compile-schemas로 반영한다.
+
+[org.gnome.desktop.interface]
+# 한국어 환경에서 흔한 12시간제(오후 3:42)를 기본으로 한다
+clock-format='12h'
+# ADR-005 잠정안: UI는 Pretendard, 고정폭은 Noto Sans Mono CJK
+font-name='Pretendard 11'
+document-font-name='Pretendard 11'
+monospace-font-name='Noto Sans Mono CJK KR 11'
+
+[org.gnome.desktop.wm.preferences]
+# 창 최소화는 아직 없으므로 창 버튼은 최대화와 닫기만 둔다
+button-layout='appmenu:maximize,close'

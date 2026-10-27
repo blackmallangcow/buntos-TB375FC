@@ -38,6 +38,9 @@ pub struct Cursor {
 
 #[derive(Debug, Deserialize)]
 pub struct Session {
+    /// startup보다 먼저, 하나씩 끝날 때까지 기다리며 실행하는 명령
+    #[serde(default)]
+    pub prepare: Vec<Vec<String>>,
     pub startup: Vec<Vec<String>>,
     pub terminal: Vec<String>,
 }

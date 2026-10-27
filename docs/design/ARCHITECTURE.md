@@ -1,8 +1,9 @@
-# buntOS 설계안 v0.3.3
+# buntOS 설계안 v0.3.4
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
 - 개정 이력
+  - v0.3.4 (2026-10-28): 11장에 기본 앱과 시스템 설정 v0, 다음 작업 순서(x86-64 확인은 필수 드라이버 뒤)를 반영했다. 5.2절에 bunt-settings, 10장에 `settings/`와 공용 번역 크레이트를 추가했다
   - v0.3.3 (2026-10-27): 11장에 진행 상황(1차 빌드 성공, 그래픽 세션 v0)과 다음 작업을 기록했다. 5.2절과 13장에 bunt-shell v0가 ADR-001의 GTK4 시제품을 겸한다고 적었다
   - v0.3.2 (2026-10-27): 공개 시점(1차 빌드 성공 후)과 검증된 개발 환경(Lima VM, 중첩 KVM)을 4.1, 9.4, 10장에 반영했다
   - v0.3.1 (2026-10-27): 9.4에 저장소 위치(`blackmallangcow/buntOS`)를 명시했다
@@ -209,6 +210,7 @@ Phase 2의 종료 조건은 2a~2d다(11장). 2e는 Phase 4·5의 실기기 판�
 |---|---|---|
 | `bunt-comp` | Rust, Smithay | 창 관리, 애니메이션, 제스처, 다중 seat, 신뢰 레이어 |
 | `bunt-shell` | Rust, 레이어 셸 클라이언트. v0은 GTK4 + gtk4-layer-shell로 만들었고 ADR-001의 GTK4 시제품을 겸한다 | 메뉴바, Dock, 런처, 알림, 제어센터 |
+| `bunt-settings` | Rust, 시스템 앱. v0은 ADR-001 잠정안대로 libadwaita 없이 GTK4와 자체 CSS로 만들었고, GTK4 시제품을 겸한다 | 시스템 설정 (v0: 정보, 모양, 날짜와 시간, 언어) |
 | 시스템 앱 UI 툴킷 | GTK4 또는 Qt6 중 Phase 1에서 시제품 비교 후 결정 | 선택 기준: (1) AT-SPI 접근성 노출 품질 (AI 계층의 입력이 됨), (2) 한국어 IME 품질, (3) 메모리 사용량 실측 |
 | 화면 키보드 | input-method-v2 클라이언트 | 두벌식/QWERTY, fcitx5와 연동 |
 
@@ -392,8 +394,9 @@ buntOS/
   kernel/                 공통 설정 조각, 업스트림 제출 대기 패치
   comp/                   bunt-comp (Rust)
   shell/                  bunt-shell (Rust)
+  settings/               bunt-settings, 시스템 설정 앱 (Rust)
   agent/                  buntd-agent, bunt CLI, MCP 어댑터 (Rust)
-  i18n/                   Fluent 리소스 (ko, en)
+  i18n/                   Fluent 리소스 (ko, en)와 이를 읽는 공용 크레이트 bunt-i18n
   policy/                 기본 권한/전원/메모리 정책 TOML
   tests/e2e/              QEMU e2e 하네스와 시나리오
   ci/                     CI 파이프라인 정의
@@ -422,20 +425,22 @@ buntOS/
 
 Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아키텍처)에서 판정하고, 실기기 판정은 해당 bring-up 단계(특히 2e)가 끝난 뒤 추가한다.
 
-진행 상황 (2026-10-27)
+진행 상황 (2026-10-28)
 
 - Phase 0: 이미지 레시피(`image/`, `bsp/`)와 e2e 1번(`tests/e2e/boot-to-shell.sh`)을 만들었다. arm64(`qemu-aarch64`)와 x86-64(`x86_64-generic`) 이미지가 같은 레시피로 빌드되고 둘 다 e2e 1번을 통과했다(1차 빌드 성공, 로컬 개발 VM 기준, [개발 환경](../dev/environment.md) 6장). 남은 종료 조건은 실기기 실측 보고서(12장)와 CI에서의 빌드·e2e다
-- Phase 1·4 일부: bunt-comp v0(창 표시·이동, 레이어 셸, 커서, 배경, 단축키)과 bunt-shell v0(메뉴바, 시계, Dock)이 arm64 QEMU에서 뜬다. 빌드 VM 안(KVM)과 Mac(HVF, QEMU 창) 양쪽에서 확인했고, Mac 창에서는 사용자가 키보드·마우스로 직접 조작해 확인했다. x86-64 이미지에는 아직 넣지 않았다(빌드 VM과 아키텍처가 달라 CI에서 빌드한다)
+- Phase 1·4 일부: bunt-comp v0(창 표시·이동, 레이어 셸, 커서, 배경, 단축키)과 bunt-shell v0(메뉴바, 시계, Dock)이 arm64 QEMU에서 뜬다. 빌드 VM 안(KVM)과 Mac(HVF, QEMU 창) 양쪽에서 확인했고, Mac 창에서는 사용자가 키보드·마우스로 직접 조작해 확인했다. x86-64 이미지에는 아직 넣지 않았다. 빌드 VM과 아키텍처가 달라 CI에서 빌드하며, 필수 드라이버를 넣은 뒤에 확인하기로 했다(2026-10-28)
+- Phase 4 일부: 기본 앱과 시스템 설정 v0를 넣었다. 기본 앱은 리눅스 데스크톱에서 널리 쓰는 GNOME 앱(파일, 텍스트 편집기, 계산기, 이미지 보기, 문서 보기, 시스템 모니터)과 터미널용 nano, vim, htop이다. bunt-settings v0는 정보(기기 이름 포함), 모양(밝게·어둡게), 날짜와 시간(시간대, 24시간제), 언어를 다룬다. 메뉴바에 로고 메뉴(이 시스템에 관하여, 시스템 설정, 다시 시작, 시스템 종료)를, bunt-comp에 팝업 그랩·창 최대화·크기 조절을 더했다. arm64 QEMU에서 확인했다
 
 다음 작업 (제안 순서)
 
 1. 저장소 공개 전환: 사용자가 결정한다([결정 자료](DECISION-BRIEF.md) 0.3절)
-2. CI: 호스티드 러너에서 x86-64 빌드와 e2e 1번을 돌리고, x86-64 이미지에도 자체 컴포넌트를 넣는다 (Phase 0 종료 조건)
-3. bunt-comp 기본기: 창 크기 조절, 팝업 그랩, 화면 해상도 변경(hotplug) 처리, dmabuf(linux-dmabuf). 지금은 GTK 앱이 CPU(cairo)로 그린다
-4. 한글 입력: text-input-v3와 입력기 연동, 한글 입력 e2e (Phase 1 종료 조건)
-5. 최소 Agent: Phase 1의 e2e 드라이버 (ADR-009)
-6. 메모리·프레임 기준선 기록 (Phase 1 종료 조건). ADR-001의 Qt6 시제품을 만들어 bunt-shell v0와 비교 측정한다
-7. 실기기 실측 보고서: TB375FC를 받은 뒤 12장 항목을 잰다 (Phase 0 종료 조건)
+2. 필수 드라이버와 네트워크: 연결 관리(NetworkManager)와 유선·Wi-Fi 같은 필수 드라이버·펌웨어를 넣는다(펌웨어는 2.1절 규칙). 웹 브라우저와 시스템 설정의 네트워크 페이지도 이때 넣는다
+3. x86-64 확인: 2번을 마친 뒤 x86-64 이미지에도 자체 컴포넌트를 넣고, CI 호스티드 러너에서 빌드와 e2e 1번을 돌린다(Phase 0 종료 조건). 사용자가 2번 뒤로 정했다(2026-10-28)
+4. bunt-comp 기본기: 화면 해상도 변경(hotplug) 처리, dmabuf(linux-dmabuf), 최소화와 전체 화면. 지금은 GTK 앱이 CPU(cairo)로 그린다
+5. 한글 입력: text-input-v3와 입력기 연동, 한글 입력 e2e (Phase 1 종료 조건)
+6. 최소 Agent: Phase 1의 e2e 드라이버 (ADR-009)
+7. 메모리·프레임 기준선 기록 (Phase 1 종료 조건). ADR-001의 Qt6 시제품을 만들어 GTK4 시제품(bunt-shell v0, bunt-settings v0)과 비교 측정한다
+8. 실기기 실측 보고서: TB375FC를 받은 뒤 12장 항목을 잰다 (Phase 0 종료 조건)
 
 ---
 
@@ -485,7 +490,7 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
 
 | ID | 질문 | 결정 시점 | 결정 방법 |
 |---|---|---|---|
-| ADR-001 | 시스템 앱 UI 툴킷 GTK4 vs Qt6 | Phase 1 | 동일 시제품 앱으로 a11y 트리 품질, 한글 IME, 메모리 실측 비교. GTK4 쪽 시제품은 bunt-shell v0로 있고, Qt6 시제품과 측정은 아직이다 |
+| ADR-001 | 시스템 앱 UI 툴킷 GTK4 vs Qt6 | Phase 1 | 동일 시제품 앱으로 a11y 트리 품질, 한글 IME, 메모리 실측 비교. GTK4 쪽 시제품은 bunt-shell v0와 bunt-settings v0로 있고, Qt6 시제품과 측정은 아직이다 |
 | ADR-003 | x86 바이너리 호환 FEX-Emu vs box64 | Phase 5 | 대표 워크로드 벤치마크 |
 | ADR-005 | UI 폰트 | Phase 4 | 렌더링 품질/메모리 실측 |
 

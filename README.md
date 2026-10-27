@@ -6,9 +6,9 @@
 
 ## 현재 상태
 
-Phase 0(기반)을 진행하고 있습니다. x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅하고, arm64 이미지에서는 자체 컴포지터(bunt-comp)와 메뉴바·Dock(bunt-shell)의 첫 버전이 뜹니다. Apple Silicon Mac에서는 이 이미지를 QEMU 창으로 띄워 볼 수 있습니다([개발 환경](docs/dev/environment.md) 4장). AI 제어 계층 코드는 아직 없습니다.
+Phase 0(기반)을 진행하고 있습니다. x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅합니다. arm64 이미지에서는 자체 컴포지터(bunt-comp), 메뉴바·Dock(bunt-shell), 시스템 설정(bunt-settings)의 첫 버전이 뜹니다. 리눅스에서 널리 쓰는 기본 앱(파일, 텍스트 편집기, 계산기, 이미지 보기, 문서 보기, 시스템 모니터, 터미널)도 함께 들어 있습니다. Apple Silicon Mac에서는 이 이미지를 QEMU 창으로 띄워 볼 수 있습니다([개발 환경](docs/dev/environment.md) 4장). AI 제어 계층 코드는 아직 없습니다.
 
-![buntOS 그래픽 세션 v0: 그라데이션 배경, 상단 메뉴바와 시계, 하단 Dock, 터미널 창](docs/images/desktop-v0.png)
+![buntOS 그래픽 세션 v0: 상단 메뉴바와 시계, 하단 Dock, 파일·텍스트 편집기·시스템 설정 창](docs/images/desktop-v0.png)
 
 - 설계안: [docs/design/ARCHITECTURE.md](docs/design/ARCHITECTURE.md)
 - 결정 자료와 근거: [docs/design/DECISION-BRIEF.md](docs/design/DECISION-BRIEF.md)

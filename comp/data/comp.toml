@@ -18,7 +18,17 @@ theme = "Adwaita"
 size = 24
 
 [session]
-# 컴포지터가 뜬 뒤 실행할 프로그램
+# 컴포지터가 뜬 뒤 차례로 실행하며 하나씩 끝날 때까지 기다리는 명령. 금방 끝나는 것만 둔다.
+# 세션 환경을 D-Bus와 systemd 사용자 서비스에 알려, D-Bus로 활성화하는 앱과 포털이
+# 이 화면에 뜨고 같은 언어와 렌더러를 쓰게 한다. bunt-shell보다 먼저 끝나야 한다
+prepare = [
+    [
+        "dbus-update-activation-environment", "--systemd",
+        "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "LANG",
+        "GSK_RENDERER", "XCURSOR_THEME", "XCURSOR_SIZE",
+    ],
+]
+# prepare 다음에 실행할 프로그램
 startup = [["bunt-shell"]]
 # Alt+Enter로 여는 터미널
 terminal = ["foot"]

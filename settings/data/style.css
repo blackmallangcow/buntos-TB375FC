@@ -1,0 +1,70 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * 시스템 설정의 모양. 어둡게를 고르면 창에 dark 클래스가 붙는다
+ */
+
+.settings-sidebar {
+  background: #ececee;
+}
+
+.settings-sidebar list {
+  background: none;
+  padding: 6px;
+}
+
+.settings-page {
+  margin: 24px 32px 32px;
+}
+
+.settings-page-title {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.settings-group-title {
+  margin-left: 4px;
+  font-weight: 600;
+}
+
+.settings-description {
+  margin-left: 4px;
+  font-size: 12px;
+}
+
+list.settings-group {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+list.settings-group > row {
+  min-height: 40px;
+  padding: 6px 14px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+list.settings-group > row:last-child {
+  border-bottom: none;
+}
+
+.settings-notice {
+  padding: 10px 18px;
+  border-radius: 9999px;
+  background: rgba(30, 30, 32, 0.9);
+  color: #ffffff;
+}
+
+.dark .settings-sidebar {
+  background: #242427;
+}
+
+.dark list.settings-group {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #2c2c2f;
+}
+
+.dark list.settings-group > row {
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}

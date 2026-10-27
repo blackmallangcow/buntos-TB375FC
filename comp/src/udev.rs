@@ -227,6 +227,9 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         .map_err(|err| err.error)?;
 
     tracing::info!("listening on {:?}", state.socket_name);
+    for command in state.config.session.prepare.clone() {
+        state.run_and_wait(&command);
+    }
     for command in state.config.session.startup.clone() {
         state.spawn(&command);
     }

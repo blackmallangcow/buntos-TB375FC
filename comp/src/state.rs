@@ -3,15 +3,22 @@
 
 //! 컴포지터 상태와 Wayland 프로토콜 처리
 
-use std::{error::Error, ffi::OsString, sync::Arc, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    error::Error,
+    ffi::OsString,
+    sync::Arc,
+    time::Instant,
+};
 
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
     delegate_seat, delegate_shm, delegate_xdg_shell,
     desktop::{
-        LayerSurface, PopupKind, PopupManager, Space, Window, WindowSurfaceType,
-        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
+        LayerSurface, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
+        PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
+        get_popup_toplevel_coords, layer_map_for_output,
     },
     input::{
         Seat, SeatHandler, SeatState,
@@ -21,13 +28,14 @@ use smithay::{
     output::Output,
     reexports::{
         calloop::{Interest, LoopHandle, LoopSignal, Mode, PostAction, generic::Generic},
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Client, Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer, wl_output, wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, Point, Serial},
+    utils::{Logical, Point, Rectangle, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -57,11 +65,22 @@ use smithay::{
     },
 };
 
-use crate::{config::Config, grabs::MoveSurfaceGrab, udev::UdevData};
+use crate::{
+    config::Config,
+    grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, handle_resize_commit},
+    udev::UdevData,
+};
 
 /// 새 창을 계단식으로 놓을 때의 간격 (논리 픽셀)
 const CASCADE_STEP: i32 = 32;
 const CASCADE_COUNT: i32 = 8;
+
+/// 최대화하기 전 창의 위치와 크기. 창의 사용자 데이터에 둔다.
+#[derive(Default)]
+struct RestoreGeometry(RefCell<Option<Rectangle<i32, Logical>>>);
+
+/// 아직 자리를 정하지 않은 새 창. 첫 버퍼가 와서 크기를 알면 자리를 정한다.
+struct PendingPlacement(Cell<bool>);
 
 pub struct BuntState {
     pub config: Config,
@@ -98,7 +117,11 @@ impl BuntState {
         let dh = display.handle();
 
         let compositor_state = CompositorState::new::<Self>(&dh);
-        let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        // 최소화, 전체 화면, 창 메뉴는 아직 없으므로 앱이 해당 버튼을 보이지 않게 한다
+        let xdg_shell_state = XdgShellState::new_with_capabilities::<Self>(
+            &dh,
+            [xdg_toplevel::WmCapabilities::Maximize],
+        );
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
@@ -161,6 +184,22 @@ impl BuntState {
             cursor_status: CursorImageStatus::default_named(),
             backend,
         })
+    }
+
+    /// 명령을 실행하고 끝날 때까지 기다린다. 그동안 컴포지터가 멈추므로 금방 끝나는 명령에만 쓴다.
+    pub fn run_and_wait(&self, command: &[String]) {
+        let Some((program, args)) = command.split_first() else {
+            return;
+        };
+        match std::process::Command::new(program)
+            .args(args)
+            .env("WAYLAND_DISPLAY", &self.socket_name)
+            .status()
+        {
+            Ok(status) if !status.success() => tracing::warn!("{program} failed: {status}"),
+            Ok(_) => {}
+            Err(err) => tracing::warn!("failed to run {program}: {err}"),
+        }
     }
 
     /// 이 컴포지터에 붙는 프로그램을 실행한다.
@@ -270,22 +309,52 @@ impl BuntState {
         }
     }
 
-    /// 새 창은 메뉴바 아래에서 계단식으로 놓는다.
+    /// 새 창의 첫 버퍼가 오면 자리를 정한다. 부모가 있는 창(대화 상자)은 부모의 가운데에,
+    /// 나머지는 쓸 수 있는 영역의 가운데에 놓되 창이 여럿이면 조금씩 비켜 놓는다.
+    /// 창이 영역을 벗어나지 않게 하고, 영역보다 크면 왼쪽 위에 맞춘다.
     fn place_new_window(&mut self, window: &Window) {
-        let index = self.space.elements().count() as i32 % CASCADE_COUNT;
-        let origin = self
-            .space
-            .outputs()
-            .next()
-            .and_then(|output| {
-                let output_geo = self.space.output_geometry(output)?;
-                let zone = layer_map_for_output(output).non_exclusive_zone();
-                Some(output_geo.loc + zone.loc + Point::from((zone.size.w / 8, zone.size.h / 10)))
-            })
-            .unwrap_or_default();
-        let offset = Point::from((CASCADE_STEP * index, CASCADE_STEP * index));
-        self.space
-            .map_element(window.clone(), origin + offset, true);
+        let Some(pending) = window.user_data().get::<PendingPlacement>() else {
+            return;
+        };
+        let size = window.geometry().size;
+        if !pending.0.get() || size.is_empty() {
+            return;
+        }
+        pending.0.set(false);
+        let (Some(toplevel), Some(area)) = (window.toplevel(), self.usable_area()) else {
+            return;
+        };
+        if Self::is_maximized(toplevel) {
+            return;
+        }
+
+        let parent = toplevel
+            .parent()
+            .and_then(|parent| self.window_for_surface(&parent))
+            .and_then(|parent| self.space.element_geometry(&parent));
+        let (center, offset) = match parent {
+            Some(parent) => (parent.loc + parent.size.downscale(2).to_point(), 0),
+            None => {
+                let others = self
+                    .space
+                    .elements()
+                    .filter(|other| *other != window)
+                    .count();
+                let index = others as i32 % CASCADE_COUNT;
+                (
+                    area.loc + area.size.downscale(2).to_point(),
+                    CASCADE_STEP * index,
+                )
+            }
+        };
+        let fit = |center: i32, length: i32, start: i32, available: i32| {
+            (center - length / 2).clamp(start, start + (available - length).max(0))
+        };
+        let location = Point::from((
+            fit(center.x + offset, size.w, area.loc.x, area.size.w),
+            fit(center.y + offset, size.h, area.loc.y, area.size.h),
+        ));
+        self.space.map_element(window.clone(), location, false);
     }
 
     fn ensure_initial_configure(&mut self, surface: &WlSurface) {
@@ -339,31 +408,90 @@ impl BuntState {
         }
     }
 
+    /// 팝업이 화면 밖으로 나가지 않게 위치를 고친다. 부모는 창이거나 메뉴바 같은 레이어 표면이다.
     fn unconstrain_popup(&self, popup: &PopupSurface) {
-        let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(popup.clone())) else {
+        let kind = PopupKind::Xdg(popup.clone());
+        let Ok(root) = find_popup_root_surface(&kind) else {
             return;
         };
-        let Some(window) = self.window_for_surface(&root) else {
-            return;
-        };
-        let Some(output) = self.space.outputs().next() else {
-            return;
-        };
-        let (Some(output_geo), Some(window_geo)) = (
-            self.space.output_geometry(output),
-            self.space.element_geometry(&window),
-        ) else {
+        let Some((output_geo, root_location)) = self.popup_root_location(&root) else {
             return;
         };
 
-        // 위치 지정은 부모 창 기준이므로 출력 영역을 그 좌표계로 옮긴다
+        // 위치 지정은 부모 표면 기준이므로 출력 영역을 그 좌표계로 옮긴다
         let mut target = output_geo;
-        target.loc -= get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
-        target.loc -= window_geo.loc;
+        target.loc -= get_popup_toplevel_coords(&kind);
+        target.loc -= root_location;
 
         popup.with_pending_state(|state| {
             state.geometry = state.positioner.get_unconstrained_geometry(target);
         });
+    }
+
+    /// 팝업의 최상위 부모가 놓인 출력의 영역과 부모의 전역 위치
+    fn popup_root_location(
+        &self,
+        root: &WlSurface,
+    ) -> Option<(Rectangle<i32, Logical>, Point<i32, Logical>)> {
+        if let Some(window) = self.window_for_surface(root) {
+            let output = self.space.outputs().next()?;
+            let output_geo = self.space.output_geometry(output)?;
+            return Some((output_geo, self.space.element_geometry(&window)?.loc));
+        }
+        self.space.outputs().find_map(|output| {
+            let output_geo = self.space.output_geometry(output)?;
+            let map = layer_map_for_output(output);
+            let layer = map.layer_for_surface(root, WindowSurfaceType::TOPLEVEL)?;
+            Some((output_geo, output_geo.loc + map.layer_geometry(layer)?.loc))
+        })
+    }
+
+    /// 메뉴바·Dock이 차지하지 않는 화면 영역 (전역 좌표)
+    fn usable_area(&self) -> Option<Rectangle<i32, Logical>> {
+        let output = self.space.outputs().next()?;
+        let output_geo = self.space.output_geometry(output)?;
+        let mut zone = layer_map_for_output(output).non_exclusive_zone();
+        zone.loc += output_geo.loc;
+        Some(zone)
+    }
+
+    fn is_maximized(surface: &ToplevelSurface) -> bool {
+        surface.with_pending_state(|state| state.states.contains(xdg_toplevel::State::Maximized))
+    }
+
+    /// 창을 쓸 수 있는 화면 영역에 맞추거나, 최대화하기 전의 위치와 크기로 되돌린다.
+    fn set_maximized(&mut self, surface: &ToplevelSurface, maximized: bool) {
+        let Some(window) = self.window_for_surface(surface.wl_surface()) else {
+            return;
+        };
+        let restore = window.user_data().get_or_insert(RestoreGeometry::default);
+        if maximized {
+            let Some(area) = self.usable_area() else {
+                return;
+            };
+            if !Self::is_maximized(surface) {
+                *restore.0.borrow_mut() = self.space.element_geometry(&window);
+            }
+            surface.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Maximized);
+                state.size = Some(area.size);
+            });
+            self.space.map_element(window.clone(), area.loc, true);
+        } else {
+            let previous = restore.0.borrow_mut().take();
+            surface.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Maximized);
+                // 크기를 비우면 앱이 스스로 크기를 고른다
+                state.size = previous.map(|geo| geo.size).filter(|size| !size.is_empty());
+            });
+            if let Some(geo) = previous {
+                self.space.map_element(window.clone(), geo.loc, true);
+            }
+        }
+        // 첫 configure 전이면 첫 configure에 함께 실린다
+        if surface.is_initial_configure_sent() {
+            surface.send_pending_configure();
+        }
     }
 }
 
@@ -395,9 +523,11 @@ impl CompositorHandler for BuntState {
             }
             if let Some(window) = self.window_for_surface(&root) {
                 window.on_commit();
+                self.place_new_window(&window);
             }
         }
         self.popups.commit(surface);
+        handle_resize_commit(&mut self.space, surface);
         self.ensure_initial_configure(surface);
     }
 }
@@ -418,8 +548,18 @@ impl XdgShellHandler for BuntState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        // 앱이 화면에 맞는 기본 크기를 고르도록 쓸 수 있는 영역의 크기를 알린다 (configure_bounds)
+        let area = self.usable_area();
+        if let Some(area) = area {
+            surface.with_pending_state(|state| state.bounds = Some(area.size));
+        }
         let window = Window::new_wayland_window(surface);
-        self.place_new_window(&window);
+        window
+            .user_data()
+            .get_or_insert(|| PendingPlacement(Cell::new(true)));
+        // 크기를 알기 전에는 아무 데나 두고, 첫 버퍼가 오면 place_new_window가 옮긴다
+        let origin = area.map(|area| area.loc).unwrap_or_default();
+        self.space.map_element(window.clone(), origin, true);
         self.focus_window(&window, smithay::utils::SERIAL_COUNTER.next_serial());
     }
 
@@ -457,9 +597,27 @@ impl XdgShellHandler for BuntState {
         else {
             return;
         };
-        let Some(initial_window_location) = self.space.element_location(&window) else {
+        let Some(mut initial_window_location) = self.space.element_location(&window) else {
             return;
         };
+
+        // 최대화된 창을 끌면 원래 크기로 되돌리고, 포인터가 제목 표시줄의 같은 비율 위치에 오게 한다
+        if Self::is_maximized(&surface) {
+            let maximized_width = window.geometry().size.w.max(1);
+            let restored_width = window
+                .user_data()
+                .get::<RestoreGeometry>()
+                .and_then(|restore| *restore.0.borrow())
+                .map_or(maximized_width, |geo| geo.size.w);
+            self.set_maximized(&surface, false);
+            let ratio = (start_data.location.x - f64::from(initial_window_location.x))
+                / f64::from(maximized_width);
+            initial_window_location.x =
+                (start_data.location.x - ratio * f64::from(restored_width)).round() as i32;
+            self.space
+                .map_element(window.clone(), initial_window_location, true);
+        }
+
         let grab = MoveSurfaceGrab {
             start_data,
             window,
@@ -468,8 +626,81 @@ impl XdgShellHandler for BuntState {
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // 팝업 그랩은 아직 지원하지 않는다
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
+    ) {
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            return;
+        };
+        let wl_surface = surface.wl_surface();
+        let Some(start_data) = check_grab(&seat, wl_surface, serial) else {
+            return;
+        };
+        let (Some(pointer), Some(window)) =
+            (seat.get_pointer(), self.window_for_surface(wl_surface))
+        else {
+            return;
+        };
+        let Some(initial_rect) = self.space.element_geometry(&window) else {
+            return;
+        };
+        surface.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Resizing);
+        });
+        surface.send_pending_configure();
+        if let Some(grab) = ResizeSurfaceGrab::start(start_data, window, edges.into(), initial_rect)
+        {
+            pointer.set_grab(self, grab, serial, Focus::Clear);
+        }
+    }
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        self.set_maximized(&surface, true);
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        self.set_maximized(&surface, false);
+    }
+
+    /// 메뉴 같은 팝업이 입력을 독점한다. 팝업 밖을 누르면 팝업이 닫힌다.
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            return;
+        };
+        let kind = PopupKind::Xdg(surface);
+        let Ok(root) = find_popup_root_surface(&kind) else {
+            return;
+        };
+        let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else {
+            return;
+        };
+
+        // 다른 그랩이 진행 중이면 팝업 그랩을 거절한다. 이어지는 하위 메뉴의 그랩은 허용한다
+        if let Some(keyboard) = seat.get_keyboard() {
+            if keyboard.is_grabbed()
+                && !(keyboard.has_grab(serial)
+                    || keyboard.has_grab(grab.previous_serial().unwrap_or(serial)))
+            {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+            keyboard.set_focus(self, grab.current_grab(), serial);
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        if let Some(pointer) = seat.get_pointer() {
+            if pointer.is_grabbed()
+                && !(pointer.has_grab(serial)
+                    || pointer.has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
+            {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
     }
 }
 
@@ -514,6 +745,10 @@ impl WlrLayerShellHandler for BuntState {
         if let Err(err) = map.map_layer(&LayerSurface::new(surface, namespace)) {
             tracing::warn!("failed to map layer surface: {err}");
         }
+    }
+
+    fn new_popup(&mut self, _parent: WlrLayerSurface, popup: PopupSurface) {
+        self.unconstrain_popup(&popup);
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {

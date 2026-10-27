@@ -4,17 +4,25 @@
 //! bunt-shell: 메뉴바와 Dock (wlr-layer-shell 클라이언트, ARCHITECTURE 5.2)
 
 mod config;
-mod i18n;
+mod dock;
+mod menubar;
 
-use std::ffi::OsStr;
+use std::rc::Rc;
 
+use bunt_i18n::{Sources, Translations};
 use gtk4::{self as gtk, gio, glib, prelude::*};
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 
-use crate::{config::Config, i18n::Translations};
+use crate::config::Config;
 
 const APP_ID: &str = "org.buntos.Shell";
 const STYLE: &str = include_str!("../data/style.css");
+const TRANSLATIONS: &Sources = &[
+    ("ko", include_str!("../../i18n/ko/bunt-shell.ftl")),
+    ("en", include_str!("../../i18n/en/bunt-shell.ftl")),
+];
+/// GNOME 공용 데스크톱 설정. 시스템 설정 앱이 시계 형식과 밝게·어둡게를 여기에 쓴다
+const INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 
 fn main() -> glib::ExitCode {
     let app = gtk::Application::builder()
@@ -23,17 +31,17 @@ fn main() -> glib::ExitCode {
         .build();
     app.connect_activate(|app| {
         let config = Config::load();
-        let tr = Translations::load();
+        let tr = Rc::new(Translations::load(TRANSLATIONS));
         load_style();
-        build_menubar(app, &tr);
-        build_dock(app, &config, &tr);
+        let windows = vec![menubar::build(app, &tr), dock::build(app, &config, &tr)];
+        follow_color_scheme(windows);
     });
     app.run()
 }
 
 fn load_style() {
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(STYLE);
+    provider.load_from_string(STYLE);
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -55,75 +63,47 @@ fn layer_window(app: &gtk::Application, name: &str) -> gtk::ApplicationWindow {
     window
 }
 
-fn build_menubar(app: &gtk::Application, tr: &Translations) {
-    let window = layer_window(app, "bunt-menubar");
-    for edge in [Edge::Top, Edge::Left, Edge::Right] {
-        window.set_anchor(edge, true);
-    }
-    window.auto_exclusive_zone_enable();
-
-    let bar = gtk::CenterBox::builder().css_classes(["bar"]).build();
-    let logo = gtk::Label::builder()
-        .label(tr.get("menubar-logo"))
-        .css_classes(["logo"])
-        .build();
-    bar.set_start_widget(Some(&logo));
-
-    let clock = gtk::Label::builder().css_classes(["clock"]).build();
-    let format = tr.get("menubar-clock-format");
-    update_clock(&clock, &format);
-    let ticking = clock.clone();
-    glib::timeout_add_seconds_local(1, move || {
-        update_clock(&ticking, &format);
-        glib::ControlFlow::Continue
-    });
-    bar.set_end_widget(Some(&clock));
-
-    window.set_child(Some(&bar));
-    window.present();
+/// 공용 데스크톱 설정. 스키마가 설치되지 않았으면 None이고, 이때는 기본값을 쓴다.
+fn interface_settings() -> Option<gio::Settings> {
+    gio::SettingsSchemaSource::default()?.lookup(INTERFACE_SCHEMA, true)?;
+    Some(gio::Settings::new(INTERFACE_SCHEMA))
 }
 
-fn update_clock(label: &gtk::Label, format: &str) {
-    if let Ok(text) = glib::DateTime::now_local().and_then(|now| now.format(format)) {
-        label.set_text(&text);
-    }
-}
-
-fn build_dock(app: &gtk::Application, config: &Config, tr: &Translations) {
-    let window = layer_window(app, "bunt-dock");
-    window.set_anchor(Edge::Bottom, true);
-    window.set_margin(Edge::Bottom, config.dock.margin_bottom);
-    window.auto_exclusive_zone_enable();
-
-    let dock = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(6)
-        .css_classes(["dock"])
-        .build();
-    for item in &config.dock.items {
-        let image = gtk::Image::from_icon_name(&item.icon);
-        image.set_pixel_size(config.dock.icon_size);
-        let button = gtk::Button::builder()
-            .child(&image)
-            .tooltip_text(tr.get(&item.label))
-            .css_classes(["dock-item"])
-            .build();
-        let command = item.command.clone();
-        button.connect_clicked(move |_| launch(&command));
-        dock.append(&button);
-    }
-
-    window.set_child(Some(&dock));
-    window.present();
-}
-
-fn launch(command: &[String]) {
-    let argv: Vec<&OsStr> = command.iter().map(OsStr::new).collect();
-    if argv.is_empty() {
+/// 시스템 설정에서 고른 밝게·어둡게(color-scheme)를 메뉴바와 Dock에 적용한다.
+fn follow_color_scheme(windows: Vec<gtk::ApplicationWindow>) {
+    let Some(settings) = interface_settings() else {
         return;
+    };
+    apply_color_scheme(&settings, &windows);
+    // 변경 알림은 설정 객체가 살아 있을 때만 온다. 처리기가 객체를 붙들어 셸이 끝날 때까지 둔다
+    let keep_alive = settings.clone();
+    settings.connect_changed(Some("color-scheme"), move |settings, _| {
+        let _ = &keep_alive;
+        apply_color_scheme(settings, &windows);
+    });
+}
+
+/// 메뉴 같은 GTK 기본 위젯은 prefer-dark로, 메뉴바와 Dock의 자체 CSS는 dark 클래스로 바꾼다
+fn apply_color_scheme(settings: &gio::Settings, windows: &[gtk::ApplicationWindow]) {
+    let dark = settings.string("color-scheme") == "prefer-dark";
+    if let Some(gtk_settings) = gtk::Settings::default() {
+        gtk_settings.set_gtk_application_prefer_dark_theme(dark);
     }
-    // GSubprocess가 끝난 프로세스를 거둔다
-    if let Err(err) = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE) {
-        eprintln!("bunt-shell: failed to start {}: {err}", command[0]);
+    for window in windows {
+        if dark {
+            window.add_css_class("dark");
+        } else {
+            window.remove_css_class("dark");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_language_has_the_same_messages() {
+        bunt_i18n::check_same_messages(TRANSLATIONS).unwrap();
     }
 }

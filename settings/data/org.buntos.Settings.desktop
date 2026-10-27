@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Desktop Entry]
+Type=Application
+Name=System Settings
+Name[ko]=시스템 설정
+Comment=Change the device name, appearance, date and time, and language
+Comment[ko]=기기 이름, 모양, 날짜와 시간, 언어를 바꿉니다
+Exec=bunt-settings
+Icon=org.buntos.Settings
+Terminal=false
+Categories=GTK;Settings;
+Keywords=Preferences;Settings;
+Keywords[ko]=설정;환경설정;
+StartupNotify=true
+Actions=about;
+
+[Desktop Action about]
+Name=About This System
+Name[ko]=이 시스템에 관하여
+Exec=bunt-settings about

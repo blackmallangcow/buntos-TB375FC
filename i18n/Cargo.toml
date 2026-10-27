@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "bunt-i18n"
+description = "buntOS: Fluent translations shared by the desktop components"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = "0.9"
