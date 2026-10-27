@@ -6,12 +6,21 @@
 
 ## 현재 상태
 
-Phase 0(기반)을 진행하고 있습니다. x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅합니다. arm64 이미지에서는 자체 컴포지터(bunt-comp), 메뉴바·Dock(bunt-shell), 시스템 설정(bunt-settings)의 첫 버전이 뜹니다. 메뉴바는 macOS처럼 앞에 있는 앱의 메뉴, 네트워크 상태, 알림 센터를 보여 주고, Dock에서 모든 앱 목록을 열 수 있습니다. 리눅스에서 널리 쓰는 기본 앱(파일, 텍스트 편집기, 계산기, 이미지 보기, 문서 보기, 시스템 모니터, 터미널)도 함께 들어 있습니다. Apple Silicon Mac에서는 이 이미지를 QEMU 창으로 띄워 볼 수 있습니다([개발 환경](docs/dev/environment.md) 4장). AI 제어 계층 코드는 아직 없습니다.
+Phase 0(기반)을 진행하고 있습니다. x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅하며, 이미지에는 Wi-Fi·Bluetooth·오디오·GPU 펌웨어 같은 필수 드라이버가 들어 있습니다.
 
-![buntOS 그래픽 세션 v0: 앞에 있는 앱의 메뉴가 보이는 투명한 메뉴바, 열린 알림 센터와 달력 위젯, 파일·텍스트 편집기 창, 실행 중 표시가 있는 Dock](docs/images/desktop-v0.png)
+arm64 이미지에서는 자체 컴포지터(bunt-comp), 셸(bunt-shell), 시스템 설정(bunt-settings)이 뜹니다. UI는 macOS 26을 기준으로 삼습니다([디자인 스펙](docs/design/DESIGN-SPEC.md)).
+- **메뉴 막대:** 앞에 있는 앱의 메뉴, 입력 소스·사운드·배터리·Wi-Fi 같은 메뉴 막대 항목, 제어 센터, 알림 센터
+- **Dock:** 화면 가운데에 뜨는 모든 앱 패널
+- **한글 입력:** fcitx5 두벌식. Ctrl+Space와 한/영 키로 바꾼다
+- **시스템 설정:** Wi-Fi, Bluetooth, 디스플레이, 배경화면, 키보드 등 12개 페이지
+
+리눅스에서 널리 쓰는 기본 앱(웹 브라우저, 파일, 텍스트 편집기, 계산기, 이미지 보기, 문서 보기, 시스템 모니터, 터미널)도 함께 들어 있습니다. Apple Silicon Mac에서는 이 이미지를 QEMU 창으로 띄워 볼 수 있습니다([개발 환경](docs/dev/environment.md) 4장). AI 제어 계층 코드는 아직 없습니다.
+
+![buntOS 데스크톱: 메뉴 막대 오른쪽의 입력 소스(한)·사운드·전원·네트워크·제어 센터 아이콘, 흐린 유리 위에 열린 제어 센터, macOS 26형 시스템 설정의 키보드 페이지(입력 소스 ABC·한글, 전환 단축키), Dock](docs/images/desktop-v0.png)
 
 - 설계안: [docs/design/ARCHITECTURE.md](docs/design/ARCHITECTURE.md)
 - 결정 자료와 근거: [docs/design/DECISION-BRIEF.md](docs/design/DECISION-BRIEF.md)
+- 디자인 스펙(UI 규칙과 토큰): [docs/design/DESIGN-SPEC.md](docs/design/DESIGN-SPEC.md)
 - 개발 환경과 이미지 빌드: [docs/dev/environment.md](docs/dev/environment.md)
 
 ## 핵심 방향

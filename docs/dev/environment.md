@@ -79,15 +79,56 @@ limactl shell buntos-dev tests/e2e/boot-to-shell.sh qemu-aarch64
 limactl shell buntos-dev tools/image/build.sh qemu-aarch64 --ephemeral=yes vm
 ```
 
+화면을 보며 기능을 확인할 때는 `tools/image/vmctl.sh`로 VM을 띄워 두고 다른 명령에서 조작한다. VM 셸(`limactl shell buntos-dev`)에서:
+
+- 빌드한 이미지 위에 임시 덮어쓰기(qcow2)를 씌워 QEMU를 직접 띄운다. 화면, 가상 키보드·태블릿, 가상 사운드 장치가 붙는다.
+- 직렬 콘솔은 root로 자동 로그인한다.
+- `VMCTL_ID`로 이름을 주면 여러 대를 따로 띄운다. 빌드 VM 메모리 때문에 한 번에 두 대까지만 뜨고, 나머지는 자리가 날 때까지 기다린다.
+
+```bash
+VMCTL_ID=mine tools/image/vmctl.sh start &      # VM이 끝날 때까지 돌아오지 않는다
+VMCTL_ID=mine tools/image/vmctl.sh wait-login
+VMCTL_ID=mine tools/image/vmctl.sh sh 'systemctl --failed'
+VMCTL_ID=mine tools/image/vmctl.sh qmp click:1200,14 sleep:1 screen:/tmp/s.png
+VMCTL_ID=mine tools/image/vmctl.sh stop
+```
+
+**동작 목록.** `qmp` 동작은 `tools/image/qmp.py` 머리말에 있다: 누르기, 끌기, 키, 글자 입력, 화면 저장.
+
+**여럿이 함께 쓸 때.**
+- 같은 이미지는 한 번에 하나만 빌드한다(`<이미지 디렉터리>.lock`). vmctl은 빌드가 끝나기를 기다렸다 띄운다.
+- 띄운 뒤에는 빌드가 이미지를 새로 만들어도 VM은 이미 연 파일을 계속 쓴다.
+- 다른 사람이 기본 이미지로 VM을 띄워 둔 동안 자기 변경을 따로 시험하려면 `BUNTOS_IMAGE_DIR`로 다른 디렉터리에 빌드하고 같은 변수로 띄운다:
+
+  ```bash
+  BUNTOS_IMAGE_DIR=~/buntos-build/mine tools/image/build.sh qemu-aarch64
+  BUNTOS_IMAGE_DIR=~/buntos-build/mine VMCTL_ID=mine tools/image/vmctl.sh start &
+  ```
+
+- mkosi `vm`(e2e, `screenshot.sh`)은 도는 동안 이미지를 잠가서, 그동안의 빌드는 2분까지 기다린 뒤 실패한다.
+
 x86-64는 보드 이름만 `x86_64-generic`으로 바꾸면 된다. Apple Silicon에서는 패키지 설치 스크립트를 qemu-user로 에뮬레이션해 빌드하고, 부팅도 KVM 없이 소프트웨어 에뮬레이션(TCG)으로 한다. CI의 x86-64 러너에서는 KVM을 쓴다([설계안](../design/ARCHITECTURE.md) 9.4).
 
 ### 그래픽 세션 보기
 
-이미지 빌드는 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings)를 먼저 컴파일해 이미지에 넣는다. 화면 장치가 있으면 tty1에서 개발용 사용자 `buntos`로 자동 로그인해 그래픽 세션을 연다. 빌드 VM과 아키텍처가 다른 x86-64 이미지에는 아직 넣지 않는다. 필수 드라이버를 넣은 뒤 CI에서 빌드한다.
+이미지 빌드는 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings)를 먼저 컴파일해 이미지에 넣는다. 화면 장치가 있으면 tty1에서 개발용 사용자 `buntos`로 자동 로그인해 그래픽 세션을 연다. 컴포지터가 셸(bunt-shell)과 입력기(fcitx5)를 띄운다.
 
-Dock에는 기본 앱인 파일(Nautilus), 모든 앱 목록, 터미널(foot), 텍스트 편집기, 계산기, 이미지 보기(Loupe), 문서 보기(Papers), 시스템 모니터와 시스템 설정(bunt-settings)이 있다. 실행 중인 앱은 아이콘 아래에 점이 붙는다. 터미널에서는 nano, vim, htop을 쓸 수 있다.
+빌드 VM과 아키텍처가 다른 x86-64 이미지에는 자체 컴포넌트가 아직 들어가지 않는다. 필수 드라이버를 넣은 x86-64 이미지는 빌드와 e2e 1번까지 확인했고(6장), 자체 컴포넌트는 CI에서 빌드한다.
 
-메뉴바는 macOS처럼 배경이 투명하고 글씨가 흰색이며, 앞에 있는 창을 최대화하거나 전체 화면으로 하면 검은색이 된다. 로고 메뉴 옆에는 앞에 있는 앱의 이름과 메뉴가, 오른쪽에는 네트워크 아이콘과 날짜·시간이 있다. 네트워크는 NetworkManager가 관리하며 QEMU에서는 유선으로 연결된다. 웹 브라우저는 아직 넣지 않았다.
+**Dock.**
+- 앱: 파일(Nautilus), 모든 앱, 웹 브라우저(Firefox ESR), 터미널(foot), 텍스트 편집기, 계산기, 이미지 보기(Loupe), 문서 보기(Papers), 시스템 모니터, 시스템 설정(bunt-settings)
+- 실행 중인 앱은 아이콘 아래에 점이 붙는다. 터미널에서는 nano, vim, htop을 쓸 수 있다.
+
+**메뉴 막대.**
+- 배경은 macOS처럼 투명하고 글씨는 흰색이다. 앞에 있는 창을 최대화하거나 전체 화면으로 하면 검은색이 된다.
+- 왼쪽: 로고 메뉴, 그 옆에 앞에 있는 앱의 이름과 메뉴
+- 오른쪽(macOS 순서): 앱이 넣는 항목, 입력 소스, 사운드, 배터리(전원), 네트워크(Wi-Fi), 제어 센터, 날짜·시간
+- 어떤 항목을 보일지는 시스템 설정의 메뉴 막대 페이지에서 정한다([디자인 스펙](../design/DESIGN-SPEC.md) 5.2).
+
+**네트워크와 장치.**
+- 네트워크는 NetworkManager가 관리하며, QEMU에서는 유선으로 연결된다.
+- 시험 VM(`vmctl.sh`)과 Mac 창(`view-mac.sh`)에는 가상 사운드 장치가 붙어 음량을 시험할 수 있다.
+- QEMU에는 배터리, Wi-Fi, Bluetooth 장치가 없다. 그래서 전원 항목은 전원 어댑터로 보이고, Bluetooth는 "사용할 수 없음"이다.
 
 Mac에서 창으로 본다. Mac 터미널의 저장소 루트에서 실행하며, QEMU가 필요하다(`brew install qemu`):
 
@@ -97,7 +138,7 @@ tools/image/view-mac.sh
 
 빌드 VM에서 이미지(약 4GB)를 `~/Library/Caches/buntos/`로 가져온 뒤 HVF 가속으로 띄운다. 이미지는 snapshot 모드로 띄우므로 안에서 바꾼 내용은 창을 닫으면 사라진다. 같은 이미지를 다시 볼 때는 `--no-copy`를 붙이면 가져오는 단계를 건너뛰며, 이때는 빌드 VM이 꺼져 있어도 된다. Mac 메모리가 16GB 이하이면 이미지를 가져온 뒤 빌드 VM을 끄고(`limactl stop buntos-dev`) `--no-copy`로 띄우는 편이 낫다. 빌드 VM이 8GiB, 보기용 QEMU가 최대 4GiB를 쓴다.
 
-화면은 1280×800으로 고정이다. 창 크기를 바꾸거나 전체 화면으로 해도 해상도는 따라가지 않는다.
+화면은 1280×800으로 뜬다. 해상도와 배율은 시스템 설정의 디스플레이 페이지에서 바꾼다. bunt-comp는 화면이 알려 주는 선호 해상도가 바뀌면 따라간다(사용자가 해상도를 고정하지 않았을 때).
 
 | 조작 | 방법 |
 |---|---|
@@ -105,12 +146,31 @@ tools/image/view-mac.sh
 | 시스템 설정, 다시 시작, 시스템 종료 | 메뉴바 왼쪽의 로고(b) 메뉴 |
 | 앞에 있는 앱의 메뉴 | 로고 옆의 앱 이름과 파일·창·도움말 메뉴. 창 메뉴에 확대/축소와 전체 화면이 있다 |
 | 알림 센터 | 메뉴바 오른쪽의 날짜와 시간을 누른다 |
-| 모든 앱 | Dock의 앱 단추. 이름을 치면 찾고 Enter로 첫 앱을 실행한다 |
+| 제어 센터 | 메뉴바 오른쪽의 스위치 두 개 아이콘. Wi-Fi·Bluetooth, 방해 금지, 다크 모드, 저전력 모드, 음량(밝기는 내장 화면이 있을 때) |
+| 전원 모드 | 메뉴바의 배터리(전원) 아이콘. 저전력 모드·자동·고성능을 고르면 바로 적용된다 |
+| 입력 소스 | 메뉴바의 "A"/"한"을 눌러 고르거나 Ctrl+Space, 한/영 키. 입력 칸에 포커스가 없어도 바뀐다 |
+| 한자 변환 | 한글을 쓰는 중에 한자 키 또는 F9. 숫자나 Enter로 고르고 Esc로 닫는다 |
+| 모든 앱 | Dock의 앱 단추를 누르면 화면 가운데에 패널이 뜬다. 분류 칩으로 거르고, 이름을 치면 찾고, Enter로 첫 앱을 실행한다. 바깥을 누르거나 Esc로 닫는다 |
+| 배경화면 | 시스템 설정의 배경화면 페이지. "사진 추가…"로 내 사진을 쓴다 |
+| 시스템 설정의 페이지 바로 열기 | `bunt-settings wifi`처럼 페이지 이름을 준다. 이미 떠 있으면 페이지만 바뀐다. 이름은 [디자인 스펙](../design/DESIGN-SPEC.md) 9장. 설정 창에서 Ctrl+F는 검색, Alt+←/→는 뒤로·앞으로 |
 | 창 옮기기 | 제목줄을 끈다 |
 | 창 크기 조절 | 창 가장자리를 끈다. 제목줄을 두 번 누르면 최대화와 복원 |
 | 창 닫기 | 제목줄의 X 버튼, 또는 Option+F4 (Mac 노트북 키보드는 fn도 함께) |
 | 세션 끝내기 | Ctrl+Option+Delete(⌫). tty1 셸로 돌아온다 |
 | 끝내기 | QEMU 창을 닫는다 (종료 확인 창이 뜨면 Quit) |
+
+**Wi-Fi 시험.** QEMU에는 Wi-Fi 장치가 없다. 시험 VM 안에서 가짜 무선 장치를 만들어 시험한다(root 직렬 콘솔에서).
+1. 장치를 만든다: `modprobe mac80211_hwsim radios=3`
+2. 핫스팟에 필요한 패키지를 넣는다. 이미지에는 넣지 않는다: `apt-get update && apt-get install -y --no-install-recommends dnsmasq-base`
+3. wlan0에 WPA2 핫스팟을 띄운다(열린 핫스팟은 wifi-sec 없이 wlan1에):
+
+   ```bash
+   nmcli con add type wifi ifname wlan0 con-name lab-ap autoconnect no ssid buntOS-Lab mode ap ipv4.method shared 802-11-wireless.band bg wifi-sec.key-mgmt wpa-psk wifi-sec.psk buntos1234 && nmcli con up lab-ap
+   ```
+
+4. wlan2가 메뉴 막대와 시스템 설정의 Wi-Fi 장치가 된다.
+
+시스템 설정은 직렬 콘솔에서 `sudo -u buntos`로 띄우면 그래픽 로그인 세션 밖이라 polkit이 네트워크 변경을 거절한다. Dock에서 띄우고, 페이지만 `bunt-settings <페이지>`로 넘긴다.
 
 빌드 VM 안에서 화면을 캡처할 수도 있다. 결과는 VM의 `~/buntos-build/qemu-aarch64/screen.png`이며, 클릭·키 입력 동작을 이어서 줄 수 있다(`tools/image/qmp.py` 참고):
 
@@ -130,7 +190,7 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 
 ## 6. 검증 기록
 
-2026-10-27에 1차 빌드와 그래픽 세션 v0를, 2026-10-28에 기본 앱과 시스템 설정을 확인했다.
+2026-10-27에 1차 빌드와 그래픽 세션 v0를, 2026-10-28에 기본 앱, 시스템 설정, macOS형 데스크톱(메뉴 막대 항목, 제어 센터, 모든 앱), 한글 입력기, 필수 드라이버, x86-64 이미지를 확인했다.
 
 | 항목 | 결과 |
 |---|---|
@@ -147,7 +207,13 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | CI (10-28) | 비공개 저장소 main(`6eb348d`)에 올려 GitHub 호스티드 러너에서 REUSE 검사 통과. 이미지 빌드와 e2e는 아직 CI에 없다 |
 | Mac에서 보기 | Mac의 QEMU 11.1.2(HVF)로 같은 이미지를 cocoa 창으로 띄워 1280×800 바탕화면과 메뉴바, Dock이 뜨는 것을 QMP 화면 캡처로 확인. 이미지 복사 10초. 이어서 사용자가 창에서 Mac 키보드와 마우스로 조작해 시계(한국 시간), 화면, 입력이 정상임을 확인 |
 | macOS형 메뉴바 arm64 (10-28) | 이미지 4.0G, 빌드 90~120초(캐시 있음). 앞에 있는 앱의 메뉴(텍스트 편집기: 정보·종료, 새 창·닫기, 확대/축소·전체 화면, 도움말)와 메뉴 사이를 포인터로 옮겨 다니기, 확대/축소와 전체 화면에서 메뉴바가 검은색으로 바뀌고 전체 화면에서 Dock이 숨었다 돌아오는 것, 모든 앱 목록의 검색과 Enter 실행, Dock의 실행 중 표시, 알림(D-Bus로 보낸 시험 알림)의 배너·알림 센터·달력 위젯, 네트워크 아이콘(유선 연결)과 상태 문장, 메뉴로 앱을 끝내면 남은 창이 활성화되는 것을 확인했다(빌드 VM 안에서 QMP로 조작). NetworkManager로 QEMU 유선 연결이 인터넷까지 닿았다(`nmcli` connectivity full). e2e 1번도 다시 통과(로그인 15초, 상태 `running`) |
-| 확인하지 않은 것 | `tools/devvm/buntos-dev.yaml`의 컨테이너 런타임 끄기 설정(검증한 VM은 그 설정을 넣기 전에 만들었다). 데스크톱 패키지를 넣은 지금 레시피로 x86-64 이미지를 빌드하고 e2e를 돌리는 것(x86-64 기록은 1차 빌드 때 것이며, 필수 드라이버를 넣은 뒤 확인한다). Mac 창에서 기본 앱, 시스템 설정, 메뉴바를 직접 조작하는 것. Wi-Fi 아이콘(QEMU에는 Wi-Fi 장치가 없다). 실제 앱이 보낸 알림(시험 알림만 보냈다) |
+| 필수 드라이버 arm64 (10-28) | non-free-firmware의 Wi-Fi·Bluetooth·GPU·오디오 펌웨어, wpasupplicant, bluez, PipeWire, UPower, power-profiles-daemon, iio-sensor-proxy와 Firefox ESR을 넣은 이미지 5.7G(사용 5.5G). 시험 VM에서 NetworkManager·wpa_supplicant·upower·power-profiles-daemon이 돌고, PipeWire가 가상 사운드 장치(virtio-snd)를 출력으로 잡는다. bluetooth.service는 어댑터가 없어 조건대로 뜨지 않는다 |
+| x86-64 (10-28) | 필수 드라이버와 CPU 마이크로코드(amd64-microcode, intel-microcode), thermald를 넣은 지금 레시피로 빌드했다. 이미지 5.4G, 교차 빌드, amd64 패키지를 처음 받아 20분. e2e 1번 통과(TCG): 로그인 65초, 셸 72초, 상태 `running`, 전원 꺼짐 79초. 커널 모듈 initrd를 줄인 뒤 다시 빌드해(UKI 79MB) 다시 통과했다(로그인 73초. 다른 VM과 함께 돌렸다). 자체 컴포넌트(그래픽 세션)는 아직 빠져 있다 |
+| 메뉴 막대 항목·제어 센터·모든 앱 arm64 (10-28) | 시험 VM에서 QMP로 조작해 확인했다.<br>- 메뉴 막대: 입력 소스(메뉴에서 2벌식을 고르면 "A"→"한"), 사운드(음량 막대, 출력 장치), 전원(전원 어댑터, 전원 모드 저전력·자동), 네트워크(유선 상태)<br>- 제어 센터: 다크 모드를 켜면 셸 전체가 바로 어두워진다. 방해 금지를 켜면 메뉴 막대에 달 아이콘이 생긴다<br>- 모든 앱 패널: 가운데 유리 패널, 분류 칩, 검색(영문·한글), Esc·바깥 누르기로 닫기<br>- 배경화면: 설정 값을 바꾸면 바로 바뀐다<br>- 앱 항목: 시험용 StatusNotifierItem 스크립트로 아이콘 표시, 메뉴(dbusmenu)의 누르기 이벤트 전달, 앱이 끝나면 사라짐 |
+| 한글 입력기·컴포지터 API arm64 (10-28) | gnome-text-editor와 foot에 한글 입력(조합 중 글자 표시), Ctrl+Space·한/영 전환(입력 칸에 포커스가 없어도), 한자 후보 창이 글자 커서 아래에 뜨는 것을 확인했다. fcitx5를 끄면 컴포지터가 다시 띄운다. 컴포지터 API의 화면 모드(1024×768)·배율(2배)·키 반복이 바로 적용되고 다시 로그인한 뒤에도 남는다. VNC로 QEMU 화면 크기를 1440×900으로 바꾸면 컴포지터가 따라간다 |
+| 시스템 설정 v1 arm64 (10-28) | 페이지 12개를 명령줄과 Dock으로 열고 사이드바 검색, 뒤로·앞으로를 확인했다.<br>- Wi-Fi: mac80211_hwsim과 NetworkManager 핫스팟으로 검색, 암호 입력, 연결, 세부사항, 지우기, 틀린 암호, 열린 네트워크 연결<br>- 배경화면: 고르면 셸이 바로 바꾼다<br>- 디스플레이: 배율 200%↔100%를 컴포지터 API로 바꾼다<br>- 키보드: fcitx5 입력 소스 목록을 읽는다<br>- 다크 모드에서도 모든 틀이 토큰대로 바뀐다<br>- Bluetooth·배터리·밝기는 QEMU에 장치가 없어 "없음" 상태만 확인했다 |
+| 통합 이미지 arm64 (10-28) | 세 갈래 작업을 합친 이미지 5.7G(UKI 87MB). e2e 1번 통과: 로그인 18초, 셸 21초, 상태 `running`, 전원 꺼짐 22초. 같은 이미지에서 확인한 것:<br>- 모든 앱 패널: 흐린 유리, "calc" 검색<br>- 제어 센터<br>- 텍스트 편집기에서 Ctrl+Space 뒤 "안녕하세요" 입력, 메뉴 막대가 "한"으로 바뀜<br>- 시스템 설정의 키보드·Wi-Fi(장치 없음) 페이지<br>- 메뉴 막대 메뉴: Esc로 닫히고 닫은 뒤 입력이 앞 창으로 감, 열 때 칠해진 줄 없음<br>- cargo fmt·clippy(경고 0)·test(52개), reuse lint 통과 |
+| 확인하지 않은 것 | `tools/devvm/buntos-dev.yaml`의 컨테이너 런타임 끄기 설정(검증한 VM은 그 설정을 넣기 전에 만들었다). x86-64 그래픽 세션(자체 컴포넌트를 x86-64로 빌드하는 것은 CI에서 한다). Bluetooth 연결·페어링, 배터리 표시, 화면 밝기, 실제 Wi-Fi 칩(QEMU에 장치가 없다). 실제 앱이 보낸 알림과 실제 앱의 메뉴 막대 항목(시험 알림과 시험 스크립트만 썼다). 분수 배율(세션이 GTK를 CPU로 그려 확인할 수 없어 넣지 않았다) |
 
 ## 7. 알려진 문제
 
@@ -163,7 +229,7 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 시계가 UTC로 나옴 | `tzdata`도 Priority: required지만 Essential이 아니어서 설치되지 않았다 | 레시피 패키지 목록에 넣었다 |
 | 화면 장치가 없는 VM에서 `getty@tty1` 실패 | 그래픽 세션이 바로 끝나며 자동 로그인이 반복됐다 | 화면 장치가 있을 때만 세션을 열고, 세션이 끝나면 셸로 돌아온다 |
 | GTK 앱이 CPU로 그린다 | 컴포지터가 아직 dmabuf(linux-dmabuf)를 지원하지 않는다 | 세션에서 `GSK_RENDERER=cairo`. dmabuf 지원은 다음 단계 |
-| 창 최소화와 전체 화면, 한글 입력기가 없다 | bunt-comp v0 범위 밖 | 다음 단계. 창 버튼은 최대화와 닫기만 보인다 |
+| 창 최소화가 없다 | bunt-comp 범위 밖 | 다음 단계. 창 버튼은 최대화와 닫기만 보인다 |
 | GTK 앱이 시스템 설정(글꼴, 밝게·어둡게, 창 버튼)을 따르지 않음 | 지금의 GTK는 이 설정을 xdg-desktop-portal로 읽는데 포털이 없었다 | 포털과 GTK 구현(`xdg-desktop-portal-gtk`)을 넣고, 세션 환경을 bunt-shell보다 먼저 D-Bus에 알린다(`comp.toml`의 `prepare`) |
 | 강조 색을 바꿔도 앱에 반영되지 않음 | GTK 포털은 `org.freedesktop.appearance`의 `color-scheme`만 주고 `accent-color`는 주지 않는다 | 시스템 설정 v0에서 강조 색을 뺐다. 강조 색을 전하는 포털 구현이 생기면 넣는다 |
 | sudo가 매번 "unable to resolve host"를 경고 | 호스트 이름을 `/etc/hosts`에 적지 않았다 | `libnss-myhostname`을 넣었다. 시스템 설정에서 바꾼 이름도 찾는다 |
@@ -173,4 +239,17 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | GNOME 앱의 창 안 메뉴(☰)가 메뉴바로 옮겨지지 않음 | GNOME 앱은 창 안의 메뉴를 밖으로 내보내지 않는다 | 메뉴바의 앱 메뉴는 앱이 D-Bus로 내보내는 동작(정보, 설정, 새 창, 종료, 도움말)과 창 조작으로 만든다 |
 | 팝업 메뉴를 닫은 직후 QMP로 누른 곳이 엉뚱하게 눌림 | smithay는 팝업 그랩이 끝난 뒤 첫 포인터 이동을 그랩을 푸는 데 쓰고 버린다. QMP 클릭은 이동이 한 번뿐이었다 | `qmp.py`가 누르기 전에 포인터를 두 번 옮긴다. 실제 마우스는 이동이 이어져서 영향이 없다 |
 | 테스트로 띄운 이미지가 바뀜 | mkosi `vm`은 이미지를 직접 쓴다. 이미지를 `-blockdev`로 붙여서 QEMU `-snapshot`도 효과가 없다. `--ephemeral`은 이미지 전체를 복사하는데, Mac 메모리가 빠듯할 때 첫 부팅이 1분 넘게 늦어졌다 | e2e와 화면 캡처는 VM을 멈춘 상태로 띄우고 QMP로 디스크에 임시 qcow2 덮어쓰기를 씌운 뒤 실행한다(`tools/image/qmp.py`의 `overlay`) |
-| Mac 창에서 바탕화면이 640×400으로 뜸 | QEMU cocoa는 창 크기를 게스트에 해상도로 알려 준다. zoom-to-fit을 켜면 처음 창(640×480)을 화면 비율에만 맞춰 그 크기가 된다. bunt-comp는 아직 해상도 변경을 따라가지 않는다 | `view-mac.sh`는 zoom-to-fit 없이 띄워 1280×800으로 둔다. 해상도 변경 처리는 다음 단계 |
+| Mac 창에서 바탕화면이 640×400으로 뜸 | QEMU cocoa는 창 크기를 게스트에 해상도로 알려 준다. zoom-to-fit을 켜면 처음 창(640×480)을 화면 비율에만 맞춰 그 크기가 된다 | `view-mac.sh`는 zoom-to-fit 없이 띄워 1280×800으로 둔다. bunt-comp는 이제 선호 해상도가 바뀌면 따라가고(2026-10-28), 해상도는 시스템 설정의 디스플레이 페이지에서도 바꾼다 |
+| 테스트 VM이 떠 있으면 이미지 빌드가 "Cannot lock … locked by another process"로 실패 | mkosi `vm`은 VM이 도는 동안 이미지를 잠근다 | `tools/image/vmctl.sh`는 QEMU를 직접 띄워 이미지에 qcow2 덮어쓰기를 씌운다. 빌드는 이미지별 잠금으로 차례를 지킨다. mkosi `vm`(e2e, `screenshot.sh`)이 도는 동안의 빌드는 2분까지 기다린 뒤 실패한다 |
+| 빌드 중에 `build.sh`를 고치면 그 빌드가 엉뚱한 줄을 실행할 수 있음 | bash는 스크립트를 실행하면서 파일을 이어 읽는다. 같은 파일을 덮어쓰면 읽던 자리가 어긋난다 | 빌드가 도는 동안에는 새 파일로 쓴 뒤 바꿔 넣는다(rename). 이미 연 파일은 그대로 남는다 |
+| 모든 앱 패널 검색 칸에 글자가 들어가지 않음, 패널을 Esc로 닫은 직후 첫 클릭이 사라짐 | bunt-comp가 keyboard_interactivity가 exclusive인 레이어 표면에 키보드 포커스를 주지 않았고, 숨긴 표면에 포커스를 남겨 입력기의 키보드 그랩이 풀리지 않았다 | wlr-layer-shell 명세대로 exclusive 레이어가 나타나면 포커스를 주고, 사라지면 창으로 돌려준다(on_demand는 누르면 준다) |
+| 유리 패널 뒤 창의 글자가 비쳐 겹침 | 컴포지터에 흐림이 없었다. macOS의 유리는 뒤를 흐리게 한다 | bunt-comp가 셸 표면 뒤를 흐리게 한다(`[effects] blur`, 기본 켬). 소프트웨어 렌더러에서 메뉴를 열 때 한두 프레임 늦어질 수 있다. 끄면 유리 토큰의 불투명도를 높인다([디자인 스펙](../design/DESIGN-SPEC.md) 2.2) |
+| Ctrl+Space를 앱이 받지 못함 | 입력 소스 전환을 컴포지터가 전역으로 가로챈다(macOS와 같다) | 단축키를 바꾸는 설정은 다음 작업이다 |
+| 부하가 클 때 셸과 앱이 1분쯤 늦게 뜸 | GTK가 xdg-desktop-portal을 기다리다 시간이 초과된다(25초×2, `Cannot get portal org.freedesktop.host.portal.Registry version`). 빌드 VM에 테스트 VM 세 대와 빌드가 함께 돌 때 보였다 | 시험할 때 테스트 VM 수를 줄인다. 셸 쪽 대처는 다음 작업이다 |
+| 저장된 Wi-Fi 연결의 암호가 바뀌면 다시 묻지 못함 | NetworkManager 비밀 에이전트가 없다 | 새로 연결할 때 틀린 암호는 만든 연결을 지우고 알린다. 셸에 에이전트를 두는 것이 다음 작업이다 |
+| PIN이나 확인 번호가 필요한 Bluetooth 기기(키보드 등)를 짝지을 수 없음 | BlueZ 페어링 에이전트가 없다 | 다음 작업 |
+| `gdk_pixbuf::Pixbuf::from_file`이 그림을 못 읽음 | Debian forky의 gdk-pixbuf는 그림 형식 로더 없이 glycin에 맡긴다 | 그림은 `gdk::Texture::from_file`(GTK)로 읽는다 |
+| fcitx5의 키 반복이 바뀐 값을 바로 따르지 않음 | fcitx5는 키보드를 잡을 때 받은 반복 값으로 반복을 직접 흉내 낸다 | 이미 포커스된 입력 칸은 다음 포커스부터 새 값을 쓴다 |
+| 필수 펌웨어를 넣은 뒤 부팅이 30초 넘게 늦어짐 | mkosi는 UKI에 모든 커널 모듈과 그 모듈이 쓰는 펌웨어를 담은 initrd를 붙인다. 펌웨어 패키지를 넣자 initrd가 220MB가 됐다 | 커널 모듈 initrd에는 루트를 여는 모듈만 넣는다(`image/mkosi.conf`의 `KernelModulesInitrdInclude`). 나머지는 루트로 바꾼 뒤 읽는다. UKI 268MB→87MB, 로그인 57초→19초 |
+| 메뉴 막대 메뉴를 열면 포인터가 메뉴 밖에 있어도 맨 아래 항목이 가리킨 것처럼 칠해짐 | 셸이 팝오버가 뜬 뒤(show)에 내용을 채워 크기가 바뀌고 다시 배치됐고, GTK가 메뉴가 뜰 때 포인터가 메뉴 위에 있다고 보고 hover를 줬다. 컴포지터는 팝업에 포인터 이벤트를 보내지 않았다(WAYLAND_DEBUG로 확인) | 메뉴 단추의 create-popup에서 띄우기 전에 채우고, 가리킨 줄은 포인터가 메뉴 안에서 실제로 움직인 뒤에만 칠한다(`shell/src/extras.rs`의 pointer-moved) |
+| 메뉴 막대 메뉴가 Esc로 닫히지 않음 | 글자 칸에 포커스가 있으면 입력기(fcitx5)가 키보드를 잡고 있는데, 컴포지터가 이것을 다른 그랩으로 보고 메뉴의 키보드 그랩을 거절했다. 레이어 포커스 정리가 열린 팝업의 포커스를 창으로 되돌리기도 했다 | 입력기 그랩은 팝업 그랩을 막지 않고, 열린 팝업의 포커스는 건드리지 않는다(`comp/src/state.rs`) |
