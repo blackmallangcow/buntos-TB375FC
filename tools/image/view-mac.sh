@@ -30,7 +30,8 @@ elif [[ ! -f "$image" ]]; then
 fi
 
 # zoom-to-fit은 쓰지 않는다. cocoa는 창 크기를 게스트에 해상도로 알려 주는데, zoom-to-fit을 켜면
-# 처음 창(640x480)을 화면 비율에만 맞춰 640x400이 된다. bunt-comp는 아직 해상도 변경을 따라가지 않는다
+# 처음 창(640x480)을 화면 비율에만 맞춰 640x400이 된다. bunt-comp는 선호 해상도가 바뀌면 따라가지만
+# (VNC로 확인), cocoa 창 크기 바꾸기로는 아직 확인하지 않았다
 exec qemu-system-aarch64 \
 	-name buntOS \
 	-machine virt -accel hvf -cpu host -smp 4 -m 4G \
