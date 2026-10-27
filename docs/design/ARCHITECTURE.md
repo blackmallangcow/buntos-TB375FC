@@ -1,8 +1,11 @@
-# buntOS 설계안 v0.2
+# buntOS 설계안 v0.3
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
-- 개정: v0.2 (2026-10-27). 실기기 전략을 mainline 단일로 바꾸고 벤더 커널 하이브리드(구 Track A)를 폐기했다. 개방성 정의(D8, 2.1절), 개발환경 비차단 원칙(D9), EL2/KVM 실측(12.1절)을 추가했다. 결정 근거는 [DECISION-BRIEF.md](DECISION-BRIEF.md)에 있다
+- 개정 이력
+  - v0.3 (2026-10-27): 오픈소스 공개를 전제로 ADR-004·006·009·010·011·012를 확정해 반영했다(D2, D10, 2.1절, 4.1, 4.2, 9.2, 9.4, 10장, 11장, 12장, 13장)
+  - v0.2 (2026-10-27): 실기기 전략을 mainline 단일로 바꾸고 벤더 커널 하이브리드(구 Track A)를 폐기했다. 개방성 정의(D8, 2.1절), 개발환경 비차단 원칙(D9), EL2/KVM 실측(12.1절)을 추가했다
+- 결정 근거: [DECISION-BRIEF.md](DECISION-BRIEF.md)
 - 범위: 전체 아키텍처, 아키텍처별(arm64 / x86-64) 전략, UI, AI 제어 계층, 다국어, 메모리/성능 전략, 테스트 전략, 단계별 로드맵
 - 원칙: 이 문서의 수치 중 "실측" 표기가 없는 것은 모두 **가설 또는 초기 예산**이며, Phase 0 측정 결과로 갱신한다 (규칙 4).
 
@@ -31,7 +34,7 @@
 | # | 결정 | 이유 |
 |---|---|---|
 | D1 | 커널은 **Linux**를 사용하고 자체 커널을 작성하지 않는다 | 목표가 "Unix 생태계 흡수"다. 자체 커널은 바이너리/드라이버 호환성을 처음부터 잃는다. buntOS의 차별점은 커널이 아니라 사용자 공간(UI, AI 제어 계층, 통합 경험)이다 |
-| D2 | 사용자 공간 베이스는 **Debian (glibc, systemd)** | arm64 / amd64 모두 1급(official) 아키텍처로 패키지 동등성이 가장 높다. musl 기반(Alpine)은 Node/Python 휠 등 사전 빌드 바이너리 호환성 문제가 있어 개발 머신용으로 부적합 |
+| D2 | 사용자 공간 베이스는 **Debian (glibc, systemd)**. 기준은 **forky(testing) 스냅샷 고정**이며 forky 정식 릴리스 시 stable로 전환한다(ADR-004) | arm64 / amd64 모두 1급(official) 아키텍처로 패키지 동등성이 가장 높다. musl 기반(Alpine)은 Node/Python 휠 등 사전 빌드 바이너리 호환성 문제가 있어 개발 머신용으로 부적합. forky는 실기기 GPU에 필요한 커널 6.18 이상과 Mesa 25.1 이상을 기본 저장소에 갖고 있고, 실측을 출시할 플랫폼에서 한 번만 하면 된다 |
 | D3 | 두 아키텍처는 **동일한 소스, 동일한 패키지 목록, 동일한 이미지 레시피**에서 빌드하고, 차이는 BSP(Board Support Package) 계층에만 허용한다 | 제1 목표(지원 동등성)를 구조적으로 강제 |
 | D4 | 디스플레이 서버는 **Wayland**, 컴포지터는 **Rust + Smithay** 기반 자체 구현 (`bunt-comp`) | macOS 수준 UI와 AI 제어 계층(가상 seat, 오프스크린 출력)을 컴포지터 내부에 넣어야 하므로 기존 DE 테마 수정으로는 불가. Rust는 GC 없이 메모리 안전성 확보. Smithay는 GLES/pixman(소프트웨어) 렌더러를 모두 제공하여 GPU 드라이버 불확실성에 대응 가능 |
 | D5 | AI 제어는 **비전(스크린샷) 우선이 아니라 의미 구조(semantic) 우선**: CLI/D-Bus 액션 > 접근성 트리 > 스크린샷 순 | Aside의 설계 원칙 채택 (6장) |
@@ -39,6 +42,7 @@
 | D7 | 설정값은 코드가 아닌 **선언형 설정(TOML)** 으로 분리 (보드 정의, 해상도/배율, 전원 정책, 권한 정책, 문자열) | 규칙 1 (하드코딩 금지) |
 | D8 | **개방성**: 애플리케이션 프로세서(AP, 메인 CPU)에서 실행되는 커널·드라이버·사용자 공간 코드는 전부 오픈소스이며 업스트림을 목표로 한다. 벤더 커널, 폐쇄 커널 모듈, 폐쇄 사용자 공간 드라이버, bionic 호환 계층(libhybris)은 쓰지 않는다. 펌웨어만 예외다(2.1절) | 1장의 원인(bionic, 벤더 통제)을 구조적으로 제거한다. 커널을 업스트림과 함께 올릴 수 있어야 개발환경이 시간이 지나도 막히지 않는다(D9) |
 | D9 | **개발환경 비차단**: root, 패키지 설치, 컨테이너(rootful/rootless), 가상화(KVM), 커널 모듈 빌드, 커널 업그레이드를 OS 구성이 막지 않는다. 하드웨어나 펌웨어가 막는 경우는 실측으로 확인해 원인과 함께 기록한다 | 1장의 목표 그 자체. 검증은 동등성 기능 매트릭스(4.4)와 실측(12장)으로 한다 |
+| D10 | **라이선스**: 컴포지터(bunt-comp), 셸(bunt-shell), 에이전트(buntd-agent, bunt CLI, MCP 어댑터 서버)는 GPL-3.0-or-later. 외부 앱이 링크하는 SDK·프로토콜 크레이트는 MIT OR Apache-2.0. 문서는 CC BY-SA 4.0. 기여는 DCO, 표기는 파일 단위 SPDX 헤더(REUSE 규격)로 한다(ADR-006) | buntOS는 오픈소스로 공개한다. GPLv3는 소비자 기기에 실어 배포하는 쪽에 수정 버전 설치 정보(Installation Information)를 요구하므로, 파생 기기가 다시 잠기는 것을 막아 D8·D9를 파생물까지 잇는다. SDK는 permissive로 두어 앱 생태계를 막지 않는다(D9) |
 
 ### 2.1 개방성 정의 (D8 상세)
 
@@ -48,10 +52,18 @@
 |---|---|---|
 | AP 사용자 공간 | 셸, 시스템 앱, Mesa, PipeWire, 네트워크 서비스 | 오픈소스 필수. 폐쇄 바이너리와 bionic 호환 계층 금지 |
 | AP 커널 | 커널, 드라이버, DTS | 오픈소스 필수. BSP 패치는 업스트림 제출이 기본이고, 다운스트림 패치는 제출 대기열로만 유지한다. 벤더 커널과 폐쇄 모듈 금지 |
-| 펌웨어 | GPU, Wi-Fi/BT, 전원 관리 MCU 등 AP가 아닌 프로세서에서 실행되는 코드 | 예외로 허용. 선호 순서: 오픈소스 > 재배포 가능한 바이너리(linux-firmware 등) > 기기에서 추출하는 재배포 불가 바이너리(허용 여부는 ADR-012) |
+| 펌웨어 | GPU, Wi-Fi/BT, 전원 관리 MCU 등 AP가 아닌 프로세서에서 실행되는 코드 | 예외로 허용. 선호 순서: 오픈소스 > 재배포 가능한 바이너리(linux-firmware 등) > 기기에서 추출하는 재배포 불가 바이너리(아래 규칙 조건으로 허용, ADR-012) |
 | 부트 체인과 런타임 펌웨어 | preloader, LK, TF-A, TEE | 지금은 교체할 수 없으므로 범위 밖으로 두고 요구 사항으로 관리한다: (1) 사용자가 자기 커널을 부팅할 수 있어야 한다(언락), (2) EL2를 OS에 넘기는지 실측한다(12.1절), (3) 오픈 부트 체인으로의 교체는 장기 과제 |
 
 이 선은 Debian의 non-free-firmware 구분과 같다. 펌웨어 목록은 BSP의 `board.toml`에 선언하고, 이미지에 포함하는 것(재배포 가능)과 설치 시 기기에서 추출하는 것을 구분한다.
+
+재배포 불가 펌웨어 규칙 (ADR-012)
+
+- 공개 이미지와 저장소에 절대 포함하지 않는다. 공개 이미지에 넣는 것 자체가 재배포다
+- 설치 시 사용자 자신의 기기에서만 추출한다. 제3자 미러에서 받지 않는다
+- 대상 파일과 해시는 `board.toml`에 선언하고, 추출 스크립트는 오픈소스로 둔다
+- 추출에 실패하면 해당 기능만 비활성화되고 OS는 정상 부팅해야 한다
+- 재배포 가능한 판이 나오면 그쪽으로 교체한다
 
 ---
 
@@ -92,7 +104,7 @@
 - 커널: mainline LTS, Debian 커널 설정 기반 + buntOS 조각(config fragment)
 - 부트: UEFI + systemd-boot, UKI(Unified Kernel Image), Secure Boot 서명은 후속 단계
 - GPU: Mesa (Intel/AMD), NVIDIA는 후속 과제
-- 리스크 낮음. UI/에이전트 계층 개발의 1차 플랫폼 (로컬 개발 머신이 Apple Silicon인 경우의 배치는 ADR-010에서 재검토)
+- 리스크 낮음. UI/에이전트 계층의 1차 검증 플랫폼. 개발 머신이 Apple Silicon이고 별도 x86 Linux 머신이 없으면, 로컬 1차 개발은 aarch64 QEMU(HVF 가속)로 하고 x86-64는 CI에서 KVM으로 검증한다(ADR-010, 9.4)
 
 ### 4.2 arm64 실기기: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)
 
@@ -108,6 +120,8 @@
 | 무선 | Wi-Fi 6, BT 5.3 (Wi-Fi 전용 모델) | geekwills |
 | 기본 OS | Android 14, ZUI 16 | 동일 |
 | 같은 SoC 변형 | TB373FU (Lenovo Idea Tab Pro), Moto Pad 60 Pro (하드웨어 동일 여부는 미확인) | TrebleDroid 위키 |
+
+실기기 확보: TB375FC 2대(개발용 1, 예비 1)로 진행한다. 글로벌판 TB373FU와 하드웨어가 같은지 Phase 0에서 확인해(12장) 같으면 BSP 하나로 두 모델을 지원한다. 12.1절 판정이 "불가(EL2 점유)"면 기기 선택을 다시 검토한다(ADR-011).
 
 #### 4.2.1 핵심 리스크 (v0.2 갱신)
 
@@ -134,7 +148,7 @@ v0.1의 이중 트랙 중 **벤더 커널 하이브리드(구 Track A)는 폐기
 전략
 
 - **업스트림 우선**: DTS와 드라이버는 업스트림(linux-mediatek 등) 제출을 기본으로 한다. `kernel/`의 다운스트림 패치는 제출 대기열로만 둔다
-- **커널 계열 일치**: 실기기 커널은 x86-64와 같은 Debian 커널 계열에 BSP 설정 조각과 제출 대기 패치를 더해 빌드한다. 실기기 GPU에는 커널 6.18 이상과 Mesa 25.1 이상이 필요하다(ADR-004의 입력)
+- **커널 계열 일치**: 실기기 커널은 x86-64와 같은 Debian 커널 계열에 BSP 설정 조각과 제출 대기 패치를 더해 빌드한다. 실기기 GPU에 필요한 커널 6.18 이상과 Mesa 25.1 이상은 forky 기본 저장소로 충족한다(ADR-004)
 - **안드로이드의 역할**: OS 경로가 아니라 포팅 정보원이다. 벤더 DTB와 펌웨어 추출, 하드웨어 동작 관찰에 쓰며, 이를 위해 안드로이드 슬롯 하나를 보존한다(4.2.3)
 - **렌더링**: GPU가 동작하기 전에는 pixman 소프트웨어 렌더러로 동작한다. 렌더러 추상화(D4)가 전환을 흡수한다
 - **제품 개발과 병행**: 실기기 포팅은 Phase 3~5와 병행한다. 제품 기능의 종료 조건은 QEMU(양 아키텍처)에서 판정하므로 포팅 진척이 제품 개발을 막지 않는다
@@ -156,6 +170,7 @@ Phase 2의 종료 조건은 2a~2d다(11장). 2e는 Phase 4·5의 실기기 판�
 - 어떤 플래시 작업 전에도 **전체 파티션 백업** (특히 `nvram`, `nvdata`, `nvcfg`, `protect1/2`, `persist` 계열: Wi-Fi MAC/캘리브레이션 데이터. 소실 시 복구 불가)
 - 안드로이드 `recovery` 와 한쪽 슬롯은 보존하여 언제든 ZUI로 복귀 가능하게 유지 (포팅 정보원으로도 쓴다)
 - 언락 조건이 특정 ZUI 버전에 묶여 있으므로 펌웨어 자동 업데이트(OTA)를 끈다
+- 언락 진행 조건(go/no-go, ADR-011): (1) 전체 파티션 백업을 다른 기기로 옮겨 해시로 무결성 확인, (2) 언락 절차를 서로 독립된 보고 2개 이상으로 교차 확인하고 펌웨어 버전 일치 확인, (3) BROM/preloader 모드 복구 경로(mtkclient 등)의 MT6897 지원 사전 확인, (4) OTA 차단. 하나라도 빠지면 언락하지 않는다
 - 기기에는 UART가 노출되어 있지 않다. 디버그 채널은 bring-up 단계에 맞춰 확보한다: (1) 부트로더가 켜둔 화면을 simple-framebuffer 콘솔로 쓴다, (2) pstore/ramoops로 직전 부팅의 커널 로그를 확보한다, (3) USB 포팅(2b) 후에는 **USB 가젯(configfs: ACM 시리얼 + NCM 이더넷)** 을 initramfs 최초 단계에서 띄운다
 
 ### 4.3 arm64 CI 기준 타깃: QEMU `virt` (aarch64, UEFI)
@@ -328,7 +343,10 @@ const shot = await app.screenshot();        // 폴백용 창 단위 캡처
 - 대상: x86-64 QEMU, aarch64 QEMU(`virt`, UEFI) **두 아키텍처 모두 동일 시나리오**
 - 구동 방식: 빌드된 이미지를 QEMU로 부팅 → 시나리오 실행 → 결과 수집
 - **e2e 드라이버로 buntOS 자체의 Agent Control Plane을 사용** (도그푸딩). 별도의 테스트 전용 자동화 경로를 만들지 않으므로 테스트 코드가 실제 제품 경로를 검증한다
-- Agent Control Plane이 준비되기 전(Phase 0~2)의 e2e 드라이버는 ADR-009에서 결정한다
+- Agent Control Plane이 준비되기 전의 e2e 드라이버 (ADR-009)
+  - Phase 0: QEMU 시리얼 콘솔(로그인, 명령 실행) + QMP(`input-send-event`로 키 입력, `screendump`) 임시 드라이버로 부팅 → 셸을 검증한다
+  - Phase 1: Agent Control Plane 최소판(`buntd-agent` JSON-RPC, 실행 경로, AT-SPI 읽기 경로)을 앞당겨 구현한다. 키 입력은 QMP로 넣어 가상 키보드 → 컴포지터 → fcitx5 → 앱으로 이어지는 실제 입력 경로를 거치게 하고, 값 확인은 AT-SPI 읽기로 한다
+  - 시나리오는 드라이버에 독립적인 형식(단계 = {동작, 기대값})으로 작성하고, Phase 3에는 드라이버만 교체한다
 - 시나리오 예 (워크플로우 단위):
   1. 부팅 → 로그인 → 셸 표시
   2. 터미널 실행 → `apt install` → 스냅샷 생성 확인 → 롤백
@@ -342,12 +360,24 @@ const shot = await app.screenshot();        // 폴백용 창 단위 캡처
 - 릴리스 후보마다 수동 트리거 스모크 테스트: 부팅, 디스플레이, 터치, Wi-Fi, 배터리 잔량, 서스펜드/복귀, 가상화(12.1절 판정이 "가능"일 때)
 - USB 가젯 NCM으로 호스트에서 SSH 접속하여 동일 e2e 시나리오 일부 실행 (bring-up 2b 이후)
 
+### 9.4 CI 구성 (ADR-010)
+
+- 저장소: GitHub 공개 저장소
+- x86-64 e2e: GitHub 호스티드 Linux 러너에서 KVM 가속으로 전체 시나리오를 돌린다
+- aarch64 e2e: Phase 0 첫 주에 호스티드 arm64 러너(`ubuntu-24.04-arm`)의 `/dev/kvm` 유무를 확인해 둘 중 하나로 확정한다
+  - KVM 있음: 호스티드 arm64 러너에서 전체 시나리오
+  - KVM 없음: PR에서는 TCG로 핵심 시나리오를 돌린다. 가속이 필요한 전체 시나리오는 리뷰를 마친 코드에 한해 메인테이너의 Apple Silicon Mac에서 실행하고(비공개 미러 저장소의 self-hosted 러너 또는 로컬 실행), 그 결과를 병합 전 확인 항목으로 둔다(9.1)
+- 공개 저장소에는 self-hosted 러너를 연결하지 않는다. 포크 PR 코드가 러너 머신에서 실행될 수 있기 때문이다
+- 호스티드 러너의 디스크 제약(arm64 러너 기준 SSD 14GB)에 맞춰 이미지 빌드 캐시와 산출물 크기를 관리한다
+- 라이선스 표기 검사(`reuse lint`)를 CI에 포함한다(D10)
+
 ---
 
 ## 10. 저장소 구조 (제안)
 
 ```
 buntOS/
+  LICENSES/               라이선스 원문 (REUSE 규격, D10)
   docs/design/            설계 문서, ADR
   docs/hw/                실기기 실측 보고서
   image/                  mkosi 이미지 레시피 (공통 + 아키텍처별 오버레이)
@@ -367,6 +397,10 @@ buntOS/
 
 - 이미지 빌드 도구: mkosi (Debian 지원, 아키텍처별 빌드, UKI 생성)
 - 패키지 형식: 자체 컴포넌트도 .deb로 패키징하여 일반 Debian 패키지와 같은 경로로 배포/업데이트
+- 패키지 미러: snapshot.debian.org의 특정 시점으로 고정하고, 주 1회 갱신 PR(e2e 통과 시 병합)로 올린다. forky 정식 릴리스 전의 공개 빌드에는 "보안 지원 없음"을 표시한다(ADR-004)
+- Rust 툴체인: `rust-toolchain.toml`로 고정하고 Debian rustc에 의존하지 않는다(ADR-004)
+- 라이선스 표기: 파일마다 SPDX 헤더를 달고, 헤더를 달 수 없는 파일은 `REUSE.toml`로 표기한다(D10)
+- 기여: 커밋에 DCO `Signed-off-by`를 단다(D10)
 
 ---
 
@@ -375,7 +409,7 @@ buntOS/
 | 단계 | 내용 | 종료 조건 (측정 가능해야 함) |
 |---|---|---|
 | **Phase 0** 실측/기반 | 실기기 정보 수집 및 전체 백업, 리포 골격, mkosi로 x86-64/aarch64 QEMU 부팅 이미지, CI | 실측 보고서 작성 완료(12.1절 EL2/KVM 예비 판정 포함), 양 아키텍처 QEMU 이미지가 같은 레시피로 부팅하여 셸 도달 (e2e 1번) |
-| **Phase 1** 컴포지터 최소 기능 | bunt-comp: 창 표시, 입력, 데미지 트래킹, pixman/GLES 렌더러, text-input-v3 | 양 아키텍처 QEMU에서 터미널 창 실행 및 한글 입력 e2e 통과, 메모리/프레임 기준선 기록 |
+| **Phase 1** 컴포지터 최소 기능 | bunt-comp: 창 표시, 입력, 데미지 트래킹, pixman/GLES 렌더러, text-input-v3, 최소 Agent(9.2, ADR-009) | 양 아키텍처 QEMU에서 터미널 창 실행 및 한글 입력 e2e 통과, 메모리/프레임 기준선 기록 |
 | **Phase 2** 실기기 bring-up (mainline) | TB375FC 언락, 4.2.2의 2a~2d 단계 (이어서 2e) | 기기에서 로그인 셸 도달, KMS 디스플레이 출력, 터치 입력, Wi-Fi 연결 (2a~2d 종료 조건) |
 | **Phase 3** Agent Control Plane v0 | buntd-agent, a11y 집계, 에이전트 seat, CLI/MCP | e2e 5, 6번 통과 |
 | **Phase 4** UI 셸 | 메뉴바/Dock/런처/제어센터/OSK, 입력 모드 전환 | 양 아키텍처 동일 UI, 터치/포인터 모드 자동 전환 확인 |
@@ -393,6 +427,7 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
 |---|---|---|
 | 커널 버전/설정 | `uname -a`, `cat /proc/version`, `zcat /proc/config.gz` (읽기 권한은 기기마다 다름) | 벤더 드라이버 목록(포팅할 하드웨어 블록 식별), GenieZone/KVM 관련 옵션 |
 | SoC 식별 | `getprop ro.soc.model`, `getprop ro.board.platform`, `cat /proc/cpuinfo` | MT6897 여부 확정 |
+| 글로벌판 동일성 | TB373FU 글로벌 펌웨어에서 추출한 벤더 DTB를 TB375FC 것과 비교 (호스트) | BSP 하나로 두 모델을 지원할 수 있는지 (ADR-011) |
 | 부트 구성 | `getprop ro.boot.slot_suffix`, `getprop ro.boot.dynamic_partitions`, `ls -l /dev/block/by-name/` (권한 허용 범위) | A/B, super 파티션, vendor_boot 유무 |
 | 부트 이미지 헤더 | 펌웨어 boot.img 추출 후 `unpack_bootimg` (호스트) | header 버전, DTB 위치. mainline 커널을 LK에 넘길 이미지 형식 결정 |
 | 벤더 DTB | 펌웨어의 vendor_boot/dtbo 이미지에서 추출 후 `dtc -I dtb -O dts` (호스트) | 레지스터 주소, 클럭·전원 도메인·인터럽트 연결. mainline DTS 작성의 근거 |
@@ -432,20 +467,22 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
 |---|---|---|---|
 | ADR-001 | 시스템 앱 UI 툴킷 GTK4 vs Qt6 | Phase 1 | 동일 시제품 앱으로 a11y 트리 품질, 한글 IME, 메모리 실측 비교 |
 | ADR-003 | x86 바이너리 호환 FEX-Emu vs box64 | Phase 5 | 대표 워크로드 벤치마크 |
-| ADR-004 | Debian stable vs testing 기준 | Phase 0 | 툴체인 최신성 요구 vs 안정성. 실기기 GPU에는 커널 6.18 이상과 Mesa 25.1 이상이 필요하다(4.2.2) |
 | ADR-005 | UI 폰트 | Phase 4 | 렌더링 품질/메모리 실측 |
-| ADR-006 | 라이선스 (자체 컴포넌트) | Phase 0 | Smithay(MIT), Debian 패키지 라이선스와의 정합성 검토. 커널 패치와 DTS는 업스트림 규칙을 따른다(D8) |
-| ADR-009 | Agent Control Plane 이전(Phase 0~2)의 e2e 드라이버 | Phase 0 | 9.2의 도그푸딩 원칙과 Phase 0·1 종료 조건의 순서 충돌 해소 |
-| ADR-010 | 빌드·CI 인프라 (aarch64 가속) | Phase 0 | 호스티드 러너의 KVM 지원 실험, 개발 머신(Apple Silicon) 활용 여부 |
-| ADR-011 | 실기기 선택과 언락 진행 기준 | Phase 0 | 12장 실측(12.1절 EL2/KVM 판정, 포팅 범위)과 예비 기기 확보 여부 |
-| ADR-012 | 재배포 불가 펌웨어(기기 추출) 허용 여부 | Phase 0 (실측 후) | 2.1절 펌웨어 예외의 마지막 단계. 12장 펌웨어 목록의 재배포 가능성 분류 |
 
-결정됨 (v0.2)
+결정됨
 
-- 실기기 포팅 전략 → **mainline 단일**. 벤더 커널 하이브리드(구 Track A) 폐기 (4.2.2)
-- ADR-002 arm64 실기기 GPU 경로 → **Panthor + Mesa**. GPU가 동작하기 전에는 pixman (D8, 4.2.2)
+| ID | 결정 | 반영 위치 | 버전 |
+|---|---|---|---|
+| 포팅 전략 | mainline 단일. 벤더 커널 하이브리드(구 Track A) 폐기 | 4.2.2 | v0.2 |
+| ADR-002 | arm64 실기기 GPU 경로: Panthor + Mesa. GPU가 동작하기 전에는 pixman | D8, 4.2.2 | v0.2 |
+| ADR-004 | Debian 기준: forky(testing) 스냅샷 고정, forky 정식 릴리스 시 stable 전환 | D2, 10장 | v0.3 |
+| ADR-006 | 라이선스: 핵심부 GPL-3.0-or-later, SDK MIT OR Apache-2.0, 문서 CC BY-SA 4.0, DCO, REUSE | D10, 10장 | v0.3 |
+| ADR-009 | e2e 드라이버: Phase 0 시리얼 콘솔 + QMP, Phase 1 최소 Agent | 9.2, 11장 | v0.3 |
+| ADR-010 | CI: GitHub 공개 저장소, 호스티드 러너 중심, 공개 저장소에 self-hosted 러너 미연결 | 4.1, 9.4 | v0.3 |
+| ADR-011 | 실기기: TB375FC 2대(개발 1, 예비 1). EL2 "불가" 판정 시 기기 재검토, 글로벌판 동일성 확인 | 4.2, 4.2.3, 12장 | v0.3 |
+| ADR-012 | 재배포 불가 펌웨어: 허용하되 공개 이미지·저장소에 넣지 않고 사용자 기기에서만 추출 | 2.1절 | v0.3 |
 
-각 항목의 선택지와 근거는 [DECISION-BRIEF.md](DECISION-BRIEF.md)에 있다.
+ADR-007·008은 구 Track A 폐기로 무효가 됐다. 각 항목의 선택지와 근거는 [DECISION-BRIEF.md](DECISION-BRIEF.md)에 있다.
 
 ---
 
@@ -462,4 +499,8 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
 - MT6878 mainline 기반 커뮤니티 커널 (postmarketOS): https://pkgs.postmarketos.org/package/master/postmarketos/aarch64/linux-postmarketos-mediatek-mt6878
 - GenieZone 하이퍼바이저 (커널 문서 패치): https://lists.infradead.org/pipermail/linux-arm-kernel/2023-July/853606.html
 - systemd 커널 요구 사항: https://github.com/systemd/systemd/blob/main/README
+- GPLv3 원문 (6조 User Product, Installation Information): https://www.gnu.org/licenses/gpl-3.0.html
+- REUSE 규격 3.3: https://reuse.software/spec-3.3/
+- GitHub self-hosted 러너 (공개 저장소 관련 경고): https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners
+- GitHub 공개 저장소용 arm64 호스티드 러너 정식 출시: https://github.blog/changelog/2025-08-07-arm64-hosted-runners-for-public-repositories-are-now-generally-available/
 - 구 Track A 검토 자료: Android 공통 커널 지원 기간 https://source.android.com/docs/core/architecture/kernel/android-common , android14-6.1 `gki_defconfig` https://android.googlesource.com/kernel/common/+/refs/heads/android14-6.1/arch/arm64/configs/gki_defconfig

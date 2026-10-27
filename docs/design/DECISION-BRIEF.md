@@ -1,31 +1,36 @@
-# buntOS 미결정 사항 결정 자료 v0.2
+# buntOS 설계 결정 자료 v0.3
 
 - 작성일: 2026-10-27
 - 변경 이력
-  - v0.2 (2026-10-27): 실기기 전략을 mainline 단일로 확정하고 구 Track A(벤더 커널 하이브리드)를 폐기했다. 그에 따라 ADR-002 결정, ADR-007·008 폐기, ADR-011 개편, ADR-012 신설. 개방성 정의와 EL2/KVM 실측은 [ARCHITECTURE.md](ARCHITECTURE.md) v0.2(2.1절, 12.1절)에 반영했다
+  - v0.3 (2026-10-27): 오픈소스 공개를 전제로 ADR-004·006·009·010·011·012를 확정했다. ADR-010은 공개 저장소 보안 권고에 따라 v0.2 권고(공개 저장소에 Mac self-hosted 러너 연결)를 철회하고 호스티드 러너 중심으로 바꿨다. 공개 전 필수 작업(0.3절)을 추가했다
+  - v0.2 (2026-10-27): 실기기 전략을 mainline 단일로 확정하고 구 Track A(벤더 커널 하이브리드)를 폐기했다. 그에 따라 ADR-002 결정, ADR-007·008 폐기, ADR-011 개편, ADR-012 신설. 개방성 정의와 EL2/KVM 실측은 [ARCHITECTURE.md](ARCHITECTURE.md) 2.1절, 12.1절에 반영했다
   - v0.1 (2026-10-27): 최초 작성
-- 대상: [ARCHITECTURE.md](ARCHITECTURE.md) v0.2의 13장
+- 대상: [ARCHITECTURE.md](ARCHITECTURE.md) v0.3의 13장
 - 표기
   - **[확인]** 공개 자료로 확인함. 괄호 안 번호는 문서 끝 출처(S번호)
   - **[추정]** 근거에서 유도한 판단이며 검증이 필요함
   - **[미확인]** 찾아봤지만 확인하지 못함
   - **[실측]** Phase 0 이후 측정으로만 확정할 수 있음
-- 각 항목 끝의 "결정 기록"을 채우면 그대로 ADR로 옮길 수 있게 구성했다.
+- 각 항목에는 결정과 함께 그 결정에 이른 선택지와 근거를 남긴다.
 
 ---
 
 ## 0. 한눈에 보기
 
-### 0.1 지금(Phase 0 착수 전) 정해야 하는 것
+### 0.1 결정됨
 
-| ID | 질문 | 잠정 권고 | 확신도 |
-|---|---|---|---|
-| ADR-004 | Debian 기준: stable vs testing | **forky(testing) 스냅샷 고정**, forky 정식 릴리스 시점에 stable로 전환 | 중상 (mainline 실기기 요구로 근거 강화) |
-| ADR-006 | 자체 컴포넌트 라이선스 | 컴포지터·셸·에이전트는 **GPL-3.0-or-later**, SDK·프로토콜 크레이트는 **MIT OR Apache-2.0**, 기여는 DCO | 중 (아래 두 질문의 답에 따라 갈림) |
-| ADR-009 | Agent Control Plane이 없는 Phase 0~2의 e2e는 무엇으로 돌리나 | Phase 0은 **시리얼 콘솔 + QMP 임시 드라이버**, Phase 1에 **최소 Agent(실행 + 읽기 경로)를 앞당겨 구현** | 중 |
-| ADR-010 | 빌드·CI 인프라 (aarch64 가속) | x86-64는 GitHub 호스티드 러너(KVM), aarch64는 **M4 Mac 위 Linux VM self-hosted** (중첩 가상화) | 중 |
-| ADR-011 | 실기기 선택과 언락 진행 기준 | **TB375FC + 예비 1대**로 진행. EL2 점유 판정이 나오면 다른 기기를 검토 | 중 (비용 판단은 사용자 몫) |
-| ADR-012 (신규) | 재배포 불가 펌웨어(기기 추출)를 허용하나 | **허용**. 이미지에 넣지 않고 설치 시 기기에서 추출 | 중 |
+| ID | 결정 | 버전 |
+|---|---|---|
+| 포팅 전략 | **mainline 단일**. 구 Track A(벤더 커널 하이브리드) 폐기 | v0.2 |
+| D8·D9 | 개방성 정의(펌웨어만 예외), 개발환경 비차단 | v0.2 |
+| ADR-002 | GPU 경로: **Panthor + Mesa**. GPU가 동작하기 전에는 pixman | v0.2 |
+| ADR-004 | Debian 기준: **forky(testing) 스냅샷 고정**, forky 정식 릴리스 시 stable 전환 | v0.3 |
+| ADR-006 | 라이선스: 핵심부 **GPL-3.0-or-later**, SDK·프로토콜 크레이트 **MIT OR Apache-2.0**, 문서 **CC BY-SA 4.0**, 기여는 **DCO**, 표기는 **REUSE** | v0.3 |
+| ADR-009 | e2e 드라이버: Phase 0은 **시리얼 콘솔 + QMP**, Phase 1에 **최소 Agent** | v0.3 |
+| ADR-010 | CI: **GitHub 공개 저장소 + 호스티드 러너 중심**. 공개 저장소에는 self-hosted 러너를 연결하지 않음 | v0.3 |
+| ADR-011 | 실기기: **TB375FC 2대(개발 1, 예비 1)**. EL2 "불가" 판정 시 기기 재검토, 글로벌판 동일성 확인 | v0.3 |
+| ADR-012 | 재배포 불가 펌웨어: **허용**하되 공개 이미지·저장소에 넣지 않고 사용자 기기에서만 추출 | v0.3 |
+| ADR-007·008 | 폐기 (구 Track A 폐기로 전제 소멸) | v0.2 |
 
 ### 0.2 결론은 실측 후에 내되, 평가 기준은 지금 고정할 것
 
@@ -33,17 +38,17 @@
 |---|---|---|---|
 | ADR-001 | 시스템 앱 툴킷 GTK4 vs Qt6 | GTK4(libadwaita 미사용). 도전자는 Qt6 QML | Phase 1 |
 | ADR-003 | FEX-Emu vs box64 | box64(Debian 패키지 존재). FEX와 벤치마크 비교 | Phase 5 |
-| ADR-005 | UI 폰트 | Pretendard(UI) + Noto CJK(폴백·고정폭). 지금 정해도 비용이 거의 없음 | Phase 4 (조기 결정 가능) |
+| ADR-005 | UI 폰트 | Pretendard(UI) + Noto CJK(폴백·고정폭). 둘 다 OFL이라 공개 배포에 문제없음. 지금 정해도 비용이 거의 없음 | Phase 4 (조기 결정 가능) |
 
-### 0.3 결정됨·폐기됨 (v0.2)
+### 0.3 공개 전 필수 작업 (아직 실행하지 않음)
 
-| 항목 | 결과 | 근거 |
-|---|---|---|
-| 실기기 포팅 전략 | **mainline 단일**. 구 Track A 폐기 | 2장 |
-| 개방성 정의, 개발환경 비차단 | ARCHITECTURE D8·D9와 2.1절로 명시 | 사용자 목표 확인 (2026-10-27) |
-| ADR-002 GPU 경로 | **Panthor + Mesa**. GPU가 동작하기 전에는 pixman | 5장 |
-| ADR-007 Track A 커널 빌드 방식 | 폐기 (전제 소멸) | 5장 |
-| ADR-008 BSP 경계 규칙 완화 | 폐기. BSP 규칙은 오히려 엄격해짐 | 5장 |
+저장소를 공개하기 전에 끝내야 한다. 이력을 고치는 작업은 되돌리기 어려우므로 별도 승인 후 진행한다.
+
+1. **토큰 교체**: `opencode.json`에 `X-Nariya-Token` 값이 평문으로 세 군데 들어 있고, 첫 커밋(`844f9e5`)부터 이력에 있다. 토큰을 새로 발급받아 교체한다 (값은 이 문서에 적지 않는다)
+2. **이력 정리**: `opencode.json`과 `attachments/`를 이력에서 제거한다. 이력이 자동 커밋 몇 개뿐이므로 문서만 담은 새 루트 커밋으로 공개 저장소를 시작하는 편이 간단하다
+3. **재유입 방지**: `.gitignore`에 두 경로를 추가하고, 이 파일들을 자동 커밋한 nariya 도구의 설정을 확인한다
+4. **ADR-006 이행**: `LICENSES/`에 라이선스 원문(GPL-3.0-or-later, MIT, Apache-2.0, CC-BY-SA-4.0)을 두고, 파일마다 SPDX 헤더를 달고, CI에 `reuse lint`를 넣고, CONTRIBUTING에 DCO(`Signed-off-by`) 규칙을 적는다
+5. **ADR-004 이행**: README에 "forky 정식 릴리스 전 빌드는 보안 지원 없음"을 표시한다
 
 ---
 
@@ -51,14 +56,14 @@
 
 F2·F3(출하 GKI 설정 공백, android14-6.1 EOL)은 구 Track A의 폐기 근거로 2장에 옮겼다.
 
-| # | 기획서 v0.1 서술 | 조사 결과 | 영향 (v0.2 반영) |
+| # | 기획서 v0.1 서술 | 조사 결과 | 영향 |
 |---|---|---|---|
-| F1 | 4.2.1-3: "G615에 대한 공식 지원은 확인되지 않음" | Mesa 공식 Panfrost 문서가 G615/G715를 **Valhall v11**로 등재한다(GLES 3.1, Vulkan 1.4, OpenCL 3.0) [확인 S1]. v11 관련 커밋은 Mesa 25.1.0 릴리스 노트부터 보인다 [확인 S2]. 커널 Panthor는 **Linux 6.18**부터 Gx15 계열을 지원한다 [확인 S3] | mainline 단일 전략의 전제. GPU가 더 이상 mainline의 병목이 아니다. ARCHITECTURE 4.2.1-3 갱신 |
+| F1 | 4.2.1-3: "G615에 대한 공식 지원은 확인되지 않음" | Mesa 공식 Panfrost 문서가 G615/G715를 **Valhall v11**로 등재한다(GLES 3.1, Vulkan 1.4, OpenCL 3.0) [확인 S1]. v11 관련 커밋은 Mesa 25.1.0 릴리스 노트부터 보인다 [확인 S2]. 커널 Panthor는 **Linux 6.18**부터 Gx15 계열을 지원한다 [확인 S3] | mainline 단일 전략의 전제. GPU가 더 이상 mainline의 병목이 아니다 |
 | F4 | 4.2.1-1: 언락이 비공식 | TB375FC(CN ZUI 16.0.20.091)에서 언락과 AVB 해제 후 GSI 부팅에 성공한 보고가 있다(2025-08) [확인 S7]. 같은 SoC를 쓰는 TB373FU(Idea Tab Pro)와 Moto Pad 60 Pro가 있다 [확인 S7]. 검색으로 잡히는 "EDL/QFIL" 언락 가이드는 퀄컴 도구 기반이라 이전 세대(스냅드래곤) 모델용으로 보이며, MediaTek 기기인 TB375FC와는 무관하다 [추정] | 언락 자체는 가능성이 높다. XDA 원문은 접근이 차단돼(403) 절차를 직접 확인하지 못했다 → ADR-011 |
 | F5 | 7장 폰트 후보 | `fonts-pretendard`가 Debian trixie main에 있다 [확인 S8] | ADR-005의 패키징 장벽이 없다 |
 | F6 | 4.4-3 FEX vs box64 | box64는 Debian main에 있고(trixie 0.3.4, forky 0.4.3), FEX-Emu는 Debian에 없다(Ubuntu PPA, Fedora 통합) [확인 S8, S9, S28] | D2/D3 파이프라인 적합성 차이 → ADR-003 |
-| F7 | 4.1: "x86-64가 UI/에이전트 계층 개발의 1차 플랫폼" | 현재 개발 머신은 Apple M4(arm64)다. 이 머신에서 aarch64 QEMU는 HVF로 가속되지만 x86-64 QEMU는 TCG(소프트웨어 에뮬레이션)로 돈다 [추정] | x86 Linux 머신이 따로 없다면 로컬 1차 플랫폼은 aarch64 QEMU가 더 빠르다 → ADR-010 |
-| F8 (신규) | (언급 없음) | MediaTek에는 EL2에서 동작하는 type-1 하이퍼바이저 GenieZone이 있다 [확인 S30]. GenieZone은 `/dev/gzvm`으로 노출된다 [확인 S31]. 리눅스 KVM(pKVM 포함)은 EL2를 필요로 한다 [확인 S32]. 이 기기에서 GenieZone이 EL2를 차지하는지는 [미확인] | 점유 시 어느 트랙이든 KVM 불가(OS로 해결 불가) → ARCHITECTURE 12.1절 실측, ADR-011 입력 |
+| F7 | 4.1: "x86-64가 UI/에이전트 계층 개발의 1차 플랫폼" | 현재 개발 머신은 Apple M4(arm64)다. 이 머신에서 aarch64 QEMU는 HVF로 가속되지만 x86-64 QEMU는 TCG(소프트웨어 에뮬레이션)로 돈다 [추정] | ADR-010에서 로컬 1차 개발 플랫폼 규칙으로 반영 |
+| F8 | (언급 없음) | MediaTek에는 EL2에서 동작하는 type-1 하이퍼바이저 GenieZone이 있다 [확인 S30]. GenieZone은 `/dev/gzvm`으로 노출된다 [확인 S31]. 리눅스 KVM(pKVM 포함)은 EL2를 필요로 한다 [확인 S32]. 이 기기에서 GenieZone이 EL2를 차지하는지는 [미확인] | 점유 시 어느 트랙이든 KVM 불가(OS로 해결 불가) → ARCHITECTURE 12.1절 실측, ADR-011 입력 |
 
 ---
 
@@ -106,9 +111,9 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 
 ---
 
-## 3. 지금 정해야 하는 항목
+## 3. Phase 0 결정 (v0.3 확정)
 
-### ADR-004. Debian 기준 브랜치
+### ADR-004. Debian 기준 브랜치 → forky 스냅샷 고정
 
 **질문**: trixie(13, stable) + backports로 갈 것인가, forky(14, testing)로 갈 것인가.
 
@@ -144,28 +149,29 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 | 동등성 (D3) | amd64·arm64 모두 release arch라 버전이 같다 | testing 이주도 release arch 전체가 함께 움직여서 버전이 같다 | 직접 보장해야 한다 |
 | 리베이스 비용 | 2027년 이후 trixie→forky 1회 | 없음 | 큼 |
 
-**권고: B (forky 스냅샷 고정)**
+**결정 (2026-10-27): B. forky(testing) 스냅샷을 고정해 쓰고, forky 정식 릴리스 시점에 stable(forky)로 전환한다.**
 
+이유
 1. 외부 사용자에게 실사용 수준으로 내놓는 시점이 forky 릴리스 예상 시점(2027년 중반)보다 늦을 가능성이 높다.
 2. A로 시작하면 Phase 1의 ADR-001 실측(GTK 4.18 vs Qt 6.8)을 forky의 GTK 4.24 / Qt 6.11에서 다시 해야 한다.
 3. 핵심 패키지(Mesa, rustc, 커널)는 A에서도 어차피 backports를 써야 하므로, A가 주는 "안정성" 이점이 정작 중요한 곳에서 이미 희석된다.
 4. mainline 실기기에는 커널 6.18 이상과 Mesa 25.1 이상이 필요하다. forky는 둘 다 기본 저장소에 있고(7.2 / 26.1), trixie는 둘 다 backports에 기대야 한다.
 
-보완 조건
-- mkosi 미러를 snapshot.debian.org의 특정 시점 URL로 고정하고, 주 1회 스냅샷 갱신 PR로 올린다. 이 PR이 e2e를 통과해야 병합한다.
-- forky 정식 릴리스 전까지 외부 배포물에는 "보안 지원 없음"을 명시한다.
-- Rust 툴체인은 어느 선택지든 `rust-toolchain.toml`로 고정해 빌드하고 Debian rustc에 의존하지 않는다 (별도 결정이 아니라 기본 권고).
+이행 규칙
+- mkosi 미러를 snapshot.debian.org의 특정 시점 URL로 고정한다. 스냅샷 갱신은 주 1회 PR로 올리고, e2e를 통과해야 병합한다.
+- forky 정식 릴리스 전까지 공개 빌드와 README에 "보안 지원 없음"을 명시한다.
+- 자체 컴포넌트의 Rust 툴체인은 `rust-toolchain.toml`로 고정하고 Debian rustc에 의존하지 않는다.
 - testing은 커널 버전이 자주 바뀌므로 실기기 대기 패치를 자주 리베이스해야 한다. 업스트림 우선 원칙(ARCHITECTURE 4.2.2)으로 대기 패치를 줄여 이 비용을 낮춘다.
 
-**뒤집기 조건**
-- 2027년 상반기 이전에 외부 사용자 배포가 필요하면 → A
+재검토 조건
+- 2027년 상반기 이전에 외부 사용자 배포가 필요해지면 → A
 - forky 동결이 2027년 하반기 이후로 밀린다고 발표되면 → 재검토
-
-> 결정 기록: ☐ A  ☐ B  ☐ C  / 비고:
 
 ---
 
-### ADR-006. 자체 컴포넌트 라이선스
+### ADR-006. 자체 컴포넌트 라이선스 → 핵심 GPL-3.0-or-later + SDK permissive
+
+**전제 (2026-10-27)**: buntOS는 오픈소스로 공개한다.
 
 **사실관계**
 
@@ -173,6 +179,9 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 - 주요 의존성: gtk4-rs MIT, cxx-qt MIT/Apache-2.0, accesskit MIT/Apache-2.0, fluent MIT/Apache-2.0, iced MIT. Slint만 GPL-3.0-only 또는 자체 라이선스다 [확인 S10].
 - GTK(LGPL-2.1+)와 Qt(LGPL-3.0/GPL/상용)는 동적 링크로 쓰면 아래 어느 선택지와도 양립한다.
 - 커널 패치와 DTS는 업스트림 규칙(커널 코드는 GPL-2.0, DTS는 관례상 GPL·permissive 이중 라이선스)을 따르므로 선택 대상이 아니다(D8). 펌웨어는 ARCHITECTURE 2.1절과 ADR-012를 따른다.
+- GPLv3 6조는 "User Product"(소비자 기기)에 GPLv3 저작물의 목적 코드를 실어 배포할 때, 수정한 버전을 그 기기에 설치·실행하는 데 필요한 "Installation Information"을 함께 제공하도록 요구한다 [확인 S37].
+- CC BY-SA 4.0은 2015-10-08부터 GPLv3와 한 방향으로 호환된다. BY-SA 4.0 자료를 각색해 GPLv3로 낼 수 있다 [확인 S38].
+- 리눅스 커널은 기여 규칙으로 DCO(`Signed-off-by`)를 쓴다 [확인 S40].
 
 **선택지 비교**
 
@@ -184,23 +193,34 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 | 특허 조항 | Apache-2.0에 있음 | GPL-3.0과 Apache-2.0에 있음 | 있음 | 있음 |
 | 나중에 라이선스 변경 | 쉬움 | CLA가 없으면 어려움 | 중간 | 어려움 |
 
-**결정을 가르는 두 질문**
+**결정을 가르는 두 질문과 답**
 
-1. 제3자(기업 포함)가 buntOS를 가져가 폐쇄 제품으로 만드는 것을 허용할 것인가?
-2. niri나 cosmic-comp의 코드(제스처, 애니메이션, IME, 분수 배율 처리 등)를 직접 가져다 쓸 계획이 있는가?
+1. 제3자가 buntOS를 가져가 폐쇄 제품으로 만드는 것을 허용하나? → **핵심부는 허용하지 않는다.** 앱과 SDK는 허용한다
+2. niri나 cosmic-comp의 코드를 직접 가져다 쓸 수 있게 하나? → **가능하게 둔다**
 
-두 답이 모두 "아니오"면 A가 가장 단순하다. 하나라도 "예"면 B나 D다. 참고로 "완전히 열린 스택"(D8)은 buntOS 자체의 개방성이고, 파생물에까지 개방을 강제할지는 이 질문 1이 정한다.
+**결정 (2026-10-27): B**
 
-**권고: B (조건부)**
-- 소규모 프로젝트에서 macOS급 상호작용을 만들려면 검증된 Smithay 상위 구현을 재사용하는 가치가 크고, 그런 구현은 둘 다 GPL-3.0 계열이다.
-- 앱 매니페스트, 에이전트 클라이언트 라이브러리, MCP 어댑터의 클라이언트 쪽처럼 외부 앱이 링크하는 부분은 생태계 확산을 위해 permissive로 둔다 (COSMIC과 같은 분할 구조).
-- 기여 정책은 DCO로 한다. 나중에 상용 이중 라이선스 가능성을 남기고 싶다면 처음부터 CLA가 필요하다. 이건 별도로 정해야 한다.
+| 대상 | 라이선스 |
+|---|---|
+| 컴포지터(bunt-comp), 셸(bunt-shell), 에이전트(buntd-agent, bunt CLI, MCP 어댑터 서버) | GPL-3.0-or-later |
+| 외부 앱이 링크하는 SDK·프로토콜 크레이트(앱 매니페스트, 에이전트 클라이언트 라이브러리, MCP 어댑터 클라이언트 등) | MIT OR Apache-2.0 |
+| 문서 (`docs/`) | CC BY-SA 4.0 |
+| 커널 패치, DTS | 업스트림 규칙 (커널 GPL-2.0, DTS는 관례상 이중 라이선스) |
+| 기여 | DCO (커밋에 `Signed-off-by`) |
+| 표기 | 파일마다 SPDX 헤더, REUSE 규격 3.3 준수, 라이선스 원문은 `LICENSES/` [확인 S39] |
 
-> 결정 기록: ☐ A  ☐ B  ☐ C  ☐ D  / 질문1: ___ 질문2: ___ / 기여 정책: ☐ DCO ☐ CLA
+이유
+- **출발점과 일치한다.** 이 프로젝트는 "제조사가 잠근 태블릿"에서 출발했다. GPLv3 6조 덕분에 buntOS 핵심부를 태블릿에 실어 파는 쪽은 사용자가 수정 버전을 설치할 수 있게 해야 한다. D8·D9가 파생 기기까지 이어진다.
+- **재사용할 수 있다.** niri(GPL-3.0-or-later)와 cosmic-comp(GPL-3.0) 코드를 쓸 수 있다. 단 cosmic-comp 코드를 들여온 바이너리는 사실상 GPL-3.0-only가 된다.
+- **앱 생태계를 막지 않는다.** SDK가 permissive라 폐쇄 앱도 buntOS용으로 만들 수 있다. 사용자가 설치하는 소프트웨어를 막지 않는다는 D9와 같은 선이다.
+- **기여 흐름이 하나로 맞는다.** D8에 따른 커널 업스트림 작업도 DCO를 쓴다. CLA를 두지 않으므로 나중에 상용 이중 라이선스로 바꾸기는 사실상 어렵다. 이 점은 감수한다.
+- **문서도 가져다 쓸 수 있다.** CC BY-SA 4.0 문서는 GPLv3 코드·문서에 각색해 넣을 수 있다.
+
+대가: GPLv3를 꺼리는 기업은 핵심부를 가져가지 않을 것이다. 그것이 바로 이 프로젝트가 막으려는 시나리오이므로 감수한다.
 
 ---
 
-### ADR-009. Phase 0~2의 e2e 드라이버
+### ADR-009. Phase 0~2의 e2e 드라이버 → 시리얼 + QMP, 이어서 최소 Agent
 
 **문제**: 9.2는 e2e 드라이버로 buntOS 자체의 Agent Control Plane을 쓴다고 정했지만(도그푸딩), Agent Control Plane은 Phase 3에 나온다. 그런데 Phase 0 종료 조건(e2e 1번: 부팅 → 셸)과 Phase 1 종료 조건(터미널 + 한글 입력 e2e)이 그보다 먼저 e2e를 요구한다. 순서가 맞지 않는다.
 
@@ -212,40 +232,44 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 | B | Agent Control Plane 최소판을 Phase 1로 앞당긴다: `buntd-agent` JSON-RPC, 실행 경로, 읽기 경로(AT-SPI로 포커스 요소 값 읽기)만 | 제품 경로를 일찍 검증한다. Phase 1 작업량이 늘어난다 |
 | C | openQA 같은 외부 화면 매칭 프레임워크 | 9.2 원칙 위반이고 유지비가 크다. 탈락 |
 
-**권고: Phase 0은 A, Phase 1은 B.**
+**결정 (2026-10-27): Phase 0은 A, Phase 1은 B.**
 - 부팅 → 셸 검증은 시리얼로 충분하다.
 - 한글 입력 e2e는 키 입력을 QMP로 넣고(가상 키보드 → 컴포지터 → fcitx5 → 앱으로 이어지는 실제 사용자 입력 경로), 값 확인을 최소 Agent의 AT-SPI 읽기로 한다.
 - 시나리오는 처음부터 드라이버에 독립적인 형식(단계 = {동작, 기대값})으로 써서, Phase 3에는 드라이버만 교체한다.
-
-> 결정 기록: ☐ 권고안  ☐ 기타 / 비고:
+- 공개 프로젝트 관점: 기여자는 QEMU만 있으면 e2e를 로컬에서 재현할 수 있다.
 
 ---
 
-### ADR-010. 빌드·CI 인프라
+### ADR-010. 빌드·CI 인프라 → GitHub 공개 저장소 + 호스티드 러너 중심
 
-**사실관계**
-- 개발 머신은 Apple M4(arm64)다 [확인: 로컬 조회]. macOS 15 이상, M3 이상 칩에서는 중첩 가상화가 지원되고, UTM 4.6이 Linux 게스트에서 이를 지원한다 [확인 S17]. 따라서 Mac 위 Linux VM 안에서 `/dev/kvm`을 쓰는 aarch64 QEMU가 가능하다.
+**사실관계 (v0.3 갱신)**
+- 개발 머신은 Apple M4(arm64)다 [확인: 로컬 조회]. macOS 15 이상, M3 이상 칩에서는 중첩 가상화가 지원되고, UTM 4.6이 Linux 게스트에서 이를 지원한다 [확인 S17].
 - mkosi는 Linux에서 실행된다. Mac에서는 Linux VM이 필요하다.
-- GitHub 호스티드 arm64 러너(`ubuntu-24.04-arm`)는 공개 저장소에 무료지만 `/dev/kvm` 제공은 공식 확인을 못 했다. 간접 근거로는 미지원 쪽이다 [미확인 S18].
-- x86 호스티드 러너는 KVM을 쓰는 사례(안드로이드 에뮬레이터 등)가 많다 [추정]. 반면 x86 호스트에서 가속 없이 aarch64 QEMU(TCG)를 돌리면 수 배에서 수십 배 느려 e2e 시간 예산을 넘기 쉽다 [추정].
+- GitHub 호스티드 Linux x86-64 러너는 2024-04부터 표준(2 vCPU) 러너에서도 KVM 하드웨어 가속을 쓸 수 있다. 러너 사용자를 kvm 그룹에 넣는 udev 규칙이 필요하다 [확인 S34].
+- arm64 호스티드 러너(`ubuntu-24.04-arm`)는 2025-08-07 공개 저장소용으로 정식 출시됐고 무료다. 4 vCPU, 16GB RAM, SSD 14GB다 [확인 S35]. `/dev/kvm` 제공 여부는 [미확인 S18].
+- GitHub 문서는 self-hosted 러너를 비공개 저장소에서만 쓰라고 권한다. 공개 저장소에서는 포크 PR이 러너 머신에서 위험한 코드를 실행할 수 있기 때문이다 [확인 S36].
+- 가속 없이 aarch64 QEMU(TCG)를 돌리면 수 배에서 수십 배 느려 e2e 시간 예산을 넘기 쉽다 [추정].
 
-**선택지**
+**선택지 (v0.3)**
 
-| | x86-64 e2e | aarch64 e2e | 비용·위험 |
-|---|---|---|---|
-| A. 전부 GitHub 호스티드 | 호스티드 + KVM | x86 러너에서 TCG, 또는 arm 러너(KVM 미확인) | 비용이 낮다. aarch64가 느릴 수 있다 |
-| B. 혼합 | 호스티드 + KVM | M4 Mac 위 Linux VM self-hosted(중첩 KVM), 또는 별도 arm64 서버 | Mac이 켜져 있어야 한다 |
-| C. 전부 self-hosted | self-hosted | self-hosted | 운영 부담이 가장 크다 |
+| | 내용 | 판단 |
+|---|---|---|
+| A | 전부 GitHub 호스티드 러너 | arm64 러너에 KVM이 있으면 최선 |
+| B | PR용 aarch64 e2e를 공개 저장소에 연결한 M4 Mac self-hosted 러너로 돌린다 (v0.2 권고) | GitHub 권고 위반. 포크 PR 코드가 개인 Mac에서 실행된다 → **철회** |
+| C | 호스티드 러너 + 리뷰를 마친 코드에 한해 Mac에서 가속 실행 (비공개 미러 저장소의 self-hosted 러너 또는 메인테이너 로컬 실행) | arm64 러너에 KVM이 없을 때의 보완책 |
 
-**권고: B로 시작하되, Phase 0 첫 주에 `ubuntu-24.04-arm` 러너에서 `ls -l /dev/kvm`을 실험한다. 있으면 A로 단순화한다.**
-- 주의: 공개 저장소에 self-hosted 러너를 붙이면 외부 PR 코드가 개인 Mac에서 실행된다. 비공개 저장소로 쓰거나, 외부 PR은 수동 승인 후에만 실행하게 설정해야 한다.
-- 함께 고칠 것(F7): x86 Linux 머신이 따로 없다면 4.1의 "x86-64가 1차 개발 플랫폼"을 "로컬 1차는 aarch64 QEMU, x86-64는 CI"로 바꾸는 것이 합리적이다.
-
-> 결정 기록: ☐ A  ☐ B  ☐ C / 저장소 공개 여부: ☐ 공개 ☐ 비공개 / x86 Linux 머신 보유: ☐ 예 ☐ 아니오
+**결정 (2026-10-27): 저장소는 GitHub 공개 저장소로 한다. CI는 A를 기본으로 하고, arm64 러너에 KVM이 없으면 C로 보완한다.**
+- x86-64 e2e: 호스티드 Linux 러너에서 KVM 가속으로 전체 시나리오를 돌린다.
+- aarch64 e2e: Phase 0 첫 주에 `ubuntu-24.04-arm`에서 `ls -l /dev/kvm`을 실험해 확정한다.
+  - KVM 있음 → 호스티드 arm64 러너에서 전체 시나리오 (A)
+  - KVM 없음 → PR에서는 TCG로 핵심 시나리오를 돌린다. 가속이 필요한 전체 시나리오는 리뷰를 마친 코드에 한해 Mac에서 실행하고, 그 결과를 병합 전 확인 항목으로 둔다. 이렇게 9.1의 "main 병합 전 e2e 필수"를 지킨다 (C)
+- 공개 저장소에는 self-hosted 러너를 연결하지 않는다.
+- 호스티드 러너의 디스크 제약(arm64 러너 기준 SSD 14GB)에 맞춰 이미지 빌드 캐시와 산출물 크기를 관리한다.
+- 로컬 개발: 별도 x86 Linux 머신이 없으면 로컬 1차 개발은 M4 Mac의 aarch64 QEMU(HVF 가속)로 하고, x86-64는 CI에서 KVM으로 검증한다(F7). x86 Linux 머신 보유 여부는 아직 확인하지 않았다.
 
 ---
 
-### ADR-011. 실기기 선택과 언락 진행 기준 (v0.2 개편)
+### ADR-011. 실기기 선택과 언락 진행 기준 → TB375FC + 예비 1대
 
 **사실관계**
 - TB375FC에 대한 공식 언락은 찾지 못했다. CN 펌웨어 ZUI 16.0.20.091에서 언락과 AVB 해제가 됐다는 실사용 보고는 있다 [확인 S7].
@@ -264,21 +288,20 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 | B | TB375FC + 같은 모델 예비 1대 | 비용 발생 |
 | C | mainline 지원이 이미 있는 SoC의 다른 arm64 기기로 변경 | 후보 조사가 필요하다(아직 조사하지 않음). 태블릿 폼팩터·성능 조건을 다시 따져야 한다 |
 
-**판단 입력 (Phase 0 실측, ARCHITECTURE 12장)**: 12.1절 EL2/KVM 판정 / 벤더 DTB로 본 포팅 범위 / Wi-Fi 방식 / 펌웨어 재배포 가능성(ADR-012)
+**결정 (2026-10-27): B. TB375FC 2대(개발용 1, 예비 1)로 진행한다.**
+- ARCHITECTURE 12.1절 판정이 "불가(EL2 점유)"로 나오면 C를 본격 검토한다.
+- 글로벌판 TB373FU와 하드웨어가 같은지 Phase 0에서 확인한다(글로벌 펌웨어의 벤더 DTB 비교). 같으면 BSP 하나로 두 모델을 지원해 기여자와 테스터를 넓힌다. 글로벌판이 중국 내수판보다 구하기 쉬울 것으로 본다 [추정].
+- 예산은 별도로 정한다.
 
-**권고: B로 진행하고, 12.1절 판정이 "불가(EL2 점유)"로 나오면 C를 본격 검토한다.**
-
-언락 진행 전 통과 조건(go/no-go)
+언락 진행 조건(go/no-go, ARCHITECTURE 4.2.3에 반영)
 1. 전체 파티션 백업을 끝내고, 백업을 다른 기기에 옮겨 해시로 무결성을 확인했다.
 2. 언락 절차를 서로 독립된 보고 2개 이상으로 교차 확인했고, 펌웨어 버전이 일치한다.
-3. BROM/preloader 모드 복구 경로(mtkclient 등)를 미리 확인했다. MT6897 지원 여부는 아직 모른다.
-4. **지금 바로** 펌웨어 자동 업데이트를 끈다. 언락 조건이 특정 ZUI 버전에 묶여 있으므로 OTA가 그 경로를 막을 수 있다 (ARCHITECTURE 4.2.3에 반영함).
-
-> 결정 기록: ☐ A  ☐ B  ☐ C / 예산: ___
+3. BROM/preloader 모드 복구 경로(mtkclient 등)의 MT6897 지원을 미리 확인했다.
+4. 펌웨어 자동 업데이트(OTA)를 껐다. 언락 조건이 특정 ZUI 버전에 묶여 있으므로 **지금 바로** 끈다.
 
 ---
 
-### ADR-012 (신규). 재배포 불가 펌웨어 허용 여부
+### ADR-012. 재배포 불가 펌웨어 → 허용, 공개 이미지에는 미포함
 
 **배경**: ARCHITECTURE 2.1절은 펌웨어를 개방성의 예외로 두되 "오픈소스 > 재배포 가능한 바이너리 > 기기에서 추출하는 재배포 불가 바이너리" 순으로 선호한다. 마지막 단계를 허용할지가 이 질문이다.
 
@@ -286,22 +309,24 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 - MT6897의 Wi-Fi/BT, 전원 관리 MCU, GPU 펌웨어 가운데 무엇이 재배포 가능한 형태(linux-firmware 등)로 있는지 [미확인]. 목록은 Phase 0 실측(ARCHITECTURE 12장 펌웨어 목록)으로 만든다.
 - Panthor는 GPU 펌웨어 `mali_csffw.bin`을 요구한다. G610용은 linux-firmware로 배포된다 [확인 S33]. G615용(arch 11.8) 배포 여부는 [미확인].
 - v0.1도 벤더 블롭을 "재배포 불가, 설치 시 기기에서 추출"로 다루는 방식을 전제했었다.
+- buntOS는 오픈소스로 공개하므로 이미지도 공개 배포된다. 재배포 불가 펌웨어를 공개 이미지에 넣는 것 자체가 재배포다.
 
 **선택지**
 
 | | 내용 | 결과 |
 |---|---|---|
-| A | 허용. 이미지에는 넣지 않고 설치 시 기기에서 추출한다. 대상 파일과 해시는 `board.toml`에 선언하고 추출 스크립트는 오픈소스로 둔다 | 해당 하드웨어가 동작할 수 있다 |
+| A | 허용. 이미지에는 넣지 않고 설치 시 기기에서 추출한다 | 해당 하드웨어가 동작할 수 있다 |
 | B | 불허 | 재배포 가능한 펌웨어가 없는 하드웨어는 미지원 |
 | C | 기능별로 판단 | 결정이 잦아지고 기준이 흐려진다 |
 
-**권고: A.** 펌웨어는 2.1절 정의상 AP 코드가 아니므로 개방성 정의와 충돌하지 않는다. B를 택하면 이 기기에서 Wi-Fi 같은 핵심 기능이 동작하지 않을 가능성이 높다 [추정].
+**결정 (2026-10-27): A.** 펌웨어는 2.1절 정의상 AP 코드가 아니므로 개방성 정의와 충돌하지 않는다. B를 택하면 이 기기에서 Wi-Fi 같은 핵심 기능이 동작하지 않을 가능성이 높다 [추정].
 
-조건
+규칙 (ARCHITECTURE 2.1절에 반영)
+- 공개 이미지와 저장소에 절대 포함하지 않는다.
+- 설치 시 사용자 자신의 기기에서만 추출한다. 제3자 미러에서 받지 않는다.
+- 대상 파일과 해시는 `board.toml`에 선언하고, 추출 스크립트는 오픈소스로 둔다.
 - 추출에 실패하면 해당 기능만 비활성화되고 OS는 정상 부팅해야 한다.
 - 재배포 가능한 판이 나오면 그쪽으로 교체한다.
-
-> 결정 기록: ☐ A  ☐ B  ☐ C / 비고:
 
 ---
 
@@ -380,7 +405,7 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 
 ---
 
-## 5. 결정됨·폐기된 항목
+## 5. v0.2에서 결정·폐기된 항목
 
 ### ADR-002 (결정됨). arm64 실기기 GPU 경로 → Panthor + Mesa
 
@@ -405,8 +430,21 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 
 ---
 
-## 6. ARCHITECTURE.md v0.2 반영 내역
+## 6. ARCHITECTURE.md 반영 내역
 
+### v0.3
+- 머리말: 개정 이력 정리
+- 2장: D2에 Debian 기준 브랜치(ADR-004) 추가, D10 라이선스(ADR-006) 신설, 2.1절에 재배포 불가 펌웨어 규칙(ADR-012) 추가
+- 4.1: 로컬 1차 개발 플랫폼 규칙(ADR-010)
+- 4.2: 실기기 확보(ADR-011), 4.2.2 커널 계열 일치 문구, 4.2.3에 언락 진행 조건(go/no-go)
+- 9.2: e2e 드라이버 단계(ADR-009). 9.4 CI 구성(ADR-010) 신설
+- 10장: `LICENSES/` 추가, 패키지 미러 고정·Rust 툴체인·라이선스 표기·DCO 규칙
+- 11장: Phase 1에 최소 Agent 추가
+- 12장: 글로벌판 동일성 확인 항목 추가
+- 13장: 확정 항목을 "결정됨" 표로 이동. 남은 미결정은 ADR-001·003·005
+- 14장: 참고 자료 추가
+
+### v0.2
 - 머리말: v0.2 개정 기록
 - 1장: 타협하지 않는 두 목표(완전히 열린 스택, 개발환경 비차단) 명시
 - 2장: D8(개방성)·D9(개발환경 비차단) 추가, 2.1절 개방성 정의 신설
@@ -420,8 +458,6 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 - 12장: 포팅 정보 수집 중심으로 재구성(벤더 DTB, 펌웨어 목록 등), 12.1절 EL2/KVM 판정 신설
 - 13장: ADR-009~012 추가, 포팅 전략과 ADR-002를 결정됨으로 이동
 - 14장: 참고 자료 추가
-
-결정 후 반영할 것: ADR-004·006·009·010·011·012가 결정되면 해당 절을 갱신한다.
 
 ---
 
@@ -462,4 +498,11 @@ android14-6.1 `gki_defconfig`의 관련 설정 [확인 S4]:
 - S31. `/dev/gzvm` 노출 사례 (DroidVM): https://github.com/HuJK/DroidVM
 - S32. Android 가상화 프레임워크(pKVM) 구조: https://source.android.com/docs/core/virtualization/architecture
 - S33. Yocto Mesa Panthor 패치 (`mali_csffw.bin`과 linux-firmware): https://patchwork.yoctoproject.org/project/yocto/patch/20250415-mesa-panthor-v2-1-a7850d0091fe@cherry.de
+- S34. GitHub 변경 기록, 표준 Linux 러너의 KVM 하드웨어 가속 (2024-04-02): https://github.blog/changelog/2024-04-02-github-actions-hardware-accelerated-android-virtualization-now-available/
+- S35. GitHub 변경 기록, 공개 저장소용 arm64 호스티드 러너 정식 출시 (2025-08-07): https://github.blog/changelog/2025-08-07-arm64-hosted-runners-for-public-repositories-are-now-generally-available/
+- S36. GitHub 문서, self-hosted 러너 추가 (공개 저장소 관련 경고): https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners
+- S37. GPLv3 원문 (6조 User Product, Installation Information): https://www.gnu.org/licenses/gpl-3.0.html
+- S38. CC BY-SA 4.0의 GPLv3 단방향 호환 발표 (2015-10-08): https://creativecommons.org/2015/10/08/cc-by-sa-4-0-now-one-way-compatible-with-gplv3/
+- S39. REUSE 규격 3.3: https://reuse.software/spec-3.3/
+- S40. 리눅스 커널 패치 제출 문서 (DCO): https://www.kernel.org/doc/html/latest/process/submitting-patches.html
 - 미확인: XDA 비공식 언락 스레드(접근 차단): https://xdaforums.com/t/unofficial-unlocking-lenovo-xiaoxin-pad-pro-2025-tb375fc.4717695/
