@@ -1,0 +1,3 @@
+# 로컬 도구(나리야) 설정. 인증 토큰이 들어 있으므로 저장소에 넣지 않는다 (DECISION-BRIEF 0.3절)
+opencode.json
+attachments/
