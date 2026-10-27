@@ -3,10 +3,14 @@
 
 //! bunt-comp: buntOS Wayland 컴포지터 (Smithay 기반, ARCHITECTURE D4)
 
+mod blur;
 mod config;
 mod cursor;
+mod dbus;
 mod grabs;
+mod ime;
 mod input;
+mod prefs;
 mod render;
 mod state;
 mod toplevels;

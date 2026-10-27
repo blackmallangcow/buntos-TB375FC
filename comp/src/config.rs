@@ -14,6 +14,26 @@ pub struct Config {
     pub keyboard: Keyboard,
     pub cursor: Cursor,
     pub session: Session,
+    #[serde(default)]
+    pub effects: Effects,
+}
+
+/// 화면 효과
+#[derive(Debug, Deserialize)]
+pub struct Effects {
+    /// 셸 유리(메뉴, 제어 센터, Dock, 모든 앱 패널) 뒤를 흐리게 그린다
+    #[serde(default = "enabled")]
+    pub blur: bool,
+}
+
+impl Default for Effects {
+    fn default() -> Self {
+        Self { blur: enabled() }
+    }
+}
+
+fn enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +64,9 @@ pub struct Session {
     /// 셸. 창 목록·창 조작 프로토콜을 쓸 수 있는 특권 클라이언트로 띄운다
     #[serde(default)]
     pub shell: Vec<String>,
+    /// 입력기(한글 입력). 입력기 프로토콜을 쓸 수 있는 클라이언트로 띄우고, 끝나면 다시 띄운다
+    #[serde(default, rename = "input-method")]
+    pub input_method: Vec<String>,
     #[serde(default)]
     pub startup: Vec<Vec<String>>,
     pub terminal: Vec<String>,
@@ -85,6 +108,8 @@ mod tests {
         assert!(parse_hex_color(&config.wallpaper.top).is_some());
         assert!(parse_hex_color(&config.wallpaper.bottom).is_some());
         assert!(!config.session.terminal.is_empty());
+        assert!(!config.session.input_method.is_empty());
+        assert!(config.effects.blur);
     }
 
     #[test]

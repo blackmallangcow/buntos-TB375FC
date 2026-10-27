@@ -13,6 +13,10 @@ layout = "us"
 repeat-delay = 200
 repeat-rate = 25
 
+[effects]
+# 셸 유리(메뉴, 제어 센터, Dock, 모든 앱 패널) 뒤를 흐리게 그린다. 셸 표면의 알파가 0.5 이상인 곳만
+blur = true
+
 [cursor]
 theme = "Adwaita"
 size = 24
@@ -31,6 +35,9 @@ prepare = [
 # 셸(메뉴바, Dock). 창 목록·창 조작 프로토콜(wlr-foreign-toplevel)을 쓸 수 있는
 # 특권 클라이언트로 띄운다. 다른 앱에는 이 프로토콜이 보이지 않는다
 shell = ["bunt-shell"]
+# 입력기(한글 입력). 키보드를 잡고 조합한 글자를 보내는 프로토콜을 이 연결에만 연다.
+# 꺼지면 다시 띄운다. 입력 소스 전환(Ctrl+Space, 한/영 키)은 컴포지터가 받아 D-Bus로 알린다
+input-method = ["fcitx5"]
 # 그 밖에 셸 다음에 실행할 프로그램
 startup = []
 # Alt+Enter로 여는 터미널

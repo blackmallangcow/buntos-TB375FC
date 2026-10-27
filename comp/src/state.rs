@@ -13,7 +13,7 @@ use std::{
 };
 
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
+    backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
     delegate_xdg_shell,
     desktop::{
@@ -28,7 +28,11 @@ use smithay::{
     },
     output::Output,
     reexports::{
-        calloop::{Interest, LoopHandle, LoopSignal, Mode, PostAction, generic::Generic},
+        calloop::{
+            Interest, LoopHandle, LoopSignal, Mode, PostAction,
+            channel::{self, Channel},
+            generic::Generic,
+        },
         rustix::io::{FdFlags, fcntl_setfd},
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_protocols_wlr::layer_shell::v1::server::{
@@ -42,13 +46,14 @@ use smithay::{
             protocol::{wl_buffer, wl_output, wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, Point, Rectangle, Serial},
+    utils::{Logical, Point, Rectangle, Serial, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, get_parent,
-            is_sync_subsurface, with_states,
+            CompositorClientState, CompositorHandler, CompositorState, TraversalAction, get_parent,
+            is_sync_subsurface, send_surface_state, with_states, with_surface_tree_downward,
         },
+        input_method::{InputMethodManagerState, InputMethodSeat},
         output::{OutputHandler, OutputManagerState},
         selection::{
             SelectionHandler,
@@ -71,12 +76,17 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
+        text_input::TextInputManagerState,
+        virtual_keyboard::VirtualKeyboardManagerState,
     },
 };
 
 use crate::{
     config::Config,
+    dbus::{self, Request},
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, handle_resize_commit},
+    ime::InputMethodProcess,
+    prefs::{KeyRepeat, Prefs},
     toplevels::ForeignToplevelState,
     udev::UdevData,
 };
@@ -84,6 +94,10 @@ use crate::{
 /// 새 창을 계단식으로 놓을 때의 간격 (논리 픽셀)
 const CASCADE_STEP: i32 = 32;
 const CASCADE_COUNT: i32 = 8;
+/// 셸 메뉴바 레이어의 이름 (shell/src/menubar.rs). 메뉴바 자체는 흐리지 않는다
+const MENUBAR_NAMESPACE: &str = "bunt-menubar";
+/// 화면 크기가 줄었을 때 창을 잡아 끌 수 있도록 화면 안에 남기는 폭과 높이 (논리 픽셀)
+const TITLE_VISIBLE: i32 = 64;
 
 /// 최대화하기 전 창의 위치와 크기. 창의 사용자 데이터에 둔다.
 #[derive(Default)]
@@ -113,6 +127,14 @@ pub struct BuntState {
     pub foreign_toplevels: ForeignToplevelState,
     pub seat: Seat<BuntState>,
     pub cursor_status: CursorImageStatus,
+    /// 컴포지터가 가로챈 단축키의 키. 뗄 때도 앱에 보내지 않는다
+    pub suppressed_keys: Vec<u32>,
+
+    /// 시스템 설정에서 고른 값 (다음 로그인에도 쓴다)
+    pub prefs: Prefs,
+    pub dbus: dbus::Service,
+    pub input_method_process: InputMethodProcess,
+    pub input_method_exited: channel::Sender<()>,
 
     pub backend: UdevData,
 }
@@ -141,7 +163,16 @@ impl BuntState {
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let foreign_toplevels = ForeignToplevelState::new(&dh);
+        // 입력기: 앱 쪽(text-input)은 모두에게, 입력기 쪽은 컴포지터가 띄운 입력기에만 연다
+        TextInputManagerState::new::<Self>(&dh);
+        InputMethodManagerState::new::<Self, _>(&dh, is_input_method_client);
+        VirtualKeyboardManagerState::new::<Self, _>(&dh, is_input_method_client);
 
+        let prefs = Prefs::load();
+        let repeat = prefs.keyboard.unwrap_or(KeyRepeat {
+            delay: config.keyboard.repeat_delay.max(0) as u32,
+            rate: config.keyboard.repeat_rate.max(0) as u32,
+        });
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, backend.seat_name());
         seat.add_keyboard(
@@ -149,10 +180,32 @@ impl BuntState {
                 layout: &config.keyboard.layout,
                 ..Default::default()
             },
-            config.keyboard.repeat_delay,
-            config.keyboard.repeat_rate,
+            repeat.delay as i32,
+            repeat.rate as i32,
         )?;
         seat.add_pointer();
+
+        let (requests, request_channel): (_, Channel<Request>) = channel::channel();
+        loop_handle
+            .insert_source(request_channel, |event, _, state| {
+                if let channel::Event::Msg(request) = event {
+                    state.handle_request(request);
+                }
+            })
+            .map_err(|err| err.error)?;
+        let dbus = dbus::Service::start(requests);
+        dbus.update(|snapshot| {
+            snapshot.repeat_delay = repeat.delay;
+            snapshot.repeat_rate = repeat.rate;
+        });
+        let (input_method_exited, exited_channel) = channel::channel();
+        loop_handle
+            .insert_source(exited_channel, |event, _, state| {
+                if let channel::Event::Msg(()) = event {
+                    state.input_method_exited();
+                }
+            })
+            .map_err(|err| err.error)?;
 
         let socket = ListeningSocketSource::new_auto()?;
         let socket_name = socket.socket_name().to_os_string();
@@ -198,6 +251,11 @@ impl BuntState {
             foreign_toplevels,
             seat,
             cursor_status: CursorImageStatus::default_named(),
+            suppressed_keys: Vec::new(),
+            prefs,
+            dbus,
+            input_method_process: InputMethodProcess::default(),
+            input_method_exited,
             backend,
         })
     }
@@ -218,31 +276,42 @@ impl BuntState {
         }
     }
 
-    /// 셸을 특권 클라이언트로 실행한다. 미리 만든 연결을 WAYLAND_SOCKET으로 넘겨,
-    /// 이 연결에만 창 목록·창 조작 프로토콜이 보이게 한다 (toplevels.rs).
+    /// 셸을 특권 클라이언트로 실행한다. 이 연결에만 창 목록·창 조작 프로토콜이 보인다 (toplevels.rs).
     pub fn spawn_privileged(&mut self, command: &[String]) {
-        let Some((program, args)) = command.split_first() else {
-            return;
+        let client = ClientState {
+            privileged: true,
+            ..ClientState::default()
         };
+        if let Some(mut child) = self.spawn_trusted(command, client) {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+
+    /// 미리 만든 연결을 WAYLAND_SOCKET으로 넘겨 프로그램을 실행한다. `client`에 적은 권한
+    /// (창 목록, 입력기 프로토콜)은 이 연결에만 주어진다. 끝난 프로세스는 부른 쪽이 거둔다.
+    pub fn spawn_trusted(
+        &mut self,
+        command: &[String],
+        client: ClientState,
+    ) -> Option<std::process::Child> {
+        let (program, args) = command.split_first()?;
         let (ours, theirs) = match UnixStream::pair() {
             Ok(pair) => pair,
             Err(err) => {
                 tracing::warn!("failed to create a socket for {program}: {err}");
-                return;
+                return None;
             }
         };
-        let client = Arc::new(ClientState {
-            privileged: true,
-            ..ClientState::default()
-        });
-        if let Err(err) = self.display_handle.insert_client(ours, client) {
+        if let Err(err) = self.display_handle.insert_client(ours, Arc::new(client)) {
             tracing::warn!("failed to add {program} as a client: {err}");
-            return;
+            return None;
         }
         // 자식 프로세스가 연결을 물려받도록 close-on-exec를 끈다. 부모 쪽 사본은 실행 뒤 닫힌다
         if let Err(err) = fcntl_setfd(&theirs, FdFlags::empty()) {
             tracing::warn!("failed to pass the socket to {program}: {err}");
-            return;
+            return None;
         }
         match std::process::Command::new(program)
             .args(args)
@@ -250,12 +319,11 @@ impl BuntState {
             .env("WAYLAND_SOCKET", theirs.as_raw_fd().to_string())
             .spawn()
         {
-            Ok(mut child) => {
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+            Ok(child) => Some(child),
+            Err(err) => {
+                tracing::warn!("failed to start {program}: {err}");
+                None
             }
-            Err(err) => tracing::warn!("failed to start {program}: {err}"),
         }
     }
 
@@ -338,9 +406,12 @@ impl BuntState {
             .any(|layer| layers.layer_under(layer, relative).is_some())
     }
 
+    /// 창을 맨 앞으로 가져와 활성화하고 키보드 포커스를 준다. 키보드를 독점하는 레이어 표면(모든 앱
+    /// 패널 등)이 떠 있으면 키보드는 그 표면에 그대로 두고, 표면이 사라질 때 이 창에 준다
     pub fn focus_window(&mut self, window: &Window, serial: Serial) {
         self.space.raise_element(window, true);
-        if let Some(keyboard) = self.seat.get_keyboard() {
+        let exclusive = self.exclusive_layer().is_some();
+        if let Some(keyboard) = self.seat.get_keyboard().filter(|_| !exclusive) {
             keyboard.set_focus(
                 self,
                 window.toplevel().map(|t| t.wl_surface().clone()),
@@ -499,11 +570,21 @@ impl BuntState {
             let output_geo = self.space.output_geometry(output)?;
             return Some((output_geo, self.space.element_geometry(&window)?.loc));
         }
+        let output_geo = self
+            .space
+            .outputs()
+            .next()
+            .and_then(|output| self.space.output_geometry(output))?;
+        Some((output_geo, self.layer_origin(root)?))
+    }
+
+    /// 레이어 표면 왼쪽 위의 전역 위치
+    pub fn layer_origin(&self, surface: &WlSurface) -> Option<Point<i32, Logical>> {
         self.space.outputs().find_map(|output| {
             let output_geo = self.space.output_geometry(output)?;
             let map = layer_map_for_output(output);
-            let layer = map.layer_for_surface(root, WindowSurfaceType::TOPLEVEL)?;
-            Some((output_geo, output_geo.loc + map.layer_geometry(layer)?.loc))
+            let layer = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)?;
+            Some(output_geo.loc + map.layer_geometry(layer)?.loc)
         })
     }
 
@@ -605,6 +686,14 @@ pub struct ClientState {
     pub compositor_state: CompositorClientState,
     /// 컴포지터가 직접 띄운 셸. 창 목록·창 조작 프로토콜을 쓸 수 있다
     pub privileged: bool,
+    /// 컴포지터가 직접 띄운 입력기. 키보드를 잡고 글자와 키를 대신 보낼 수 있다
+    pub input_method: bool,
+}
+
+fn is_input_method_client(client: &Client) -> bool {
+    client
+        .get_data::<ClientState>()
+        .is_some_and(|data| data.input_method)
 }
 
 impl ClientData for ClientState {
@@ -635,8 +724,17 @@ impl CompositorHandler for BuntState {
             }
         }
         self.popups.commit(surface);
+        // 레이어 표면이 나타나거나 사라지거나 키보드 설정을 바꾸면 키보드 포커스를 다시 정한다
+        if self.is_layer_surface(surface) {
+            self.refresh_layer_focus();
+        }
+        // 입력기 팝업은 크기가 바뀌면 화면 안에 들도록 다시 놓는다
+        if let Some(PopupKind::InputMethod(popup)) = self.popups.find_popup(surface) {
+            self.place_input_method_popup(&popup);
+        }
         handle_resize_commit(&mut self.space, surface);
         self.ensure_initial_configure(surface);
+        self.send_scale(surface);
     }
 }
 
@@ -828,9 +926,12 @@ impl XdgShellHandler for BuntState {
             return;
         };
 
-        // 다른 그랩이 진행 중이면 팝업 그랩을 거절한다. 이어지는 하위 메뉴의 그랩은 허용한다
+        // 다른 그랩이 진행 중이면 팝업 그랩을 거절한다. 이어지는 하위 메뉴의 그랩은 허용한다.
+        // 입력기(fcitx5)가 입력 칸 때문에 잡은 키보드는 예외다. 포커스가 팝업으로 옮겨 가면 입력기가
+        // 놓는다 (막으면 입력 칸에 포커스가 있을 때 메뉴가 키보드를 받지 못해 Esc로 닫히지 않는다)
         if let Some(keyboard) = seat.get_keyboard() {
             if keyboard.is_grabbed()
+                && !seat.input_method().keyboard_grabbed()
                 && !(keyboard.has_grab(serial)
                     || keyboard.has_grab(grab.previous_serial().unwrap_or(serial)))
             {
@@ -919,6 +1020,7 @@ impl WlrLayerShellHandler for BuntState {
                 map.unmap_layer(&layer);
             }
         }
+        self.refresh_layer_focus();
     }
 }
 
@@ -939,10 +1041,11 @@ impl SeatHandler for BuntState {
         let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client);
         // 키보드를 받지 않는 레이어(메뉴바, Dock)로 포커스가 왔다면 그 레이어의 팝업 메뉴가
-        // 닫힌 것이다. 앞에 있던 창에 키보드를 돌려준다. 포커스를 바꾸는 중이므로 다음 차례에 한다
+        // 닫힌 것이다. 키보드를 독점하는 레이어나 앞에 있던 창에 돌려준다. 포커스를 바꾸는 중이므로
+        // 다음 차례에 한다
         if focused.is_some_and(|surface| self.is_passive_layer(surface)) {
             self.loop_handle
-                .insert_idle(|state| state.return_focus_to_window());
+                .insert_idle(|state| state.refresh_layer_focus());
         }
     }
 }
@@ -972,24 +1075,291 @@ impl BuntState {
             .cloned()
     }
 
-    /// 활성 창(없으면 맨 위 창)을 다시 활성화해 키보드 포커스를 준다
-    fn return_focus_to_window(&mut self) {
+    /// 레이어 표면 (최상위 표면)인지
+    fn is_layer_surface(&self, surface: &WlSurface) -> bool {
+        self.layer_keyboard(surface).is_some()
+    }
+
+    /// 레이어 표면의 키보드 설정과 버퍼가 붙어 보이는지. 레이어 표면이 아니면 None
+    fn layer_keyboard(&self, surface: &WlSurface) -> Option<(KeyboardInteractivity, bool)> {
+        self.space.outputs().find_map(|output| {
+            layer_map_for_output(output)
+                .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                .map(|layer| {
+                    (
+                        layer.cached_state().keyboard_interactivity,
+                        has_buffer(layer.wl_surface()),
+                    )
+                })
+        })
+    }
+
+    /// 키보드를 독점하는(exclusive) 위층(overlay, top) 레이어 표면 가운데 맨 위의 것.
+    /// 버퍼가 붙어 보이는 것만 센다 (wlr-layer-shell)
+    pub fn exclusive_layer(&self) -> Option<WlSurface> {
+        self.space.outputs().find_map(|output| {
+            let map = layer_map_for_output(output);
+            [Layer::Overlay, Layer::Top].into_iter().find_map(|layer| {
+                map.layers_on(layer)
+                    .rev()
+                    .find(|layer| {
+                        layer.cached_state().keyboard_interactivity
+                            == KeyboardInteractivity::Exclusive
+                            && has_buffer(layer.wl_surface())
+                    })
+                    .map(|layer| layer.wl_surface().clone())
+            })
+        })
+    }
+
+    /// 표면이 속한 최상위 표면. 하위 표면과 xdg 팝업을 거슬러 올라간다
+    fn root_surface(&self, surface: &WlSurface) -> WlSurface {
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        self.popups
+            .find_popup(&root)
+            .and_then(|popup| find_popup_root_surface(&popup).ok())
+            .unwrap_or(root)
+    }
+
+    /// 키보드 포커스를 둘 수 없는 최상위 표면인지: 사라졌거나, 창도 아니고 키보드를 받는 보이는
+    /// 레이어 표면도 아니다 (레이어 역할을 잃은 표면 포함)
+    fn cannot_hold_focus(&self, root: &WlSurface) -> bool {
+        if !root.is_alive() {
+            return true;
+        }
+        if self.window_for_surface(root).is_some() {
+            return false;
+        }
+        match self.layer_keyboard(root) {
+            Some((interactivity, mapped)) => {
+                interactivity == KeyboardInteractivity::None || !mapped
+            }
+            None => true,
+        }
+    }
+
+    /// wlr-layer-shell 명세대로 레이어 표면의 키보드 포커스를 맞춘다. 키보드를 독점하는 위층 레이어
+    /// 표면(모든 앱 패널 등)이 보이면 그 표면(이나 그 팝업)에 포커스를 두고, 그런 표면이 없는데 포커스가
+    /// 사라진 표면이나 키보드를 받지 않는 레이어 표면(팝업 메뉴를 닫은 메뉴바 포함)에 남았으면 활성 창
+    /// (없으면 맨 위 창)에 돌려준다. 열려 있는 팝업 메뉴의 포커스는 건드리지 않는다
+    pub fn refresh_layer_focus(&mut self) {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
-        // 그사이 포커스가 다른 곳으로 갔으면 그대로 둔다
-        if !keyboard
-            .current_focus()
-            .is_some_and(|surface| self.is_passive_layer(&surface))
-        {
+        let focus = keyboard.current_focus();
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        if let Some(layer) = self.exclusive_layer() {
+            let inside = focus
+                .as_ref()
+                .is_some_and(|focus| focus.is_alive() && self.root_surface(focus) == layer);
+            if !inside {
+                keyboard.set_focus(self, Some(layer), serial);
+            }
             return;
         }
-        let window = self
-            .active_window()
-            .or_else(|| self.space.elements().last().cloned());
-        if let Some(window) = window {
-            self.focus_window(&window, smithay::utils::SERIAL_COUNTER.next_serial());
+        // 팝업 메뉴는 그랩하는 동안 키보드를 가진다. 메뉴바처럼 키보드를 받지 않는 레이어의 팝업도
+        // 그렇다 (그래야 Esc와 화살표가 메뉴로 간다)
+        let stale = focus.as_ref().is_some_and(|focus| {
+            !(focus.is_alive() && self.popups.find_popup(focus).is_some())
+                && self.cannot_hold_focus(&self.root_surface(focus))
+        });
+        if stale {
+            match self
+                .active_window()
+                .or_else(|| self.space.elements().last().cloned())
+            {
+                Some(window) => self.focus_window(&window, serial),
+                None => self.clear_focus(serial),
+            }
         }
+    }
+
+    /// 뒤를 흐릴 셸 표면: 특권 셸 클라이언트의 위층(overlay, top) 레이어 표면과 그 xdg 팝업.
+    /// 메뉴바는 macOS처럼 흐리지 않는다 (투명하거나 검은색). 그 메뉴와 제어 센터 팝업은 흐린다
+    pub fn blur_surfaces(&self, output: &Output) -> Vec<WlSurface> {
+        let map = layer_map_for_output(output);
+        let mut surfaces = Vec::new();
+        for layer in map.layers() {
+            let surface = layer.wl_surface();
+            if !matches!(layer.layer(), Layer::Overlay | Layer::Top) || !self.is_privileged(surface)
+            {
+                continue;
+            }
+            if layer.namespace() != MENUBAR_NAMESPACE {
+                surfaces.push(surface.clone());
+            }
+            surfaces.extend(
+                PopupManager::popups_for_surface(surface)
+                    .filter(|(popup, _)| matches!(popup, PopupKind::Xdg(_)))
+                    .map(|(popup, _)| popup.wl_surface().clone()),
+            );
+        }
+        surfaces
+    }
+
+    /// 컴포지터가 직접 띄운 셸의 표면인지
+    fn is_privileged(&self, surface: &WlSurface) -> bool {
+        self.display_handle
+            .get_client(surface.id())
+            .ok()
+            .and_then(|client| client.get_data::<ClientState>().map(|data| data.privileged))
+            .unwrap_or(false)
+    }
+
+    /// 누른 자리의 위층 레이어 표면이 키보드를 받으면(on_demand, exclusive) 그 표면을 돌려준다
+    pub fn keyboard_layer_under(&self, pos: Point<f64, Logical>) -> Option<WlSurface> {
+        let output = self.space.output_under(pos).next()?;
+        let output_geo = self.space.output_geometry(output)?;
+        let map = layer_map_for_output(output);
+        let relative = pos - output_geo.loc.to_f64();
+        [Layer::Overlay, Layer::Top].into_iter().find_map(|layer| {
+            map.layer_under(layer, relative)
+                .filter(|layer| {
+                    layer.cached_state().keyboard_interactivity != KeyboardInteractivity::None
+                })
+                .map(|layer| layer.wl_surface().clone())
+        })
+    }
+
+    /// 레이어 표면에 키보드 포커스를 준다 (on_demand 레이어를 눌렀을 때)
+    pub fn focus_layer(&mut self, surface: &WlSurface, serial: Serial) {
+        if let Some(keyboard) = self.seat.get_keyboard()
+            && keyboard
+                .current_focus()
+                .is_none_or(|focus| self.root_surface(&focus) != *surface)
+        {
+            keyboard.set_focus(self, Some(surface.clone()), serial);
+        }
+    }
+
+    /// 표면에 알릴 배율과 회전 (출력이 여럿이면 첫 출력 기준)
+    fn preferred_scale(&self) -> Option<(i32, Transform)> {
+        let output = self.space.outputs().next()?;
+        Some((
+            output.current_scale().integer_scale(),
+            output.current_transform(),
+        ))
+    }
+
+    /// 표면에 출력의 배율과 회전을 알린다 (wl_surface.preferred_buffer_scale). 바뀐 값만 보낸다
+    fn send_scale(&self, surface: &WlSurface) {
+        if let Some((scale, transform)) = self.preferred_scale() {
+            with_states(surface, |data| {
+                send_surface_state(surface, data, scale, transform)
+            });
+        }
+    }
+
+    /// 배율이 바뀐 뒤 모든 창, 레이어 표면, 팝업에 새 배율을 알린다
+    pub fn send_scale_to_all(&self) {
+        let Some((scale, transform)) = self.preferred_scale() else {
+            return;
+        };
+        let mut roots: Vec<WlSurface> = self
+            .space
+            .elements()
+            .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+            .collect();
+        for output in self.space.outputs() {
+            roots.extend(
+                layer_map_for_output(output)
+                    .layers()
+                    .map(|layer| layer.wl_surface().clone()),
+            );
+        }
+        let popups: Vec<WlSurface> = roots
+            .iter()
+            .flat_map(|root| {
+                PopupManager::popups_for_surface(root).map(|(popup, _)| popup.wl_surface().clone())
+            })
+            .collect();
+        // 표면 상태는 순회하는 동안 잠겨 있으므로 with_states를 다시 부르지 않고 받은 상태를 쓴다
+        for root in roots.iter().chain(&popups) {
+            with_surface_tree_downward(
+                root,
+                (),
+                |_, _, _| TraversalAction::DoChildren(()),
+                |surface, data, _| send_surface_state(surface, data, scale, transform),
+                |_, _, _| true,
+            );
+        }
+    }
+
+    /// 화면 크기가 바뀐 뒤 최대화·전체 화면 창을 새 영역에 맞추고, 나머지 창은 제목 표시줄이
+    /// 화면 안에 남도록 옮긴다. 레이어(메뉴바, Dock)는 먼저 배치해 둔다
+    pub fn refit_windows(&mut self) {
+        let (Some(usable), Some(full)) = (self.usable_area(), self.fullscreen_area()) else {
+            return;
+        };
+        let windows: Vec<Window> = self.space.elements().cloned().collect();
+        for window in windows {
+            let Some(toplevel) = window.toplevel() else {
+                continue;
+            };
+            toplevel.with_pending_state(|state| state.bounds = Some(usable.size));
+            let area = if Self::has_state(toplevel, xdg_toplevel::State::Fullscreen) {
+                Some(full)
+            } else if Self::has_state(toplevel, xdg_toplevel::State::Maximized) {
+                Some(usable)
+            } else {
+                None
+            };
+            match area {
+                Some(area) => {
+                    toplevel.with_pending_state(|state| state.size = Some(area.size));
+                    self.space.map_element(window.clone(), area.loc, false);
+                }
+                None => {
+                    let Some(geo) = self.space.element_geometry(&window) else {
+                        continue;
+                    };
+                    let visible = TITLE_VISIBLE.min(geo.size.w);
+                    let x = geo.loc.x.clamp(
+                        usable.loc.x - geo.size.w + visible,
+                        usable.loc.x + usable.size.w - visible,
+                    );
+                    let y = geo
+                        .loc
+                        .y
+                        .clamp(usable.loc.y, usable.loc.y + usable.size.h - TITLE_VISIBLE);
+                    if (x, y) != (geo.loc.x, geo.loc.y) {
+                        self.space.map_element(window.clone(), (x, y), false);
+                    }
+                }
+            }
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_pending_configure();
+            }
+        }
+    }
+
+    pub fn handle_request(&mut self, request: Request) {
+        match request {
+            Request::OutputMode {
+                name,
+                width,
+                height,
+                refresh,
+            } => self.set_output_mode(&name, width, height, refresh),
+            Request::OutputScale { name, scale } => self.set_output_scale(&name, scale),
+            Request::KeyboardRepeat { delay, rate } => self.set_keyboard_repeat(delay, rate),
+        }
+    }
+
+    fn set_keyboard_repeat(&mut self, delay: u32, rate: u32) {
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.change_repeat_info(rate as i32, delay as i32);
+        }
+        self.prefs.keyboard = Some(KeyRepeat { delay, rate });
+        self.prefs.save();
+        self.dbus.update(|snapshot| {
+            snapshot.repeat_delay = delay;
+            snapshot.repeat_rate = rate;
+        });
+        tracing::info!("key repeat: {delay} ms, {rate}/s");
     }
 }
 
@@ -1064,3 +1434,8 @@ impl Dispatch<ZwlrLayerSurfaceV1, WlrLayerSurfaceUserData> for BuntState {
 delegate_seat!(BuntState);
 delegate_data_device!(BuntState);
 delegate_output!(BuntState);
+
+/// 표면에 버퍼가 붙어 화면에 보이는지
+fn has_buffer(surface: &WlSurface) -> bool {
+    with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+}

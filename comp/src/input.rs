@@ -18,7 +18,7 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
-use crate::state::BuntState;
+use crate::{dbus::Command, state::BuntState};
 
 /// 컴포지터가 가로채는 단축키 동작
 enum Action {
@@ -30,6 +30,8 @@ enum Action {
     CloseWindow,
     /// Ctrl+Alt+F1..F12: 가상 터미널 전환
     SwitchVt(i32),
+    /// Ctrl+Space(macOS 기본), 한/영 키: 입력 소스 전환. 입력 칸에 포커스가 없어도 동작한다
+    ToggleInputSource,
 }
 
 fn shortcut(modifiers: &ModifiersState, sym: Keysym) -> Option<Action> {
@@ -38,7 +40,15 @@ fn shortcut(modifiers: &ModifiersState, sym: Keysym) -> Option<Action> {
     if (first_vt..=Keysym::XF86_Switch_VT_12.raw()).contains(&raw) {
         return Some(Action::SwitchVt((raw - first_vt + 1) as i32));
     }
-    if sym == Keysym::BackSpace && modifiers.ctrl && modifiers.alt {
+    if sym == Keysym::Hangul
+        || (sym == Keysym::space
+            && modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.shift
+            && !modifiers.logo)
+    {
+        Some(Action::ToggleInputSource)
+    } else if sym == Keysym::BackSpace && modifiers.ctrl && modifiers.alt {
         Some(Action::Quit)
     } else if sym == Keysym::Return && modifiers.alt {
         Some(Action::Terminal)
@@ -85,23 +95,34 @@ impl BuntState {
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(&event);
         let pressed = event.state() == KeyState::Pressed;
-        let action = keyboard.input::<Action, _>(
+        let action = keyboard.input::<Option<Action>, _>(
             self,
             event.key_code(),
             event.state(),
             serial,
             time,
-            |_, modifiers, handle| {
+            |state, modifiers, handle| {
+                let code = handle.raw_code().raw();
+                // 단축키로 가로챈 키는 뗄 때도 앱(과 입력기)에 보내지 않는다
                 if !pressed {
-                    return FilterResult::Forward;
+                    return match state.suppressed_keys.iter().position(|key| *key == code) {
+                        Some(index) => {
+                            state.suppressed_keys.swap_remove(index);
+                            FilterResult::Intercept(None)
+                        }
+                        None => FilterResult::Forward,
+                    };
                 }
                 match shortcut(modifiers, handle.modified_sym()) {
-                    Some(action) => FilterResult::Intercept(action),
+                    Some(action) => {
+                        state.suppressed_keys.push(code);
+                        FilterResult::Intercept(Some(action))
+                    }
                     None => FilterResult::Forward,
                 }
             },
         );
-        if let Some(action) = action {
+        if let Some(Some(action)) = action {
             self.run(action);
         }
     }
@@ -129,6 +150,7 @@ impl BuntState {
                     tracing::warn!("failed to switch to VT {vt}: {err}");
                 }
             }
+            Action::ToggleInputSource => self.dbus.send(Command::ToggleInputMethod),
         }
     }
 
@@ -177,10 +199,13 @@ impl BuntState {
         let serial = SERIAL_COUNTER.next_serial();
         let state = event.state();
 
-        // 메뉴바·Dock을 누를 때는 창 포커스를 바꾸지 않는다
+        // 키보드를 받는 레이어 표면(on_demand)을 누르면 그 표면에 포커스를 준다.
+        // 메뉴바·Dock처럼 키보드를 받지 않는 레이어를 누를 때는 창 포커스를 바꾸지 않는다
         if state == ButtonState::Pressed && !pointer.is_grabbed() {
             let pos = pointer.current_location();
-            if !self.is_over_top_layer(pos) {
+            if let Some(layer) = self.keyboard_layer_under(pos) {
+                self.focus_layer(&layer, serial);
+            } else if !self.is_over_top_layer(pos) {
                 match self
                     .space
                     .element_under(pos)

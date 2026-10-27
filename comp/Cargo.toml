@@ -16,6 +16,8 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 xcursor = "0.3"
+# 시스템 설정이 화면과 키 반복을 바꾸는 D-Bus 서비스, 입력 소스 전환(fcitx5 호출)
+zbus = "5"
 
 [dependencies.smithay]
 version = "0.7.0"

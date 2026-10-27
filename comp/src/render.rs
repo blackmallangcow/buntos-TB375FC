@@ -7,32 +7,34 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            ImportAll, ImportMem, Renderer,
             element::{
-                RenderElement, memory::MemoryRenderBuffer, memory::MemoryRenderBufferRenderElement,
+                memory::MemoryRenderBuffer, memory::MemoryRenderBufferRenderElement,
                 surface::WaylandSurfaceRenderElement,
             },
+            gles::GlesRenderer,
         },
     },
     desktop::space::SpaceRenderElements,
     utils::{Physical, Rectangle, Size, Transform},
 };
 
+use crate::blur::BlurElement;
+
 smithay::backend::renderer::element::render_elements! {
-    pub OutputRenderElements<R, E> where R: ImportAll + ImportMem;
-    Space = SpaceRenderElements<R, E>,
-    Memory = MemoryRenderBufferRenderElement<R>,
-    Surface = WaylandSurfaceRenderElement<R>,
+    pub OutputRenderElements<=GlesRenderer>;
+    Space = SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+    Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
+    Surface = WaylandSurfaceRenderElement<GlesRenderer>,
+    Blur = BlurElement,
 }
 
-impl<R: Renderer + ImportAll + ImportMem, E: RenderElement<R> + std::fmt::Debug> std::fmt::Debug
-    for OutputRenderElements<R, E>
-{
+impl std::fmt::Debug for OutputRenderElements {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Space(element) => f.debug_tuple("Space").field(element).finish(),
             Self::Memory(element) => f.debug_tuple("Memory").field(element).finish(),
             Self::Surface(element) => f.debug_tuple("Surface").field(element).finish(),
+            Self::Blur(element) => f.debug_tuple("Blur").field(element).finish(),
             Self::_GenericCatcher(_) => f.write_str("GenericCatcher"),
         }
     }

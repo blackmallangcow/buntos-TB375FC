@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 입력 소스는 시스템 설정의 키보드 페이지에서 바꾸므로 fcitx5 설정 도구는 모든 앱 목록에서 숨긴다.
+# /usr/local/share가 /usr/share보다 먼저 읽히므로 같은 이름의 이 파일이 패키지의 것을 가린다
+[Desktop Entry]
+Type=Application
+Name=fcitx5-configtool
+Hidden=true

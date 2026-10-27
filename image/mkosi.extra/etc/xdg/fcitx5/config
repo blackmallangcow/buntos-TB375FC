@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# fcitx5 기본 설정. Ctrl+Space와 한/영 키는 bunt-comp가 먼저 받아 입력 소스를 바꾸므로
+# 입력 칸에 포커스가 없어도 동작한다. 여기 적은 키는 컴포지터 없이 띄웠을 때를 위한 것이다
+
+[Hotkey]
+EnumerateWithTriggerKeys=True
+
+[Hotkey/TriggerKeys]
+0=Control+space
+1=Hangul
+
+[Behavior]
+# macOS처럼 입력 소스는 앱마다가 아니라 전체에 하나다
+ShareInputState=All
+ActiveByDefault=False
+PreeditEnabledByDefault=True
+# 바꿀 때 글자 커서 옆에 잠깐 입력 소스를 보인다 (macOS의 입력 소스 표시기)
+ShowInputMethodInformation=True
+CompactInputMethodInformation=True
+DefaultPageSize=9
+
+# 입력 소스는 셸의 메뉴바가 보이므로 fcitx5 자체 트레이 항목(StatusNotifierItem)은 끈다
+[Behavior/DisabledAddons]
+0=notificationitem

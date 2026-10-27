@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 기본 입력 소스: 영어(ABC) 다음 한국어 두벌식. 첫 항목이 "끈" 상태, 둘째가 "켠" 상태다.
+# 시스템 설정의 키보드 페이지에서 바꾸면 ~/.config/fcitx5/profile에 저장된다
+
+[Groups/0]
+Name=Default
+Default Layout=us
+DefaultIM=hangul
+
+[Groups/0/Items/0]
+Name=keyboard-us
+Layout=
+
+[Groups/0/Items/1]
+Name=hangul
+Layout=
+
+[GroupOrder]
+0=Default
