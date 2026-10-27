@@ -20,6 +20,9 @@ builtin = "apps"
 label = "dock-apps"
 
 [[dock.items]]
+app = "firefox-esr.desktop"
+
+[[dock.items]]
 app = "foot.desktop"
 label = "dock-terminal"
 
