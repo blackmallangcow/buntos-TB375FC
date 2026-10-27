@@ -1,8 +1,9 @@
-# buntOS 설계안 v0.3.1
+# buntOS 설계안 v0.3.2
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
 - 개정 이력
+  - v0.3.2 (2026-10-27): 공개 시점(1차 빌드 성공 후)과 검증된 개발 환경(Lima VM, 중첩 KVM)을 4.1, 9.4, 10장에 반영했다
   - v0.3.1 (2026-10-27): 9.4에 저장소 위치(`blackmallangcow/buntOS`)를 명시했다
   - v0.3 (2026-10-27): 오픈소스 공개를 전제로 ADR-004·006·009·010·011·012를 확정해 반영했다(D2, D10, 2.1절, 4.1, 4.2, 9.2, 9.4, 10장, 11장, 12장, 13장)
   - v0.2 (2026-10-27): 실기기 전략을 mainline 단일로 바꾸고 벤더 커널 하이브리드(구 Track A)를 폐기했다. 개방성 정의(D8, 2.1절), 개발환경 비차단 원칙(D9), EL2/KVM 실측(12.1절)을 추가했다
@@ -105,7 +106,7 @@
 - 커널: mainline LTS, Debian 커널 설정 기반 + buntOS 조각(config fragment)
 - 부트: UEFI + systemd-boot, UKI(Unified Kernel Image), Secure Boot 서명은 후속 단계
 - GPU: Mesa (Intel/AMD), NVIDIA는 후속 과제
-- 리스크 낮음. UI/에이전트 계층의 1차 검증 플랫폼. 개발 머신이 Apple Silicon이고 별도 x86 Linux 머신이 없으면, 로컬 1차 개발은 aarch64 QEMU(HVF 가속)로 하고 x86-64는 CI에서 KVM으로 검증한다(ADR-010, 9.4)
+- 리스크 낮음. UI/에이전트 계층의 1차 검증 플랫폼. 개발 머신이 Apple Silicon이고 별도 x86 Linux 머신이 없으면, 로컬 1차 개발은 Mac 위 Linux VM(Lima)에서 aarch64로 하고(이미지는 VM 안에서 중첩 KVM으로 부팅) x86-64는 CI에서 KVM으로 검증한다(ADR-010, 9.4, [개발 환경](../dev/environment.md))
 
 ### 4.2 arm64 실기기: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)
 
@@ -363,7 +364,7 @@ const shot = await app.screenshot();        // 폴백용 창 단위 캡처
 
 ### 9.4 CI 구성 (ADR-010)
 
-- 저장소: GitHub 공개 저장소 [`blackmallangcow/buntOS`](https://github.com/blackmallangcow/buntOS)
+- 저장소: GitHub 공개 저장소 [`blackmallangcow/buntOS`](https://github.com/blackmallangcow/buntOS). 1차 빌드 성공 후 공개하며, 그 전까지는 비공개로 두고 aarch64 빌드·e2e는 로컬 개발 VM(`tools/devvm/`)에서 돌린다(arm64 호스티드 러너 무료 제공은 공개 저장소 한정)
 - x86-64 e2e: GitHub 호스티드 Linux 러너에서 KVM 가속으로 전체 시나리오를 돌린다
 - aarch64 e2e: Phase 0 첫 주에 호스티드 arm64 러너(`ubuntu-24.04-arm`)의 `/dev/kvm` 유무를 확인해 둘 중 하나로 확정한다
   - KVM 있음: 호스티드 arm64 러너에서 전체 시나리오
@@ -381,6 +382,7 @@ buntOS/
   LICENSES/               라이선스 원문 (REUSE 규격, D10)
   docs/design/            설계 문서, ADR
   docs/hw/                실기기 실측 보고서
+  docs/dev/               개발 환경 안내
   image/                  mkosi 이미지 레시피 (공통 + 아키텍처별 오버레이)
   bsp/
     x86_64-generic/       커널 설정 조각, 부트 설정, board.toml
@@ -394,6 +396,7 @@ buntOS/
   policy/                 기본 권한/전원/메모리 정책 TOML
   tests/e2e/              QEMU e2e 하네스와 시나리오
   ci/                     CI 파이프라인 정의
+  tools/devvm/            개발용 빌드 VM 설정(Lima)과 설치 스크립트
 ```
 
 - 이미지 빌드 도구: mkosi (Debian 지원, 아키텍처별 빌드, UKI 생성)

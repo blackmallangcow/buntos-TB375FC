@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# buntOS 개발용 빌드 VM (Lima, Apple Silicon Mac)
+# 만들기와 사용법: docs/dev/environment.md
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/debian-13
+
+vmType: vz
+# aarch64 테스트 이미지를 VM 안에서 KVM으로 띄우기 위해 필요하다 (M3 이상, macOS 15 이상)
+nestedVirtualization: true
+cpus: 6
+memory: 8GiB
+disk: 60GiB
+mountType: virtiofs
+
+# 컨테이너 런타임은 쓰지 않는다
+containerd:
+  system: false
+  user: false
