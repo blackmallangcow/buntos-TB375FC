@@ -233,9 +233,24 @@ pub fn subtitle_label(text: &str) -> gtk::Label {
 
 /// 왼쪽에 이름, 오른쪽 끝에 조작 위젯이 있는 행
 pub fn row(title: &str, control: &impl IsA<gtk::Widget>) -> gtk::ListBoxRow {
+    label_control(control.as_ref(), title);
     let (row, accessories) = rich_row(None, title, None);
     accessories.append(control);
     row
+}
+
+/// 자기 글이 없는 조작 위젯(스위치, 슬라이더, 드롭다운, 숫자 칸, 글자 칸)에 행 제목을 접근성
+/// 이름으로 준다. 화면 읽기 프로그램과 에이전트(buntd-agent)가 이 이름으로 위젯을 찾는다.
+/// 단추처럼 제 이름이 있는 위젯은 그대로 둔다
+fn label_control(control: &gtk::Widget, title: &str) {
+    if control.is::<gtk::Switch>()
+        || control.is::<gtk::Scale>()
+        || control.is::<gtk::DropDown>()
+        || control.is::<gtk::SpinButton>()
+        || control.is::<gtk::Entry>()
+    {
+        control.update_property(&[gtk::accessible::Property::Label(title)]);
+    }
 }
 
 /// 읽기 전용 값을 보여 주는 행. 값은 선택해 복사할 수 있다
@@ -311,12 +326,14 @@ pub fn slider_row(title: &str, scale: &gtk::Scale, low: &str, high: &str) -> gtk
         .build();
     control.append(scale);
     control.append(&ends);
+    label_control(scale.upcast_ref(), title);
     row(title, &control)
 }
 
 /// 스위치 행
 pub fn switch_row(title: &str, subtitle: Option<&str>) -> (gtk::ListBoxRow, gtk::Switch) {
     let switch = gtk::Switch::builder().valign(gtk::Align::Center).build();
+    label_control(switch.upcast_ref(), title);
     let (row, accessories) = rich_row(None, title, subtitle);
     accessories.append(&switch);
     (row, switch)

@@ -266,6 +266,9 @@ pub fn button(child: &impl IsA<gtk::Widget>, menu: &Menu, tooltip: &str) -> gtk:
         .tooltip_text(tooltip)
         .css_classes(["status-item"])
         .build();
+    // 접근성 이름은 항목 이름으로 고정한다. 그러지 않으면 GTK가 아이콘이나 열린 메뉴의 글을 이어
+    // 붙여 이름을 만든다. 상태(예: 유선 연결됨)는 아이콘의 이름으로 남는다
+    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
     let menu = menu.clone();
     button.set_create_popup_func(move |_| menu.refill());
     button

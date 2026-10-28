@@ -343,6 +343,7 @@ fn fill(menu: &Menu, tr: &Rc<Translations>, services: &Services) {
             ))
             .hexpand(true)
             .build();
+        scale.update_property(&[gtk::accessible::Property::Label(&tr.get("cc-brightness"))]);
         scale.connect_value_changed(move |scale| backlight.set(scale.value()));
         let slider = gtk::Box::builder()
             .spacing(6)
@@ -365,7 +366,7 @@ fn fill(menu: &Menu, tr: &Rc<Translations>, services: &Services) {
                 .css_classes(["cc-title"])
                 .build(),
         );
-        audio.append(&sound::slider(&services.sound));
+        audio.append(&sound::slider(tr, &services.sound));
         grid.attach(&audio, 0, row, 4, 1);
     }
 

@@ -216,17 +216,19 @@ impl Sound {
 }
 
 /// 음량 막대. 제어 센터와 사운드 메뉴가 쓴다
-pub fn slider(sound: &Sound) -> gtk::Box {
+pub fn slider(tr: &Translations, sound: &Sound) -> gtk::Box {
     let icon = gtk::Button::builder()
         .icon_name("audio-volume-medium-symbolic")
         .css_classes(["slider-icon"])
         .build();
+    icon.update_property(&[gtk::accessible::Property::Label(&tr.get("sound-mute"))]);
     let scale = gtk::Scale::builder()
         .orientation(gtk::Orientation::Horizontal)
         .adjustment(&gtk::Adjustment::new(0.0, 0.0, 1.0, 0.01, 0.1, 0.0))
         .hexpand(true)
         .css_classes(["volume-slider"])
         .build();
+    scale.update_property(&[gtk::accessible::Property::Label(&tr.get("sound-volume"))]);
     let row = gtk::Box::builder()
         .spacing(6)
         .css_classes(["slider-row"])
@@ -272,7 +274,7 @@ pub fn extra(tr: &Rc<Translations>, sound: &Sound) -> gtk::MenuButton {
     menu.on_show(move |menu| {
         sound.refresh();
         menu.title(&tr.get("sound-title"));
-        menu.append(&slider(&sound));
+        menu.append(&slider(&tr, &sound));
         menu.separator();
         menu.section(&tr.get("sound-output"));
         // 장치 목록은 wpctl status를 읽은 뒤 채운다
