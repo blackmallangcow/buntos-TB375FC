@@ -148,6 +148,10 @@ pub fn build(
     window.set_anchor(Edge::Bottom, true);
     window.set_margin(Edge::Bottom, config.dock.margin_bottom);
     window.auto_exclusive_zone_enable();
+    // gtk4-layer-shell은 표면 크기를 전체 화면 창의 크기처럼 GTK에 알리고, GTK는 다음 알림이 올
+    // 때까지 그 크기를 쓴다. 크기를 바꿀 수 있는 창이면 최소 크기보다 작을 때만 늘려서, 아이콘이
+    // 작아져도 Dock은 줄지 않는다. 크기를 바꿀 수 없는 창은 그 크기를 내용의 크기로 맞춘다
+    window.set_resizable(false);
 
     let settings = shell_settings();
     // 고른 크기. 화면에 다 들어가지 않으면 fit_icons가 이보다 줄인다
