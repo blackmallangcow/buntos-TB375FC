@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "bunt-agent"
+description = "buntOS agent control plane: the buntd-agent daemon and the bunt CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "buntd-agent"
+path = "src/bin/buntd-agent.rs"
+
+[[bin]]
+name = "bunt"
+path = "src/bin/bunt.rs"
+
+[dependencies]
+# 요청을 받은 스레드에서 zbus 호출을 기다린다 (zbus가 쓰는 것과 같은 실행기)
+async-io = "2"
+# 접근성 버스에 여러 호출을 한꺼번에 보낸다
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+# 데몬과 CLI 사이의 JSON-RPC
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 접근성 버스(AT-SPI)와 세션 버스
+zbus = "5"

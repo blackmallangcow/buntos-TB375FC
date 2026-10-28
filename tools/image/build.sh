@@ -27,7 +27,8 @@ mkdir -p "$out"
 mkosi=$(command -v mkosi || echo "$HOME/.local/bin/mkosi")
 extra=()
 
-# 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings)를 빌드해 이미지에 넣을 트리로 모은다.
+# 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, buntd-agent와 bunt)를 빌드해 이미지에 넣을
+# 트리로 모은다.
 # 지금은 빌드 VM과 아키텍처가 같은 보드만 지원한다. 다른 아키텍처는 CI에서 빌드한다.
 stage_components() {
 	local arch host
@@ -46,6 +47,12 @@ stage_components() {
 	install -D -m 0755 "$target/release/bunt-comp" "$out/stage/usr/bin/bunt-comp"
 	install -D -m 0755 "$target/release/bunt-shell" "$out/stage/usr/bin/bunt-shell"
 	install -D -m 0755 "$target/release/bunt-settings" "$out/stage/usr/bin/bunt-settings"
+	install -D -m 0755 "$target/release/buntd-agent" "$out/stage/usr/bin/buntd-agent"
+	install -D -m 0755 "$target/release/bunt" "$out/stage/usr/bin/bunt"
+	local unit
+	for unit in buntd-agent.service buntd-agent.socket; do
+		install -D -m 0644 "$repo/agent/data/$unit" "$out/stage/usr/lib/systemd/user/$unit"
+	done
 	install -D -m 0644 "$repo/settings/data/org.buntos.Settings.desktop" \
 		"$out/stage/usr/share/applications/org.buntos.Settings.desktop"
 	install -D -m 0644 "$repo/shell/data/org.buntos.shell.gschema.xml" \

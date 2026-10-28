@@ -73,6 +73,19 @@ pub struct PointerDevice {
     pub touchpad: bool,
 }
 
+/// 키보드 포커스를 가진 클라이언트와 그 최상위 표면. 에이전트(buntd-agent)가 활성 창을 고를 때
+/// 쓴다. 셸의 레이어 창은 팝업이 닫힌 뒤에도 GTK가 활성으로 알릴 때가 있어 컴포지터에 묻는다
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Focus {
+    pub pid: u32,
+    /// 창이면 앱 ID, 레이어 표면이면 그 이름(namespace)
+    pub app_id: String,
+    /// 창 제목. 레이어 표면은 빈 문자열
+    pub title: String,
+    /// 레이어 표면(셸의 메뉴, 모든 앱 등)이다
+    pub layer: bool,
+}
+
 /// 컴포지터 상태의 사본. 컴포지터가 바뀔 때마다 고쳐 쓴다
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -81,6 +94,7 @@ pub struct Snapshot {
     pub repeat_rate: u32,
     pub pointer: PointerPrefs,
     pub pointer_devices: Vec<PointerDevice>,
+    pub focus: Option<Focus>,
 }
 
 /// D-Bus에서 이벤트 루프로 넘기는 변경 요청 (값은 이미 확인했다)
@@ -339,6 +353,19 @@ impl Api {
             name: name.to_owned(),
             scale,
         })
+    }
+
+    /// 키보드 포커스: (클라이언트 pid, 앱 ID나 레이어 이름, 창 제목, 레이어 표면인지).
+    /// 포커스가 없으면 pid가 0이다
+    fn get_focus(&self) -> (u32, String, String, bool) {
+        let focus = self
+            .snapshot
+            .lock()
+            .unwrap()
+            .focus
+            .clone()
+            .unwrap_or_default();
+        (focus.pid, focus.app_id, focus.title, focus.layer)
     }
 
     /// (반복 시작까지 ms, 초당 반복 횟수)

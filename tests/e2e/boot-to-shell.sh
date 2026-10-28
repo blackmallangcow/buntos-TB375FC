@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # e2e 1번: 부팅 → 로그인 → 셸 (ARCHITECTURE 9.2. ADR-009의 Phase 0 드라이버: 시리얼 콘솔)
-# 빌드한 이미지를 띄워 콘솔 자동 로그인 뒤 셸에서 명령이 실행되는지 보고, 끈다.
+# 빌드한 이미지를 띄워 콘솔 자동 로그인 뒤 셸에서 명령이 실행되는지 보고, 그래픽 셸(메뉴 막대,
+# Dock)이 떴는지는 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본 뒤 끈다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
 # 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 600)
 set -euo pipefail
@@ -44,8 +45,9 @@ fail() {
 
 # 테스트가 빌드한 이미지를 바꾸지 않게, 멈춘 상태로 띄워 디스크에 임시 덮어쓰기를 씌운 뒤 실행한다.
 # mkosi는 이미지를 -blockdev로 붙여 QEMU의 -snapshot이 효과가 없고, --ephemeral은 이미지 전체를 복사한다
+# 그래픽 세션이 뜨도록 가상 GPU를 붙인다 (화면은 내보내지 않는다)
 "$repo/tools/image/build.sh" "$board" vm -- -S -qmp "unix:$work/qmp.sock,server=on,wait=off" \
-	<"$work/console.in" >"$log" 2>&1 &
+	-device virtio-gpu-pci <"$work/console.in" >"$log" 2>&1 &
 vm_pid=$!
 exec 3>"$work/console.in"
 python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" "overlay:$work/disk.qcow2" cont ||
@@ -67,6 +69,23 @@ if [[ "$system_state" == degraded ]]; then
 	echo 'systemctl --failed --no-legend --plain | sed "s/^/E2E_$((1 + 1))F /"; echo "E2E_DONE_$((2 * 3))"' >&3
 	wait_for "^E2E_DONE_6$" || true
 	console | grep -a "^E2E_2F " | sed 's/^E2E_2F /실패한 유닛: /'
+fi
+
+# 그래픽 셸: 에이전트가 접근성 트리에서 메뉴 막대 항목과 Dock 단추를 읽는다. 앱이 없으면 메뉴 막대에
+# 앱 메뉴가 없으므로 누를 수 있는 요소의 수로 본다. 자체 컴포넌트를 넣지 않은 이미지(다른 아키텍처로
+# 빌드한 이미지)에는 에이전트가 없어 건너뛴다
+agent='sudo -u buntos XDG_RUNTIME_DIR=/run/user/1000 bunt agent snapshot --app bunt-shell -i'
+echo "if command -v bunt >/dev/null; then for i in \$(seq 300); do $agent >/tmp/e2e-shell 2>&1 && [ \$(grep -c 'ref=e' /tmp/e2e-shell) -ge 10 ] && break; sleep 1; done; echo \"E2E_AGENT_\$(grep -c 'ref=e' /tmp/e2e-shell)\"; else echo E2E_AGENT_NONE; fi" >&3
+wait_for "^E2E_AGENT_([0-9]+|NONE)$" || fail "에이전트로 그래픽 셸을 확인하지 못했다"
+agent_refs=$(console | grep -a -E "^E2E_AGENT_([0-9]+|NONE)$" | tail -1 | sed 's/^E2E_AGENT_//')
+if [[ "$agent_refs" == NONE ]]; then
+	echo "그래픽 셸: 이 이미지에는 에이전트가 없어 건너뛴다"
+elif ((agent_refs >= 10)); then
+	echo "그래픽 셸(에이전트): ${SECONDS}초, 누를 수 있는 요소 ${agent_refs}개"
+else
+	echo 'cat /tmp/e2e-shell' >&3
+	sleep 2
+	fail "에이전트가 읽은 셸에 메뉴 막대 항목과 Dock이 없다 (요소 ${agent_refs}개)"
 fi
 
 echo 'systemctl poweroff' >&3

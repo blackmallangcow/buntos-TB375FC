@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 에이전트 데몬의 소켓. 처음 붙을 때 buntd-agent.service를 띄운다 (ARCHITECTURE 6.3)
+
+[Unit]
+Description=buntOS agent control plane socket
+
+[Socket]
+ListenStream=%t/buntos/agent.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target

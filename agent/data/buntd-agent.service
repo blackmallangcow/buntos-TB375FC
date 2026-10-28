@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 에이전트 데몬. 접근성 버스를 읽어 에이전트에게 앱의 스냅샷을 준다 (ARCHITECTURE 6.3)
+
+[Unit]
+Description=buntOS agent control plane
+Requires=buntd-agent.socket
+
+[Service]
+ExecStart=/usr/bin/buntd-agent

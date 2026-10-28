@@ -1310,12 +1310,24 @@ impl XdgShellHandler for BuntState {
         if let Some(window) = self.window_for_surface(surface.wl_surface()) {
             self.refresh_window_info(&window);
         }
+        self.publish_focus(
+            self.seat
+                .get_keyboard()
+                .and_then(|keyboard| keyboard.current_focus())
+                .as_ref(),
+        );
     }
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for_surface(surface.wl_surface()) {
             self.refresh_window_info(&window);
         }
+        self.publish_focus(
+            self.seat
+                .get_keyboard()
+                .and_then(|keyboard| keyboard.current_focus())
+                .as_ref(),
+        );
     }
 
     /// 창이 닫히면 셸에 알리고, 활성 창이 없어졌으면 맨 위 창을 활성화한다.
@@ -1470,10 +1482,57 @@ impl SeatHandler for BuntState {
             self.loop_handle
                 .insert_idle(|state| state.refresh_layer_focus());
         }
+        self.publish_focus(focused);
     }
 }
 
 impl BuntState {
+    /// 키보드 포커스를 D-Bus 사본에 적는다 (GetFocus). 포커스가 바뀔 때와 창 제목이 바뀔 때 부른다
+    fn publish_focus(&self, focused: Option<&WlSurface>) {
+        let focus = focused.map(|surface| self.focus_info(surface));
+        self.dbus.update(|snapshot| snapshot.focus = focus);
+    }
+
+    /// 키보드 포커스 표면의 클라이언트와 그 최상위 표면
+    fn focus_info(&self, surface: &WlSurface) -> dbus::Focus {
+        let pid = self
+            .display_handle
+            .get_client(surface.id())
+            .ok()
+            .and_then(|client| client.get_credentials(&self.display_handle).ok())
+            .map_or(0, |credentials| credentials.pid as u32);
+        let root = self.root_surface(surface);
+        // 창이 공간에 놓이기 전에 포커스를 받을 수 있으므로 표면의 xdg 정보를 바로 읽는다
+        let toplevel = with_states(&root, |states| {
+            states.data_map.get::<XdgToplevelSurfaceData>().map(|data| {
+                let data = data.lock().unwrap();
+                (
+                    data.title.clone().unwrap_or_default(),
+                    data.app_id.clone().unwrap_or_default(),
+                )
+            })
+        });
+        if let Some((title, app_id)) = toplevel {
+            return dbus::Focus {
+                pid,
+                app_id,
+                title,
+                layer: false,
+            };
+        }
+        let namespace = self.space.outputs().find_map(|output| {
+            layer_map_for_output(output)
+                .layer_for_surface(&root, WindowSurfaceType::TOPLEVEL)
+                .map(|layer| layer.namespace().to_string())
+        });
+        dbus::Focus {
+            pid,
+            layer: namespace.is_some(),
+            app_id: namespace.unwrap_or_default(),
+            title: String::new(),
+        }
+    }
+
     /// 키보드 입력을 받지 않는 레이어 표면인지
     fn is_passive_layer(&self, surface: &WlSurface) -> bool {
         self.space.outputs().any(|output| {
