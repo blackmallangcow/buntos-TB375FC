@@ -56,12 +56,12 @@ bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock",
     <key name="dock-autohide" type="s">
       <choices>
         <choice value="always"/>
-        <choice value="maximized"/>
         <choice value="fullscreen"/>
+        <choice value="never"/>
       </choices>
       <default>'fullscreen'</default>
-      <summary>Dock을 자동으로 가리는 때</summary>
-      <description>always: 늘 숨는다. maximized: 앞에 있는 창이 최대화나 전체 화면일 때. fullscreen: 전체 화면일 때. 숨은 Dock은 화면 아래쪽 가장자리를 가리키면 나온다</description>
+      <summary>Dock을 자동으로 가리는 때 (자동으로 Dock 가리기)</summary>
+      <description>always: 늘 숨는다. fullscreen: 앞에 있는 창이 전체 화면일 때. never: 늘 보인다. 전체 화면 창도 Dock 자리를 비워 둔다. 숨은 Dock은 화면 아래쪽 가장자리를 가리키면 나온다. 컴포지터도 이 값으로 화면을 채우는 창이 Dock 자리까지 채울지 정한다</description>
     </key>
     <key name="dock-icon-size" type="i">
       <range min="32" max="96"/>

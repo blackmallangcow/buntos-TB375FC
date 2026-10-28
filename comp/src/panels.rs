@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 셸 막대(메뉴 막대, Dock) 자동 가리기. 시스템 설정의 "자동으로 메뉴 막대 가리기 및 보기"와
-//! "자동으로 Dock 가리기와 보기"(org.buntos.shell)를 셸이 D-Bus로 알려 준다.
+//! "자동으로 Dock 가리기"(org.buntos.shell)를 셸이 D-Bus로 알려 준다.
 //!
 //! macOS의 WindowServer처럼 컴포지터가 막대를 숨긴다. 셸은 막대를 그대로 두고, 컴포지터가 숨은
 //! 막대를 그리지 않고 입력도 보내지 않는다. 포인터가 화면 가장자리에 닿으면 막대를 미끄러지듯 꺼내고,

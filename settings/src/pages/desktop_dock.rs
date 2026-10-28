@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 데스크탑 및 Dock (macOS 26과 같은 이름과 순서): Dock 크기, 투명도, 자동으로 가리기, 실행 중
+//! 데스크탑 및 Dock (macOS 26과 같은 순서): Dock 크기, 투명도, 자동으로 Dock 가리기, 실행 중
 //! 표시, 기본 웹 브라우저. bunt-shell이 같은 설정(org.buntos.shell)을 바로 따른다. 투명도는
-//! macOS에 없고 buntOS에서 더했다. 기본 웹 브라우저는 기본 앱 페이지와 같은 값이다
+//! macOS에 없고 buntOS에서 더했다. 자동으로 Dock 가리기는 macOS의 켜고 끄는 "자동으로 Dock
+//! 가리기와 보기" 대신 숨는 때를 고른다. 기본 웹 브라우저는 기본 앱 페이지와 같은 값이다
 
 use std::rc::Rc;
 
@@ -14,13 +15,9 @@ use crate::widgets::{self, BadgeSize, Tint, badge};
 
 /// 셸이 설치하는 아이콘 (shell/data/icons)
 const ICON: &str = "org.buntos.Dock-symbolic";
-/// 드롭다운 항목 순서대로의 dock-autohide 값 (macOS의 메뉴 막대 가리기와 같은 순서)
-const AUTOHIDE: [&str; 3] = ["always", "maximized", "fullscreen"];
-const AUTOHIDE_LABELS: [&str; 3] = [
-    "autohide-always",
-    "autohide-maximized",
-    "autohide-fullscreen",
-];
+/// 드롭다운 항목 순서대로의 dock-autohide 값 (항상, 전체 화면일 때, 안 함)
+const AUTOHIDE: [&str; 3] = ["always", "fullscreen", "never"];
+const AUTOHIDE_LABELS: [&str; 3] = ["autohide-always", "autohide-fullscreen", "autohide-never"];
 /// dock-icon-size의 범위 (셸 스키마)
 const SIZE_RANGE: (f64, f64) = (32.0, 96.0);
 
