@@ -446,6 +446,17 @@ scale marks indicator {
   background: var(--label-tertiary);
 }
 
+/* 슬라이더 행(widgets::slider_row): 트랙은 scale의 좌우 여백만큼 안쪽에 그려진다. 양 끝 이름도
+   같은 만큼 들여 트랙 끝 아래에 둔다 */
+.slider-control > scale {
+  padding-left: var(--space-3);
+  padding-right: var(--space-3);
+}
+
+.slider-ends {
+  margin: 0 var(--space-3);
+}
+
 levelbar block.filled {
   border-radius: var(--radius-capsule);
   background: var(--green);

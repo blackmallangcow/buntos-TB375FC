@@ -93,10 +93,9 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
     scroller.upcast()
 }
 
+/// 너비는 widgets::slider_row가 정한다
 fn slider((low, high): (f64, f64), step: f64) -> gtk::Scale {
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, low, high, step);
     scale.set_draw_value(false);
-    scale.set_hexpand(true);
-    scale.set_width_request(220);
     scale
 }

@@ -269,10 +269,12 @@ pub fn info_row(title: &str, value: &str) -> gtk::ListBoxRow {
         .build()
 }
 
-/// 스위치 행
-/// 슬라이더 아래 양 끝 이름이 붙은 행 (macOS의 "작게 … 크게")
+/// 슬라이더 행의 조작 너비. 페이지와 행 제목이 달라도 슬라이더는 모두 이 너비다
+const SLIDER_WIDTH: i32 = 260;
+
+/// 슬라이더 아래 양 끝 이름이 붙은 행 (macOS의 "작게 … 크게"). 슬라이더는 행 오른쪽 끝에 붙는다
 pub fn slider_row(title: &str, scale: &gtk::Scale, low: &str, high: &str) -> gtk::ListBoxRow {
-    let ends = gtk::Box::builder().build();
+    let ends = gtk::Box::builder().css_classes(["slider-ends"]).build();
     ends.append(
         &gtk::Label::builder()
             .label(low)
@@ -288,15 +290,20 @@ pub fn slider_row(title: &str, scale: &gtk::Scale, low: &str, high: &str) -> gtk
             .css_classes(["row-subtitle"])
             .build(),
     );
+    // hexpand를 직접 꺼 둔다. 그러지 않으면 슬라이더의 hexpand가 행까지 퍼져 제목이 남긴 너비를
+    // 제목과 나눠 가지므로, 제목이 길수록 슬라이더가 짧아진다
     let control = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .width_request(260)
+        .width_request(SLIDER_WIDTH)
+        .hexpand(false)
+        .css_classes(["slider-control"])
         .build();
     control.append(scale);
     control.append(&ends);
     row(title, &control)
 }
 
+/// 스위치 행
 pub fn switch_row(title: &str, subtitle: Option<&str>) -> (gtk::ListBoxRow, gtk::Switch) {
     let switch = gtk::Switch::builder().valign(gtk::Align::Center).build();
     let (row, accessories) = rich_row(None, title, subtitle);

@@ -79,12 +79,11 @@ fn nearest(steps: &[u32], value: u32) -> usize {
         .map_or(0, |(index, _)| index)
 }
 
+/// 눈금 슬라이더. 너비는 widgets::slider_row가 정한다
 fn step_scale(steps: usize) -> gtk::Scale {
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (steps - 1) as f64, 1.0);
     scale.set_round_digits(0);
     scale.set_draw_value(false);
-    scale.set_hexpand(true);
-    scale.set_width_request(220);
     for index in 0..steps {
         scale.add_mark(index as f64, gtk::PositionType::Bottom, None);
     }
