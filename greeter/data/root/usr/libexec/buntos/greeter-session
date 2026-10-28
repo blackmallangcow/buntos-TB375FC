@@ -1,0 +1,36 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 로그인 화면 세션. greetd가 로그인 화면 사용자(_greetd)로 실행한다 (/etc/greetd/config.toml).
+# 로그인 화면용 설정(/etc/buntos/greeter.toml)으로 컴포지터를 띄우고, 컴포지터가 셸
+# (greeter-shell)로 bunt-greeter를 띄운다. 로그는 bunt-greeter라는 이름으로 저널에 남는다.
+
+# 화면 장치가 없으면(화면 없는 VM) 로그인 화면을 띄우지 않고 기다린다. 컴포지터가 바로 끝나면 greetd가
+# 곧바로 다시 띄워 실패를 되풀이하기 때문이다. 부팅 중에는 장치가 조금 늦게 생길 수 있다
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	ls /dev/dri/card* >/dev/null 2>&1 && break
+	sleep 1
+done
+if ! ls /dev/dri/card* >/dev/null 2>&1; then
+	echo "bunt-greeter: no display device, the login window is not shown" | systemd-cat --identifier=bunt-greeter
+	exec sleep infinity
+fi
+
+# 표시 언어: 시스템 언어, 정하지 않았으면(C) 한국어
+LANG=$(sed -n 's/^LANG=//p' /etc/locale.conf /etc/default/locale 2>/dev/null | tr -d '"' | tail -n 1)
+case "$LANG" in
+"" | C | C.* | POSIX) LANG=ko_KR.UTF-8 ;;
+esac
+export LANG
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=buntOS
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
+# 컴포지터가 아직 dmabuf를 지원하지 않아 GTK는 CPU로 그린다
+export GSK_RENDERER=cairo
+# 로그인 화면에는 데스크톱 포털이 없다. GTK가 포털을 기다리지 않게 한다 (기다리면 25초씩 두 번)
+export GDK_DEBUG=no-portals
+export BUNT_COMP_CONFIG=/etc/buntos/greeter.toml
+
+exec systemd-cat --identifier=bunt-greeter bunt-comp

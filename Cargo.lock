@@ -244,6 +244,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bunt-greeter"
+version = "0.1.0"
+dependencies = [
+ "bunt-i18n",
+ "gtk4",
+ "serde",
+ "serde_json",
+ "zbus",
+]
+
+[[package]]
 name = "bunt-i18n"
 version = "0.1.0"
 dependencies = [

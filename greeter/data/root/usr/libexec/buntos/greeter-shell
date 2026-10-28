@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 로그인 화면의 셸 (/etc/buntos/greeter.toml의 shell). 컴포지터는 셸이 끝나도 남아 있으므로,
+# bunt-greeter가 끝나면(로그인했거나 죽었으면) 여기서 로그인 화면의 컴포지터(부모 프로세스)를
+# 끝낸다. 그래야 greetd가 예약한 사용자 세션을 바로 열거나 로그인 화면을 다시 띄운다
+# (기다리게 두면 greetd가 5초 뒤에 끝낸다).
+
+bunt-greeter
+status=$?
+if [ "$(cat "/proc/$PPID/comm" 2>/dev/null)" = bunt-comp ]; then
+	kill -TERM "$PPID"
+fi
+exit "$status"

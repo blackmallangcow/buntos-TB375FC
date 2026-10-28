@@ -9,14 +9,6 @@ set -euo pipefail
 sed -i -E 's/^# *(ko_KR\.UTF-8 UTF-8)/\1/; s/^# *(en_US\.UTF-8 UTF-8)/\1/' /etc/locale.gen
 locale-gen
 
-# Phase 0 개발용 사용자. 사용자 계정을 설계하기 전까지 tty1 자동 로그인으로 그래픽 세션을 연다.
-# 비특권 빌드에서는 파일 소유자를 바꿀 수 없으므로 홈 디렉터리는 부팅 때 만든다
-# (/usr/lib/tmpfiles.d/buntos-home.conf). 암호는 잠가 두며, 자동 로그인과 sudo에는 필요 없다.
-if ! id buntos >/dev/null 2>&1; then
-	useradd --no-create-home --home-dir /home/buntos --shell /bin/bash \
-		--groups sudo,video,render,input buntos
-fi
-
 # 패키지 설치 뒤에 넣은 파일을 반영한다: GSettings 기본값(90_buntos.gschema.override)과
 # 자체 앱과 셸의 아이콘. 아이콘 캐시가 낡으면 GTK가 새 아이콘을 찾지 못한다
 glib-compile-schemas /usr/share/glib-2.0/schemas
@@ -28,4 +20,16 @@ systemctl disable systemd-networkd.service systemd-networkd.socket
 # 에이전트 데몬은 처음 붙을 때 뜬다 (소켓 활성화). 자체 컴포넌트를 빌드하지 않은 이미지에는 없다
 if [[ -e /usr/lib/systemd/user/buntd-agent.socket ]]; then
 	systemctl --global enable buntd-agent.socket
+fi
+
+# 로그인 화면(greetd와 bunt-greeter). 이미지에는 사용자 계정이 없다: 처음 켜면 로그인 화면이 계정을
+# 만들고(buntd-setup), 시험·개발용 VM은 부팅 때 자격 증명 buntos.account로 미리 만든다
+# (buntos-account.service). VT1은 로그인 화면이 쓰므로 tty1의 텍스트 로그인을 막는다. mkosi의
+# Autologin=yes가 거기에 root 자동 로그인을 붙이기 때문이다(직렬 콘솔의 root 자동 로그인은 남는다).
+# 자체 컴포넌트를 빌드하지 않은 이미지에는 로그인 화면이 없으므로 greetd를 끈다
+if [[ -x /usr/bin/bunt-greeter ]]; then
+	systemctl enable greetd.service buntos-account.service
+	systemctl mask getty@tty1.service
+else
+	systemctl disable greetd.service
 fi

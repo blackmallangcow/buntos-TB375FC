@@ -3,10 +3,14 @@
 
 //! 선언형 설정 (ARCHITECTURE D7). 기본값은 data/comp.toml에 있다.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
 const DEFAULT: &str = include_str!("../data/comp.toml");
 const SYSTEM_PATH: &str = "/etc/buntos/comp.toml";
+/// 설정 파일을 바꾸는 환경 변수. 로그인 화면은 사용자 세션과 다른 셸을 띄운다
+const PATH_VARIABLE: &str = "BUNT_COMP_CONFIG";
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -74,13 +78,18 @@ pub struct Session {
 
 impl Config {
     pub fn load() -> Self {
-        match std::fs::read_to_string(SYSTEM_PATH) {
+        let path = std::env::var_os(PATH_VARIABLE)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(SYSTEM_PATH));
+        match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str(&text) {
                 Ok(config) => return config,
-                Err(err) => tracing::warn!("{SYSTEM_PATH}: {err}; using built-in defaults"),
+                Err(err) => {
+                    tracing::warn!("{}: {err}; using built-in defaults", path.display())
+                }
             },
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-                tracing::warn!("{SYSTEM_PATH}: {err}; using built-in defaults")
+                tracing::warn!("{}: {err}; using built-in defaults", path.display())
             }
             Err(_) => {}
         }

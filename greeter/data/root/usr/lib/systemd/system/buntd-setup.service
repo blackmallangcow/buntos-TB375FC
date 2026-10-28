@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 처음 켤 때 계정을 만드는 시스템 서비스 (org.buntos.Setup1, 버스 활성화). 쓰이지 않으면 스스로 끝난다
+
+[Unit]
+Description=buntOS first-boot account setup
+
+[Service]
+Type=dbus
+BusName=org.buntos.Setup1
+ExecStart=/usr/libexec/buntos/buntd-setup
+# 계정 도구(useradd, chpasswd)가 /etc와 /home에 쓴다. 나머지는 막는다
+ProtectSystem=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_NETLINK

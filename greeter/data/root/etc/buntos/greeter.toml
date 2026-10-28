@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 로그인 화면의 컴포지터 설정. 로그인 화면 세션(/usr/libexec/buntos/greeter-session)이
+# BUNT_COMP_CONFIG로 이 파일을 준다. 사용자 세션의 기본값은 comp/data/comp.toml이다
+
+[wallpaper]
+# 로그인 화면이 흐린 배경화면을 그리기 전에 잠깐 보인다
+top = "#1d2433"
+bottom = "#3b3550"
+
+[keyboard]
+layout = "us"
+repeat-delay = 200
+repeat-rate = 25
+
+[effects]
+# 로그인 화면에는 셸 유리가 없다
+blur = false
+
+[cursor]
+theme = "Adwaita"
+size = 24
+
+[session]
+# 로그인 화면. bunt-greeter가 끝나면 이 컴포지터도 끝낸다
+shell = ["/usr/libexec/buntos/greeter-shell"]
+# 계정을 만들 때 전체 이름을 한글로 쓸 수 있게 입력기를 띄운다 (Ctrl+Space, 한/영)
+input-method = ["fcitx5"]
+startup = []
+# 로그인 화면에서는 터미널(Alt+Enter)을 열지 않는다
+terminal = []

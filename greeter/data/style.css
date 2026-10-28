@@ -1,0 +1,260 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * 로그인 화면과 계정 만들기의 모양. macOS 26 로그인 창과 설정 지원을 따른다: 흐린 배경화면 위에
+ * 흰 글씨, 가운데 카드. 색·모서리·글자 크기는 theme/tokens.css의 변수를 쓴다
+ */
+
+/* 로그인 화면에만 쓰는 크기와 색. 다음 토큰 개편 때 theme/tokens.css로 옮긴다 */
+:root {
+  --greeter-clock-size: 88px;
+  --greeter-date-size: 20px;
+  --greeter-dim: rgba(0, 0, 0, 0.14);
+  --greeter-placeholder: rgba(255, 255, 255, 0.62);
+}
+
+window.greeter,
+window.greeter.background {
+  /* 배경화면을 읽지 못했을 때의 바탕 */
+  background: var(--menubar-solid);
+  color: var(--on-wallpaper);
+  font-family: var(--font-family);
+  font-size: var(--text-body);
+}
+
+.greeter-dim {
+  background: var(--greeter-dim);
+}
+
+/* 시각 */
+.greeter-clock {
+  margin-top: 64px;
+}
+
+.greeter-date {
+  font-size: var(--greeter-date-size);
+  font-weight: 600;
+  text-shadow: var(--on-wallpaper-shadow);
+}
+
+.greeter-time {
+  font-size: var(--greeter-clock-size);
+  font-weight: 700;
+  font-feature-settings: "tnum";
+  text-shadow: var(--on-wallpaper-shadow);
+}
+
+/* 사진, 이름, 암호 칸 */
+.greeter-account {
+  margin-bottom: 56px;
+}
+
+.avatar {
+  border-radius: var(--radius-capsule);
+}
+
+.avatar.monogram {
+  background-image: linear-gradient(to bottom, color-mix(in srgb, var(--gray) 70%, white), var(--gray));
+  color: var(--on-wallpaper);
+}
+
+.monogram-text {
+  font-weight: 600;
+}
+
+.greeter-user-name {
+  font-size: var(--text-title2);
+  font-weight: 600;
+  text-shadow: var(--on-wallpaper-shadow);
+}
+
+button.greeter-user {
+  padding: 8px;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: none;
+  box-shadow: none;
+  color: var(--on-wallpaper);
+  opacity: 0.6;
+}
+
+button.greeter-user:hover {
+  background: var(--on-wallpaper-hover);
+}
+
+button.greeter-user.selected {
+  opacity: 1;
+}
+
+entry.greeter-password {
+  min-height: 30px;
+  padding: 0 34px 0 14px;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--on-wallpaper-hover);
+  box-shadow: inset 0 0 0 1px var(--glass-highlight);
+  color: var(--on-wallpaper);
+  caret-color: var(--on-wallpaper);
+}
+
+entry.greeter-password:focus-within {
+  box-shadow: inset 0 0 0 1px var(--glass-highlight), 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+entry.greeter-password > text > placeholder {
+  color: var(--greeter-placeholder);
+}
+
+entry.greeter-password image {
+  color: var(--on-wallpaper);
+}
+
+button.greeter-go {
+  min-width: 24px;
+  min-height: 24px;
+  margin-right: 3px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--on-wallpaper-hover);
+  box-shadow: none;
+  color: var(--on-wallpaper);
+}
+
+.greeter-spinner {
+  margin-right: 7px;
+  color: var(--on-wallpaper);
+}
+
+.greeter-message {
+  font-size: var(--text-callout);
+  text-shadow: var(--on-wallpaper-shadow);
+}
+
+/* 암호가 틀리면 칸이 좌우로 흔들린다 (macOS). 길이는 login.rs의 SHAKE와 같다 */
+@keyframes shake {
+  0% { transform: translateX(0); }
+  15% { transform: translateX(-12px); }
+  30% { transform: translateX(10px); }
+  45% { transform: translateX(-8px); }
+  60% { transform: translateX(6px); }
+  75% { transform: translateX(-3px); }
+  100% { transform: translateX(0); }
+}
+
+.greeter-field.shake {
+  animation: shake 450ms ease-out;
+}
+
+/* 다시 시작, 시스템 종료 */
+.greeter-power-row {
+  margin-bottom: 36px;
+}
+
+button.greeter-power {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--on-wallpaper-hover);
+  box-shadow: none;
+  color: var(--on-wallpaper);
+}
+
+button.greeter-power:hover {
+  background: color-mix(in srgb, var(--on-wallpaper-hover) 60%, var(--on-wallpaper));
+}
+
+.greeter-power-label {
+  font-size: var(--text-footnote);
+  text-shadow: var(--on-wallpaper-shadow);
+}
+
+/* 계정 만들기: 흐린 배경화면 가운데의 밝은 카드 (macOS 설정 지원) */
+.setup-card {
+  margin: 32px;
+  padding: 32px 40px 24px;
+  border-radius: var(--radius-xl);
+  background: var(--content-bg);
+  box-shadow: var(--shadow-panel);
+  color: var(--label);
+}
+
+.setup-badge {
+  border-radius: var(--radius-capsule);
+  background-image: linear-gradient(to bottom, color-mix(in srgb, var(--gray) 70%, white), var(--gray));
+  color: var(--accent-fg);
+}
+
+.setup-title {
+  font-size: var(--text-title1);
+  font-weight: 700;
+}
+
+.setup-description {
+  color: var(--label-secondary);
+}
+
+.setup-form {
+  padding: 16px 20px;
+  border-radius: var(--radius-md);
+  background: var(--group-bg);
+}
+
+.setup-label {
+  min-width: 76px;
+}
+
+.setup-hint {
+  font-size: var(--text-footnote);
+  color: var(--label-secondary);
+}
+
+.setup-error {
+  font-size: var(--text-callout);
+  color: var(--red);
+}
+
+.setup-status {
+  color: var(--label-secondary);
+}
+
+.setup-card entry {
+  min-height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--content-bg);
+  box-shadow: inset 0 0 0 1px var(--separator);
+  color: var(--label);
+}
+
+.setup-card entry:focus-within {
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.setup-card entry image {
+  color: var(--label-secondary);
+}
+
+.setup-card button {
+  min-height: 26px;
+  padding: 2px 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background-image: none;
+  background-color: var(--control-bg);
+  box-shadow: none;
+  color: var(--label);
+}
+
+.setup-card button.suggested-action {
+  background-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.setup-card button:disabled {
+  opacity: 0.5;
+}

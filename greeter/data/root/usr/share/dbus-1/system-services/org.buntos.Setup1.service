@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 로그인 화면이 처음 부르면 buntd-setup을 띄운다 (버스 활성화)
+
+[D-BUS Service]
+Name=org.buntos.Setup1
+Exec=/bin/false
+User=root
+SystemdService=buntd-setup.service

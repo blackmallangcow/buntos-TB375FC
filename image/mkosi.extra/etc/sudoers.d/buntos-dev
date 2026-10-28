@@ -1,5 +1,0 @@
-# SPDX-FileCopyrightText: 2026 buntOS contributors
-# SPDX-License-Identifier: GPL-3.0-or-later
-#
-# Phase 0 개발용: 사용자 계정과 권한 모델을 설계하기 전까지 buntos 사용자는 암호 없이 sudo를 쓴다
-buntos ALL=(ALL:ALL) NOPASSWD: ALL

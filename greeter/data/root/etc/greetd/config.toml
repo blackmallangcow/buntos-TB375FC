@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# buntOS 로그인 관리자. greetd가 VT1에 로그인 화면을 로그인 화면 사용자(_greetd, Debian greetd
+# 패키지의 sysusers.d)로 띄운다. 로그인 화면(bunt-greeter)이 암호를 확인하고 사용자 세션을
+# 예약하면(start_session), 로그인 화면이 끝난 뒤 같은 VT에서 그 세션을 연다.
+# 세션이 끝나면(로그아웃) 로그인 화면이 다시 뜬다. Debian 패키지의 원래 파일을 바꾼 것이다
+
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/libexec/buntos/greeter-session"
+user = "_greetd"
