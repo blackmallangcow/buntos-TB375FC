@@ -13,6 +13,7 @@ mod input;
 mod panels;
 mod prefs;
 mod render;
+mod shmdiff;
 mod state;
 mod toplevels;
 mod udev;

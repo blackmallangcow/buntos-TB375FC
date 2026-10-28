@@ -236,10 +236,13 @@ impl BuntState {
             return;
         };
         let source = event.source();
+        // 시스템 설정의 스크롤 속도 (배수)
+        let speed = self.pointer_prefs().scroll_speed;
         let amount = |axis: Axis| {
             event
                 .amount(axis)
                 .unwrap_or_else(|| event.amount_v120(axis).unwrap_or(0.0) * 15.0 / 120.0)
+                * speed
         };
 
         let mut frame = AxisFrame::new(event.time_msec()).source(source);
@@ -248,7 +251,7 @@ impl BuntState {
             if value != 0.0 {
                 frame = frame.value(axis, value);
                 if let Some(discrete) = event.amount_v120(axis) {
-                    frame = frame.v120(axis, discrete as i32);
+                    frame = frame.v120(axis, (discrete * speed).round() as i32);
                 }
             }
             if source == AxisSource::Finger && event.amount(axis) == Some(0.0) {

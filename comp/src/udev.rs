@@ -5,6 +5,7 @@
 //! 하드웨어 GPU가 없는 VM에서는 Mesa의 소프트웨어 렌더러(llvmpipe)로 그린다.
 
 use std::{
+    cell::Cell,
     cmp::Reverse,
     collections::HashMap,
     error::Error,
@@ -27,6 +28,7 @@ use smithay::{
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
         egl::{EGLContext, EGLDisplay},
+        input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             ImportMemWl,
@@ -48,16 +50,20 @@ use smithay::{
             update_surface_primary_scanout_output, with_surfaces_surface_tree,
         },
     },
-    input::pointer::{CursorImageStatus, CursorImageSurfaceData},
+    input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     output::{Mode as WlMode, Output, PhysicalProperties, Scale as OutputScale},
     reexports::{
         calloop::{
             EventLoop, RegistrationToken,
             timer::{TimeoutAction, Timer},
         },
-        drm::control::{Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, connector, crtc},
-        input::Libinput,
+        drm::{
+            ClientCapability, Device as _,
+            control::{Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, connector, crtc},
+        },
+        input::{Device as InputDevice, DeviceCapability, Libinput},
         rustix::fs::OFlags,
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{Display, backend::GlobalId, protocol::wl_surface::WlSurface},
     },
     utils::{DeviceFd, IsAlive, Logical, Physical, Point, Scale, Size, Transform},
@@ -68,8 +74,8 @@ use crate::{
     blur::Blur,
     config::{Config, parse_hex_color},
     cursor::Cursor,
-    dbus::{Command, OutputInfo},
-    prefs::ModePref,
+    dbus::{Command, OutputInfo, PointerDevice},
+    prefs::{ModePref, PointerPrefs},
     render::{self, OutputRenderElements},
     state::BuntState,
 };
@@ -84,6 +90,8 @@ const IDLE_REDRAW: Duration = Duration::from_millis(16);
 const SLOW_FRAME: Duration = Duration::from_millis(12);
 /// 소프트웨어 렌더러에서 프레임 사이의 최소 간격 (60Hz)
 const SOFTWARE_FRAME: Duration = Duration::from_micros(16_667);
+/// 소프트웨어 렌더러에서 앞에 있지 않은 창에 프레임 알림을 보내는 간격 (30Hz)
+const BACKGROUND_FRAME: Duration = Duration::from_micros(33_333);
 /// 화면에 보이지 않은 표면(다른 창에 다 가려진 창, 숨은 막대)에 프레임 알림을 보내는 간격
 const HIDDEN_FRAME_INTERVAL: Option<Duration> = Some(Duration::from_secs(1));
 const CLEAR_COLOR: [f32; 4] = [0.08, 0.08, 0.1, 1.0];
@@ -109,10 +117,13 @@ pub struct UdevData {
     output_manager: DrmOutputManager<Allocator, Exporter, (), DrmDeviceFd>,
     outputs: HashMap<crtc::Handle, OutputSurface>,
     cursor: Cursor,
-    /// 기본 화살표 커서. 출력의 배율이 바뀌면 그 배율의 이미지로 다시 만든다
+    /// 컴포지터가 그리는 커서(기본 화살표, 앱이 모양으로 고른 커서). 모양, 출력 배율, 크기가 바뀌면
+    /// 다시 만든다
     cursor_buffer: MemoryRenderBuffer,
     cursor_hotspot: Point<f64, Logical>,
-    cursor_scale: i32,
+    cursor_key: Option<(CursorIcon, i32, u32)>,
+    /// 연결된 포인터 장치(마우스, 터치패드). 시스템 설정의 마우스 설정을 쓴다
+    pointer_devices: Vec<InputDevice>,
     /// 셸 유리 뒤 흐림 (blur.rs)
     blur: Blur,
     /// GPU 없이 CPU로 그린다 (llvmpipe 등)
@@ -124,6 +135,9 @@ impl UdevData {
         self.session.seat()
     }
 }
+
+/// 뒤에 있는 창에 마지막으로 프레임 알림을 보낸 때 (BACKGROUND_FRAME)
+struct BackgroundFrame(Cell<Duration>);
 
 struct OutputSurface {
     output: Output,
@@ -181,6 +195,19 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
     )?;
     let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+    // 가상 GPU(virtio-gpu 등)의 커널은 커서 핫스폿을 알리겠다고 한 클라이언트에게만 커서 평면을
+    // 보인다. smithay는 이 기능을 켜지 않아 커서를 늘 화면에 합성했다. 이 기능은 원자적 모드를 켠
+    // 뒤라야 켜지고, smithay는 DrmDevice를 만들 때 본 평면만 쓰므로 DrmDevice보다 먼저 둘 다 켠다.
+    // 핫스폿 속성은 0으로 남지만, smithay가 커서 평면을 핫스폿만큼 옮겨 놓으므로 커서는 제자리에 그려진다
+    if fd
+        .set_client_capability(ClientCapability::Atomic, true)
+        .is_ok()
+        && fd
+            .set_client_capability(ClientCapability::CursorPlaneHotspot, true)
+            .is_ok()
+    {
+        tracing::info!("virtual cursor plane enabled");
+    }
     let (drm, drm_notifier) = DrmDevice::new(fd.clone(), true)?;
     let gbm = GbmDevice::new(fd)?;
 
@@ -205,7 +232,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     );
 
     let cursor = Cursor::load(&config.cursor.theme, config.cursor.size);
-    let (cursor_buffer, cursor_hotspot) = cursor.buffer(1);
+    let (cursor_buffer, cursor_hotspot) = cursor.buffer(CursorIcon::Default, 1);
 
     let backend = UdevData {
         session,
@@ -215,7 +242,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         cursor,
         cursor_buffer,
         cursor_hotspot,
-        cursor_scale: 1,
+        cursor_key: None,
+        pointer_devices: Vec::new(),
         blur: Blur::default(),
         software,
     };
@@ -227,6 +255,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         backend,
     )?;
     state.shm_state.update_formats(shm_formats);
+    state.apply_pointer_prefs();
 
     event_loop
         .handle()
@@ -263,7 +292,14 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         .handle()
         .insert_source(
             LibinputInputBackend::new(libinput.clone()),
-            |event, _, state| state.process_input_event(event),
+            |event, _, state| {
+                match &event {
+                    InputEvent::DeviceAdded { device } => state.pointer_device_added(device),
+                    InputEvent::DeviceRemoved { device } => state.pointer_device_removed(device),
+                    _ => {}
+                }
+                state.process_input_event(event)
+            },
         )
         .map_err(|err| err.error)?;
 
@@ -760,6 +796,63 @@ impl BuntState {
         }
     }
 
+    /// 포인터 장치가 연결됐다. 마우스 설정을 쓰고 시스템 설정에 알린다
+    fn pointer_device_added(&mut self, device: &InputDevice) {
+        if !device.has_capability(DeviceCapability::Pointer) {
+            return;
+        }
+        let mut device = device.clone();
+        apply_pointer(&mut device, self.pointer_prefs());
+        tracing::info!("pointer device: {}", device.name());
+        self.backend.pointer_devices.push(device);
+        self.publish_pointer_devices();
+    }
+
+    fn pointer_device_removed(&mut self, device: &InputDevice) {
+        let before = self.backend.pointer_devices.len();
+        self.backend.pointer_devices.retain(|known| known != device);
+        if self.backend.pointer_devices.len() != before {
+            self.publish_pointer_devices();
+        }
+    }
+
+    fn publish_pointer_devices(&mut self) {
+        let devices = self
+            .backend
+            .pointer_devices
+            .iter()
+            .map(device_info)
+            .collect();
+        self.dbus
+            .update(|snapshot| snapshot.pointer_devices = devices);
+        self.dbus.send(Command::PointerDevicesChanged);
+    }
+
+    /// 시스템 설정이 마우스 설정을 바꿨다. 다음 로그인에도 쓴다
+    pub fn set_pointer_prefs(&mut self, prefs: PointerPrefs) {
+        self.prefs.pointer = Some(prefs);
+        self.prefs.save();
+        self.apply_pointer_prefs();
+        tracing::info!(
+            "pointer: speed {}, natural scroll {}, left handed {}, scroll {}x, cursor {}px",
+            prefs.speed,
+            prefs.natural_scroll,
+            prefs.left_handed,
+            prefs.scroll_speed,
+            prefs.cursor_size
+        );
+    }
+
+    /// 마우스 설정을 연결된 장치와 커서에 쓴다
+    pub fn apply_pointer_prefs(&mut self) {
+        let prefs = self.pointer_prefs();
+        for device in &mut self.backend.pointer_devices {
+            apply_pointer(device, prefs);
+        }
+        self.backend.cursor.set_size(prefs.cursor_size);
+        self.dbus.update(|snapshot| snapshot.pointer = prefs);
+    }
+
     /// 표면마다 이번 프레임에 그 출력에 보였는지 적는다 (프레임 알림을 줄 표면을 고를 때 쓴다)
     fn note_visible_surfaces(&self, output: &Output, states: &RenderElementStates) {
         let update = |surface: &WlSurface, data: &SurfaceData| {
@@ -817,7 +910,7 @@ impl BuntState {
             cursor,
             cursor_buffer,
             cursor_hotspot,
-            cursor_scale,
+            cursor_key,
             blur,
             ..
         } = &mut self.backend;
@@ -867,11 +960,11 @@ impl BuntState {
                         .map(OutputRenderElements::Surface),
                     );
                 }
-                CursorImageStatus::Named(_) => {
-                    let wanted = output.current_scale().integer_scale();
-                    if *cursor_scale != wanted {
-                        (*cursor_buffer, *cursor_hotspot) = cursor.buffer(wanted);
-                        *cursor_scale = wanted;
+                CursorImageStatus::Named(icon) => {
+                    let key = (*icon, output.current_scale().integer_scale(), cursor.size());
+                    if *cursor_key != Some(key) {
+                        (*cursor_buffer, *cursor_hotspot) = cursor.buffer(key.0, key.1);
+                        *cursor_key = Some(key);
                     }
                     let location = (local - *cursor_hotspot).to_physical(scale);
                     match MemoryRenderBufferRenderElement::from_buffer(
@@ -962,6 +1055,21 @@ impl BuntState {
         // 애니메이션(시스템 모니터의 그래프 등)이 계속 그려지며 CPU를 쓰지 않게 한다
         let elapsed = self.start_time.elapsed();
         for window in self.space.elements() {
+            // 소프트웨어 렌더러에서는 앞에 있지 않은 창(시스템 모니터의 그래프 등)이 애니메이션을
+            // 30Hz로 그리게 한다. 뒤의 창이 60Hz로 그리면 그 합성만으로 CPU 한 코어의 절반을 썼다
+            if self.backend.software
+                && !window.toplevel().is_some_and(|toplevel| {
+                    Self::has_state(toplevel, xdg_toplevel::State::Activated)
+                })
+            {
+                let last = window
+                    .user_data()
+                    .get_or_insert(|| BackgroundFrame(Cell::new(Duration::ZERO)));
+                if elapsed.saturating_sub(last.0.get()) < BACKGROUND_FRAME {
+                    continue;
+                }
+                last.0.set(elapsed);
+            }
             window.send_frame(
                 &output,
                 elapsed,
@@ -1168,6 +1276,37 @@ fn parse_edid(edid: &[u8]) -> (String, String) {
         })
         .unwrap_or_default();
     (letters.unwrap_or_default(), name)
+}
+
+/// 장치가 지원하는 마우스 설정만 쓴다 (절대 좌표 장치에는 가속이 없다)
+fn apply_pointer(device: &mut InputDevice, prefs: PointerPrefs) {
+    if device.config_accel_is_available() {
+        let _ = device.config_accel_set_speed(prefs.speed.clamp(-1.0, 1.0));
+    }
+    if device.config_scroll_has_natural_scroll() {
+        let _ = device.config_scroll_set_natural_scroll_enabled(prefs.natural_scroll);
+    }
+    if device.config_left_handed_is_available() {
+        let _ = device.config_left_handed_set(prefs.left_handed);
+    }
+}
+
+/// 시스템 설정에 보일 장치 정보. 연결 방식은 udev의 ID_BUS다 (usb, bluetooth 등)
+fn device_info(device: &InputDevice) -> PointerDevice {
+    // 안전: udev 장치는 libinput 장치(device)가 사는 동안 쓴다
+    let bus = unsafe { device.udev_device() }
+        .and_then(|udev| {
+            udev.property_value("ID_BUS")
+                .map(|bus| bus.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    PointerDevice {
+        name: device.name().to_owned(),
+        vendor: device.id_vendor(),
+        product: device.id_product(),
+        bus,
+        touchpad: device.config_tap_finger_count() > 0,
+    }
 }
 
 /// GPU 없이 CPU로 그리는 Mesa 렌더러인지 (GL_RENDERER: "llvmpipe (LLVM …)", "softpipe")

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 사용자가 시스템 설정에서 고른 값(화면 모드와 배율, 키 반복). 다음 로그인에도 쓰도록
+//! 사용자가 시스템 설정에서 고른 값(화면 모드와 배율, 키 반복, 마우스). 다음 로그인에도 쓰도록
 //! `$XDG_CONFIG_HOME/buntos/comp-state.toml`에 저장하며, 시스템 기본값(comp.toml)보다 앞선다.
 
 use std::{io::ErrorKind, path::PathBuf};
@@ -14,6 +14,8 @@ const FILE_NAME: &str = "comp-state.toml";
 pub struct Prefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyboard: Option<KeyRepeat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer: Option<PointerPrefs>,
     #[serde(default, rename = "output", skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputPrefs>,
 }
@@ -23,6 +25,36 @@ pub struct Prefs {
 pub struct KeyRepeat {
     pub delay: u32,
     pub rate: u32,
+}
+
+/// 마우스: 이동 속도(libinput 가속, -1~1), 자연스러운 스크롤, 보조 클릭을 왼쪽 단추로(왼손잡이),
+/// 스크롤 속도(배수), 커서 크기(논리 픽셀)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PointerPrefs {
+    pub speed: f64,
+    pub natural_scroll: bool,
+    pub left_handed: bool,
+    pub scroll_speed: f64,
+    pub cursor_size: u32,
+}
+
+impl PointerPrefs {
+    /// 고르기 전의 값. 커서 크기는 comp.toml의 [cursor] size다
+    pub fn with_cursor_size(cursor_size: u32) -> Self {
+        Self {
+            speed: 0.0,
+            natural_scroll: false,
+            left_handed: false,
+            scroll_speed: 1.0,
+            cursor_size,
+        }
+    }
+}
+
+impl Default for PointerPrefs {
+    fn default() -> Self {
+        Self::with_cursor_size(24)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

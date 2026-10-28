@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 컴포지터 제어 D-Bus 서비스 (세션 버스 `org.buntos.Compositor`). 시스템 설정이 화면(해상도,
-//! 배율)과 키 반복을 읽고 바꾸고, 셸이 메뉴 막대·Dock 가리기 설정을 알린다.
+//! 배율), 키 반복, 마우스를 읽고 바꾸고 연결된 포인터 장치를 읽으며, 셸이 메뉴 막대·Dock 가리기
+//! 설정을 알린다.
 //! 버스 일은 따로 도는 스레드가 맡는다. 읽기는 컴포지터가 미리
 //! 적어 둔 사본(Snapshot)으로 답하고, 바꾸기는 값을 확인한 뒤 이벤트 루프로 넘긴다.
 //! 입력 소스 전환처럼 컴포지터가 다른 프로그램을 부르는 일도 이 스레드가 한다.
@@ -14,7 +15,11 @@ use std::{
 
 use smithay::reexports::calloop::channel::Sender as LoopSender;
 
-use crate::panels::{Autohide, Panels};
+use crate::{
+    cursor,
+    panels::{Autohide, Panels},
+    prefs::PointerPrefs,
+};
 use zbus::{
     Message, blocking, fdo, interface,
     object_server::SignalEmitter,
@@ -55,12 +60,27 @@ pub struct OutputInfo {
     pub physical_height: i32,
 }
 
+/// 연결된 포인터 장치 하나 (마우스, 터치패드 등)
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PointerDevice {
+    /// 장치가 알린 이름. 모르면 빈 문자열
+    pub name: String,
+    /// USB 제조사·제품 번호. 모르면 0
+    pub vendor: u32,
+    pub product: u32,
+    /// 연결 방식 (udev의 ID_BUS: usb, bluetooth 등). 모르면 빈 문자열
+    pub bus: String,
+    pub touchpad: bool,
+}
+
 /// 컴포지터 상태의 사본. 컴포지터가 바뀔 때마다 고쳐 쓴다
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub outputs: Vec<OutputInfo>,
     pub repeat_delay: u32,
     pub repeat_rate: u32,
+    pub pointer: PointerPrefs,
+    pub pointer_devices: Vec<PointerDevice>,
 }
 
 /// D-Bus에서 이벤트 루프로 넘기는 변경 요청 (값은 이미 확인했다)
@@ -81,6 +101,7 @@ pub enum Request {
         rate: u32,
     },
     Panels(Panels),
+    Pointer(PointerPrefs),
 }
 
 /// 컴포지터가 D-Bus 스레드에 시키는 일
@@ -88,6 +109,8 @@ pub enum Request {
 pub enum Command {
     /// OutputsChanged 신호를 보낸다
     OutputsChanged,
+    /// PointerDevicesChanged 신호를 보낸다
+    PointerDevicesChanged,
     /// 입력 소스를 바꾼다 (한/영 전환)
     ToggleInputMethod,
 }
@@ -148,6 +171,17 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
                     &(),
                 ) {
                     tracing::warn!("failed to emit OutputsChanged: {err}");
+                }
+            }
+            Command::PointerDevicesChanged => {
+                if let Err(err) = connection.emit_signal(
+                    None::<&str>,
+                    OBJECT_PATH,
+                    INTERFACE,
+                    "PointerDevicesChanged",
+                    &(),
+                ) {
+                    tracing::warn!("failed to emit PointerDevicesChanged: {err}");
                 }
             }
             Command::ToggleInputMethod => toggle_input_method(&connection),
@@ -326,6 +360,66 @@ impl Api {
         })
     }
 
+    /// 마우스 설정: (이동 속도 -1~1, 자연스러운 스크롤, 보조 클릭을 왼쪽 단추로, 스크롤 속도 배수,
+    /// 커서 크기 논리 픽셀)
+    fn get_pointer(&self) -> (f64, bool, bool, f64, u32) {
+        let pointer = self.snapshot.lock().unwrap().pointer;
+        (
+            pointer.speed,
+            pointer.natural_scroll,
+            pointer.left_handed,
+            pointer.scroll_speed,
+            pointer.cursor_size,
+        )
+    }
+
+    /// 마우스 설정을 바꾸고 다음 로그인에도 쓴다. 연결된 장치와 나중에 연결하는 장치에 모두 쓴다
+    fn set_pointer(
+        &self,
+        speed: f64,
+        natural_scroll: bool,
+        left_handed: bool,
+        scroll_speed: f64,
+        cursor_size: u32,
+    ) -> fdo::Result<()> {
+        let (min_size, max_size) = cursor::SIZE_RANGE;
+        if !(-1.0..=1.0).contains(&speed)
+            || !(0.25..=4.0).contains(&scroll_speed)
+            || !(min_size..=max_size).contains(&cursor_size)
+        {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "speed must be -1..=1, scroll speed 0.25..=4 and cursor size \
+                 {min_size}..={max_size} (got {speed}, {scroll_speed}, {cursor_size})"
+            )));
+        }
+        self.request(Request::Pointer(PointerPrefs {
+            speed,
+            natural_scroll,
+            left_handed,
+            scroll_speed,
+            cursor_size,
+        }))
+    }
+
+    /// 연결된 포인터 장치. 장치마다 name(s), vendor(u), product(u), bus(s: usb, bluetooth 등.
+    /// 모르면 빈 문자열), touchpad(b)
+    fn get_pointer_devices(&self) -> Vec<HashMap<String, Value<'static>>> {
+        let snapshot = self.snapshot.lock().unwrap();
+        snapshot
+            .pointer_devices
+            .iter()
+            .map(|device| {
+                HashMap::from([
+                    ("name".to_owned(), Value::from(device.name.clone())),
+                    ("vendor".to_owned(), Value::from(device.vendor)),
+                    ("product".to_owned(), Value::from(device.product)),
+                    ("bus".to_owned(), Value::from(device.bus.clone())),
+                    ("touchpad".to_owned(), Value::from(device.touchpad)),
+                ])
+            })
+            .collect()
+    }
+
     /// 셸이 메뉴 막대와 Dock 설정을 알린다 (org.buntos.shell의 menu-bar-autohide, dock-autohide,
     /// menu-bar-background). 가리기 값은 never, fullscreen, maximized, always다.
     /// 최대화·전체 화면 창이 채우는 영역과 메뉴 막대 흐림이 바뀐다. 다음 로그인에는 셸이 다시 알린다
@@ -352,4 +446,8 @@ impl Api {
     /// 모드, 배율, 연결이 바뀐 뒤 보낸다
     #[zbus(signal)]
     async fn outputs_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    /// 포인터 장치를 연결하거나 뺀 뒤 보낸다
+    #[zbus(signal)]
+    async fn pointer_devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }

@@ -153,9 +153,15 @@ impl PointerGrab<BuntState> for MoveSurfaceGrab {
         handle.motion(data, None, event);
 
         let delta = event.location - self.start_data.location;
-        let new_location = self.initial_window_location.to_f64() + delta;
+        let mut new_location: Point<i32, Logical> =
+            (self.initial_window_location.to_f64() + delta).to_i32_round();
+        // macOS처럼 창의 위쪽 끝(제목 막대)은 메뉴 막대를 넘지 못한다. 메뉴 막대 밑으로 들어간 제목
+        // 막대는 다시 잡을 수 없기 때문이다. 아래쪽 Dock은 넘어가도 된다
+        if let Some(top) = data.window_top() {
+            new_location.y = new_location.y.max(top);
+        }
         data.space
-            .map_element(self.window.clone(), new_location.to_i32_round(), true);
+            .map_element(self.window.clone(), new_location, true);
     }
 
     fn button(
@@ -254,6 +260,13 @@ impl PointerGrab<BuntState> for ResizeSurfaceGrab {
         }
         if self.edges.top || self.edges.bottom {
             size.h = (f64::from(size.h) + delta.y) as i32;
+        }
+        // 위쪽 가장자리를 끌어도 창의 위쪽 끝은 메뉴 막대를 넘지 못한다 (옮기기와 같다)
+        if self.edges.top
+            && let Some(top) = data.window_top()
+        {
+            let bottom = self.initial_rect.loc.y + self.initial_rect.size.h;
+            size.h = size.h.min(bottom - top);
         }
 
         let (min_size, max_size) = with_states(toplevel.wl_surface(), |states| {

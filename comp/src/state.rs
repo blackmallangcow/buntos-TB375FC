@@ -14,8 +14,9 @@ use std::{
 
 use smithay::{
     backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
-    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
-    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_dialog, delegate_xdg_shell,
+    delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_fractional_scale,
+    delegate_output, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_dialog,
+    delegate_xdg_shell,
     desktop::{
         LayerSurface, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
         PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -55,6 +56,7 @@ use smithay::{
             TraversalAction, get_parent, is_sync_subsurface, send_surface_state, with_states,
             with_surface_tree_downward,
         },
+        cursor_shape::CursorShapeManagerState,
         fractional_scale::{
             FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
         },
@@ -82,6 +84,7 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
+        tablet_manager::TabletSeatHandler,
         text_input::TextInputManagerState,
         viewporter::ViewporterState,
         virtual_keyboard::VirtualKeyboardManagerState,
@@ -94,8 +97,8 @@ use crate::{
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, handle_resize_commit},
     ime::InputMethodProcess,
     panels::{self, Bar, BarInput, Edge, Fill, Panels, Reveal},
-    prefs::{KeyRepeat, Prefs},
-    render,
+    prefs::{KeyRepeat, PointerPrefs, Prefs},
+    render, shmdiff,
     toplevels::ForeignToplevelState,
     udev::UdevData,
 };
@@ -182,6 +185,9 @@ impl BuntState {
         );
         // 앱이 모달 대화 상자(GTK의 모달 창, 시스템 설정의 시트)를 알린다. focus_window가 쓴다
         XdgDialogState::new::<Self>(&dh);
+        // 앱이 커서 이미지를 직접 그리지 않고 모양(글자 입력, 손가락 등)만 알린다. 모든 앱의 커서가
+        // 시스템 설정에서 고른 크기로 같게 보이고, 컴포지터가 그린 커서는 커서 평면에 오른다
+        CursorShapeManagerState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
@@ -692,6 +698,12 @@ impl BuntState {
         self.window_area(Fill::Normal)
     }
 
+    /// 창을 옮기거나 크기를 바꿀 때 창의 위쪽 끝이 올라갈 수 있는 가장 높은 곳 (메뉴 막대 아래 끝.
+    /// 메뉴 막대가 늘 숨으면 화면 위 끝)
+    pub fn window_top(&self) -> Option<i32> {
+        self.usable_area().map(|area| area.loc.y)
+    }
+
     /// 창이 놓일 영역 (전역 좌표). 출력 전체에서 그 창이 덮지 않는 레이어의 독점 영역을 뺀다.
     /// 메뉴 막대와 Dock은 자동 가리기 설정(panels)을 따르고, 다른 레이어는 전체 화면 창만 덮는다
     fn window_area(&self, fill: Fill) -> Option<Rectangle<i32, Logical>> {
@@ -1115,6 +1127,8 @@ impl CompositorHandler for BuntState {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // 버퍼 전체를 손상으로 알리는 앱(GTK의 cairo 렌더러)은 실제로 바뀐 곳만 다시 그린다
+        shmdiff::narrow_damage(surface);
         on_commit_buffer_handler::<Self>(surface);
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
@@ -1760,7 +1774,15 @@ impl BuntState {
             Request::OutputScale { name, scale } => self.set_output_scale(&name, scale),
             Request::KeyboardRepeat { delay, rate } => self.set_keyboard_repeat(delay, rate),
             Request::Panels(panels) => self.set_panels(panels),
+            Request::Pointer(pointer) => self.set_pointer_prefs(pointer),
         }
+    }
+
+    /// 지금 쓰는 마우스 설정. 고른 적이 없으면 기본값과 comp.toml의 커서 크기다
+    pub fn pointer_prefs(&self) -> PointerPrefs {
+        self.prefs
+            .pointer
+            .unwrap_or_else(|| PointerPrefs::with_cursor_size(self.config.cursor.size))
     }
 
     fn set_keyboard_repeat(&mut self, delay: u32, rate: u32) {
@@ -1804,6 +1826,9 @@ delegate_xdg_shell!(BuntState);
 
 impl XdgDialogHandler for BuntState {}
 delegate_xdg_dialog!(BuntState);
+
+impl TabletSeatHandler for BuntState {}
+delegate_cursor_shape!(BuntState);
 // 레이어 셸은 smithay의 처리에 맡기고, 레이어 표면 객체가 없어질 때만 손본다
 delegate_dispatch!(BuntState: [ZwlrLayerShellV1: ()] => WlrLayerShellState);
 delegate_global_dispatch!(BuntState: [ZwlrLayerShellV1: WlrLayerShellGlobalData] => WlrLayerShellState);
