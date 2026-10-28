@@ -67,7 +67,7 @@ VM 안에서 다음을 확인한다.
 limactl shell buntos-dev tools/image/build.sh qemu-aarch64
 ```
 
-e2e 1번(부팅 → 로그인 → 셸)을 돌린다:
+e2e 1번(부팅 → 로그인 화면 → 셸)과 e2e 5번(에이전트의 앱 간 제어)을 돌린다. 시험 계정을 자격 증명으로 넘겨 부팅하고, 로그인 화면에 QMP로 암호를 쳐 들어간 뒤 sudo가 암호를 묻는지 보고, 에이전트로 그래픽 셸을 확인한 다음 e2e 5번(`tests/e2e/agent-apps.sh`)을 돌린다:
 
 ```bash
 limactl shell buntos-dev tests/e2e/boot-to-shell.sh qemu-aarch64
@@ -93,6 +93,9 @@ VMCTL_ID=mine tools/image/vmctl.sh qmp click:1200,14 sleep:1 screen:/tmp/s.png
 VMCTL_ID=mine tools/image/vmctl.sh stop
 ```
 
+- `wait-login`은 직렬 콘솔의 자동 로그인을 기다린 뒤 로그인 화면에 QMP로 암호를 쳐 그래픽 세션까지 들어간다(`VMCTL_GREETER_LOGIN=0`이면 들어가지 않는다). `login`은 로그인 화면에서 다시 들어간다(로그아웃한 뒤 등).
+- `VMCTL_ACCOUNT="계정 이름:전체 이름:암호"`로 계정을 바꾸고, `VMCTL_ACCOUNT=`(빈 값)으로 계정 없이 띄워 처음 켤 때의 계정 만들기를 본다. QMP는 영문 소문자와 숫자만 치므로 암호도 그렇게 정한다.
+
 **동작 목록.** `qmp` 동작은 `tools/image/qmp.py` 머리말에 있다: 누르기, 끌기, 키, 글자 입력, 화면 저장.
 
 **여럿이 함께 쓸 때.**
@@ -111,7 +114,11 @@ x86-64는 보드 이름만 `x86_64-generic`으로 바꾸면 된다. Apple Silico
 
 ### 그래픽 세션 보기
 
-이미지 빌드는 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings)를 먼저 컴파일해 이미지에 넣는다. 화면 장치가 있으면 tty1에서 개발용 사용자 `buntos`로 자동 로그인해 그래픽 세션을 연다. 컴포지터가 셸(bunt-shell)과 입력기(fcitx5)를 띄운다.
+이미지 빌드는 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, bunt-greeter, 에이전트)를 먼저 컴파일해 이미지에 넣는다.
+
+이미지에는 사용자 계정이 없다. 처음 켜면 로그인 화면이 계정 만들기를 보인다. 개발·시험용 VM 도구(`tools/image/vmctl.sh`, `tools/image/view-mac.sh`, e2e)는 부팅 때 systemd 자격 증명 `buntos.account`로 시험 계정 `buntos`(uid 1000, 암호 `buntos`, 관리자)를 만들어 주므로 로그인 화면이 뜬다. 암호를 치고 들어가면 컴포지터가 셸(bunt-shell)과 입력기(fcitx5)를 띄운다. 직렬 콘솔은 그대로 root로 자동 로그인한다.
+
+직렬 콘솔에서 앱을 띄우는 명령(`sudo -u buntos env ... setsid <앱> &`)은 그대로 쓸 수 있다. 이 sudo는 root가 쓰는 것이라 암호를 묻지 않는다. 그래픽 세션 안의 sudo는 `buntos` 암호를 묻는다.
 
 빌드 VM과 아키텍처가 다른 x86-64 이미지에는 자체 컴포넌트가 아직 들어가지 않는다. 필수 드라이버를 넣은 x86-64 이미지는 빌드와 e2e 1번까지 확인했고(6장), 자체 컴포넌트는 CI에서 빌드한다.
 
@@ -136,7 +143,7 @@ Mac에서 창으로 본다. Mac 터미널의 저장소 루트에서 실행하며
 tools/image/view-mac.sh
 ```
 
-빌드 VM에서 이미지(약 4GB)를 `~/Library/Caches/buntos/`로 가져온 뒤 HVF 가속으로 띄운다. 이미지는 snapshot 모드로 띄우므로 안에서 바꾼 내용은 창을 닫으면 사라진다. 같은 이미지를 다시 볼 때는 `--no-copy`를 붙이면 가져오는 단계를 건너뛰며, 이때는 빌드 VM이 꺼져 있어도 된다. Mac 메모리가 16GB 이하이면 이미지를 가져온 뒤 빌드 VM을 끄고(`limactl stop buntos-dev`) `--no-copy`로 띄우는 편이 낫다. 빌드 VM이 8GiB, 보기용 QEMU가 최대 4GiB를 쓴다.
+빌드 VM에서 이미지(약 4GB)를 `~/Library/Caches/buntos/`로 가져온 뒤 HVF 가속으로 띄운다. 이미지는 snapshot 모드로 띄우므로 안에서 바꾼 내용은 창을 닫으면 사라진다. 로그인 화면에서 `buntos`를 치고 들어간다. `--setup`이면 계정 없이 띄워 계정 만들기를 본다. 같은 이미지를 다시 볼 때는 `--no-copy`를 붙이면 가져오는 단계를 건너뛰며, 이때는 빌드 VM이 꺼져 있어도 된다. Mac 메모리가 16GB 이하이면 이미지를 가져온 뒤 빌드 VM을 끄고(`limactl stop buntos-dev`) `--no-copy`로 띄우는 편이 낫다. 빌드 VM이 8GiB, 보기용 QEMU가 최대 4GiB를 쓴다.
 
 화면은 1280×800으로 뜬다. 화면 크기(배율)는 시스템 설정의 디스플레이 페이지에서 고르고, 실제 해상도는 같은 페이지의 "고급"에서 바꾼다. 1280×800에서 고를 수 있는 크기는 100%와 125%(1024 × 640처럼 보임)다. 더 큰 배율은 해상도를 올리면 나온다(1920×1200은 175%까지). bunt-comp는 화면이 알려 주는 선호 해상도가 바뀌면 따라간다(사용자가 해상도를 고정하지 않았을 때).
 
@@ -183,6 +190,35 @@ sudo -u buntos XDG_RUNTIME_DIR=/run/user/1000 bunt agent snapshot -i
 - `--diff`는 지난번과 달라진 줄만 낸다.
 - 데몬 기록(요청마다 걸린 시간)은 `journalctl _SYSTEMD_USER_UNIT=buntd-agent.service`로 본다.
 
+**에이전트로 앱 조작하기.** 읽기와 같은 방법으로 부른다. 동작의 답은 화면이 멈춘 뒤 그 창의 diff다.
+
+```bash
+A() { sudo -u buntos XDG_RUNTIME_DIR=/run/user/1000 bunt agent "$@"; }
+A launch org.gnome.Calculator     # 이름("계산기", "calculator")도 된다. 열려 있으면 앞으로 가져온다
+A click e185                      # ref는 launch나 snapshot이 준다
+A type "안녕하세요" --ref e5       # 글 칸에 글 입력으로 넣는다. 입력기가 한글 모드여도 된다
+A press "ctrl+a BackSpace" --ref e5
+```
+
+- 직렬 콘솔의 `sudo -u buntos …`는 관리자 요청이라 접근 정책과 상관없이 받는다. 허용하지 않은 AI처럼 시험하려면 root 조상이 없게 사용자 서비스로 띄운다: `sudo -u buntos XDG_RUNTIME_DIR=/run/user/1000 systemd-run --user --pipe --wait python3 <스크립트>`. 거절된 요청은 `~/.local/state/buntos/agent-requests.toml`에 남는다.
+- 정책을 손으로 시험할 때는 root로 `/etc/buntos/agent-access.toml`을 쓴다. 데몬이 요청마다 다시 읽는다.
+- 데몬이나 CLI를 바꿔 넣을 때(`install`) 데몬을 멈추지 않아도 된다. 옛 데몬이 다음 연결 전에 끝나고 소켓이 새 데몬을 띄운다. 컴포지터는 `/usr/bin/buntd-agent`와 같은 파일인 프로세스만 받으므로, 다른 경로의 개발 빌드는 컴포지터 API를 쓰지 못한다.
+- 세션을 다시 띄운 직후 처음 여는 GTK 앱은 포털을 기다리느라 20초 넘게 걸릴 수 있다. `launch`는 이때 "아직 창이 없다"고 답한다.
+
+**진짜 관리자 인증 시험.**
+- 이미지 준비:
+  - 개발용 무인증 규칙(`50-buntos-dev.rules`, sudoers)이 없는 이미지는 polkit이 계정 암호를 묻는다.
+  - 예전 이미지면 직렬 콘솔에서 `echo buntos:<암호> | chpasswd`로 암호를 주고 `/etc/polkit-1/rules.d/50-buntos-dev.rules`를 지운다.
+- 앱 띄우기:
+  - root 콘솔에서 `sudo -u buntos`로 띄운 앱은 root의 콘솔 세션에 남아 polkit이 인증 창을 찾지 못한다.
+  - 사용자 서비스로 띄운다:
+    `sudo -u buntos XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemd-run --user --setenv=WAYLAND_DISPLAY=wayland-1 --setenv=LANG=ko_KR.UTF-8 --setenv=GSK_RENDERER=cairo bunt-settings agent`
+- QMP `type:`은 영문 소문자·숫자만 되므로 시험 암호도 그렇게 고른다.
+- 도우미 바꿔 넣기:
+  - 도우미는 `/usr/libexec/buntos/bunt-access-helper`, polkit 동작은 `/usr/share/polkit-1/actions/org.buntos.agent.access.policy`다.
+  - polkitd는 동작 파일을 바로 다시 읽는다.
+  - bunt-shell(인증 창)을 바꿨으면 세션을 다시 띄운다.
+
 빌드 VM 안에서 화면을 캡처할 수도 있다. 결과는 VM의 `~/buntos-build/qemu-aarch64/screen.png`이며, 클릭·키 입력 동작을 이어서 줄 수 있다(`tools/image/qmp.py` 참고):
 
 ```bash
@@ -201,7 +237,7 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 
 ## 6. 검증 기록
 
-2026-10-27에 1차 빌드와 그래픽 세션 v0를, 2026-10-28에 기본 앱, 시스템 설정, macOS형 데스크톱(메뉴 막대 항목, 제어 센터, 모든 앱), 한글 입력기, 필수 드라이버, x86-64 이미지를 확인했다.
+2026-10-27에 1차 빌드와 그래픽 세션 v0를, 2026-10-28에 기본 앱, 시스템 설정, macOS형 데스크톱(메뉴 막대 항목, 제어 센터, 모든 앱), 한글 입력기, 필수 드라이버, x86-64 이미지를 확인했다. 2026-10-29에는 에이전트 읽기·동작 경로, AI 접근 정책과 인증 창, 계정과 로그인 화면을 확인했다.
 
 | 항목 | 결과 |
 |---|---|
@@ -230,7 +266,9 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 마우스·커서·성능 arm64 (10-28) | Mac 창에서 QMP와 직렬 콘솔로 확인했다.<br>- 커서 평면: `planes primary 1, cursor 1`이고 debugfs에서 plane-1이 crtc-0에 붙어 있다<br>- 커서 모양: GTK가 `wp_cursor_shape_device_v1.set_shape`를 보내고 커서 표면을 보내지 않는다(WAYLAND_DEBUG)<br>- 마우스 페이지: 연결된 마우스에 "QEMU Virtio Tablet"이 보인다. 포인터 크기를 끌면 컴포지터가 16px로 바꿔 저장하고(`comp-state.toml`의 `[pointer]`) `org.gnome.desktop.interface cursor-size`도 16이 된다<br>- 창 옮기기: 시스템 설정의 제목 막대를 y=5까지 끌어도 창 위쪽 끝이 y=28(메뉴 막대 아래)에 멈춘다<br>- 성능: 위 알려진 문제의 수치(시스템 모니터 7%, 창 넷 9%, 끌기 62%). 시스템 모니터 그래프가 계속 바뀌고 남은 조각이 없다<br>- cargo fmt·clippy(경고 0)·test 통과 |
 | 음량 막대 arm64 (10-28) | Mac 창에서 QMP와 직렬 콘솔로 확인했다.<br>- 음량 0, 2, 5, 10, 25, 50, 90, 100%에서 흰 채움이 막대 왼쪽 끝(둥근 끝)부터 손잡이 가운데까지 이어진다. 전에는 GTK 기본 테마가 남긴 1px 강조색 테두리가 채움을 둘렀고, 50% 밑에서는 채움 끝이 손잡이 앞에서 따로 둥글게 끝났으며, 10% 밑에서는 좁은 채움이 세로로 눌린 알약이 됐다<br>- 막대 높이가 22px다(전에는 기본 테마의 테두리로 24px)<br>- 막대의 x=1100을 누르면 음량 44%, 손잡이 가운데가 그 자리에 온다. 1180까지 끌면 78%, 손잡이가 포인터와 같이 움직인다<br>- Tab으로 막대에 오면 막대에 붙은 2px 강조색 고리가 보이고 3초 뒤 사라진다. 마우스로만 열고 누를 때는 고리가 없다<br>- 다크 모드, 메뉴 막대의 사운드 메뉴도 같다. 셸의 GTK 경고 0 |
 | 에이전트 읽기 경로 arm64 (10-29) | Mac 창(QEMU cocoa, HVF)에서 QMP와 직렬 콘솔로 확인했다.<br>- at-spi2-core를 넣자 GTK 앱이 접근성 버스에 붙는다. `buntd-agent.socket`에 처음 붙을 때 데몬이 뜬다<br>- `bunt agent apps`: 셸, 시스템 설정, 텍스트 편집기, 포털과 그 창, 활성 창<br>- 시스템 설정: 첫 스냅샷 16ms(객체 121개), 이후 3~5ms. 화면과 같은 사이드바 15항목, 뒤로·앞으로(사용할 수 없음), 창 단추, 페이지 글이 28줄로 나온다<br>- 키보드 페이지: 막대 두 개(값과 범위), 시험 칸, 입력 소스 행과 지우기 단추, 스위치(켬). 스위치를 끄면 `--diff`가 그 한 줄만 바꾼다. `--ref`로 입력 소스 목록만 읽는다. 없는 ref는 오류다<br>- 셸: 메뉴 막대(로고, 앱 메뉴, 입력 소스, 사운드, 전원, 네트워크, 제어 센터, 시계)와 Dock 10개. 제어 센터를 열면 diff에 `[expanded]`와 모듈, 음소거 단추, 음량 막대가 나온다<br>- 텍스트 편집기: 9ms, 10줄. 친 글이 diff에 `[value="hello agent"]`로 나온다<br>- 파일(Nautilus): 11ms, 객체 139개가 `-i`로 24줄. 파일 칸(`cell "Downloads. 폴더"`), 도구 막대 단추, 가장자리 목록이 이름과 함께 나온다<br>- 처음에는 시스템 설정의 막대·스위치와 셸의 음량 막대·음소거 단추에 이름이 없었고, 열린 제어 센터는 메뉴 단추 이름이 안의 글을 모두 이어 붙인 것이었다. 고친 뒤 위와 같다<br>- 활성 창: 제어 센터를 닫은 뒤에도 GTK가 메뉴 막대 창을 활성으로 알려, 시스템 설정과 두 창이 활성이었다(키 입력은 시스템 설정으로 갔다). 컴포지터의 `GetFocus`로 고른 뒤에는 제어 센터가 열려 있으면 메뉴 막대 창을, 시스템 설정을 누르면 시스템 설정 창을 읽는다<br>- e2e 1번 통과(최종 이미지, 5.8G): 로그인 16초, 콘솔 셸 19초, 그래픽 셸(에이전트) 22초에 누를 수 있는 요소 20개, 전원 꺼짐 23초. 처음에는 메뉴 막대의 앱 메뉴(menubar)가 보일 때까지 기다렸는데, 앱이 없으면 앱 메뉴가 없어 대기 한도(149초, 327초)까지 기다린 뒤 요소 수로만 통과했다. 요소 수로 기다리게 고쳤다<br>- 메모리(RSS): buntd-agent 약 15MB(스냅샷 여러 번 뒤), at-spi-bus-launcher 약 18MB<br>- cargo fmt·clippy(경고 0)·test(에이전트 17개) 통과 |
-| 확인하지 않은 것 | Firefox ESR와 Chromium 계열의 접근성 트리(접근성 버스의 IsEnabled를 보고 트리를 낸다. v0는 켜지 않는다). Mac 창에 보이는 커서의 모양과 자리(QMP 화면 캡처에는 커서 평면이 나오지 않는다). 실제 USB·Bluetooth 마우스의 이름·연결 방식과 이동 속도·자연스러운 스크롤·보조 클릭(QEMU에는 가상 태블릿뿐이고 절대 좌표 장치에는 가속이 없다). `tools/devvm/buntos-dev.yaml`의 컨테이너 런타임 끄기 설정(검증한 VM은 그 설정을 넣기 전에 만들었다). x86-64 그래픽 세션(자체 컴포넌트를 x86-64로 빌드하는 것은 CI에서 한다). Bluetooth 연결·페어링, 배터리 표시, 화면 밝기, 실제 Wi-Fi 칩(QEMU에 장치가 없다). 실제 앱이 보낸 알림과 실제 앱의 메뉴 막대 항목(시험 알림과 시험 스크립트만 썼다). 분수 배율의 실제 HiDPI 화면(QEMU 화면은 약 100ppi라 기본 배율은 늘 100%다). Mac 창(view-mac.sh)에서 사람이 조작한 배율 변경 |
+| 에이전트 동작 경로 arm64 (10-29) | Mac 창(QEMU cocoa, HVF)과 시험 VM에서 직렬 콘솔과 QMP로 확인했다.<br>- 계산기: `launch`가 창과 버튼 34개의 트리를 낸다. 6 × 7 = 을 누르면 `=`의 diff에 기록 `6×7 = 42`와 `[value="42"]`가 나온다(멈추기까지 430~530ms). 다시 열면 새로 띄우지 않고 그 창을 가져온다<br>- 텍스트 편집기(DBusActivatable): `gio launch`로는 서비스 모드로만 떠 14초 뒤 끝났다. Activate를 직접 보내자 0.5~5초에 창이 뜬다. 계산기의 결과를 `fill`로 넣고 읽었다. 파일, 시스템 모니터도 같은 길로 뜬다<br>- 입력기를 한글 모드로 두고 `type 'hello world'`: 키로 칠 때는 "되ㅣㅐ재"였고, 글 입력으로 넣자 "hello world"다. "안녕하세요 buntOS 😀"도 그대로 들어간다. Firefox 주소 막대에 example.org를 쳐 자동 완성이 뜨고, 스냅샷이 `[value="example.org"]`를 읽는다<br>- 시스템 설정: 사이드바를 누르면 diff에 그 페이지가 나온다. 스위치, 막대, 글자 칸<br>- 접근 정책: 사용자 서비스로 띄운 시험용 AI(python 스크립트)는 거절되고 요청 기록에 남는다. 정책에 더하면 받는다. 계산기를 막으면 `apps`·`apps --installed`에서 빠지고 스냅샷·열기·막기 전에 받은 ref로 누르기가 모두 BLOCKED_APP이다. 직렬 콘솔의 `sudo -u buntos bunt …`는 관리자다<br>- 데몬 파일을 바꿔 넣으면 옛 데몬이 다음 연결 전에 끝나고 새 데몬이 받는다. 컴포지터는 다른 파일(inode)인 옛 데몬의 입력 요청을 거절했다<br>- 계산기 결과를 편집기에 넣는 시나리오 전체: 4.3초<br>- cargo clippy(경고 0)·test(에이전트 22개, 컴포지터 25개) 통과 |
+| 통합 이미지 arm64 (10-29) | 세 갈래(계정과 로그인, AI 접근 정책과 인증 창, 에이전트 동작 경로)를 합친 이미지 5.8G(사용 5.4G), 빌드 2분 22초(캐시 있음).<br>- e2e 1번·5번 통과: 콘솔 로그인 19초, 셸 22초, 상태 `running`, 로그인 화면 27초, 로그인(1번째 시도) 34초, sudo가 암호를 묻는다, 그래픽 셸(에이전트) 41초에 요소 20개, e2e 5번 6개 통과 63초<br>- 처음 돌린 e2e 5번은 6개 중 5개였다. 컴포지터가 바쁜 VM에서 창 목록에 500ms 안에 답하지 못해 `--app org.gnome.TextEditor`가 앱을 찾지 못했다(답 제한을 2초로 늘렸다). GTK4가 GrabFocus를 지원하지 않아 `focus`가 실패했다(글 칸은 눌러 포커스를 준다). 세션을 다시 띄운 VM에서 첫 창이 늦은 계산기를 다시 열자 둘이 떴다(그 앱의 창을 기다리고, 막 연 앱은 다시 띄우지 않는다)<br>- 인증 창(pkexec)이 떠 있는 동안: `apps`와 `snapshot --app bunt-shell`에 인증 창이 없다. `snapshot`, `press`, `type`은 "an authentication dialog is open"으로 거절되고, `launch`는 컴포지터가 창 활성화를 거절한다. 인증 창은 그대로 남아 사람이 Esc로 닫았다<br>- 인증 창의 pkexec 설명에 `{$program}`이 그대로 보였다. polkitd(128)가 pkexec의 세부를 넘기지 않기 때문이다(`polkit.caller-pid`, `polkit.subject-pid`만 온다). polkit 설명에서 프로그램을 읽게 고친 뒤 "/usr/bin/true 프로그램을 관리자 권한으로 실행하려고 합니다."다<br>- 셸의 레이어 창이 접근성 이름을 갖는다(`bunt-menubar`, `bunt-dock`) |
+| 확인하지 않은 것 | Chromium 계열의 접근성 트리. 에이전트의 스크롤 동작(아직 없다). Mac 창에 보이는 커서의 모양과 자리(QMP 화면 캡처에는 커서 평면이 나오지 않는다). 실제 USB·Bluetooth 마우스의 이름·연결 방식과 이동 속도·자연스러운 스크롤·보조 클릭(QEMU에는 가상 태블릿뿐이고 절대 좌표 장치에는 가속이 없다). `tools/devvm/buntos-dev.yaml`의 컨테이너 런타임 끄기 설정(검증한 VM은 그 설정을 넣기 전에 만들었다). x86-64 그래픽 세션(자체 컴포넌트를 x86-64로 빌드하는 것은 CI에서 한다). Bluetooth 연결·페어링, 배터리 표시, 화면 밝기, 실제 Wi-Fi 칩(QEMU에 장치가 없다). 실제 앱이 보낸 알림과 실제 앱의 메뉴 막대 항목(시험 알림과 시험 스크립트만 썼다). 분수 배율의 실제 HiDPI 화면(QEMU 화면은 약 100ppi라 기본 배율은 늘 100%다). Mac 창(view-mac.sh)에서 사람이 조작한 배율 변경 |
 
 ## 7. 알려진 문제
 
@@ -239,12 +277,12 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 첫 빌드가 `/var/cache/mkosi` 권한 오류로 실패 | mkosi는 일반 사용자로 실행해도 이 경로에 패키지 캐시를 둔다 | `setup.sh`가 사용자 소유로 만든다 |
 | "systemd-boot binary was not found" 빌드 오류 | Debian은 systemd-boot의 EFI 파일을 `systemd-boot-efi` 패키지로 나눈다 | 레시피 패키지 목록에 넣었다 |
 | 자동 로그인 직후 로그인이 반복되며 셸이 뜨지 않음 | Debian에서 `login`은 Priority: required지만 Essential이 아니어서 mkosi가 설치하지 않는다. `apt`, `passwd`도 같다 | 레시피 패키지 목록에 넣었다 |
-| 부팅이 시간대 입력 화면에서 멈춤 | systemd-firstboot의 대화형 설정 | 레시피에 로캘·시간대·키맵·호스트 이름을 정하고 `systemd.firstboot=no`로 끈다. 실제 최초 설정은 따로 설계해야 한다 |
+| 부팅이 시간대 입력 화면에서 멈춤 | systemd-firstboot의 대화형 설정 | 레시피에 로캘·시간대·키맵·호스트 이름을 정하고 `systemd.firstboot=no`로 끈다. 계정은 처음 켤 때 로그인 화면이 만든다(2026-10-29) |
 | `/dev/tpm0`, `/dev/tpmrm0`를 기다리다 90초씩 지연 (arm64) | mkosi가 붙이는 에뮬레이션 TPM을 게스트 커널이 장치로 잡지 못했다(원인 미확인) | 레시피에서 `TPM=no`로 끈다. 원인은 따로 확인한다 |
 | `--console=read-only`, `interactive`를 쓸 수 없음 | Debian 13 호스트에 `systemd-pty-forward`가 없다 | 기본(native) 콘솔을 쓴다 |
-| 홈 디렉터리가 root 소유라 셸 설정을 읽지 못함 | 이미지를 비특권으로 빌드하면 파일 소유자를 바꿀 수 없다 | 부팅 때 tmpfiles로 만든다 (`/usr/lib/tmpfiles.d/buntos-home.conf`) |
+| 홈 디렉터리가 root 소유라 셸 설정을 읽지 못함 | 이미지를 비특권으로 빌드하면 파일 소유자를 바꿀 수 없다 | 2026-10-29부터 계정은 부팅한 시스템에서 useradd가 만들므로 홈 폴더 소유자가 맞다 (그전에는 tmpfiles로 만들었다) |
 | 시계가 UTC로 나옴 | `tzdata`도 Priority: required지만 Essential이 아니어서 설치되지 않았다 | 레시피 패키지 목록에 넣었다 |
-| 화면 장치가 없는 VM에서 `getty@tty1` 실패 | 그래픽 세션이 바로 끝나며 자동 로그인이 반복됐다 | 화면 장치가 있을 때만 세션을 열고, 세션이 끝나면 셸로 돌아온다 |
+| 화면 장치가 없는 VM에서 `getty@tty1` 실패 | 그래픽 세션이 바로 끝나며 자동 로그인이 반복됐다 | 2026-10-29부터 tty1에는 텍스트 로그인 대신 greetd가 있다. 화면 장치가 없으면 로그인 화면의 컴포지터가 끝나고 greetd가 다시 띄운다 |
 | GTK 앱이 CPU로 그린다 | 컴포지터가 아직 dmabuf(linux-dmabuf)를 지원하지 않는다 | 세션에서 `GSK_RENDERER=cairo`. dmabuf 지원은 다음 단계 |
 | 배율을 높이면 Firefox 본문이 한 번 더 확대돼 화면 밖으로 잘림 | Firefox는 본문을 하위 표면에 그리고 그 크기를 wp_viewporter로 알린다. 컴포지터에 viewporter가 없어 2배로 그린 본문을 1배 버퍼로 받아 다시 2배로 키웠다. 또 1280×800에서 200%를 허용해 논리 화면(640×400)이 Dock과 앱의 최소 크기보다 작았다 | wp_viewporter, wp_fractional_scale_v1, wl_compositor v6를 넣었다. 논리 화면이 1024×640보다 작아지는 배율은 두지 않는다. 배율이 바뀌면 창을 화면 안에 맞춘다([디자인 스펙](../design/DESIGN-SPEC.md) 3.1절) |
 | 창 최소화가 없다 | bunt-comp 범위 밖 | 다음 단계. 창 버튼은 최대화와 닫기만 보인다 |
