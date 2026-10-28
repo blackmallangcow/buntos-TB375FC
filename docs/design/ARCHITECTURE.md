@@ -214,9 +214,9 @@ Phase 2의 종료 조건은 2a~2d다(11장). 2e는 Phase 4·5의 실기기 판�
 
 | 컴포넌트 | 구현 | 비고 |
 |---|---|---|
-| `bunt-comp` | Rust, Smithay | 창 관리, 애니메이션, 제스처, 다중 seat, 신뢰 레이어. 창 목록·창 조작 프로토콜(wlr-foreign-toplevel)은 컴포지터가 직접 띄운 셸에게만, 입력기 프로토콜(input-method-v2, virtual-keyboard)은 직접 띄운 입력기(fcitx5)에게만 연다. 앱에는 text-input-v3를 준다. 시스템 설정과 셸이 쓰는 제어 API(D-Bus `org.buntos.Compositor1`: 화면 모드·배율, 키 반복, 막대 자동 가리기)를 낸다. 셸의 메뉴 막대와 Dock을 macOS의 WindowServer처럼 숨기고 꺼낸다 |
+| `bunt-comp` | Rust, Smithay | 창 관리, 애니메이션, 제스처, 다중 seat, 신뢰 레이어. 창 목록·창 조작 프로토콜(wlr-foreign-toplevel)은 컴포지터가 직접 띄운 셸에게만, 입력기 프로토콜(input-method-v2, virtual-keyboard)은 직접 띄운 입력기(fcitx5)에게만 연다. 앱에는 text-input-v3를 준다. 시스템 설정과 셸이 쓰는 제어 API(D-Bus `org.buntos.Compositor1`: 화면 모드·배율, 키 반복, 마우스와 연결된 포인터 장치, 막대 자동 가리기)를 낸다. 셸의 메뉴 막대와 Dock을 macOS의 WindowServer처럼 숨기고 꺼낸다 |
 | `bunt-shell` | Rust, 레이어 셸 클라이언트. v0은 GTK4 + gtk4-layer-shell로 만들었고 ADR-001의 GTK4 시제품을 겸한다 | 메뉴바, 메뉴 막대 항목(입력 소스, 사운드, 배터리·전원 모드, Wi-Fi, Bluetooth, 앱의 StatusNotifierItem), 제어 센터, Dock, 모든 앱 패널, 알림, 배경화면. 메뉴바의 앱 메뉴는 앱이 D-Bus로 내보내는 동작(GAction)과 창 목록 프로토콜로 만든다. GNOME 앱처럼 창 안의 메뉴를 밖으로 내보내지 않는 앱은 그 메뉴를 옮길 수 없다 |
-| `bunt-settings` | Rust, 시스템 앱. v0은 ADR-001 잠정안대로 libadwaita 없이 GTK4와 자체 CSS로 만들었고, GTK4 시제품을 겸한다 | 시스템 설정. macOS 26 시스템 설정의 구성(검색 사이드바, 묶음 상자)을 따른다. Wi-Fi, Bluetooth, 네트워크, 배터리, 화면 모드, 메뉴 막대, 데스크탑 및 Dock, 배경화면, 디스플레이, 키보드, 언어, 날짜와 시간, 기본 앱, 정보 |
+| `bunt-settings` | Rust, 시스템 앱. v0은 ADR-001 잠정안대로 libadwaita 없이 GTK4와 자체 CSS로 만들었고, GTK4 시제품을 겸한다 | 시스템 설정. macOS 26 시스템 설정의 구성(검색 사이드바, 묶음 상자)을 따른다. Wi-Fi, Bluetooth, 네트워크, 배터리, 화면 모드, 메뉴 막대, 데스크탑 및 Dock, 배경화면, 디스플레이, 키보드, 마우스, 언어, 날짜와 시간, 기본 앱, 정보 |
 | 공통 디자인 토큰 | CSS 변수 (`theme/tokens.css`) | 셸과 시스템 설정이 같은 색·모서리·글자 크기·유리 재질을 쓴다. 규칙은 [디자인 스펙](DESIGN-SPEC.md) |
 | 시스템 앱 UI 툴킷 | GTK4 또는 Qt6 중 Phase 1에서 시제품 비교 후 결정 | 선택 기준: (1) AT-SPI 접근성 노출 품질 (AI 계층의 입력이 됨), (2) 한국어 IME 품질, (3) 메모리 사용량 실측 |
 | 화면 키보드 | input-method-v2 클라이언트 | 두벌식/QWERTY, fcitx5와 연동 |
@@ -465,6 +465,11 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
   - 대화 상자(부모가 있는 창)는 부모 위에 남고, 모달 대화 상자(xdg-dialog-v1)가 키보드를 받는다. 시트를 띄운 채 부모 창을 누르면 시트가 뒤로 숨어 누르기가 먹지 않던 문제를 고쳤다
   - 화면에 보인 표면에만 프레임마다 프레임 알림을 보내고, 가려진 표면은 1초에 한 번 보낸다. 흐림은 아래의 손상이 흐릴 범위에 닿을 때만 다시 한다. 소프트웨어 렌더러(llvmpipe)에서는 60Hz로 그린다
   - Dock이 아이콘 크기를 줄여도 판이 줄지 않던 문제, 시스템 설정 슬라이더 길이가 행마다 다르던 문제를 고쳤다
+- 마우스와 커서, 창 옮기기 (2026-10-28):
+  - 시스템 설정에 마우스 페이지(이동 속도, 자연스러운 스크롤, 보조 클릭, 두 번 클릭 속도, 스크롤 속도, 포인터 크기, 연결된 마우스)를 더했다. 컴포지터가 libinput 장치와 커서에 쓴다
+  - 컴포지터가 커서 모양 프로토콜(wp_cursor_shape_v1)을 열어 모든 앱의 커서를 같은 테마와 크기로 그리고, 가상 GPU에서도 하드웨어 커서 평면을 쓴다
+  - 창의 위쪽 끝은 메뉴 막대를 넘지 못한다(macOS와 같다)
+  - 버퍼 전체를 손상으로 알리는 앱(GTK의 cairo 렌더러)은 실제로 바뀐 타일만 다시 그린다. 소프트웨어 렌더러에서 시스템 모니터를 띄운 채 컴포지터 CPU가 42~48%에서 7%로 줄었다
 - 필수 드라이버 (2026-10-28):
   - Debian non-free-firmware의 Wi-Fi·Bluetooth·GPU·오디오 펌웨어
   - wpasupplicant, bluez, PipeWire, UPower, power-profiles-daemon, iio-sensor-proxy
