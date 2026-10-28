@@ -15,7 +15,7 @@ use std::{
 use smithay::{
     backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
     delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
-    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_shell,
+    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_dialog, delegate_xdg_shell,
     desktop::{
         LayerSurface, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
         PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -77,6 +77,7 @@ use smithay::{
             xdg::{
                 PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
                 XdgToplevelSurfaceData,
+                dialog::{XdgDialogHandler, XdgDialogState},
             },
         },
         shm::{ShmHandler, ShmState},
@@ -179,6 +180,8 @@ impl BuntState {
                 xdg_toplevel::WmCapabilities::Fullscreen,
             ],
         );
+        // 앱이 모달 대화 상자(GTK의 모달 창, 시스템 설정의 시트)를 알린다. focus_window가 쓴다
+        XdgDialogState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
@@ -428,15 +431,21 @@ impl BuntState {
         self.upper_layer_under(pos).is_some()
     }
 
-    /// 창을 맨 앞으로 가져와 활성화하고 키보드 포커스를 준다. 키보드를 독점하는 레이어 표면(모든 앱
-    /// 패널 등)이 떠 있으면 키보드는 그 표면에 그대로 두고, 표면이 사라질 때 이 창에 준다
+    /// 창을 맨 앞으로 가져와 활성화하고 키보드 포커스를 준다. 그 창의 대화 상자(부모가 이 창인 창)는
+    /// 함께 앞으로 와서 창 위에 남고, 모달 대화 상자가 있으면 그 대화 상자가 활성화되어 키보드를
+    /// 받는다(macOS의 시트처럼). 모달 창이 부모 뒤로 숨으면 GTK가 부모의 누르기를 버려서 입력이 먹지
+    /// 않는 것처럼 보였다. 키보드를 독점하는 레이어 표면(모든 앱 패널 등)이 떠 있으면 키보드는 그
+    /// 표면에 그대로 두고, 표면이 사라질 때 이 창에 준다
     pub fn focus_window(&mut self, window: &Window, serial: Serial) {
-        self.space.raise_element(window, true);
+        let target = self.raise_with_dialogs(window);
+        for other in self.space.elements() {
+            other.set_activated(*other == target);
+        }
         let exclusive = self.exclusive_layer().is_some();
         if let Some(keyboard) = self.seat.get_keyboard().filter(|_| !exclusive) {
             keyboard.set_focus(
                 self,
-                window.toplevel().map(|t| t.wl_surface().clone()),
+                target.toplevel().map(|t| t.wl_surface().clone()),
                 serial,
             );
         }
@@ -446,6 +455,67 @@ impl BuntState {
             }
         });
         self.refresh_all_windows();
+    }
+
+    /// `window`와 그 대화 상자들을 쌓인 순서 그대로 맨 앞으로 올리고, 키보드를 받을 창을 돌려준다:
+    /// 맨 위의 모달 대화 상자, 없으면 `window`
+    fn raise_with_dialogs(&mut self, window: &Window) -> Window {
+        let Some(root) = window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone())
+        else {
+            self.space.raise_element(window, false);
+            return window.clone();
+        };
+        let dialogs: Vec<Window> = self
+            .space
+            .elements()
+            .filter(|other| self.descends_from(other, &root))
+            .cloned()
+            .collect();
+        self.space.raise_element(window, false);
+        let mut target = window.clone();
+        for dialog in dialogs {
+            self.space.raise_element(&dialog, false);
+            if Self::is_modal(&dialog) {
+                target = dialog;
+            }
+        }
+        if target != *window {
+            self.space.raise_element(&target, false);
+        }
+        target
+    }
+
+    /// `window`가 `ancestor` 창의 대화 상자이거나 그 대화 상자의 대화 상자인지
+    fn descends_from(&self, window: &Window, ancestor: &WlSurface) -> bool {
+        let mut parent = window.toplevel().and_then(ToplevelSurface::parent);
+        // 부모 고리가 잘못 이어져 있어도 끝나도록 창 수만큼만 따라간다
+        for _ in 0..self.space.elements().count() {
+            match parent {
+                Some(surface) if &surface == ancestor => return true,
+                Some(surface) => {
+                    parent = self
+                        .window_for_surface(&surface)
+                        .and_then(|window| window.toplevel().and_then(ToplevelSurface::parent));
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// 모달 대화 상자인지 (xdg-dialog-v1. 부모가 없는 창의 모달 표시는 뜻이 없다)
+    fn is_modal(window: &Window) -> bool {
+        window.toplevel().is_some_and(|toplevel| {
+            toplevel.parent().is_some()
+                && with_states(toplevel.wl_surface(), |states| {
+                    states
+                        .data_map
+                        .get::<XdgToplevelSurfaceData>()
+                        .is_some_and(|data| data.lock().unwrap().modal)
+                })
+        })
     }
 
     pub fn clear_focus(&mut self, serial: Serial) {
@@ -1731,6 +1801,9 @@ impl FractionalScaleHandler for BuntState {
 delegate_compositor!(BuntState);
 delegate_shm!(BuntState);
 delegate_xdg_shell!(BuntState);
+
+impl XdgDialogHandler for BuntState {}
+delegate_xdg_dialog!(BuntState);
 // 레이어 셸은 smithay의 처리에 맡기고, 레이어 표면 객체가 없어질 때만 손본다
 delegate_dispatch!(BuntState: [ZwlrLayerShellV1: ()] => WlrLayerShellState);
 delegate_global_dispatch!(BuntState: [ZwlrLayerShellV1: WlrLayerShellGlobalData] => WlrLayerShellState);
