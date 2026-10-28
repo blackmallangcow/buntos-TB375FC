@@ -411,31 +411,47 @@ button.extra-row {
   box-shadow: var(--shadow-control);
 }
 
-/* 음량·밝기 막대 (macOS 26 제어 센터의 굵은 막대) */
+/* 음량·밝기 막대 (macOS 26 제어 센터의 굵은 막대). 흰 채움은 막대 왼쪽 끝에서 손잡이 가운데까지다.
+   GTK는 채움을 홈 너비 × 값만큼 칠하고, 손잡이는 (홈 너비 - 잰 손잡이 너비) × 값에 놓는다. 손잡이의
+   좌우 여백을 반지름만큼 빼 잰 너비를 0으로 만들면 손잡이 가운데가 채움 끝과 누른 곳에 온다.
+   홈의 좌우 안쪽 여백은 양 끝에 선 손잡이의 반쪽 자리다. 기본 테마의 테두리(채움은 강조색)는 지운다 */
 .slider-row scale {
   padding: 0;
 }
 
-.slider-row scale trough {
+.slider-row scale > trough {
   min-height: 22px;
+  margin: 0;
+  padding: 0 11px;
+  border: none;
   border-radius: var(--radius-capsule);
   background: var(--control-bg);
 }
 
-.slider-row scale highlight {
+/* 왼쪽 여백을 빼 홈의 왼쪽 끝부터 칠한다. 최소 너비가 뺀 여백을 메워 잰 너비가 0 밑으로 가지 않는다 */
+.slider-row scale > trough > highlight {
+  min-width: 11px;
   min-height: 22px;
-  border-radius: var(--radius-capsule);
+  margin: 0 0 0 -11px;
+  border: none;
+  border-radius: var(--radius-capsule) 0 0 var(--radius-capsule);
   background: var(--knob);
 }
 
-.slider-row scale slider {
+.slider-row scale > trough > slider {
   min-width: 22px;
   min-height: 22px;
-  margin: 0;
+  margin: 0 -11px;
   border: none;
   border-radius: var(--radius-capsule);
   background: var(--knob);
   box-shadow: var(--shadow-control);
+}
+
+/* 기본 테마의 초점 고리는 막대에서 10px 떨어져 뜬다 */
+.slider-row scale:focus-visible > trough {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 button.slider-icon {
