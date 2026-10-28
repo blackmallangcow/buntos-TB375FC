@@ -15,9 +15,14 @@ use crate::widgets::{self, BadgeSize, Tint, badge};
 
 /// 셸이 설치하는 아이콘 (shell/data/icons)
 const ICON: &str = "org.buntos.Dock-symbolic";
-/// 드롭다운 항목 순서대로의 dock-autohide 값 (항상, 전체 화면일 때, 안 함)
-const AUTOHIDE: [&str; 3] = ["always", "fullscreen", "never"];
-const AUTOHIDE_LABELS: [&str; 3] = ["autohide-always", "autohide-fullscreen", "autohide-never"];
+/// 드롭다운 항목 순서대로의 dock-autohide 값 (항상, 전체 화면일 때, 안 함). Dock의 "전체 화면일
+/// 때"는 확대 단추로 최대화한 창도 화면을 채운 것으로 보므로 maximized다
+const AUTOHIDE: [&str; 3] = ["always", "maximized", "never"];
+const AUTOHIDE_LABELS: [&str; 3] = [
+    "autohide-always",
+    "desktop-dock-autohide-fullscreen",
+    "autohide-never",
+];
 /// dock-icon-size의 범위 (셸 스키마)
 const SIZE_RANGE: (f64, f64) = (32.0, 96.0);
 

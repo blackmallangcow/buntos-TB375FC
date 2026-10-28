@@ -84,11 +84,12 @@ pub struct Panels {
 }
 
 impl Default for Panels {
-    /// 셸이 알려 주기 전에는 스키마의 기본값(macOS와 같다)을 쓴다
+    /// 셸이 알려 주기 전에는 스키마의 기본값을 쓴다. 메뉴 막대는 macOS와 같고, Dock은 최대화한
+    /// 창에서도 숨는다(시스템 설정의 "전체 화면일 때")
     fn default() -> Self {
         Self {
             menu_bar: Autohide::Fullscreen,
-            dock: Autohide::Fullscreen,
+            dock: Autohide::Maximized,
             menu_bar_background: false,
         }
     }
