@@ -17,6 +17,7 @@ mod menubar;
 mod network;
 mod notification_center;
 mod notifications;
+mod polkit_agent;
 mod power;
 mod sound;
 mod status_items;
@@ -68,6 +69,8 @@ fn main() -> glib::ExitCode {
         }
         wallpaper::build(app);
         let notifications = Notifications::start();
+        // 세션의 관리자 인증(pkexec, 시간대, 기기 이름, AI 에이전트 권한)을 묻는 창
+        polkit_agent::start(app, &tr);
         let services = Services {
             network: Network::start(),
             bluetooth: Bluetooth::start(),
@@ -107,8 +110,10 @@ fn load_style() {
 }
 
 fn layer_window(app: &gtk::Application, name: &str) -> gtk::ApplicationWindow {
+    // 제목은 보이지 않지만 접근성 이름이 된다. 에이전트는 이것으로 인증 창을 알아보고 건드리지 않는다
     let window = gtk::ApplicationWindow::builder()
         .application(app)
+        .title(name)
         .css_classes([name])
         .build();
     window.init_layer_shell();

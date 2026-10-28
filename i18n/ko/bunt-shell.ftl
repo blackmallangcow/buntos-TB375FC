@@ -114,3 +114,24 @@ cc-low-power = 저전력 모드
 cc-display = 디스플레이
 cc-brightness = 밝기
 cc-edit = 메뉴 막대 설정…
+
+## 관리자 인증 창 (polkit 인증 에이전트). 제목은 인증을 요청한 앱 이름이고, 앱을 모르면 auth-title이다
+auth-title = 인증 필요
+auth-hint = 허용하려면 암호를 입력하십시오.
+auth-hint-admin = 허용하려면 관리자 이름과 암호를 입력하십시오.
+auth-user-name = 사용자 이름
+auth-password = 암호
+auth-cancel = 취소
+auth-confirm = 확인
+# 동작마다의 설명 (auth-action-<polkit 동작 ID의 .을 -로>). polkit이 보낸 설명 대신 쓴다. 없으면 polkit의 설명을
+# 쓴다. 제목이 요청한 앱 이름이라 주어 없이 쓴다. $app은 앱 이름(모르면 auth-someone), $program은 pkexec가 실행할 프로그램
+auth-someone = 프로그램
+auth-action-org-buntos-agent-access-change = 이 컴퓨터를 제어할 수 있는 AI를 바꾸려고 합니다.
+auth-action-org-freedesktop-timedate1-set-timezone = 시간대를 바꾸려고 합니다.
+auth-action-org-freedesktop-timedate1-set-time = 시스템 시간을 바꾸려고 합니다.
+auth-action-org-freedesktop-timedate1-set-ntp = 날짜와 시간을 자동으로 맞출지 바꾸려고 합니다.
+auth-action-org-freedesktop-timedate1-set-local-rtc = 하드웨어 시계의 시간대를 바꾸려고 합니다.
+auth-action-org-freedesktop-hostname1-set-static-hostname = 기기 이름을 바꾸려고 합니다.
+auth-action-org-freedesktop-hostname1-set-hostname = 기기 이름을 바꾸려고 합니다.
+auth-action-org-freedesktop-hostname1-set-machine-info = 기기 정보를 바꾸려고 합니다.
+auth-action-org-freedesktop-policykit-exec = { $program } 프로그램을 관리자 권한으로 실행하려고 합니다.

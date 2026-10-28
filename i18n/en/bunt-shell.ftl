@@ -114,3 +114,24 @@ cc-low-power = Low Power Mode
 cc-display = Display
 cc-brightness = Brightness
 cc-edit = Menu Bar Settings…
+
+## Administrator authentication (polkit agent). The title is the requesting app's name, or auth-title
+auth-title = Authentication Required
+auth-hint = Enter your password to allow this.
+auth-hint-admin = Enter an administrator’s name and password to allow this.
+auth-user-name = User Name
+auth-password = Password
+auth-cancel = Cancel
+auth-confirm = OK
+# Per-action descriptions (auth-action-<polkit action ID with . replaced by ->), used instead of polkit's message.
+# $app is the requesting app's name (auth-someone if unknown), $program is what pkexec will run
+auth-someone = A program
+auth-action-org-buntos-agent-access-change = { $app } wants to change which AI can control this computer.
+auth-action-org-freedesktop-timedate1-set-timezone = { $app } wants to change the time zone.
+auth-action-org-freedesktop-timedate1-set-time = { $app } wants to change the system time.
+auth-action-org-freedesktop-timedate1-set-ntp = { $app } wants to change whether the date and time are set automatically.
+auth-action-org-freedesktop-timedate1-set-local-rtc = { $app } wants to change the time zone of the hardware clock.
+auth-action-org-freedesktop-hostname1-set-static-hostname = { $app } wants to change the computer name.
+auth-action-org-freedesktop-hostname1-set-hostname = { $app } wants to change the computer name.
+auth-action-org-freedesktop-hostname1-set-machine-info = { $app } wants to change the computer information.
+auth-action-org-freedesktop-policykit-exec = { $app } wants to run { $program } as an administrator.
