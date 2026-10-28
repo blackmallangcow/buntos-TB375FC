@@ -9,6 +9,7 @@
 //! - `bunt agent`: 데몬에 JSON-RPC로 묻는 CLI
 
 pub mod atspi;
+pub mod desktop;
 pub mod diff;
 pub mod protocol;
 pub mod session;

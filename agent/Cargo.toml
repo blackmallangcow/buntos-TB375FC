@@ -19,10 +19,14 @@ name = "bunt"
 path = "src/bin/bunt.rs"
 
 [dependencies]
+# 이 컴퓨터를 제어할 수 있는 AI와 AI에게서 막은 앱 (시스템 설정의 AI 에이전트 페이지가 고친다)
+bunt-access = { path = "../access" }
 # 요청을 받은 스레드에서 zbus 호출을 기다린다 (zbus가 쓰는 것과 같은 실행기)
 async-io = "2"
 # 접근성 버스에 여러 호출을 한꺼번에 보낸다
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# 소켓 건너편 프로세스의 pid (SO_PEERCRED)
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 # 데몬과 CLI 사이의 JSON-RPC
 serde_json = "1"

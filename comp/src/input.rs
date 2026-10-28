@@ -174,7 +174,7 @@ impl BuntState {
         (x, y).into()
     }
 
-    fn pointer_moved(&mut self, pos: Point<f64, Logical>, time: u32) {
+    pub(crate) fn pointer_moved(&mut self, pos: Point<f64, Logical>, time: u32) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
@@ -195,11 +195,16 @@ impl BuntState {
     }
 
     fn on_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
+        self.press_button(event.button_code(), event.state(), event.time_msec());
+    }
+
+    /// 포인터 단추 하나. 누르면 그 아래의 창이나 키보드를 받는 레이어에 포커스를 준다
+    /// (에이전트의 누르기도 이 길로 온다)
+    pub(crate) fn press_button(&mut self, button: u32, state: ButtonState, time: u32) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
         let serial = SERIAL_COUNTER.next_serial();
-        let state = event.state();
 
         // 키보드를 받는 레이어 표면(on_demand)을 누르면 그 표면에 포커스를 준다.
         // 메뉴바·Dock처럼 키보드를 받지 않는 레이어를 누를 때는 창 포커스를 바꾸지 않는다
@@ -222,10 +227,10 @@ impl BuntState {
         pointer.button(
             self,
             &ButtonEvent {
-                button: event.button_code(),
+                button,
                 state,
                 serial,
-                time: event.time_msec(),
+                time,
             },
         );
         pointer.frame(self);

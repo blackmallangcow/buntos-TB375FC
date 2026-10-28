@@ -1595,7 +1595,7 @@ impl BuntState {
     }
 
     /// 표면이 속한 최상위 표면. 하위 표면과 xdg 팝업을 거슬러 올라간다
-    fn root_surface(&self, surface: &WlSurface) -> WlSurface {
+    pub(crate) fn root_surface(&self, surface: &WlSurface) -> WlSurface {
         let mut root = surface.clone();
         while let Some(parent) = get_parent(&root) {
             root = parent;
@@ -1834,6 +1834,7 @@ impl BuntState {
             Request::KeyboardRepeat { delay, rate } => self.set_keyboard_repeat(delay, rate),
             Request::Panels(panels) => self.set_panels(panels),
             Request::Pointer(pointer) => self.set_pointer_prefs(pointer),
+            Request::Agent(request) => self.agent_request(request),
         }
     }
 

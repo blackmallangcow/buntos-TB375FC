@@ -51,6 +51,10 @@ pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 /// 접근성 버스나 앱에서 난 오류
 pub const AGENT_ERROR: i64 = -32000;
+/// 사용자가 이 클라이언트(AI)에게 이 컴퓨터의 제어를 허용하지 않았다 (시스템 설정 > AI 에이전트)
+pub const NOT_ALLOWED: i64 = -32001;
+/// 사용자가 AI에게서 막은 앱
+pub const BLOCKED_APP: i64 = -32002;
 
 /// `snapshot`의 인자
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -77,6 +81,64 @@ pub struct Snapshot {
     pub diff: String,
     /// 이 범위를 이 세션에서 처음 읽었다 (diff가 비어 있다)
     pub first: bool,
+}
+
+/// `act`의 인자: ref가 가리키는 요소에 동작 하나
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActParams {
+    pub session: Option<String>,
+    /// 지난 스냅샷의 ref (예: "e12")
+    #[serde(rename = "ref")]
+    pub target: String,
+    /// click, fill, set, focus, select, press
+    pub action: String,
+    /// fill의 글, set의 값, press의 키
+    pub value: Option<String>,
+    /// click을 접근성 동작 대신 포인터로 한다 (동작이 엉뚱하게 구는 앱에서)
+    pub pointer: bool,
+}
+
+/// `act`의 답
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Acted {
+    /// 한 일 (예: "clicked with the accessible action \"click\"")
+    pub done: String,
+    /// 동작 전과 화면이 멈춘 뒤의 그 창 트리의 차이
+    pub diff: String,
+    /// 동작 뒤 화면이 멈출 때까지 걸린 시간
+    pub settled_ms: u64,
+    /// 동작 뒤 같은 앱에 새로 뜬 창의 제목
+    pub new_windows: Vec<String>,
+}
+
+/// `launch`의 인자
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LaunchParams {
+    pub session: Option<String>,
+    /// 데스크톱 ID나 앱 이름 (일부만 써도 하나로 정해지면 된다)
+    pub app: String,
+}
+
+/// `launch`의 답
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Launched {
+    pub name: String,
+    pub id: String,
+    /// 새로 뜬 창의 제목. 기다리는 동안 창이 뜨지 않았으면 None
+    pub window: Option<String>,
+    /// 이미 창이 있던 앱이라 새로 띄우지 않고 그 창을 앞으로 가져왔다
+    pub running: bool,
+    /// 그 창의 상호작용 요소 트리 (접근성 트리를 내놓지 않는 창이면 빈 글)
+    pub tree: String,
+}
+
+/// 설치된 앱 하나 (`apps`의 installed)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Installed {
+    pub id: String,
+    pub name: String,
 }
 
 /// `apps`의 답 한 줄

@@ -3,6 +3,7 @@
 
 //! bunt-comp: buntOS Wayland 컴포지터 (Smithay 기반, ARCHITECTURE D4)
 
+mod agent;
 mod blur;
 mod config;
 mod cursor;

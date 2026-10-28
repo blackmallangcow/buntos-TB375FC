@@ -18,7 +18,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use zbus::{
     Connection, fdo,
     names::BusName,
-    zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Type},
+    zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Type, Value},
 };
 
 use crate::tree::{Item, Range, Tree, iface};
@@ -26,9 +26,20 @@ use crate::tree::{Item, Range, Tree, iface};
 const REGISTRY: &str = "org.a11y.atspi.Registry";
 /// 앱 루트 객체의 경로
 pub const ROOT: &str = "/org/a11y/atspi/accessible/root";
+/// 셸의 관리자 인증 창: 레이어 이름이자 창의 접근성 이름. 사람만 답하는 창이라 에이전트는 읽지도
+/// 조작하지도 않는다
+pub const AUTH_WINDOW: &str = "bunt-polkit-agent";
 const CACHE: &str = "/org/a11y/atspi/cache";
 const ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
+const ACTION: &str = "org.a11y.atspi.Action";
+const COMPONENT: &str = "org.a11y.atspi.Component";
 const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
+/// D-Bus로 뜨는 앱의 인터페이스 (데스크톱 항목 명세의 DBusActivatable)
+const APPLICATION: &str = "org.freedesktop.Application";
+/// AtspiCoordType의 WINDOW: 창(최상위 표면) 기준 좌표
+const COORD_WINDOW: u32 = 1;
+/// linux 입력의 왼쪽 단추 (BTN_LEFT)
+const BUTTON_LEFT: u32 = 0x110;
 /// 한 번에 보내는 호출 수
 const BATCH: usize = 64;
 /// 목록을 다시 읽는 횟수 상한
@@ -68,6 +79,23 @@ pub struct WindowRef {
     pub states: u64,
 }
 
+/// GetWindows 항목: pid, 앱 ID, 제목, x, y, 너비, 높이, 키보드 포커스
+type RawWindow = (u32, String, String, i32, i32, i32, i32, bool);
+
+/// 컴포지터가 놓은 창 (GetWindows)
+#[derive(Clone, Debug)]
+pub struct Placed {
+    pub pid: u32,
+    /// Wayland 앱 ID (= 데스크톱 ID)
+    pub app_id: String,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub focused: bool,
+}
+
 #[derive(Clone)]
 pub struct A11y {
     /// 접근성 버스
@@ -90,6 +118,20 @@ impl A11y {
             )
             .await?;
         let address: String = reply.body().deserialize()?;
+        // 보조 기술이 있다고 알린다. Firefox·Chromium·Qt 앱은 이것을 보고서야 트리를 내놓는다
+        // (GTK4는 늘 내놓는다). 이미 떠 있던 앱은 다시 띄워야 따를 수 있다
+        if let Err(err) = session
+            .call_method(
+                Some("org.a11y.Bus"),
+                "/org/a11y/bus",
+                Some(PROPERTIES),
+                "Set",
+                &("org.a11y.Status", "IsEnabled", Value::from(true)),
+            )
+            .await
+        {
+            tracing::warn!("cannot turn on accessibility for other toolkits: {err}");
+        }
         let bus = zbus::connection::Builder::address(address.as_str())?
             .build()
             .await?;
@@ -99,17 +141,98 @@ impl A11y {
     /// 컴포지터가 키보드 포커스를 준 클라이언트의 pid (org.buntos.Compositor1.GetFocus).
     /// 컴포지터 API가 없거나 포커스가 없으면 None
     pub async fn focused_pid(&self) -> Option<u32> {
-        let (pid, ..): (u32, String, String, bool) = call_on(
+        let (pid, ..): (u32, String, String, bool) = self.compositor("GetFocus", &()).await.ok()?;
+        (pid != 0).then_some(pid)
+    }
+
+    /// 키보드 포커스가 셸의 관리자 인증 창(레이어 `bunt-polkit-agent`)에 있는지
+    pub async fn auth_dialog_focused(&self) -> bool {
+        matches!(
+            self.compositor::<_, (u32, String, String, bool)>("GetFocus", &()).await,
+            Ok((_, namespace, _, true)) if namespace == AUTH_WINDOW
+        )
+    }
+
+    /// 컴포지터 API (org.buntos.Compositor1). 창 목록과 입력 메서드는 buntd-agent만 부를 수 있다
+    async fn compositor<B, R>(&self, method: &str, body: &B) -> zbus::Result<R>
+    where
+        B: Serialize + DynamicType,
+        R: DeserializeOwned + Type,
+    {
+        call_on(
             &self.session,
+            CALL_TIMEOUT,
             "org.buntos.Compositor",
             "/org/buntos/Compositor",
             "org.buntos.Compositor1",
-            "GetFocus",
-            &(),
+            method,
+            body,
         )
         .await
-        .ok()?;
-        (pid != 0).then_some(pid)
+    }
+
+    /// 컴포지터의 창 목록 (쌓인 순서, 아래부터)
+    pub async fn windows(&self) -> zbus::Result<Vec<Placed>> {
+        let windows: Vec<RawWindow> = self.compositor("GetWindows", &()).await?;
+        Ok(windows
+            .into_iter()
+            .map(
+                |(pid, app_id, title, x, y, width, height, focused)| Placed {
+                    pid,
+                    app_id,
+                    title,
+                    x,
+                    y,
+                    width,
+                    height,
+                    focused,
+                },
+            )
+            .collect())
+    }
+
+    /// 그 pid의 창(제목이 같은 것 먼저)을 앞으로 가져와 키보드 포커스를 준다
+    pub async fn activate_window(&self, pid: u32, title: &str) -> zbus::Result<bool> {
+        self.compositor("ActivateWindow", &(pid, title)).await
+    }
+
+    /// 키보드 포커스에 키를 차례로 누른다 ("ctrl+a", "Return")
+    pub async fn press_keys(&self, keys: &[String]) -> zbus::Result<()> {
+        self.compositor("PressKeys", &(keys,)).await
+    }
+
+    /// 키보드 포커스를 가진 앱이 글 입력(text-input-v3)을 켜 두었는지
+    pub async fn text_input_active(&self) -> zbus::Result<bool> {
+        self.compositor("TextInputActive", &()).await
+    }
+
+    /// 글을 친다. 앱의 글 입력에 확정했으면 "text-input", 글자마다 키를 쳤으면 "keys"
+    /// (지금 키 배열에 있는 글자만)
+    pub async fn type_text(&self, text: &str) -> zbus::Result<String> {
+        self.compositor("TypeText", &(text,)).await
+    }
+
+    /// 화면의 논리 좌표를 왼쪽 단추로 누른다
+    pub async fn click(&self, x: f64, y: f64) -> zbus::Result<()> {
+        self.compositor("Click", &(x, y, BUTTON_LEFT)).await
+    }
+
+    /// D-Bus로 뜨는 앱(DBusActivatable)에 창을 열라고 한다 (org.freedesktop.Application.Activate).
+    /// 앱이 없으면 세션 버스가 띄우고, 답은 앱이 뜬 뒤에 오므로 `wait`만큼 기다린다. `gio launch`는
+    /// 이 호출이 앱에 닿기 전에 끝나 버려서, 앱은 뜨기만 하고 창을 열지 않은 채 곧 끝난다
+    pub async fn activate_app(&self, id: &str, wait: Duration) -> zbus::Result<()> {
+        let path = format!("/{}", id.replace('.', "/").replace('-', "_"));
+        let platform: HashMap<&str, Value> = HashMap::new();
+        call_on(
+            &self.session,
+            wait,
+            id,
+            &path,
+            APPLICATION,
+            "Activate",
+            &(platform,),
+        )
+        .await
     }
 
     async fn call<B, R>(
@@ -124,7 +247,16 @@ impl A11y {
         B: Serialize + DynamicType,
         R: DeserializeOwned + Type,
     {
-        call_on(&self.bus, destination, path, interface, method, body).await
+        call_on(
+            &self.bus,
+            CALL_TIMEOUT,
+            destination,
+            path,
+            interface,
+            method,
+            body,
+        )
+        .await
     }
 
     /// 앱 목록과 그 창 (이름, 상태)
@@ -240,7 +372,16 @@ impl A11y {
     pub async fn tree(&self, bus: &str) -> zbus::Result<Vec<Item>> {
         // 루트는 자식 수를 0으로 알리므로 창은 늘 직접 물어본다
         self.children(bus, ROOT).await;
-        let mut items = self.items(bus).await?;
+        let mut items = match self.items(bus).await {
+            Ok(items) => items,
+            // 목록(캐시)이 없는 툴킷(Firefox의 ATK 다리 등)은 트리를 직접 걷는다
+            Err(zbus::Error::MethodError(name, ..))
+                if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" =>
+            {
+                return Ok(self.walk(bus).await);
+            }
+            Err(err) => return Err(err),
+        };
         for _ in 0..ROUNDS {
             let missing: Vec<String> = Tree::new(&items)
                 .missing()
@@ -255,6 +396,89 @@ impl A11y {
             items = self.items(bus).await?;
         }
         Ok(items)
+    }
+
+    /// 루트부터 GetChildren으로 내려가며 객체마다 역할, 이름, 설명, 상태, 인터페이스를 묻는다.
+    /// 캐시가 없는 앱에 쓴다 (객체마다 호출 여섯 번이라 GTK4의 목록보다 느리다)
+    async fn walk(&self, bus: &str) -> Vec<Item> {
+        let mut items = vec![Item {
+            path: ROOT.into(),
+            name: self.name(bus, ROOT).await,
+            role: crate::tree::role::APPLICATION,
+            ..Item::default()
+        }];
+        let mut frontier = vec![ROOT.to_string()];
+        while !frontier.is_empty() && items.len() < MAX_ITEMS {
+            let mut next = Vec::new();
+            for batch in frontier.chunks(BATCH / 4) {
+                let levels = join_all(batch.iter().map(|parent| async move {
+                    let children: Vec<String> = self
+                        .children(bus, parent)
+                        .await
+                        .into_iter()
+                        .filter(|(child_bus, _)| child_bus == bus)
+                        .map(|(_, path)| path.as_str().to_string())
+                        .collect();
+                    join_all(
+                        children
+                            .iter()
+                            .enumerate()
+                            .map(|(index, path)| self.describe(bus, parent, index, path)),
+                    )
+                    .await
+                }))
+                .await;
+                for item in levels.into_iter().flatten() {
+                    next.push(item.path.clone());
+                    items.push(item);
+                }
+            }
+            frontier = next;
+        }
+        items
+    }
+
+    /// 객체 하나의 모양 (walk)
+    async fn describe(&self, bus: &str, parent: &str, index: usize, path: &str) -> Item {
+        let (role, name, (states, interfaces, children)) = join3(
+            self.call::<_, u32>(bus, path, ACCESSIBLE, "GetRole", &()),
+            self.name(bus, path),
+            join3(
+                self.states(bus, path),
+                self.call::<_, Vec<String>>(bus, path, ACCESSIBLE, "GetInterfaces", &()),
+                self.call::<_, OwnedValue>(
+                    bus,
+                    path,
+                    PROPERTIES,
+                    "Get",
+                    &(ACCESSIBLE, "ChildCount"),
+                ),
+            ),
+        )
+        .await;
+        let description = self
+            .call::<_, OwnedValue>(bus, path, PROPERTIES, "Get", &(ACCESSIBLE, "Description"))
+            .await
+            .ok()
+            .and_then(|value| String::try_from(value).ok())
+            .unwrap_or_default();
+        Item {
+            path: path.to_string(),
+            parent: parent.to_string(),
+            index: index as i32,
+            child_count: children
+                .ok()
+                .and_then(|value| value.downcast_ref::<i32>().ok())
+                .unwrap_or(0),
+            interfaces: interfaces
+                .map(|names| iface::from_names(names.iter().map(String::as_str)))
+                .unwrap_or(0),
+            name,
+            role: role.unwrap_or(0),
+            description,
+            states,
+            ..Item::default()
+        }
     }
 
     /// `start` 아래를 GetChildren으로 물어 GTK가 접근성 객체를 만들게 한다. 처음 보는 자식은 그
@@ -358,11 +582,127 @@ impl A11y {
             .await
             .ok()
     }
+
+    /// 요소가 내놓은 동작의 이름. 번호는 DoAction의 번호다. GetActions는 지역화한 이름("토글")을
+    /// 주고 쓸 수 없는 동작을 빼므로, 동작 수와 GetName으로 지역화하지 않은 이름을 읽는다
+    pub async fn actions(&self, bus: &str, path: &str) -> Vec<String> {
+        let count = self
+            .call::<_, OwnedValue>(bus, path, PROPERTIES, "Get", &(ACTION, "NActions"))
+            .await
+            .ok()
+            .and_then(|value| value.downcast_ref::<i32>().ok())
+            .unwrap_or(0)
+            .clamp(0, 16);
+        join_all((0..count).map(|index| async move {
+            self.call::<_, String>(bus, path, ACTION, "GetName", &(index,))
+                .await
+                .unwrap_or_default()
+        }))
+        .await
+    }
+
+    pub async fn do_action(&self, bus: &str, path: &str, index: i32) -> zbus::Result<bool> {
+        self.call(bus, path, ACTION, "DoAction", &(index,)).await
+    }
+
+    /// 글자 칸의 커서를 글 끝으로 옮긴다 (Text.SetCaretOffset)
+    pub async fn caret_to_end(&self, bus: &str, path: &str) -> zbus::Result<bool> {
+        let count = self
+            .call::<_, OwnedValue>(
+                bus,
+                path,
+                PROPERTIES,
+                "Get",
+                &("org.a11y.atspi.Text", "CharacterCount"),
+            )
+            .await?
+            .downcast_ref::<i32>()
+            .map_err(zbus::Error::Variant)?;
+        self.call(
+            bus,
+            path,
+            "org.a11y.atspi.Text",
+            "SetCaretOffset",
+            &(count,),
+        )
+        .await
+    }
+
+    /// 글자 칸의 커서 자리에 글을 넣는다 (EditableText.InsertText. 길이는 GTK가 바이트로 읽는다)
+    pub async fn insert_text(&self, bus: &str, path: &str, text: &str) -> zbus::Result<bool> {
+        let caret = self
+            .call::<_, OwnedValue>(
+                bus,
+                path,
+                PROPERTIES,
+                "Get",
+                &("org.a11y.atspi.Text", "CaretOffset"),
+            )
+            .await?
+            .downcast_ref::<i32>()
+            .map_err(zbus::Error::Variant)?;
+        let length = i32::try_from(text.len()).unwrap_or(i32::MAX);
+        self.call(
+            bus,
+            path,
+            "org.a11y.atspi.EditableText",
+            "InsertText",
+            &(caret, text, length),
+        )
+        .await
+    }
+
+    /// 글자 칸의 내용을 바꾼다 (EditableText.SetTextContents)
+    pub async fn set_text(&self, bus: &str, path: &str, text: &str) -> zbus::Result<bool> {
+        self.call(
+            bus,
+            path,
+            "org.a11y.atspi.EditableText",
+            "SetTextContents",
+            &(text,),
+        )
+        .await
+    }
+
+    /// 막대·숫자 칸의 값을 바꾼다 (Value.CurrentValue)
+    pub async fn set_value(&self, bus: &str, path: &str, value: f64) -> zbus::Result<()> {
+        self.call(
+            bus,
+            path,
+            PROPERTIES,
+            "Set",
+            &("org.a11y.atspi.Value", "CurrentValue", Value::from(value)),
+        )
+        .await
+    }
+
+    pub async fn grab_focus(&self, bus: &str, path: &str) -> zbus::Result<bool> {
+        self.call(bus, path, COMPONENT, "GrabFocus", &()).await
+    }
+
+    /// 목록의 `index`번째 항목을 고른다 (Selection.SelectChild)
+    pub async fn select_child(&self, bus: &str, list: &str, index: i32) -> zbus::Result<bool> {
+        self.call(
+            bus,
+            list,
+            "org.a11y.atspi.Selection",
+            "SelectChild",
+            &(index,),
+        )
+        .await
+    }
+
+    /// 요소의 자리와 크기 (창 기준 논리 좌표: x, y, 너비, 높이)
+    pub async fn extents(&self, bus: &str, path: &str) -> zbus::Result<(i32, i32, i32, i32)> {
+        self.call(bus, path, COMPONENT, "GetExtents", &(COORD_WINDOW,))
+            .await
+    }
 }
 
 /// D-Bus 호출 하나. 바쁘거나 멈춘 앱 하나가 데몬 전체를 붙잡지 않게 기다리는 시간을 둔다
 async fn call_on<B, R>(
     connection: &Connection,
+    timeout: Duration,
     destination: &str,
     path: &str,
     interface: &str,
@@ -374,11 +714,11 @@ where
     R: DeserializeOwned + Type,
 {
     let call = connection.call_method(Some(destination), path, Some(interface), method, body);
-    match select(pin!(call), pin!(Timer::after(CALL_TIMEOUT))).await {
+    match select(pin!(call), pin!(Timer::after(timeout))).await {
         Either::Left((reply, _)) => reply?.body().deserialize(),
         Either::Right(_) => Err(zbus::Error::Failure(format!(
             "{destination} did not answer {interface}.{method} within {}s",
-            CALL_TIMEOUT.as_secs()
+            timeout.as_secs()
         ))),
     }
 }

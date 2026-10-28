@@ -192,16 +192,22 @@ impl Item {
     pub fn wants_text(&self) -> bool {
         self.interfaces & iface::TEXT != 0
             && self.role != role::PASSWORD_TEXT
-            && (matches!(kind(self), Kind::Line(name) if name == "textbox")
-                || (matches!(kind(self), Kind::Text) && self.name.is_empty()))
+            && (self.is_editable() || (matches!(kind(self), Kind::Text) && self.name.is_empty()))
     }
 
     /// 속성(안내 글, 제목 단계)을 따로 읽을 객체인가
     pub fn wants_attributes(&self) -> bool {
-        matches!(kind(self), Kind::Line(name) if name == "textbox" || name == "heading")
+        self.is_editable() || matches!(kind(self), Kind::Line(name) if name == "heading")
+    }
+
+    /// 글을 고칠 수 있는 칸: 글자 칸, 그리고 Firefox 주소 막대처럼 글을 쓰는 콤보 상자 등
+    fn is_editable(&self) -> bool {
+        self.interfaces & iface::EDITABLE_TEXT != 0
+            || matches!(kind(self), Kind::Line(name) if name == "textbox")
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Options {
     /// 상호작용할 수 있는 요소(와 그것을 담은 범위 그릇, 제목)만
     pub interactive: bool,
@@ -703,7 +709,7 @@ fn attributes(item: &Item, role: &str, name: &str, is_interactive: bool) -> Vec<
             number(range.max)
         ));
     }
-    if role == "textbox" && item.role != role::PASSWORD_TEXT {
+    if item.is_editable() && item.role != role::PASSWORD_TEXT {
         if let Some(text) = item.text.as_deref().filter(|text| !text.is_empty()) {
             out.push(format!("value={}", quote(text, MAX_TEXT)));
         }
@@ -888,6 +894,27 @@ mod tests {
         );
         // 데몬은 암호 칸의 내용을 읽지도 않는다
         assert!(!items[1].wants_text());
+    }
+
+    #[test]
+    fn editable_comboboxes_show_their_text() {
+        // Firefox 주소 막대: 글을 쓰는 콤보 상자
+        let mut bar = item("/bar", "", 0, role::COMBO_BOX, "검색 또는 주소 입력");
+        bar.states |= state::EDITABLE | state::FOCUSABLE;
+        bar.interfaces = iface::TEXT | iface::EDITABLE_TEXT;
+        bar.text = Some("example.org".into());
+        assert!(bar.wants_text());
+        let items = vec![bar];
+        let tree = Tree::new(&items);
+        let options = Options {
+            interactive: true,
+            hidden: false,
+        };
+        let lines = render(&tree, &["/bar"], &options, &mut refs());
+        assert_eq!(
+            lines,
+            ["- combobox \"검색 또는 주소 입력\" [ref=e1] [value=\"example.org\"]"]
+        );
     }
 
     #[test]

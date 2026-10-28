@@ -222,7 +222,9 @@ name = "bunt-agent"
 version = "0.1.0"
 dependencies = [
  "async-io",
+ "bunt-access",
  "futures-util",
+ "libc",
  "serde",
  "serde_json",
  "tracing",
