@@ -39,6 +39,8 @@ page-default-apps = Default Apps
 page-default-apps-keywords = default programs open with file type extension associations web browser mail images video
 page-agent = AI Agents
 page-agent-keywords = artificial intelligence agent control access permission allow block apps
+page-users = Users & Groups
+page-users-keywords = account user name password profile picture login
 page-about = About
 page-about-keywords = device name operating system version memory storage
 

@@ -1,0 +1,129 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * 사용자 및 그룹 페이지와 사이드바 계정 카드. 사진 모양은 로그인 화면(greeter/data/style.css)과 같다
+ */
+
+/* 사진: 원 안의 그림, 없으면 회색 원의 모노그램 */
+.avatar {
+  border-radius: var(--radius-capsule);
+}
+
+.avatar.monogram {
+  background-image: linear-gradient(to bottom, color-mix(in srgb, var(--gray) 70%, white), var(--gray));
+  color: var(--accent-fg);
+}
+
+.monogram-text {
+  font-weight: 600;
+}
+
+/* 기본 사진: 시스템 색 그라데이션 위의 흰 기호 (window/account.rs의 DEFAULT_PICTURES) */
+.default-picture {
+  color: var(--accent-fg);
+}
+
+.picture-orange { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--orange) 70%, white), var(--orange)); }
+.picture-indigo { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--indigo) 70%, white), var(--indigo)); }
+.picture-purple { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--purple) 70%, white), var(--purple)); }
+.picture-green { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--green) 70%, white), var(--green)); }
+.picture-red { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--red) 70%, white), var(--red)); }
+.picture-blue { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--blue) 70%, white), var(--blue)); }
+.picture-teal { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--teal) 70%, white), var(--teal)); }
+.picture-pink { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--pink) 70%, white), var(--pink)); }
+
+/* 사이드바 맨 위 계정 카드: 누르면 사용자 및 그룹을 연다 */
+.settings-window button.account-button {
+  margin: 2px 12px 10px;
+  padding: 4px;
+  border-radius: var(--radius-md);
+  background-color: transparent;
+}
+
+.settings-window button.account-button:hover {
+  background-color: var(--hover);
+}
+
+.settings-window button.account-button:active {
+  background-color: var(--pressed);
+}
+
+.settings-window button.account-button .account-header {
+  margin: 0;
+  padding: 0;
+}
+
+/* 맨 위: 큰 사진, 이름, 계정 종류 */
+.users-hero {
+  margin: 8px 0 4px;
+}
+
+.settings-window button.avatar-button {
+  padding: 0;
+  border-radius: var(--radius-capsule);
+  background-color: transparent;
+}
+
+.settings-window button.avatar-button:disabled {
+  color: var(--label);
+}
+
+.avatar-overlay {
+  border-radius: var(--radius-capsule);
+}
+
+/* 사진을 가리키면 아래쪽에 "편집"이 보인다 (macOS) */
+.avatar-edit {
+  padding: 3px 0 7px;
+  background: alpha(black, 0.45);
+  color: var(--accent-fg);
+  font-size: var(--text-footnote);
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity var(--duration-fast);
+}
+
+button.avatar-button:hover .avatar-edit,
+button.avatar-button:focus-visible .avatar-edit {
+  opacity: 1;
+}
+
+button.avatar-button:disabled .avatar-edit {
+  opacity: 0;
+}
+
+.users-name {
+  font-size: var(--text-title2);
+  font-weight: 700;
+}
+
+.users-kind {
+  font-size: var(--text-callout);
+  color: var(--label-secondary);
+}
+
+/* 사진 고르기 시트 */
+.picture-preview {
+  margin: 4px 0 8px;
+}
+
+.sheet button.picture-option {
+  padding: 2px;
+  border-radius: var(--radius-capsule);
+  background-color: transparent;
+}
+
+.sheet button.picture-option:hover {
+  background-color: var(--hover);
+}
+
+.sheet button.picture-option.selected {
+  box-shadow: 0 0 0 3px var(--accent);
+}
+
+/* 암호 변경 시트의 실패 안내 */
+.password-error {
+  color: var(--red);
+  font-size: var(--text-callout);
+}

@@ -5,6 +5,8 @@
 //! 본문(뒤로·앞으로 단추, 제목, 페이지)으로 나눈다. 제목 표시줄은 따로 두지 않고 두 칸의 맨 위가
 //! 창을 끄는 손잡이와 창 단추를 맡는다. 페이지는 처음 열 때 만든다
 
+pub mod account;
+
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
@@ -16,8 +18,10 @@ use gtk4::{self as gtk, gio, glib, prelude::*};
 
 use crate::{
     pages::{Context, Page, interface_settings},
-    widgets::{BadgeSize, Notice, badge},
+    widgets::{BadgeSize, Notice, badge, keep_alive},
 };
+
+use self::account::Account;
 
 const SIDEBAR_WIDTH: i32 = 230;
 
@@ -158,7 +162,7 @@ impl SettingsWindow {
         sidebar_top.append(&gtk::WindowControls::new(gtk::PackType::Start));
         sidebar_pane.append(&gtk::WindowHandle::builder().child(&sidebar_top).build());
         sidebar_pane.append(&search);
-        sidebar_pane.append(&account_header(tr));
+        sidebar_pane.append(&account_header(tr, &navigator));
         sidebar_pane.append(
             &gtk::ScrolledWindow::builder()
                 .child(&sidebar)
@@ -305,38 +309,30 @@ fn nav_button(icon: &str, tooltip: &str) -> gtk::Button {
         .build()
 }
 
-/// 사이드바 맨 위의 사용자 (macOS의 계정 자리). 이름은 계정의 실명, 없으면 사용자 이름
-fn account_header(tr: &Translations) -> gtk::Box {
-    let avatar = gtk::Image::from_icon_name("avatar-default-symbolic");
-    avatar.set_pixel_size(22);
-    let avatar_frame = gtk::Box::builder()
-        .width_request(36)
-        .height_request(36)
-        .valign(gtk::Align::Center)
-        .hexpand(false)
-        .css_classes(["account-avatar"])
-        .build();
-    avatar.set_hexpand(true);
-    avatar_frame.append(&avatar);
+/// 사이드바 맨 위 계정 카드의 사진 크기
+const ACCOUNT_AVATAR_SIZE: i32 = 36;
 
+/// 사이드바 맨 위의 사용자 (macOS의 계정 자리). 사진과 전체 이름(없으면 사용자 이름)을
+/// AccountsService에서 읽고, 시스템 설정이나 다른 곳에서 바꾸면 따라간다. 누르면 사용자 및 그룹을 연다
+fn account_header(tr: &Translations, navigator: &Rc<Navigator>) -> gtk::Button {
     let real_name = glib::real_name().to_string_lossy().into_owned();
     let name = if real_name.is_empty() || real_name == "Unknown" {
         glib::user_name().to_string_lossy().into_owned()
     } else {
         real_name
     };
+    let avatar = account::avatar(&name, None, ACCOUNT_AVATAR_SIZE);
+    let name_label = gtk::Label::builder()
+        .label(&name)
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["account-name"])
+        .build();
     let text = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .valign(gtk::Align::Center)
         .build();
-    text.append(
-        &gtk::Label::builder()
-            .label(name)
-            .xalign(0.0)
-            .ellipsize(gtk::pango::EllipsizeMode::End)
-            .css_classes(["account-name"])
-            .build(),
-    );
+    text.append(&name_label);
     text.append(
         &gtk::Label::builder()
             .label(tr.get("sidebar-account"))
@@ -348,9 +344,74 @@ fn account_header(tr: &Translations) -> gtk::Box {
         .spacing(10)
         .css_classes(["account-header"])
         .build();
-    header.append(&avatar_frame);
+    header.append(&avatar);
     header.append(&text);
-    header
+    let button = gtk::Button::builder()
+        .child(&header)
+        .tooltip_text(tr.get("page-users"))
+        .css_classes(["account-button"])
+        .build();
+    button.update_property(&[gtk::accessible::Property::Label(&name)]);
+    let weak = Rc::downgrade(navigator);
+    button.connect_clicked(move |_| {
+        if let Some(navigator) = weak.upgrade() {
+            navigator.show(Page::Users, true);
+        }
+    });
+
+    // 계정 정보를 읽어 바꾸고, 바뀌었다는 신호(Changed)를 받으면 다시 읽는다
+    let show = {
+        let (avatar, name_label, button) = (
+            avatar.downgrade(),
+            name_label.downgrade(),
+            button.downgrade(),
+        );
+        move |account: &Account| {
+            let (Some(avatar), Some(name_label), Some(button)) =
+                (avatar.upgrade(), name_label.upgrade(), button.upgrade())
+            else {
+                return;
+            };
+            let texture = account
+                .icon_file
+                .as_ref()
+                .and_then(|path| gtk::gdk::Texture::from_filename(path).ok());
+            account::set_avatar(
+                &avatar,
+                account.display_name(),
+                texture.as_ref(),
+                ACCOUNT_AVATAR_SIZE,
+            );
+            name_label.set_text(account.display_name());
+            button.update_property(&[gtk::accessible::Property::Label(account.display_name())]);
+        }
+    };
+    let show = Rc::new(show);
+    let holder = button.downgrade();
+    glib::spawn_future_local(async move {
+        let account = match Account::current().await {
+            Ok(account) => account,
+            Err(err) => {
+                eprintln!("bunt-settings: account: {}", err.message());
+                return;
+            }
+        };
+        show(&account);
+        let Some(button) = holder.upgrade() else {
+            return;
+        };
+        let watched = account.clone();
+        let subscription = account.watch(move || {
+            let (account, show) = (watched.clone(), show.clone());
+            glib::spawn_future_local(async move {
+                if let Ok(account) = account.reload().await {
+                    show(&account);
+                }
+            });
+        });
+        keep_alive(&button, subscription);
+    });
+    button
 }
 
 /// 검색 칸에 쓴 글자가 페이지 이름이나 낱말에 들어 있는 페이지만 보인다. Enter는 첫 페이지를 연다

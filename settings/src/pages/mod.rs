@@ -17,6 +17,7 @@ mod language;
 mod menu_bar;
 mod mouse;
 mod network;
+mod users;
 mod wallpaper;
 mod wifi;
 
@@ -49,12 +50,13 @@ pub enum Page {
     DateTime,
     DefaultApps,
     Agent,
+    Users,
     About,
 }
 
 impl Page {
     /// 왼쪽 목록에 놓는 순서
-    pub const ALL: [Page; 16] = [
+    pub const ALL: [Page; 17] = [
         Page::Wifi,
         Page::Bluetooth,
         Page::Network,
@@ -70,6 +72,7 @@ impl Page {
         Page::DateTime,
         Page::DefaultApps,
         Page::Agent,
+        Page::Users,
         Page::About,
     ];
 
@@ -91,6 +94,7 @@ impl Page {
             Self::DateTime => "datetime",
             Self::DefaultApps => "default-apps",
             Self::Agent => "agent",
+            Self::Users => "users",
             Self::About => "about",
         }
     }
@@ -117,6 +121,7 @@ impl Page {
             Self::DateTime => "page-datetime",
             Self::DefaultApps => "page-default-apps",
             Self::Agent => "page-agent",
+            Self::Users => "page-users",
             Self::About => "page-about",
         }
     }
@@ -145,6 +150,7 @@ impl Page {
             Self::DefaultApps => "view-app-grid-symbolic",
             // 셸이 설치하는 아이콘 (shell/data/icons)
             Self::Agent => "org.buntos.Agent-symbolic",
+            Self::Users => "system-users-symbolic",
             Self::About => "computer-symbolic",
         }
     }
@@ -156,7 +162,7 @@ impl Page {
             Self::Battery => Tint::Green,
             Self::Appearance | Self::MenuBar | Self::DesktopDock => Tint::Graphite,
             Self::Wallpaper => Tint::Cyan,
-            Self::DefaultApps => Tint::Blue,
+            Self::DefaultApps | Self::Users => Tint::Blue,
             Self::Agent => Tint::Pink,
             Self::Keyboard | Self::Mouse | Self::DateTime | Self::About => Tint::Gray,
             Self::Language => Tint::Indigo,
@@ -173,7 +179,7 @@ impl Page {
             | Self::Wallpaper
             | Self::Display => 1,
             Self::Keyboard | Self::Mouse | Self::Language | Self::DateTime | Self::DefaultApps => 2,
-            Self::Agent => 3,
+            Self::Agent | Self::Users => 3,
             Self::About => 4,
         }
     }
@@ -195,6 +201,7 @@ impl Page {
             Self::DateTime => datetime::build(context),
             Self::DefaultApps => default_apps::build(context),
             Self::Agent => agent::build(context),
+            Self::Users => users::build(context),
             Self::About => about::build(context),
         }
     }

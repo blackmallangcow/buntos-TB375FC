@@ -39,6 +39,8 @@ page-default-apps = 기본 앱
 page-default-apps-keywords = 기본 프로그램 연결 프로그램 다음으로 열기 확장자 파일 형식 웹 브라우저 메일 이미지 동영상 default apps open with file type extension browser
 page-agent = AI 에이전트
 page-agent-keywords = 인공지능 에이전트 제어 접근 권한 허용 차단 앱 ai agent access control permission
+page-users = 사용자 및 그룹
+page-users-keywords = 계정 사용자 이름 암호 비밀번호 프로필 사진 로그인 account user password profile picture login
 page-about = 정보
 page-about-keywords = 기기 이름 운영체제 버전 메모리 저장 공간 about
 
