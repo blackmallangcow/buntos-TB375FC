@@ -269,6 +269,17 @@ pub fn info_row(title: &str, value: &str) -> gtk::ListBoxRow {
         .build()
 }
 
+/// 눈금 슬라이더. 값은 눈금 번호(0부터)다. 너비는 slider_row가 정한다
+pub fn step_scale(steps: usize) -> gtk::Scale {
+    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (steps - 1) as f64, 1.0);
+    scale.set_round_digits(0);
+    scale.set_draw_value(false);
+    for index in 0..steps {
+        scale.add_mark(index as f64, gtk::PositionType::Bottom, None);
+    }
+    scale
+}
+
 /// 슬라이더 행의 조작 너비. 페이지와 행 제목이 달라도 슬라이더는 모두 이 너비다
 const SLIDER_WIDTH: i32 = 260;
 

@@ -14,6 +14,7 @@ mod display;
 mod keyboard;
 mod language;
 mod menu_bar;
+mod mouse;
 mod network;
 mod wallpaper;
 mod wifi;
@@ -42,6 +43,7 @@ pub enum Page {
     Wallpaper,
     Display,
     Keyboard,
+    Mouse,
     Language,
     DateTime,
     DefaultApps,
@@ -50,7 +52,7 @@ pub enum Page {
 
 impl Page {
     /// 왼쪽 목록에 놓는 순서
-    pub const ALL: [Page; 14] = [
+    pub const ALL: [Page; 15] = [
         Page::Wifi,
         Page::Bluetooth,
         Page::Network,
@@ -61,6 +63,7 @@ impl Page {
         Page::Wallpaper,
         Page::Display,
         Page::Keyboard,
+        Page::Mouse,
         Page::Language,
         Page::DateTime,
         Page::DefaultApps,
@@ -80,6 +83,7 @@ impl Page {
             Self::Wallpaper => "wallpaper",
             Self::Display => "display",
             Self::Keyboard => "keyboard",
+            Self::Mouse => "mouse",
             Self::Language => "language",
             Self::DateTime => "datetime",
             Self::DefaultApps => "default-apps",
@@ -104,6 +108,7 @@ impl Page {
             Self::Wallpaper => "page-wallpaper",
             Self::Display => "page-display",
             Self::Keyboard => "page-keyboard",
+            Self::Mouse => "page-mouse",
             Self::Language => "page-language",
             Self::DateTime => "page-datetime",
             Self::DefaultApps => "page-default-apps",
@@ -129,6 +134,7 @@ impl Page {
             Self::Wallpaper => "preferences-desktop-wallpaper-symbolic",
             Self::Display => "video-display-symbolic",
             Self::Keyboard => "input-keyboard-symbolic",
+            Self::Mouse => "input-mouse-symbolic",
             Self::Language => "preferences-desktop-locale-symbolic",
             Self::DateTime => "preferences-system-time-symbolic",
             Self::DefaultApps => "view-app-grid-symbolic",
@@ -144,7 +150,7 @@ impl Page {
             Self::Appearance | Self::MenuBar | Self::DesktopDock => Tint::Graphite,
             Self::Wallpaper => Tint::Cyan,
             Self::DefaultApps => Tint::Blue,
-            Self::Keyboard | Self::DateTime | Self::About => Tint::Gray,
+            Self::Keyboard | Self::Mouse | Self::DateTime | Self::About => Tint::Gray,
             Self::Language => Tint::Indigo,
         }
     }
@@ -158,7 +164,7 @@ impl Page {
             | Self::DesktopDock
             | Self::Wallpaper
             | Self::Display => 1,
-            Self::Keyboard | Self::Language | Self::DateTime | Self::DefaultApps => 2,
+            Self::Keyboard | Self::Mouse | Self::Language | Self::DateTime | Self::DefaultApps => 2,
             Self::About => 3,
         }
     }
@@ -175,6 +181,7 @@ impl Page {
             Self::Wallpaper => wallpaper::build(context),
             Self::Display => display::build(context),
             Self::Keyboard => keyboard::build(context),
+            Self::Mouse => mouse::build(context),
             Self::Language => language::build(context),
             Self::DateTime => datetime::build(context),
             Self::DefaultApps => default_apps::build(context),

@@ -79,17 +79,6 @@ fn nearest(steps: &[u32], value: u32) -> usize {
         .map_or(0, |(index, _)| index)
 }
 
-/// 눈금 슬라이더. 너비는 widgets::slider_row가 정한다
-fn step_scale(steps: usize) -> gtk::Scale {
-    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (steps - 1) as f64, 1.0);
-    scale.set_round_digits(0);
-    scale.set_draw_value(false);
-    for index in 0..steps {
-        scale.add_mark(index as f64, gtk::PositionType::Bottom, None);
-    }
-    scale
-}
-
 fn language_name(tr: &Translations, code: &str) -> String {
     match code.split(['_', '-']).next().unwrap_or_default() {
         "ko" => tr.get("keyboard-language-korean"),
@@ -113,8 +102,8 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
     ));
 
     let repeat_list = widgets::group(&column, Some(&tr.get("keyboard-repeat")), None);
-    let rate = step_scale(RATES.len());
-    let delay = step_scale(DELAYS.len());
+    let rate = widgets::step_scale(RATES.len());
+    let delay = widgets::step_scale(DELAYS.len());
     repeat_list.append(&widgets::slider_row(
         &tr.get("keyboard-repeat-rate"),
         &rate,
