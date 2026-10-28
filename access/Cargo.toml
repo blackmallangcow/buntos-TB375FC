@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "bunt-access"
+description = "buntOS AI agent access policy and its privileged helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bunt-access-helper"
+path = "src/bin/bunt-access-helper.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# 정책 파일과 요청 기록
+toml = "1"

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+SPDX-FileCopyrightText: 2026 buntOS contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+AI 에이전트 접근 정책(/etc/buntos/agent-access.toml)을 바꾸는 동작. 시스템 설정의 AI 에이전트 페이지가
+pkexec로 bunt-access-helper를 실행할 때 쓰인다. 바꿀 때마다 관리자 암호를 묻는다(auth_admin).
+auth_admin_keep으로 두면 인증한 뒤 몇 분 동안 같은 세션의 다른 프로그램(허용받은 AI 포함)이
+암호 없이 제 권한을 늘릴 수 있다.
+-->
+<policyconfig>
+  <vendor>buntOS</vendor>
+  <vendor_url>https://github.com/blackmallangcow/buntOS</vendor_url>
+  <icon_name>org.buntos.Agent-symbolic</icon_name>
+
+  <action id="org.buntos.agent.access.change">
+    <description>Change which AI agents can control this computer</description>
+    <description xml:lang="ko">이 컴퓨터를 제어할 수 있는 AI 바꾸기</description>
+    <message>System Settings wants to change which AI agents can control this computer.</message>
+    <message xml:lang="ko">시스템 설정이 이 컴퓨터를 제어할 수 있는 AI를 바꾸려고 합니다.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/buntos/bunt-access-helper</annotate>
+  </action>
+</policyconfig>

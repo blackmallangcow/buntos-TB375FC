@@ -53,6 +53,16 @@ stage_components() {
 	for unit in buntd-agent.service buntd-agent.socket; do
 		install -D -m 0644 "$repo/agent/data/$unit" "$out/stage/usr/lib/systemd/user/$unit"
 	done
+	install -D -m 0755 "$target/release/bunt-access-helper" \
+		"$out/stage/usr/libexec/buntos/bunt-access-helper"
+	# 크레이트의 data/root는 이미지 루트에 그대로 놓는다(안의 경로가 이미지 안의 경로다):
+	# 접근 정책의 polkit 동작 등
+	local crate
+	for crate in access; do
+		if [[ -d "$repo/$crate/data/root" ]]; then
+			cp -a "$repo/$crate/data/root/." "$out/stage/"
+		fi
+	done
 	install -D -m 0644 "$repo/settings/data/org.buntos.Settings.desktop" \
 		"$out/stage/usr/share/applications/org.buntos.Settings.desktop"
 	install -D -m 0644 "$repo/shell/data/org.buntos.shell.gschema.xml" \
