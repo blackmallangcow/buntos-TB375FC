@@ -6,7 +6,8 @@
 # 빌드한 이미지를 시험 계정과 함께 띄운다(systemd 자격 증명 buntos.account를 SMBIOS로 넘긴다).
 # 직렬 콘솔의 root 자동 로그인 뒤 셸에서 명령이 실행되는지 보고, 로그인 화면(bunt-greeter)에 QMP로
 # 암호를 쳐 그 계정으로 들어간다. sudo가 암호를 묻는지 보고, 그래픽 셸(메뉴 막대, Dock)이 떴는지는
-# 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본 뒤 끈다.
+# 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에
+# 넣는다, tests/e2e/agent-apps.sh)을 돌린 뒤 끈다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
 # 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 600)
 set -euo pipefail
@@ -128,6 +129,22 @@ else
 	echo 'cat /tmp/e2e-shell' >&3
 	sleep 2
 	fail "에이전트가 읽은 셸에 메뉴 막대 항목과 Dock이 없다 (요소 ${agent_refs}개)"
+fi
+
+# e2e 5번: 에이전트가 앱 A(계산기)의 값을 읽어 앱 B(텍스트 편집기)에 넣는다(tests/e2e/agent-apps.sh).
+# 스크립트를 직렬 콘솔로 넣어 root로 돌린다. 콘솔은 4KB 가까운 줄을 자르므로 base64를 1000자씩 나눠 보낸다.
+# 결과 줄은 입력 줄의 에코와 구분되도록 앞에 표시를 붙인다
+if [[ "$agent_refs" != NONE ]]; then
+	echo 'rm -f /tmp/e2e-agent-apps.b64' >&3
+	base64 -w 1000 "$repo/tests/e2e/agent-apps.sh" | while IFS= read -r chunk; do
+		echo "echo $chunk >>/tmp/e2e-agent-apps.b64" >&3
+	done
+	echo 'base64 -d /tmp/e2e-agent-apps.b64 >/tmp/e2e-agent-apps.sh && bash /tmp/e2e-agent-apps.sh 2>&1 | sed "s/^/E2E5: /"' >&3
+	wait_for "^E2E5: E2E5_RESULT [0-9]+ [0-9]+$" || fail "e2e 5번(에이전트 앱 간 제어)이 끝나지 않았다"
+	console | grep -a "^E2E5: E2E5 " | sed 's/^E2E5: E2E5 /e2e 5번 /'
+	read -r passed failed < <(console | grep -a -E "^E2E5: E2E5_RESULT" | tail -1 | sed 's/^E2E5: E2E5_RESULT //')
+	((failed == 0 && passed > 0)) || fail "e2e 5번(에이전트 앱 간 제어): ${failed}개 실패"
+	echo "e2e 5번(에이전트 앱 간 제어): ${SECONDS}초, ${passed}개 통과"
 fi
 
 echo 'systemctl poweroff' >&3
