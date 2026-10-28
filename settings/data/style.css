@@ -503,14 +503,23 @@ button.appearance-choice:checked {
   font-size: var(--text-footnote);
 }
 
-/* 디스플레이 배율 */
-button.scale-choice {
+/* 디스플레이 크기: macOS의 "더 큰 텍스트 ↔ 더 많은 공간" */
+.scale-row {
+  padding: 14px 12px 12px;
+}
+
+.settings-window button.scale-choice {
   padding: 3px;
   border-radius: 9px;
   background: none;
 }
 
-button.scale-choice:checked {
+.settings-window button.scale-choice:hover {
+  box-shadow: 0 0 0 3px var(--hover);
+  background: none;
+}
+
+.settings-window button.scale-choice:checked {
   box-shadow: 0 0 0 3px var(--accent);
   background: none;
 }

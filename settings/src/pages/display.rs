@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 디스플레이: 컴포지터 API(org.buntos.Compositor1)로 출력마다 배율, 해상도, 주사율을 바꾸고,
-//! 내장 화면이면 밝기(/sys/class/backlight를 읽고 logind로 쓴다)를 바꾼다
+//! 디스플레이: 컴포지터 API(org.buntos.Compositor1)로 출력마다 화면 크기(배율), 주사율, 해상도를
+//! 바꾸고, 내장 화면이면 밝기(/sys/class/backlight를 읽고 logind로 쓴다)를 바꾼다.
+//! 화면 크기는 macOS처럼 "더 큰 텍스트 ↔ 더 많은 공간" 가운데 고르고, 고른 것이 어떤 해상도처럼
+//! 보이는지 알린다. 화면에 보내는 실제 해상도는 그대로다. 실제 해상도는 고급에서 바꾼다
 
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
 
@@ -37,7 +39,10 @@ struct Output {
     scale: f64,
     /// (너비, 높이, mHz), 선호 모드가 먼저
     modes: Vec<(i32, i32, i32)>,
+    /// 고를 수 있는 배율 (작은 것부터)
     scales: Vec<f64>,
+    /// 화면 크기로 고른 기본 배율
+    preferred_scale: f64,
 }
 
 impl Output {
@@ -67,6 +72,22 @@ impl Output {
             scale: props.get("scale").unwrap_or(1.0),
             modes,
             scales: props.get::<Vec<f64>>("scales").unwrap_or_default(),
+            preferred_scale: props.get("preferred-scale").unwrap_or(1.0),
+        }
+    }
+
+    /// 배율로 보이는 논리 해상도 (macOS의 "~처럼 보임")
+    fn looks_like(&self, scale: f64) -> (i32, i32) {
+        let side = |pixels: i32| (f64::from(pixels) / scale).round() as i32;
+        (side(self.width), side(self.height))
+    }
+
+    /// 화면 이름 (EDID의 모델, 없으면 커넥터)
+    fn title(&self) -> &str {
+        if self.description.is_empty() {
+            &self.name
+        } else {
+            &self.description
         }
     }
 
@@ -244,17 +265,14 @@ impl DisplayPage {
             return;
         }
         for output in &outputs {
-            self.output_groups(tr, output);
+            self.output_group(tr, output);
         }
         self.brightness_group();
+        self.advanced_group(tr, &outputs);
     }
 
-    fn output_groups(self: &Rc<Self>, tr: &Translations, output: &Output) {
-        let title = if output.description.is_empty() {
-            output.name.clone()
-        } else {
-            output.description.clone()
-        };
+    /// 화면 하나: 이름과 실제 모드, 화면 크기 고르기, 주사율
+    fn output_group(self: &Rc<Self>, tr: &Translations, output: &Output) {
         let mut args = FluentArgs::new();
         args.set("width", output.width);
         args.set("height", output.height);
@@ -268,60 +286,13 @@ impl DisplayPage {
         let list = widgets::group(&self.content, None, None);
         list.append(&widgets::hero_row(
             &badge(ICON, Tint::Blue, BadgeSize::Medium),
-            &title,
+            output.title(),
             &format!("{kind} · {subtitle}"),
             None,
         ));
 
         if output.scales.len() > 1 {
             list.append(&self.scale_row(tr, output));
-        }
-
-        // 해상도
-        let resolutions = output.resolutions();
-        if !resolutions.is_empty() {
-            let preferred = output.modes.first().map(|(w, h, _)| (*w, *h));
-            let labels: Vec<String> = resolutions
-                .iter()
-                .map(|(width, height)| {
-                    let mut args = FluentArgs::new();
-                    args.set("width", *width);
-                    args.set("height", *height);
-                    let id = if Some((*width, *height)) == preferred {
-                        "display-resolution-preferred"
-                    } else {
-                        "display-resolution"
-                    };
-                    tr.get_with(id, &args)
-                })
-                .collect();
-            let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-            let dropdown = gtk::DropDown::from_strings(&refs);
-            if let Some(index) = resolutions
-                .iter()
-                .position(|size| *size == (output.width, output.height))
-            {
-                dropdown.set_selected(index as u32);
-            }
-            let page = self.clone();
-            let name = output.name.clone();
-            let output_copy = output.clone();
-            dropdown.connect_selected_notify(move |dropdown| {
-                let Some((width, height)) = resolutions.get(dropdown.selected() as usize) else {
-                    return;
-                };
-                // 같은 해상도의 가장 높은 주사율로 바꾼다
-                let refresh = output_copy
-                    .refresh_rates(*width, *height)
-                    .first()
-                    .copied()
-                    .unwrap_or(0);
-                page.set_mode(&name, *width, *height, refresh);
-            });
-            list.append(&widgets::row(
-                &tr.get("display-resolution-title"),
-                &dropdown,
-            ));
         }
 
         // 주사율
@@ -358,13 +329,103 @@ impl DisplayPage {
         }
     }
 
-    /// macOS의 "텍스트 더 크게 ↔ 공간 더 많이"처럼 배율을 고르는 행. 큰 배율이 왼쪽이다
+    /// 고급: 화면에 실제로 보내는 해상도. 화면 크기(배율)와 달리 앱이 보는 공간도, 선명함도 바뀐다
+    fn advanced_group(self: &Rc<Self>, tr: &Translations, outputs: &[Output]) {
+        let rows: Vec<gtk::ListBoxRow> = outputs
+            .iter()
+            .filter_map(|output| {
+                let title = if outputs.len() == 1 {
+                    tr.get("display-resolution-title")
+                } else {
+                    output.title().to_owned()
+                };
+                self.resolution_row(tr, output, &title)
+            })
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let list = widgets::group(
+            &self.content,
+            Some(&tr.get("display-advanced")),
+            Some(&tr.get("display-resolution-description")),
+        );
+        for row in &rows {
+            list.append(row);
+        }
+    }
+
+    fn resolution_row(
+        self: &Rc<Self>,
+        tr: &Translations,
+        output: &Output,
+        title: &str,
+    ) -> Option<gtk::ListBoxRow> {
+        let resolutions = output.resolutions();
+        if resolutions.is_empty() {
+            return None;
+        }
+        let preferred = output.modes.first().map(|(w, h, _)| (*w, *h));
+        let labels: Vec<String> = resolutions
+            .iter()
+            .map(|(width, height)| {
+                let mut args = FluentArgs::new();
+                args.set("width", *width);
+                args.set("height", *height);
+                let id = if Some((*width, *height)) == preferred {
+                    "display-resolution-preferred"
+                } else {
+                    "display-resolution"
+                };
+                tr.get_with(id, &args)
+            })
+            .collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let dropdown = gtk::DropDown::from_strings(&refs);
+        if let Some(index) = resolutions
+            .iter()
+            .position(|size| *size == (output.width, output.height))
+        {
+            dropdown.set_selected(index as u32);
+        }
+        let page = self.clone();
+        let output = output.clone();
+        dropdown.connect_selected_notify(move |dropdown| {
+            let Some((width, height)) = resolutions.get(dropdown.selected() as usize) else {
+                return;
+            };
+            // 같은 해상도의 가장 높은 주사율로 바꾼다
+            let refresh = output
+                .refresh_rates(*width, *height)
+                .first()
+                .copied()
+                .unwrap_or(0);
+            page.set_mode(&output.name, *width, *height, refresh);
+        });
+        Some(widgets::row(title, &dropdown))
+    }
+
+    /// macOS 26의 디스플레이 크기 고르기: 큰 배율(더 큰 텍스트)이 왼쪽, 1배(더 많은 공간)가
+    /// 오른쪽이다. 기본 배율 아래에 "기본값"을 달고, 고른 것이 어떤 해상도처럼 보이는지 적는다
     fn scale_row(self: &Rc<Self>, tr: &Translations, output: &Output) -> gtk::ListBoxRow {
         let mut scales = output.scales.clone();
         scales.sort_by(|a, b| b.total_cmp(a));
+        let looks_like = |scale: f64| {
+            let (width, height) = output.looks_like(scale);
+            let mut args = FluentArgs::new();
+            args.set("width", width);
+            args.set("height", height);
+            args.set("percent", (scale * 100.0).round() as i64);
+            tr.get_with("display-looks-like", &args)
+        };
+        let summary = gtk::Label::builder()
+            .label(looks_like(output.scale))
+            .css_classes(["row-subtitle"])
+            .build();
         let choices = gtk::Box::builder()
-            .spacing(10)
+            .spacing(12)
             .halign(gtk::Align::Center)
+            .homogeneous(true)
             .build();
         let mut first: Option<gtk::ToggleButton> = None;
         let count = scales.len();
@@ -385,7 +446,8 @@ impl DisplayPage {
             let button = gtk::ToggleButton::builder()
                 .child(&screen)
                 .active((scale - output.scale).abs() < 0.01)
-                .tooltip_text(format!("{:.0}%", scale * 100.0))
+                .tooltip_text(looks_like(*scale))
+                .halign(gtk::Align::Center)
                 .css_classes(["scale-choice"])
                 .build();
             match &first {
@@ -399,48 +461,38 @@ impl DisplayPage {
                     page.set_scale(&name, scale);
                 }
             });
+            // macOS처럼 기본값과 양 끝에만 이름을 단다
+            let caption = if (scale - output.preferred_scale).abs() < 0.01 {
+                tr.get("display-default")
+            } else if index == 0 {
+                tr.get("display-larger-text")
+            } else if index + 1 == count {
+                tr.get("display-more-space")
+            } else {
+                String::new()
+            };
             let choice = gtk::Box::builder()
                 .orientation(gtk::Orientation::Vertical)
-                .spacing(4)
+                .spacing(6)
                 .build();
             choice.append(&button);
             choice.append(
                 &gtk::Label::builder()
-                    .label(format!("{:.0}%", scale * 100.0))
+                    .label(caption)
+                    .justify(gtk::Justification::Center)
+                    .wrap(true)
                     .css_classes(["choice-label"])
                     .build(),
             );
             choices.append(&choice);
         }
-        let ends = gtk::Box::builder().build();
-        ends.append(
-            &gtk::Label::builder()
-                .label(tr.get("display-larger-text"))
-                .xalign(0.0)
-                .hexpand(true)
-                .css_classes(["row-subtitle"])
-                .build(),
-        );
-        ends.append(
-            &gtk::Label::builder()
-                .label(tr.get("display-more-space"))
-                .xalign(1.0)
-                .css_classes(["row-subtitle"])
-                .build(),
-        );
         let column = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(8)
+            .spacing(10)
+            .css_classes(["scale-row"])
             .build();
-        column.append(
-            &gtk::Label::builder()
-                .label(tr.get("display-scale"))
-                .xalign(0.0)
-                .css_classes(["row-title"])
-                .build(),
-        );
         column.append(&choices);
-        column.append(&ends);
+        column.append(&summary);
         gtk::ListBoxRow::builder()
             .child(&column)
             .activatable(false)
@@ -553,8 +605,21 @@ mod tests {
                 (1920, 1080, 74973),
                 (1024, 768, 60000),
             ],
-            scales: vec![1.0, 2.0],
+            scales: vec![1.0, 1.25],
+            preferred_scale: 1.0,
         }
+    }
+
+    #[test]
+    fn scales_look_like_smaller_resolutions() {
+        assert_eq!(output().looks_like(1.0), (1280, 800));
+        assert_eq!(output().looks_like(1.25), (1024, 640));
+        let tablet = Output {
+            width: 1920,
+            height: 1200,
+            ..output()
+        };
+        assert_eq!(tablet.looks_like(1.75), (1097, 686));
     }
 
     #[test]
