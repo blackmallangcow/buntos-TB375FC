@@ -44,9 +44,11 @@ impl Cursor {
         let buffer_scale = (f64::from(image.size) / f64::from(self.size.max(1)))
             .round()
             .clamp(1.0, f64::from(scale.max(1))) as i32;
+        // xcursor의 pixels_rgba는 파일의 바이트 그대로(리틀 엔디언 ARGB, 곧 B, G, R, A 순서)다.
+        // 커서 평면과 같은 Argb8888이어야 DRM이 커서를 화면 합성 없이 커서 평면에 올린다
         let buffer = MemoryRenderBuffer::from_slice(
             &image.pixels_rgba,
-            Fourcc::Abgr8888,
+            Fourcc::Argb8888,
             (image.width as i32, image.height as i32),
             buffer_scale,
             Transform::Normal,

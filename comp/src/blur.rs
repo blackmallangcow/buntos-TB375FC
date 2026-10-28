@@ -175,7 +175,10 @@ struct Shared {
 struct SurfaceBlur {
     id: Id,
     commit: CommitCounter,
+    /// 흐릴 범위와 그 아래에서 겹치는 요소들의 자리
     fingerprint: u64,
+    /// 겹치는 요소마다 지난 프레임에 본 커밋. 그 뒤의 손상이 흐릴 범위에 닿을 때만 다시 흐린다
+    seen: HashMap<Id, CommitCounter>,
     targets: Rc<RefCell<Targets>>,
     /// 유리 범위를 구한 버퍼 커밋과 그 결과 (glass_bounds)
     bounds: Option<(CommitCounter, Bounds)>,
@@ -257,6 +260,7 @@ impl Blur {
                     id: Id::new(),
                     commit: CommitCounter::default(),
                     fingerprint: 0,
+                    seen: HashMap::new(),
                     targets: Rc::default(),
                     bounds: None,
                 });
@@ -286,22 +290,37 @@ impl Blur {
                     )
                 }
             };
-            // 흐릴 범위 아래에서 겹치는 요소의 커밋과 위치. 바뀌면 다시 흐린다
+            // 흐릴 범위 아래에서 겹치는 요소가 바뀌거나 움직였거나, 그 손상이 흐릴 범위에 닿으면
+            // 다시 흐린다. 커밋만 보면 Dock 아래에 걸친 창이 멀리 떨어진 곳을 그릴 때마다(시스템
+            // 모니터의 그래프 등) Dock 전체를 다시 흐렸다
             let mut hasher = DefaultHasher::new();
             hash_rectangle(geometry, &mut hasher);
+            let mut damaged = false;
+            let mut seen = HashMap::new();
             for element in &elements[index + 1..] {
                 let below = element.geometry(scale);
-                if below.overlaps(geometry) {
-                    element.id().hash(&mut hasher);
-                    element
-                        .current_commit()
-                        .distance(Some(CommitCounter::default()))
-                        .hash(&mut hasher);
-                    hash_rectangle(below, &mut hasher);
+                if !below.overlaps(geometry) {
+                    continue;
                 }
+                element.id().hash(&mut hasher);
+                hash_rectangle(below, &mut hasher);
+                let commit = element.current_commit();
+                if let Some(&last) = entry.seen.get(element.id())
+                    && last != commit
+                {
+                    // 손상은 요소 기준 좌표다
+                    damaged |= element.damage_since(scale, Some(last)).iter().any(|rect| {
+                        Rectangle::new(rect.loc + below.loc, rect.size).overlaps(geometry)
+                    });
+                }
+                seen.insert(element.id().clone(), commit);
             }
+            entry.seen = seen;
             let fingerprint = hasher.finish();
-            if entry.fingerprint != fingerprint || entry.commit == CommitCounter::default() {
+            if entry.fingerprint != fingerprint
+                || damaged
+                || entry.commit == CommitCounter::default()
+            {
                 entry.fingerprint = fingerprint;
                 entry.commit.increment();
             }

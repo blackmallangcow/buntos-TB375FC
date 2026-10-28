@@ -4,7 +4,14 @@
 //! DRM/KMS + libinput 백엔드 (GPU 하나). Smithay anvil의 udev 백엔드 구조를 단순화했다.
 //! 하드웨어 GPU가 없는 VM에서는 Mesa의 소프트웨어 렌더러(llvmpipe)로 그린다.
 
-use std::{cmp::Reverse, collections::HashMap, error::Error, path::PathBuf, time::Duration};
+use std::{
+    cmp::Reverse,
+    collections::HashMap,
+    error::Error,
+    ffi::CStr,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     backend::{
@@ -24,17 +31,22 @@ use smithay::{
         renderer::{
             ImportMemWl,
             element::{
-                Kind,
+                Kind, RenderElementStates, default_primary_scanout_output_compare,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 surface::render_elements_from_surface_tree,
             },
-            gles::GlesRenderer,
+            gles::{GlesRenderer, ffi},
         },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
     desktop::{
-        layer_map_for_output, space::space_render_elements, utils::send_frames_surface_tree,
+        layer_map_for_output,
+        space::space_render_elements,
+        utils::{
+            send_frames_surface_tree, surface_primary_scanout_output,
+            update_surface_primary_scanout_output, with_surfaces_surface_tree,
+        },
     },
     input::pointer::{CursorImageStatus, CursorImageSurfaceData},
     output::{Mode as WlMode, Output, PhysicalProperties, Scale as OutputScale},
@@ -46,10 +58,10 @@ use smithay::{
         drm::control::{Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, connector, crtc},
         input::Libinput,
         rustix::fs::OFlags,
-        wayland_server::{Display, backend::GlobalId},
+        wayland_server::{Display, backend::GlobalId, protocol::wl_surface::WlSurface},
     },
     utils::{DeviceFd, IsAlive, Logical, Physical, Point, Scale, Size, Transform},
-    wayland::compositor::with_states,
+    wayland::compositor::{SurfaceData, with_states},
 };
 
 use crate::{
@@ -70,6 +82,10 @@ type Elements = OutputRenderElements;
 const IDLE_REDRAW: Duration = Duration::from_millis(16);
 /// 이보다 오래 걸린 프레임은 디버그 기록에 남긴다 (RUST_LOG=bunt_comp=debug)
 const SLOW_FRAME: Duration = Duration::from_millis(12);
+/// 소프트웨어 렌더러에서 프레임 사이의 최소 간격 (60Hz)
+const SOFTWARE_FRAME: Duration = Duration::from_micros(16_667);
+/// 화면에 보이지 않은 표면(다른 창에 다 가려진 창, 숨은 막대)에 프레임 알림을 보내는 간격
+const HIDDEN_FRAME_INTERVAL: Option<Duration> = Some(Duration::from_secs(1));
 const CLEAR_COLOR: [f32; 4] = [0.08, 0.08, 0.1, 1.0];
 const FALLBACK_TOP: [u8; 3] = [0x5b, 0x7c, 0xfa];
 const FALLBACK_BOTTOM: [u8; 3] = [0xf2, 0xa7, 0xc3];
@@ -99,6 +115,8 @@ pub struct UdevData {
     cursor_scale: i32,
     /// 셸 유리 뒤 흐림 (blur.rs)
     blur: Blur,
+    /// GPU 없이 CPU로 그린다 (llvmpipe 등)
+    software: bool,
 }
 
 impl UdevData {
@@ -123,6 +141,8 @@ struct OutputSurface {
     wallpaper: MemoryRenderBuffer,
     /// 페이지 플립을 기다리는 프레임이 있다
     frame_pending: bool,
+    /// 마지막으로 프레임을 내보낸 때 (소프트웨어 렌더러의 60Hz 제한)
+    rendered_at: Option<Instant>,
     redraw_timer: Option<RegistrationToken>,
     global: GlobalId,
 }
@@ -167,7 +187,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     // 안전: GBM 장치는 EGL 디스플레이보다 오래 산다 (둘 다 UdevData가 끝까지 가진다)
     let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
     let egl_context = EGLContext::new(&egl_display)?;
-    let renderer = unsafe { GlesRenderer::new(egl_context)? };
+    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
+    let software = is_software(&mut renderer);
     let render_formats: FormatSet = renderer.egl_context().dmabuf_render_formats().clone();
     let shm_formats: Vec<_> = renderer.shm_formats().collect();
 
@@ -196,6 +217,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         cursor_hotspot,
         cursor_scale: 1,
         blur: Blur::default(),
+        software,
     };
     let mut state = BuntState::new(
         display,
@@ -406,6 +428,15 @@ impl BuntState {
         self.space.map_output(&output, (x, 0));
 
         let planes = self.backend.output_manager.device().planes(&crtc).ok();
+        if let Some(planes) = &planes {
+            tracing::info!(
+                "output {name}: planes primary {}, cursor {}, overlay {}; cursor size {:?}",
+                planes.primary.len(),
+                planes.cursor.len(),
+                planes.overlay.len(),
+                self.backend.output_manager.device().cursor_size()
+            );
+        }
         let UdevData {
             renderer,
             output_manager,
@@ -450,6 +481,7 @@ impl BuntState {
                 description,
                 wallpaper,
                 frame_pending: false,
+                rendered_at: None,
                 redraw_timer: None,
                 global,
             },
@@ -689,29 +721,64 @@ impl BuntState {
             tracing::warn!("frame submission failed: {err:?}");
         }
         surface.frame_pending = false;
+        // 소프트웨어 렌더러는 화면 주사율(QEMU 창은 Mac 화면을 따라 120~144Hz)과 상관없이 60Hz로
+        // 그린다. 프레임마다 CPU로 합성하므로 그보다 자주 그리면 CPU만 쓴다. 앱도 프레임 알림을
+        // 그만큼 받으므로 애니메이션을 60Hz로 그린다
+        let since = surface.rendered_at.map(|at| at.elapsed());
+        if self.backend.software
+            && let Some(since) = since.filter(|since| *since < SOFTWARE_FRAME)
+        {
+            self.schedule_redraw_after(crtc, SOFTWARE_FRAME - since);
+            return;
+        }
         self.render_output(crtc);
     }
 
     fn schedule_redraw(&mut self, crtc: crtc::Handle) {
+        self.schedule_redraw_after(crtc, IDLE_REDRAW);
+    }
+
+    fn schedule_redraw_after(&mut self, crtc: crtc::Handle, delay: Duration) {
         let Some(surface) = self.backend.outputs.get_mut(&crtc) else {
             return;
         };
         if surface.redraw_timer.is_some() {
             return;
         }
-        let token = self.loop_handle.insert_source(
-            Timer::from_duration(IDLE_REDRAW),
-            move |_, _, state| {
-                if let Some(surface) = state.backend.outputs.get_mut(&crtc) {
-                    surface.redraw_timer = None;
-                }
-                state.render_output(crtc);
-                TimeoutAction::Drop
-            },
-        );
+        let token =
+            self.loop_handle
+                .insert_source(Timer::from_duration(delay), move |_, _, state| {
+                    if let Some(surface) = state.backend.outputs.get_mut(&crtc) {
+                        surface.redraw_timer = None;
+                    }
+                    state.render_output(crtc);
+                    TimeoutAction::Drop
+                });
         match token {
             Ok(token) => surface.redraw_timer = Some(token),
             Err(err) => tracing::warn!("failed to schedule redraw: {}", err.error),
+        }
+    }
+
+    /// 표면마다 이번 프레임에 그 출력에 보였는지 적는다 (프레임 알림을 줄 표면을 고를 때 쓴다)
+    fn note_visible_surfaces(&self, output: &Output, states: &RenderElementStates) {
+        let update = |surface: &WlSurface, data: &SurfaceData| {
+            update_surface_primary_scanout_output(
+                surface,
+                output,
+                data,
+                states,
+                default_primary_scanout_output_compare,
+            );
+        };
+        for window in self.space.elements() {
+            window.with_surfaces(update);
+        }
+        for layer in layer_map_for_output(output).layers() {
+            layer.with_surfaces(update);
+        }
+        if let CursorImageStatus::Surface(cursor_surface) = &self.cursor_status {
+            with_surfaces_surface_tree(cursor_surface, update);
         }
     }
 
@@ -865,40 +932,58 @@ impl BuntState {
         if elapsed > SLOW_FRAME {
             tracing::debug!("slow frame on {}: {elapsed:?}", output.name());
         }
-        let queued = match rendered {
-            Ok(frame) if !frame.is_empty => match surface.drm_output.queue_frame(()) {
-                Ok(()) => true,
-                Err(err) => {
-                    tracing::warn!("failed to queue frame: {err:?}");
-                    false
-                }
-            },
-            Ok(_) => false,
+        let (queued, states) = match rendered {
+            Ok(frame) => {
+                let queued = !frame.is_empty
+                    && match surface.drm_output.queue_frame(()) {
+                        Ok(()) => true,
+                        Err(err) => {
+                            tracing::warn!("failed to queue frame: {err:?}");
+                            false
+                        }
+                    };
+                (queued, Some(frame.states))
+            }
             Err(err) => {
                 tracing::warn!("failed to render frame: {err:?}");
-                false
+                (false, None)
             }
         };
         surface.frame_pending = queued;
+        if queued {
+            surface.rendered_at = Some(Instant::now());
+        }
+        if let Some(states) = &states {
+            self.note_visible_surfaces(&output, states);
+        }
 
+        // 이번 프레임에 보인 표면만 바로 다음 프레임 알림을 받는다. 다른 창에 다 가려진 창, 숨은
+        // 막대처럼 보이지 않은 표면은 HIDDEN_FRAME_INTERVAL마다 한 번만 받아, 보이지 않는
+        // 애니메이션(시스템 모니터의 그래프 등)이 계속 그려지며 CPU를 쓰지 않게 한다
         let elapsed = self.start_time.elapsed();
         for window in self.space.elements() {
-            window.send_frame(&output, elapsed, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+            window.send_frame(
+                &output,
+                elapsed,
+                HIDDEN_FRAME_INTERVAL,
+                surface_primary_scanout_output,
+            );
         }
         for layer in layer_map_for_output(&output).layers() {
-            layer.send_frame(&output, elapsed, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+            layer.send_frame(
+                &output,
+                elapsed,
+                HIDDEN_FRAME_INTERVAL,
+                surface_primary_scanout_output,
+            );
         }
         if let CursorImageStatus::Surface(cursor_surface) = &self.cursor_status {
             send_frames_surface_tree(
                 cursor_surface,
                 &output,
                 elapsed,
-                Some(Duration::ZERO),
-                |_, _| Some(output.clone()),
+                HIDDEN_FRAME_INTERVAL,
+                surface_primary_scanout_output,
             );
         }
 
@@ -1083,6 +1168,22 @@ fn parse_edid(edid: &[u8]) -> (String, String) {
         })
         .unwrap_or_default();
     (letters.unwrap_or_default(), name)
+}
+
+/// GPU 없이 CPU로 그리는 Mesa 렌더러인지 (GL_RENDERER: "llvmpipe (LLVM …)", "softpipe")
+fn is_software(renderer: &mut GlesRenderer) -> bool {
+    let name = renderer
+        .with_context(|gl| unsafe {
+            let name = gl.GetString(ffi::RENDERER);
+            (!name.is_null()).then(|| CStr::from_ptr(name.cast()).to_string_lossy().into_owned())
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    tracing::info!("renderer: {name}");
+    ["llvmpipe", "softpipe", "SwiftShader"]
+        .iter()
+        .any(|software| name.contains(software))
 }
 
 #[cfg(test)]
