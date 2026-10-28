@@ -177,7 +177,6 @@ impl SettingsWindow {
             .valign(gtk::Align::Center)
             .build();
         arrows.append(&back);
-        arrows.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         arrows.append(&forward);
         header.append(&arrows);
         title.set_hexpand(true);

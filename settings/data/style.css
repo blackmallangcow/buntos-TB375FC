@@ -85,29 +85,42 @@ list.sidebar-list > row:selected {
   padding: 0 12px 0 16px;
 }
 
+/* 두 단추가 한 알약을 이룬다. 맞닿는 쪽은 각지게 해서 가운데에 틈이 없다.
+ * 아래의 .settings-window button보다 앞서도록 창 클래스를 붙인다 */
 .nav-buttons {
   border-radius: var(--radius-capsule);
   background: var(--content-bg);
   box-shadow: 0 0 0 1px var(--separator), var(--shadow-control);
 }
 
-.nav-buttons > separator {
-  min-width: 1px;
-  margin: 6px 0;
-  background: var(--separator);
-}
-
-.nav-buttons > button {
-  min-width: 30px;
+.settings-window .nav-buttons > button {
+  min-width: 32px;
   min-height: 26px;
   padding: 0;
-  border-radius: var(--radius-capsule);
   background: none;
   box-shadow: none;
 }
 
-.nav-buttons > button:hover {
+.settings-window .nav-buttons > button:first-child {
+  padding-left: 2px;
+  border-radius: var(--radius-capsule) 0 0 var(--radius-capsule);
+}
+
+.settings-window .nav-buttons > button:last-child {
+  padding-right: 2px;
+  border-radius: 0 var(--radius-capsule) var(--radius-capsule) 0;
+}
+
+.settings-window .nav-buttons > button:hover {
   background: var(--hover);
+}
+
+.settings-window .nav-buttons > button:active {
+  background: var(--pressed);
+}
+
+.settings-window .nav-buttons > button:disabled {
+  background: none;
 }
 
 .content-title {
