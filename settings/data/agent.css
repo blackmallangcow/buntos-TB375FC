@@ -1,0 +1,106 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * AI 에이전트 페이지 (pages/agent.rs). 묶음은 macOS 개인정보 보호 및 보안의 앱 목록을 따른다:
+ * 상자 맨 위의 설명과 구분선, 구분선 없는 줄, 고른 줄의 강조, 아래 왼쪽의 작은 [+][−]
+ */
+
+.agent-box-description {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--separator);
+  font-size: var(--text-footnote);
+  color: var(--label-secondary);
+}
+
+list.agent-list {
+  background: none;
+}
+
+list.agent-list > row {
+  min-height: 24px;
+  margin: 1px 6px;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  background: none;
+  outline: none;
+}
+
+list.agent-list > row:first-child {
+  margin-top: 5px;
+}
+
+list.agent-list > row:last-child {
+  margin-bottom: 5px;
+}
+
+/* GTK 기본 테마는 고른 줄의 글자를 흰색으로 바꾼다. 포커스가 없을 때는 회색 바탕에 보통 글자색이다 */
+list.agent-list > row:selected {
+  background: var(--pressed);
+  color: var(--label);
+}
+
+list.agent-list > row:selected .row-title {
+  color: var(--label);
+}
+
+list.agent-list > row:selected .row-subtitle {
+  color: var(--label-secondary);
+}
+
+/* 목록에 포커스가 있으면 macOS처럼 강조색으로 고른 줄을 칠한다 */
+list.agent-list:focus-within > row:selected {
+  background: var(--selection);
+  color: #ffffff;
+}
+
+list.agent-list:focus-within > row:selected .row-title,
+list.agent-list:focus-within > row:selected .row-subtitle {
+  color: #ffffff;
+}
+
+list.agent-list > row:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.agent-empty {
+  padding: var(--space-5) var(--space-3);
+  color: var(--label-tertiary);
+}
+
+.agent-box-bar {
+  padding: 2px var(--space-1);
+  border-top: 1px solid var(--separator);
+}
+
+.settings-window button.agent-bar-button {
+  min-width: 24px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--label-secondary);
+  -gtk-icon-size: 12px;
+}
+
+.settings-window button.agent-bar-button:hover {
+  background: var(--hover);
+}
+
+.settings-window button.agent-bar-button:active {
+  background: var(--pressed);
+}
+
+.settings-window button.agent-bar-button:disabled {
+  background: none;
+  color: var(--label-tertiary);
+}
+
+/* 시트의 고르기 목록 (묶음 상자 모양의 스크롤 틀 file-types-frame 안) */
+list.agent-picker > row {
+  padding: 6px 6px;
+}
+
+list.agent-picker > row.activatable:hover {
+  background: var(--hover);
+}

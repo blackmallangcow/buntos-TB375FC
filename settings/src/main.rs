@@ -20,14 +20,28 @@ use gtk4::{self as gtk, gio, glib, prelude::*};
 use crate::{pages::Page, window::SettingsWindow};
 
 const APP_ID: &str = "org.buntos.Settings";
-/// 공통 디자인 토큰(theme/tokens.css) 다음에 이 앱의 CSS
+/// 공통 디자인 토큰(theme/tokens.css) 다음에 이 앱의 CSS. AI 에이전트 페이지의 CSS는 따로 둔다
 const STYLE: &str = concat!(
     include_str!("../../theme/tokens.css"),
-    include_str!("../data/style.css")
+    include_str!("../data/style.css"),
+    include_str!("../data/agent.css")
 );
+/// 페이지가 많은 문자열은 따로 둔다 (AI 에이전트)
 const TRANSLATIONS: &Sources = &[
-    ("ko", include_str!("../../i18n/ko/bunt-settings.ftl")),
-    ("en", include_str!("../../i18n/en/bunt-settings.ftl")),
+    (
+        "ko",
+        concat!(
+            include_str!("../../i18n/ko/bunt-settings.ftl"),
+            include_str!("../../i18n/ko/bunt-settings-agent.ftl"),
+        ),
+    ),
+    (
+        "en",
+        concat!(
+            include_str!("../../i18n/en/bunt-settings.ftl"),
+            include_str!("../../i18n/en/bunt-settings-agent.ftl"),
+        ),
+    ),
 ];
 
 fn main() -> glib::ExitCode {
