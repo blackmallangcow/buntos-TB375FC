@@ -5,6 +5,10 @@
 
 use std::io::Read;
 
+use smithay::{
+    backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
+    utils::{Logical, Point, Transform},
+};
 use xcursor::{
     CursorTheme,
     parser::{Image, parse_xcursor},
@@ -24,12 +28,35 @@ impl Cursor {
         Self { images, size }
     }
 
-    /// 설정한 크기에 가장 가까운 이미지. 애니메이션 커서는 첫 프레임만 쓴다.
-    pub fn image(&self) -> &Image {
+    /// 설정한 크기에 배율을 곱한 크기에 가장 가까운 이미지. 애니메이션 커서는 첫 프레임만 쓴다.
+    fn image(&self, scale: i32) -> &Image {
+        let wanted = i64::from(self.size) * i64::from(scale.max(1));
         self.images
             .iter()
-            .min_by_key(|image| (i64::from(self.size) - i64::from(image.size)).abs())
+            .min_by_key(|image| (wanted - i64::from(image.size)).abs())
             .expect("cursor has at least one image")
+    }
+
+    /// 배율에 맞는 커서 이미지의 버퍼와 논리 좌표의 핫스폿. 소수 배율 화면에서는 올림한 정수
+    /// 배율의 이미지를 줄여 그린다. 테마에 큰 이미지가 없으면 있는 이미지를 키워 그린다
+    pub fn buffer(&self, scale: i32) -> (MemoryRenderBuffer, Point<f64, Logical>) {
+        let image = self.image(scale);
+        let buffer_scale = (f64::from(image.size) / f64::from(self.size.max(1)))
+            .round()
+            .clamp(1.0, f64::from(scale.max(1))) as i32;
+        let buffer = MemoryRenderBuffer::from_slice(
+            &image.pixels_rgba,
+            Fourcc::Abgr8888,
+            (image.width as i32, image.height as i32),
+            buffer_scale,
+            Transform::Normal,
+            None,
+        );
+        let hotspot = Point::from((
+            f64::from(image.xhot) / f64::from(buffer_scale),
+            f64::from(image.yhot) / f64::from(buffer_scale),
+        ));
+        (buffer, hotspot)
     }
 }
 

@@ -14,8 +14,8 @@ use std::{
 
 use smithay::{
     backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
+    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_shell,
     desktop::{
         LayerSurface, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
         PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -26,7 +26,7 @@ use smithay::{
         keyboard::XkbConfig,
         pointer::{CursorImageStatus, Focus, GrabStartData as PointerGrabStartData},
     },
-    output::Output,
+    output::{Output, Scale as OutputScale},
     reexports::{
         calloop::{
             Interest, LoopHandle, LoopSignal, Mode, PostAction,
@@ -46,12 +46,16 @@ use smithay::{
             protocol::{wl_buffer, wl_output, wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, Point, Rectangle, Serial, Transform},
+    utils::{Logical, Point, Rectangle, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, TraversalAction, get_parent,
-            is_sync_subsurface, send_surface_state, with_states, with_surface_tree_downward,
+            CompositorClientState, CompositorHandler, CompositorState, SurfaceData,
+            TraversalAction, get_parent, is_sync_subsurface, send_surface_state, with_states,
+            with_surface_tree_downward,
+        },
+        fractional_scale::{
+            FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
         },
         input_method::{InputMethodManagerState, InputMethodSeat},
         output::{OutputHandler, OutputManagerState},
@@ -77,6 +81,7 @@ use smithay::{
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
         text_input::TextInputManagerState,
+        viewporter::ViewporterState,
         virtual_keyboard::VirtualKeyboardManagerState,
     },
 };
@@ -96,8 +101,6 @@ const CASCADE_STEP: i32 = 32;
 const CASCADE_COUNT: i32 = 8;
 /// 셸 메뉴바 레이어의 이름 (shell/src/menubar.rs). 메뉴바 자체는 흐리지 않는다
 const MENUBAR_NAMESPACE: &str = "bunt-menubar";
-/// 화면 크기가 줄었을 때 창을 잡아 끌 수 있도록 화면 안에 남기는 폭과 높이 (논리 픽셀)
-const TITLE_VISIBLE: i32 = 64;
 
 /// 최대화하기 전 창의 위치와 크기. 창의 사용자 데이터에 둔다.
 #[derive(Default)]
@@ -149,7 +152,8 @@ impl BuntState {
     ) -> Result<Self, Box<dyn Error>> {
         let dh = display.handle();
 
-        let compositor_state = CompositorState::new::<Self>(&dh);
+        // v6: 표면마다 알맞은 버퍼 배율과 회전을 알린다 (wl_surface.preferred_buffer_scale)
+        let compositor_state = CompositorState::new_v6::<Self>(&dh);
         // 최소화와 창 메뉴는 아직 없으므로 앱이 해당 버튼을 보이지 않게 한다
         let xdg_shell_state = XdgShellState::new_with_capabilities::<Self>(
             &dh,
@@ -167,6 +171,10 @@ impl BuntState {
         TextInputManagerState::new::<Self>(&dh);
         InputMethodManagerState::new::<Self, _>(&dh, is_input_method_client);
         VirtualKeyboardManagerState::new::<Self, _>(&dh, is_input_method_client);
+        // 소수 배율(125%, 150% …): 앱은 알려 준 배율로 그리고 viewporter로 논리 크기를 정한다.
+        // Firefox는 배율이 1이 아니면 viewporter 없이는 본문을 제 크기로 보이지 못한다
+        ViewporterState::new::<Self>(&dh);
+        FractionalScaleManagerState::new::<Self>(&dh);
 
         let prefs = Prefs::load();
         let repeat = prefs.keyboard.unwrap_or(KeyRepeat {
@@ -479,6 +487,12 @@ impl BuntState {
                 )
             }
         };
+        // 영역보다 큰 창은 영역에 맞게 줄여 달라고 한다 (최소 크기가 더 크면 앱이 따르지 않는다)
+        let size = Size::from((size.w.min(area.size.w), size.h.min(area.size.h)));
+        if size != window.geometry().size {
+            toplevel.with_pending_state(|state| state.size = Some(size));
+            toplevel.send_pending_configure();
+        }
         let fit = |center: i32, length: i32, start: i32, available: i32| {
             (center - length / 2).clamp(start, start + (available - length).max(0))
         };
@@ -694,6 +708,39 @@ fn is_input_method_client(client: &Client) -> bool {
     client
         .get_data::<ClientState>()
         .is_some_and(|data| data.input_method)
+}
+
+/// 표면 하나에 배율과 회전을 알린다. 소수 배율을 아는 앱(wp_fractional_scale_v1)은 그 배율로 그리고,
+/// 모르는 앱은 올림한 정수 배율로 그린 것을 컴포지터가 줄여 그린다
+fn send_scale_state(
+    surface: &WlSurface,
+    data: &SurfaceData,
+    scale: OutputScale,
+    transform: Transform,
+) {
+    send_surface_state(surface, data, scale.integer_scale(), transform);
+    with_fractional_scale(data, |fractional| {
+        fractional.set_preferred_scale(scale.fractional_scale())
+    });
+}
+
+/// 창을 영역 안에 들인다. 들어가면 옮기기만 하고, 영역보다 크면 그 방향을 영역 크기로 줄인다
+fn fit_into(
+    rect: Rectangle<i32, Logical>,
+    area: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let size = Size::from((rect.size.w.min(area.size.w), rect.size.h.min(area.size.h)));
+    let x = rect
+        .loc
+        .x
+        .min(area.loc.x + area.size.w - size.w)
+        .max(area.loc.x);
+    let y = rect
+        .loc
+        .y
+        .min(area.loc.y + area.size.h - size.h)
+        .max(area.loc.y);
+    Rectangle::new((x, y).into(), size)
 }
 
 impl ClientData for ClientState {
@@ -1236,19 +1283,16 @@ impl BuntState {
     }
 
     /// 표면에 알릴 배율과 회전 (출력이 여럿이면 첫 출력 기준)
-    fn preferred_scale(&self) -> Option<(i32, Transform)> {
+    fn preferred_scale(&self) -> Option<(OutputScale, Transform)> {
         let output = self.space.outputs().next()?;
-        Some((
-            output.current_scale().integer_scale(),
-            output.current_transform(),
-        ))
+        Some((output.current_scale(), output.current_transform()))
     }
 
-    /// 표면에 출력의 배율과 회전을 알린다 (wl_surface.preferred_buffer_scale). 바뀐 값만 보낸다
+    /// 표면에 출력의 배율과 회전을 알린다. 바뀐 값만 보낸다
     fn send_scale(&self, surface: &WlSurface) {
         if let Some((scale, transform)) = self.preferred_scale() {
             with_states(surface, |data| {
-                send_surface_state(surface, data, scale, transform)
+                send_scale_state(surface, data, scale, transform)
             });
         }
     }
@@ -1282,24 +1326,31 @@ impl BuntState {
                 root,
                 (),
                 |_, _, _| TraversalAction::DoChildren(()),
-                |surface, data, _| send_surface_state(surface, data, scale, transform),
+                |surface, data, _| send_scale_state(surface, data, scale, transform),
                 |_, _, _| true,
             );
         }
     }
 
-    /// 화면 크기가 바뀐 뒤 최대화·전체 화면 창을 새 영역에 맞추고, 나머지 창은 제목 표시줄이
-    /// 화면 안에 남도록 옮긴다. 레이어(메뉴바, Dock)는 먼저 배치해 둔다
+    /// 화면 크기나 배율이 바뀐 뒤 창을 새 영역에 맞춘다. 레이어(메뉴바, Dock)는 먼저 배치해 둔다.
+    /// 최대화·전체 화면 창은 새 영역을 채운다. 나머지 창은 macOS처럼 화면 안으로 옮기고, 그래도
+    /// 넘치면 영역에 맞게 줄인다. 최대화를 풀 때 돌아갈 자리도 새 영역에 맞춘다
     pub fn refit_windows(&mut self) {
         let (Some(usable), Some(full)) = (self.usable_area(), self.fullscreen_area()) else {
             return;
         };
         let windows: Vec<Window> = self.space.elements().cloned().collect();
-        for window in windows {
+        for window in &windows {
             let Some(toplevel) = window.toplevel() else {
                 continue;
             };
             toplevel.with_pending_state(|state| state.bounds = Some(usable.size));
+            if let Some(restore) = window.user_data().get::<RestoreGeometry>() {
+                let mut restore = restore.0.borrow_mut();
+                if let Some(geo) = restore.as_mut() {
+                    *geo = fit_into(*geo, usable);
+                }
+            }
             let area = if Self::has_state(toplevel, xdg_toplevel::State::Fullscreen) {
                 Some(full)
             } else if Self::has_state(toplevel, xdg_toplevel::State::Maximized) {
@@ -1313,26 +1364,25 @@ impl BuntState {
                     self.space.map_element(window.clone(), area.loc, false);
                 }
                 None => {
-                    let Some(geo) = self.space.element_geometry(&window) else {
+                    let Some(geo) = self.space.element_geometry(window) else {
                         continue;
                     };
-                    let visible = TITLE_VISIBLE.min(geo.size.w);
-                    let x = geo.loc.x.clamp(
-                        usable.loc.x - geo.size.w + visible,
-                        usable.loc.x + usable.size.w - visible,
-                    );
-                    let y = geo
-                        .loc
-                        .y
-                        .clamp(usable.loc.y, usable.loc.y + usable.size.h - TITLE_VISIBLE);
-                    if (x, y) != (geo.loc.x, geo.loc.y) {
-                        self.space.map_element(window.clone(), (x, y), false);
+                    let fitted = fit_into(geo, usable);
+                    if fitted.size != geo.size {
+                        toplevel.with_pending_state(|state| state.size = Some(fitted.size));
+                    }
+                    if fitted.loc != geo.loc {
+                        self.space.map_element(window.clone(), fitted.loc, false);
                     }
                 }
             }
             if toplevel.is_initial_configure_sent() {
                 toplevel.send_pending_configure();
             }
+        }
+        // map_element는 옮긴 창을 맨 위로 올린다. 원래 쌓인 순서(아래부터)대로 다시 올려 되돌린다
+        for window in &windows {
+            self.space.raise_element(window, false);
         }
     }
 
@@ -1377,6 +1427,12 @@ impl ClientDndGrabHandler for BuntState {}
 impl ServerDndGrabHandler for BuntState {}
 
 impl OutputHandler for BuntState {}
+
+impl FractionalScaleHandler for BuntState {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        self.send_scale(&surface);
+    }
+}
 
 delegate_compositor!(BuntState);
 delegate_shm!(BuntState);
@@ -1434,8 +1490,45 @@ impl Dispatch<ZwlrLayerSurfaceV1, WlrLayerSurfaceUserData> for BuntState {
 delegate_seat!(BuntState);
 delegate_data_device!(BuntState);
 delegate_output!(BuntState);
+delegate_viewporter!(BuntState);
+delegate_fractional_scale!(BuntState);
 
 /// 표면에 버퍼가 붙어 화면에 보이는지
 fn has_buffer(surface: &WlSurface) -> bool {
     with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    #[test]
+    fn windows_move_back_inside_a_smaller_screen() {
+        let area = rect(0, 28, 1024, 508);
+        // 들어가는 창은 그대로
+        assert_eq!(
+            fit_into(rect(100, 100, 600, 400), area),
+            rect(100, 100, 600, 400)
+        );
+        // 오른쪽 아래로 넘친 창은 크기를 지키고 안으로 옮긴다
+        assert_eq!(
+            fit_into(rect(800, 300, 600, 400), area),
+            rect(424, 136, 600, 400)
+        );
+        // 메뉴바 위로 올라간 창은 메뉴바 아래로
+        assert_eq!(
+            fit_into(rect(10, 0, 600, 400), area),
+            rect(10, 28, 600, 400)
+        );
+        // 영역보다 큰 창은 영역에 맞게 줄인다
+        assert_eq!(fit_into(rect(0, 28, 1280, 668), area), area);
+        assert_eq!(
+            fit_into(rect(300, 40, 900, 640), area),
+            rect(124, 28, 900, 508)
+        );
+    }
 }

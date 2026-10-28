@@ -48,7 +48,7 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::{Display, backend::GlobalId},
     },
-    utils::{DeviceFd, IsAlive, Point, Scale, Transform},
+    utils::{DeviceFd, IsAlive, Logical, Physical, Point, Scale, Size, Transform},
     wayland::compositor::with_states,
 };
 
@@ -73,10 +73,19 @@ const SLOW_FRAME: Duration = Duration::from_millis(12);
 const CLEAR_COLOR: [f32; 4] = [0.08, 0.08, 0.1, 1.0];
 const FALLBACK_TOP: [u8; 3] = [0x5b, 0x7c, 0xfa];
 const FALLBACK_BOTTOM: [u8; 3] = [0xf2, 0xa7, 0xc3];
-/// 배율을 고를 때 남겨야 하는 가장 작은 논리 화면 크기
-const MIN_LOGICAL_WIDTH: i32 = 640;
-const MIN_LOGICAL_HEIGHT: i32 = 400;
-const MAX_SCALE: i32 = 3;
+/// 배율을 고를 때 남겨야 하는 가장 작은 논리 화면 크기. macOS의 "더 큰 텍스트"도 1024×640보다
+/// 작아지지 않는다. 이보다 작으면 메뉴바, Dock, 앱의 최소 크기가 화면을 넘는다
+const MIN_LOGICAL_WIDTH: f64 = 1024.0;
+const MIN_LOGICAL_HEIGHT: f64 = 640.0;
+/// 배율 단계. wp_fractional_scale_v1은 1/120 단위라 0.25 단위는 그대로 전해진다
+const SCALE_STEP: f64 = 0.25;
+const MAX_SCALE: f64 = 4.0;
+/// 시스템 설정에 보이는 배율 선택지 수 (macOS도 다섯 개를 보인다)
+const SCALE_CHOICES: usize = 5;
+/// 기본 배율이 맞추려는 논리 화면 밀도(ppi). 노트북·태블릿 화면은 macOS 노트북의 기본값,
+/// 모니터는 macOS 5K 모니터의 기본값 가까이
+const BUILTIN_PPI: f64 = 125.0;
+const EXTERNAL_PPI: f64 = 110.0;
 
 pub struct UdevData {
     pub session: LibSeatSession,
@@ -84,7 +93,10 @@ pub struct UdevData {
     output_manager: DrmOutputManager<Allocator, Exporter, (), DrmDeviceFd>,
     outputs: HashMap<crtc::Handle, OutputSurface>,
     cursor: Cursor,
+    /// 기본 화살표 커서. 출력의 배율이 바뀌면 그 배율의 이미지로 다시 만든다
     cursor_buffer: MemoryRenderBuffer,
+    cursor_hotspot: Point<f64, Logical>,
+    cursor_scale: i32,
     /// 셸 유리 뒤 흐림 (blur.rs)
     blur: Blur,
 }
@@ -97,6 +109,8 @@ impl UdevData {
 
 struct OutputSurface {
     output: Output,
+    /// 화면 크기로 고른 기본 배율 (recommended_scale)
+    preferred_scale: f64,
     drm_output: DrmOutput<Allocator, Exporter, (), DrmDeviceFd>,
     connector: connector::Handle,
     /// 커넥터가 알려 준 모드. 화면이 권하는 모드가 먼저다 (sorted_modes)
@@ -170,15 +184,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     );
 
     let cursor = Cursor::load(&config.cursor.theme, config.cursor.size);
-    let image = cursor.image();
-    let cursor_buffer = MemoryRenderBuffer::from_slice(
-        &image.pixels_rgba,
-        Fourcc::Abgr8888,
-        (image.width as i32, image.height as i32),
-        1,
-        Transform::Normal,
-        None,
-    );
+    let (cursor_buffer, cursor_hotspot) = cursor.buffer(1);
 
     let backend = UdevData {
         session,
@@ -187,6 +193,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         outputs: HashMap::new(),
         cursor,
         cursor_buffer,
+        cursor_hotspot,
+        cursor_scale: 1,
         blur: Blur::default(),
     };
     let mut state = BuntState::new(
@@ -337,11 +345,23 @@ impl BuntState {
             .and_then(|pin| find_mode(&modes, pin))
             .unwrap_or(modes[0]);
         let wl_mode = WlMode::from(drm_mode);
+        let (width_mm, height_mm) = info.size().unwrap_or((0, 0));
+        let builtin = matches!(
+            info.interface(),
+            connector::Interface::EmbeddedDisplayPort
+                | connector::Interface::LVDS
+                | connector::Interface::DSI
+        );
+        let preferred_scale = recommended_scale(
+            WlMode::from(modes[0]).size,
+            (width_mm as i32, height_mm as i32),
+            builtin,
+        );
+        // 사용자가 고른 배율이 없으면 화면 크기로 고른 기본 배율을 쓴다
         let scale = saved
             .and_then(|prefs| prefs.scale)
-            .filter(|scale| scales_for(wl_mode.size.w, wl_mode.size.h).contains(scale))
-            .unwrap_or(1.0);
-        let (width_mm, height_mm) = info.size().unwrap_or((0, 0));
+            .unwrap_or(preferred_scale);
+        let scale = nearest_scale(&scales_for(wl_mode.size.w, wl_mode.size.h), scale);
         let (make, model) = edid_blob(self.backend.output_manager.device(), info.handle())
             .map(|edid| parse_edid(&edid))
             .unwrap_or_default();
@@ -350,12 +370,6 @@ impl BuntState {
         } else {
             model.clone()
         };
-        let builtin = matches!(
-            info.interface(),
-            connector::Interface::EmbeddedDisplayPort
-                | connector::Interface::LVDS
-                | connector::Interface::DSI
-        );
 
         let output = Output::new(
             name.clone(),
@@ -427,6 +441,7 @@ impl BuntState {
             crtc,
             OutputSurface {
                 output,
+                preferred_scale,
                 drm_output,
                 connector: info.handle(),
                 modes,
@@ -546,12 +561,13 @@ impl BuntState {
             wl_mode.size.h,
             wl_mode.refresh
         );
-        // 지금 배율로는 화면이 너무 작아지면 1배로 되돌린다
+        // 지금 배율로는 화면이 너무 작아지면 쓸 수 있는 가장 가까운 배율로 바꾼다
         let scale = surface.output.current_scale().fractional_scale();
-        if !scales_for(wl_mode.size.w, wl_mode.size.h).contains(&scale) {
+        let fitted = nearest_scale(&scales_for(wl_mode.size.w, wl_mode.size.h), scale);
+        if fitted != scale {
             surface
                 .output
-                .change_current_state(None, None, Some(OutputScale::Integer(1)), None);
+                .change_current_state(None, None, Some(output_scale(fitted)), None);
         }
         self.output_resized(crtc);
         true
@@ -634,6 +650,9 @@ impl BuntState {
             .map(|surface| {
                 let mode = WlMode::from(surface.mode);
                 let size = surface.output.physical_properties().size;
+                let scale = surface.output.current_scale().fractional_scale();
+                let scales = scales_for(mode.size.w, mode.size.h);
+                let preferred_scale = nearest_scale(&scales, surface.preferred_scale);
                 OutputInfo {
                     name: surface.output.name(),
                     description: surface.description.clone(),
@@ -641,9 +660,10 @@ impl BuntState {
                     width: mode.size.w,
                     height: mode.size.h,
                     refresh: mode.refresh,
-                    scale: surface.output.current_scale().fractional_scale(),
+                    scale,
                     modes: surface.modes.iter().map(mode_key).collect(),
-                    scales: scales_for(mode.size.w, mode.size.h),
+                    scales: scale_choices(&scales, &[scale, preferred_scale]),
+                    preferred_scale,
                     physical_width: size.w,
                     physical_height: size.h,
                 }
@@ -721,6 +741,8 @@ impl BuntState {
             outputs,
             cursor,
             cursor_buffer,
+            cursor_hotspot,
+            cursor_scale,
             blur,
             ..
         } = &mut self.backend;
@@ -771,9 +793,12 @@ impl BuntState {
                     );
                 }
                 CursorImageStatus::Named(_) => {
-                    let image = cursor.image();
-                    let hotspot = Point::from((f64::from(image.xhot), f64::from(image.yhot)));
-                    let location = (local - hotspot).to_physical(scale);
+                    let wanted = output.current_scale().integer_scale();
+                    if *cursor_scale != wanted {
+                        (*cursor_buffer, *cursor_hotspot) = cursor.buffer(wanted);
+                        *cursor_scale = wanted;
+                    }
+                    let location = (local - *cursor_hotspot).to_physical(scale);
                     match MemoryRenderBufferRenderElement::from_buffer(
                         renderer,
                         location,
@@ -919,16 +944,88 @@ fn sorted_modes(info: &connector::Info) -> Vec<DrmMode> {
     modes
 }
 
-/// 고를 수 있는 배율. 정수 배율만 쓴다 (GTK를 cairo로 그리는 동안 분수 배율은 흐리다).
-/// 배율로 나눈 논리 화면이 너무 작아지지 않는 것만 둔다
+/// 고를 수 있는 배율: 1배와, 배율로 나눈 논리 화면이 너무 작아지지 않는 0.25 단위 배율.
+/// 소수 배율을 모르는 앱은 올림한 정수 배율로 그리고 컴포지터가 줄여 그린다 (macOS의 HiDPI와 같다)
 fn scales_for(width: i32, height: i32) -> Vec<f64> {
-    (1..=MAX_SCALE)
-        .filter(|scale| {
-            *scale == 1
-                || (width / scale >= MIN_LOGICAL_WIDTH && height / scale >= MIN_LOGICAL_HEIGHT)
-        })
-        .map(f64::from)
-        .collect()
+    let fits = |scale: f64| {
+        f64::from(width) / scale >= MIN_LOGICAL_WIDTH - 1e-6
+            && f64::from(height) / scale >= MIN_LOGICAL_HEIGHT - 1e-6
+    };
+    let mut scales = vec![1.0];
+    scales.extend(
+        (1..)
+            .map(|step| 1.0 + f64::from(step) * SCALE_STEP)
+            .take_while(|scale| *scale <= MAX_SCALE && fits(*scale)),
+    );
+    scales
+}
+
+/// 시스템 설정에 보일 배율: 많으면 양 끝(가장 큰 텍스트, 가장 넓은 공간) 사이를 고르게 나눠 다섯 개를
+/// 고른다. 거리가 같으면 고르기 쉬운 0.5 단위(150%, 200%)를 고르고, `keep`(지금 배율, 기본 배율)은
+/// 늘 넣는다
+fn scale_choices(scales: &[f64], keep: &[f64]) -> Vec<f64> {
+    if scales.len() <= SCALE_CHOICES {
+        return scales.to_vec();
+    }
+    let (first, last) = (scales[0], scales[scales.len() - 1]);
+    let half_step = |scale: f64| (scale * 2.0).fract() == 0.0;
+    let nearest = |target: f64| {
+        scales
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                (a - target)
+                    .abs()
+                    .total_cmp(&(b - target).abs())
+                    .then(half_step(*b).cmp(&half_step(*a)))
+            })
+            .unwrap_or(target)
+    };
+    let mut picks: Vec<f64> = (0..SCALE_CHOICES)
+        .map(|index| nearest(first + (last - first) * index as f64 / (SCALE_CHOICES - 1) as f64))
+        .collect();
+    picks.dedup();
+    for &scale in keep {
+        if !scales.contains(&scale) || picks.contains(&scale) {
+            continue;
+        }
+        // 양 끝과 지킬 값은 두고, 가장 가까운 자리를 바꾼다
+        if let Some(slot) = picks
+            .iter_mut()
+            .filter(|pick| **pick != first && **pick != last && !keep.contains(pick))
+            .min_by(|a, b| (**a - scale).abs().total_cmp(&(**b - scale).abs()))
+        {
+            *slot = scale;
+        }
+        picks.sort_by(f64::total_cmp);
+    }
+    picks
+}
+
+/// `scales` 가운데 `scale`에 가장 가까운 배율 (같으면 작은 쪽)
+fn nearest_scale(scales: &[f64], scale: f64) -> f64 {
+    scales
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - scale).abs().total_cmp(&(b - scale).abs()))
+        .unwrap_or(1.0)
+}
+
+/// 화면의 실제 크기(mm)로 고른 기본 배율. 논리 밀도가 BUILTIN_PPI나 EXTERNAL_PPI에 가깝게 한다.
+/// 크기를 모르거나(0) 믿기 어려우면(프로젝터의 센티미터 값, 가로세로 비가 픽셀과 다름) 1배
+fn recommended_scale(pixels: Size<i32, Physical>, millimeters: (i32, i32), builtin: bool) -> f64 {
+    let (width_mm, height_mm) = millimeters;
+    if width_mm < 100 || height_mm < 60 || pixels.w <= 0 || pixels.h <= 0 {
+        return 1.0;
+    }
+    let pixel_ratio = f64::from(pixels.w) / f64::from(pixels.h);
+    let size_ratio = f64::from(width_mm) / f64::from(height_mm);
+    if (pixel_ratio / size_ratio - 1.0).abs() > 0.15 {
+        return 1.0;
+    }
+    let ppi = f64::from(pixels.w) * 25.4 / f64::from(width_mm);
+    let target = if builtin { BUILTIN_PPI } else { EXTERNAL_PPI };
+    nearest_scale(&scales_for(pixels.w, pixels.h), ppi / target)
 }
 
 fn output_scale(scale: f64) -> OutputScale {
@@ -1000,8 +1097,55 @@ mod tests {
 
     #[test]
     fn scales_keep_a_usable_logical_size() {
-        assert_eq!(scales_for(1280, 800), vec![1.0, 2.0]);
-        assert_eq!(scales_for(1024, 768), vec![1.0]);
-        assert_eq!(scales_for(3840, 2160), vec![1.0, 2.0, 3.0]);
+        assert_eq!(scales_for(1280, 800), vec![1.0, 1.25]);
+        assert_eq!(scales_for(1366, 768), vec![1.0]);
+        assert_eq!(scales_for(1920, 1080), vec![1.0, 1.25, 1.5]);
+        assert_eq!(
+            scales_for(2560, 1600),
+            vec![1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5]
+        );
+    }
+
+    #[test]
+    fn five_choices_keep_the_ends_and_the_current_scale() {
+        let laptop = scales_for(2560, 1600);
+        assert_eq!(scale_choices(&laptop, &[]), vec![1.0, 1.5, 1.75, 2.0, 2.5]);
+        assert_eq!(
+            scale_choices(&laptop, &[2.25, 1.75]),
+            vec![1.0, 1.5, 1.75, 2.25, 2.5]
+        );
+        // 4K: 1920×1080처럼 보이는 200%와 2560×1440처럼 보이는 150%가 들어간다
+        let monitor = scales_for(3840, 2160);
+        assert_eq!(
+            scale_choices(&monitor, &[1.0]),
+            vec![1.0, 1.5, 2.0, 2.75, 3.25]
+        );
+        assert_eq!(
+            scale_choices(&monitor, &[1.75, 1.0]),
+            vec![1.0, 1.75, 2.0, 2.75, 3.25]
+        );
+        assert_eq!(scale_choices(&[1.0, 1.25], &[1.0]), vec![1.0, 1.25]);
+    }
+
+    #[test]
+    fn recommended_scale_follows_the_pixel_density() {
+        // QEMU의 가상 화면 (약 100ppi)
+        assert_eq!(
+            recommended_scale((1280, 800).into(), (320, 200), false),
+            1.0
+        );
+        // 13.3형 2560×1600 노트북 (227ppi) → 1440×900에 가깝게
+        assert_eq!(
+            recommended_scale((2560, 1600).into(), (286, 179), true),
+            1.75
+        );
+        // 27형 4K 모니터 (163ppi) → 2560×1440
+        assert_eq!(
+            recommended_scale((3840, 2160).into(), (597, 336), false),
+            1.5
+        );
+        // 크기를 모르거나 믿을 수 없는 화면
+        assert_eq!(recommended_scale((2560, 1600).into(), (0, 0), true), 1.0);
+        assert_eq!(recommended_scale((1920, 1080).into(), (16, 9), false), 1.0);
     }
 }

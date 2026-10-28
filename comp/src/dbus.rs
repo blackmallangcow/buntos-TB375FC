@@ -43,8 +43,10 @@ pub struct OutputInfo {
     pub scale: f64,
     /// (너비, 높이, mHz). 화면이 권하는 모드가 먼저
     pub modes: Vec<(i32, i32, i32)>,
-    /// 고를 수 있는 배율
+    /// 시스템 설정에 보일 배율 (작은 것부터, 많으면 다섯 개)
     pub scales: Vec<f64>,
+    /// 화면 크기로 고른 기본 배율 (macOS의 "기본값")
+    pub preferred_scale: f64,
     /// mm. 모르면 0
     pub physical_width: i32,
     pub physical_height: i32,
@@ -244,6 +246,10 @@ impl Api {
                     ("scale".to_owned(), Value::from(output.scale)),
                     ("modes".to_owned(), Value::new(output.modes.clone())),
                     ("scales".to_owned(), Value::new(output.scales.clone())),
+                    (
+                        "preferred-scale".to_owned(),
+                        Value::from(output.preferred_scale),
+                    ),
                     (
                         "physical-width".to_owned(),
                         Value::from(output.physical_width),

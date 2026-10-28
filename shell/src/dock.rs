@@ -3,6 +3,7 @@
 
 //! Dock: 화면 아래에서 앱을 실행한다. 실행 중인 앱은 아이콘 아래에 점이 붙고, 누르면 새로
 //! 띄우지 않고 그 앱의 창을 앞으로 가져온다. Dock에 없는 앱이 실행 중이면 구분선 뒤에 보인다.
+//! macOS의 Dock처럼 화면이 좁거나 앱이 많아 넘치면 아이콘을 줄여 화면 안에 둔다.
 
 use std::rc::Rc;
 
@@ -61,6 +62,18 @@ pub fn app_button_content(image: &gtk::Image) -> (gtk::Box, gtk::Box) {
     content.append(&dot);
     (content, dot)
 }
+
+/// Dock 판의 가로 바깥 여백(--space-4), 안쪽 여백(10px), 테두리를 양쪽 더한 것 (style.css)
+const DOCK_CHROME: i32 = 2 * 16 + 2 * 10 + 2;
+/// 단추 안에서 아이콘 밖의 너비(좌우 4px)와 단추 사이 간격 (style.css, build의 spacing)
+const ITEM_PADDING: i32 = 8;
+const ITEM_SPACING: i32 = 6;
+/// 실행 중인 앱 앞 구분선(선과 좌우 여백)과 그 뒤 간격
+const SEPARATOR_WIDTH: i32 = 5 + ITEM_SPACING;
+/// 화면 가장자리에 남기는 틈
+const SCREEN_MARGIN: i32 = 8;
+/// 아무리 좁아도 이보다 작게 줄이지 않는다
+const MIN_ICON_SIZE: i32 = 24;
 
 struct AppItem {
     app_id: String,
@@ -165,10 +178,15 @@ pub fn build(
     let running = gtk::Box::builder().spacing(6).build();
     dock.append(&separator);
     dock.append(&running);
+    let fit: Rc<dyn Fn()> = {
+        let (window, dock, separator) = (window.clone(), dock.clone(), separator.clone());
+        Rc::new(move || fit_icons(&window, &dock, &separator, icon_size))
+    };
 
     if let Some(toplevels) = toplevels {
         let pinned = Rc::new(pinned);
         let clicks = toplevels.clone();
+        let fit = fit.clone();
         toplevels.subscribe(move |toplevels| {
             for item in pinned.iter() {
                 let on = toplevels.is_running(&item.app_id);
@@ -200,17 +218,113 @@ pub fn build(
                 running.append(&button);
             }
             separator.set_visible(!extra.is_empty());
+            // 실행 중인 앱이 늘거나 줄면 화면에 들도록 다시 맞춘다
+            fit();
         });
     }
 
     window.set_child(Some(&dock));
     window.present();
+    fit();
+    follow_monitors(&WidgetExt::display(&window), &fit);
     window
+}
+
+/// 화면 크기나 배율이 바뀌면(모니터의 논리 크기) `fit`을 부른다
+fn follow_monitors(display: &gtk::gdk::Display, fit: &Rc<dyn Fn()>) {
+    let watch = {
+        let fit = fit.clone();
+        move |monitor: &gtk::gdk::Monitor| {
+            let fit = fit.clone();
+            monitor.connect_geometry_notify(move |_| fit());
+        }
+    };
+    let monitors = display.monitors();
+    for monitor in monitors.iter::<gtk::gdk::Monitor>().flatten() {
+        watch(&monitor);
+    }
+    let fit = fit.clone();
+    monitors.connect_items_changed(move |monitors, position, _removed, added| {
+        for index in position..position + added {
+            if let Some(monitor) = monitors.item(index).and_downcast::<gtk::gdk::Monitor>() {
+                watch(&monitor);
+            }
+        }
+        fit();
+    });
+}
+
+/// Dock이 화면 너비에 들어가도록 아이콘 크기를 정한다
+fn fit_icons(
+    window: &gtk::ApplicationWindow,
+    dock: &gtk::Box,
+    separator: &gtk::Separator,
+    max: i32,
+) {
+    let display = WidgetExt::display(window);
+    let monitor = window
+        .surface()
+        .and_then(|surface| display.monitor_at_surface(&surface))
+        .or_else(|| display.monitors().item(0).and_downcast());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let images = images_in(dock.upcast_ref());
+    let size = icon_size_for(
+        monitor.geometry().width(),
+        images.len() as i32,
+        separator.is_visible(),
+        max,
+    );
+    for image in images {
+        if image.pixel_size() != size {
+            image.set_pixel_size(size);
+        }
+    }
+}
+
+/// 아이콘 `items`개가 너비 `screen`인 화면에 들어가는 가장 큰 아이콘 크기 (`max`까지)
+fn icon_size_for(screen: i32, items: i32, separator: bool, max: i32) -> i32 {
+    if items <= 0 {
+        return max;
+    }
+    let fixed = DOCK_CHROME
+        + 2 * SCREEN_MARGIN
+        + (items - 1) * ITEM_SPACING
+        + items * ITEM_PADDING
+        + if separator { SEPARATOR_WIDTH } else { 0 };
+    ((screen - fixed) / items).clamp(MIN_ICON_SIZE.min(max), max)
+}
+
+/// 위젯 아래의 모든 아이콘
+fn images_in(widget: &gtk::Widget) -> Vec<gtk::Image> {
+    let mut images = Vec::new();
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        match current.downcast_ref::<gtk::Image>() {
+            Some(image) => images.push(image.clone()),
+            None => images.extend(images_in(&current)),
+        }
+        child = current.next_sibling();
+    }
+    images
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icons_shrink_only_when_the_dock_would_overflow() {
+        // 1024×640처럼 보이는 화면에는 기본 Dock(앱 10개)이 그대로 들어간다
+        assert_eq!(icon_size_for(1024, 10, false, 48), 48);
+        // 좁은 화면이나 실행 중인 앱이 많으면 줄인다
+        assert_eq!(icon_size_for(640, 10, false, 48), 43);
+        assert_eq!(icon_size_for(1024, 16, true, 48), 45);
+        // 그래도 24보다 작게는 줄이지 않는다
+        assert_eq!(icon_size_for(400, 20, true, 48), 24);
+        assert_eq!(icon_size_for(1024, 0, false, 48), 48);
+    }
 
     #[test]
     fn app_ids_come_from_desktop_ids() {
