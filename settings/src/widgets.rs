@@ -270,6 +270,33 @@ pub fn info_row(title: &str, value: &str) -> gtk::ListBoxRow {
 }
 
 /// 스위치 행
+/// 슬라이더 아래 양 끝 이름이 붙은 행 (macOS의 "작게 … 크게")
+pub fn slider_row(title: &str, scale: &gtk::Scale, low: &str, high: &str) -> gtk::ListBoxRow {
+    let ends = gtk::Box::builder().build();
+    ends.append(
+        &gtk::Label::builder()
+            .label(low)
+            .xalign(0.0)
+            .hexpand(true)
+            .css_classes(["row-subtitle"])
+            .build(),
+    );
+    ends.append(
+        &gtk::Label::builder()
+            .label(high)
+            .xalign(1.0)
+            .css_classes(["row-subtitle"])
+            .build(),
+    );
+    let control = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .width_request(260)
+        .build();
+    control.append(scale);
+    control.append(&ends);
+    row(title, &control)
+}
+
 pub fn switch_row(title: &str, subtitle: Option<&str>) -> (gtk::ListBoxRow, gtk::Switch) {
     let switch = gtk::Switch::builder().valign(gtk::Align::Center).build();
     let (row, accessories) = rich_row(None, title, subtitle);

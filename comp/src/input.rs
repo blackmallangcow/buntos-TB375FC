@@ -178,6 +178,8 @@ impl BuntState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
+        // 화면 가장자리에 닿으면 숨은 막대를 꺼내고, 꺼낸 막대를 떠나면 숨길 때를 잰다
+        self.update_bars(Some(pos));
         let under = self.surface_under(pos);
         let serial = SERIAL_COUNTER.next_serial();
         pointer.motion(

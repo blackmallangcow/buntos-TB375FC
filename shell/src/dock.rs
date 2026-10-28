@@ -4,19 +4,31 @@
 //! Dock: 화면 아래에서 앱을 실행한다. 실행 중인 앱은 아이콘 아래에 점이 붙고, 누르면 새로
 //! 띄우지 않고 그 앱의 창을 앞으로 가져온다. Dock에 없는 앱이 실행 중이면 구분선 뒤에 보인다.
 //! macOS의 Dock처럼 화면이 좁거나 앱이 많아 넘치면 아이콘을 줄여 화면 안에 둔다.
+//! 크기, 투명도, 실행 중 표시는 시스템 설정의 "데스크탑 및 Dock"을 따른다. 자동으로 숨고 아래쪽
+//! 가장자리에서 나오는 것은 컴포지터가 한다(comp/src/panels.rs).
 
-use std::rc::Rc;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use bunt_i18n::Translations;
-use gtk4::{self as gtk, gio, prelude::*};
+use gtk4::{self as gtk, gdk, gio, prelude::*};
 use gtk4_layer_shell::{Edge, LayerShell};
 
 use crate::{
     config::{Builtin, Config, DockItem},
     launcher::{self, Launcher},
-    layer_window,
+    layer_window, shell_settings,
     toplevels::Toplevels,
 };
+
+/// 셸 설정 키 (data/org.buntos.shell.gschema.xml)
+const SIZE_KEY: &str = "dock-icon-size";
+const TRANSPARENCY_KEY: &str = "dock-transparency";
+const INDICATORS_KEY: &str = "dock-show-indicators";
+/// 설정 스키마가 없을 때(이미지 밖에서 실행하는 개발 환경)의 아이콘 크기
+const DEFAULT_ICON_SIZE: i32 = 48;
 
 /// 앱을 실행한다. D-Bus로 활성화하는 앱이면 GIO가 D-Bus로 띄운다
 pub fn launch(info: &impl IsA<gio::AppInfo>, widget: &impl IsA<gtk::Widget>) {
@@ -137,7 +149,13 @@ pub fn build(
     window.set_margin(Edge::Bottom, config.dock.margin_bottom);
     window.auto_exclusive_zone_enable();
 
-    let icon_size = config.dock.icon_size;
+    let settings = shell_settings();
+    // 고른 크기. 화면에 다 들어가지 않으면 fit_icons가 이보다 줄인다
+    let icon_size = Rc::new(Cell::new(
+        settings
+            .as_ref()
+            .map_or(DEFAULT_ICON_SIZE, |settings| settings.int(SIZE_KEY)),
+    ));
     let dock = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(6)
@@ -150,7 +168,11 @@ pub fn build(
                 builtin: Builtin::Apps,
                 label,
             } => {
-                dock.append(&launcher::dock_button(launcher, &tr.get(label), icon_size));
+                dock.append(&launcher::dock_button(
+                    launcher,
+                    &tr.get(label),
+                    icon_size.get(),
+                ));
             }
             DockItem::App { app, label } => {
                 let Some(info) = gio_unix::DesktopAppInfo::new(app) else {
@@ -161,7 +183,7 @@ pub fn build(
                     Some(id) => tr.get(id),
                     None => info.name().into(),
                 };
-                let image = app_image(Some(&info), icon_size);
+                let image = app_image(Some(&info), icon_size.get());
                 let (button, item) =
                     app_button(image, &name, app_id_of(app), Some(info), toplevels);
                 dock.append(&button);
@@ -180,21 +202,20 @@ pub fn build(
     dock.append(&running);
     let fit: Rc<dyn Fn()> = {
         let (window, dock, separator) = (window.clone(), dock.clone(), separator.clone());
-        Rc::new(move || fit_icons(&window, &dock, &separator, icon_size))
+        let icon_size = icon_size.clone();
+        Rc::new(move || fit_icons(&window, &dock, &separator, icon_size.get()))
     };
 
     if let Some(toplevels) = toplevels {
         let pinned = Rc::new(pinned);
         let clicks = toplevels.clone();
-        let fit = fit.clone();
+        let (fit, icon_size) = (fit.clone(), icon_size.clone());
+        // 지금 구분선 뒤에 놓인 앱. 창 제목만 바뀌는 것처럼 목록이 같으면 단추를 다시 만들지 않는다
+        let shown: RefCell<Vec<String>> = RefCell::default();
         toplevels.subscribe(move |toplevels| {
             for item in pinned.iter() {
                 let on = toplevels.is_running(&item.app_id);
                 item.dot.set_opacity(if on { 1.0 } else { 0.0 });
-            }
-            // Dock에 없는 실행 중인 앱을 구분선 뒤에 다시 늘어놓는다
-            while let Some(child) = running.first_child() {
-                running.remove(&child);
             }
             let mut extra: Vec<String> = Vec::new();
             for toplevel in toplevels.list() {
@@ -206,28 +227,90 @@ pub fn build(
                     extra.push(id);
                 }
             }
+            if *shown.borrow() == extra {
+                return;
+            }
+            // Dock에 없는 실행 중인 앱을 구분선 뒤에 다시 늘어놓는다
+            while let Some(child) = running.first_child() {
+                running.remove(&child);
+            }
             for app_id in &extra {
                 let info = gio_unix::DesktopAppInfo::new(&format!("{app_id}.desktop"));
                 let name = info
                     .as_ref()
                     .map(|info| info.name().to_string())
                     .unwrap_or_else(|| app_id.clone());
-                let image = app_image(info.as_ref(), icon_size);
+                let image = app_image(info.as_ref(), icon_size.get());
                 let (button, item) = app_button(image, &name, app_id, info, Some(&clicks));
                 item.dot.set_opacity(1.0);
                 running.append(&button);
             }
             separator.set_visible(!extra.is_empty());
+            shown.replace(extra);
             // 실행 중인 앱이 늘거나 줄면 화면에 들도록 다시 맞춘다
             fit();
         });
     }
 
     window.set_child(Some(&dock));
+    if let Some(settings) = &settings {
+        follow_settings(settings, &dock, &icon_size, &fit);
+    }
     window.present();
     fit();
     follow_monitors(&WidgetExt::display(&window), &fit);
     window
+}
+
+/// 설정 키 하나가 바뀌었을 때 할 일
+type SettingChanged = dyn Fn(&gio::Settings, &str);
+
+/// 시스템 설정의 Dock 크기, 투명도, 실행 중 표시를 따른다
+fn follow_settings(
+    settings: &gio::Settings,
+    dock: &gtk::Box,
+    icon_size: &Rc<Cell<i32>>,
+    fit: &Rc<dyn Fn()>,
+) {
+    // 투명도는 style.css의 .dock 바탕을 덮어쓴다
+    let glass = gtk::CssProvider::new();
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &glass,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
+    }
+    let apply: Rc<SettingChanged> = {
+        let (dock, icon_size, fit) = (dock.clone(), icon_size.clone(), fit.clone());
+        Rc::new(move |settings, key| match key {
+            SIZE_KEY => {
+                icon_size.set(settings.int(SIZE_KEY));
+                fit();
+            }
+            TRANSPARENCY_KEY => glass.load_from_string(&glass_css(settings.double(key))),
+            INDICATORS_KEY if settings.boolean(key) => dock.remove_css_class("no-indicators"),
+            INDICATORS_KEY => dock.add_css_class("no-indicators"),
+            _ => {}
+        })
+    };
+    for key in [SIZE_KEY, TRANSPARENCY_KEY, INDICATORS_KEY] {
+        // 처리기가 설정 객체를 붙들어 셸이 끝날 때까지 둔다
+        let (changed, keep_alive) = (apply.clone(), settings.clone());
+        settings.connect_changed(Some(key), move |settings, key| {
+            let _ = &keep_alive;
+            changed(settings, key);
+        });
+        // 변경 알림은 처리기를 단 뒤 한 번 읽어야 온다
+        apply(settings, key);
+    }
+}
+
+/// Dock 유리의 바탕. 투명도가 0이면 불투명하고, 1이면 바탕 없이 테두리와 그림자만 남는다.
+/// bunt-comp는 알파가 0.35~0.5보다 옅은 곳은 흐리지 않으므로 아주 투명하면 뒤가 그대로 비친다
+fn glass_css(transparency: f64) -> String {
+    let alpha = 1.0 - transparency.clamp(0.0, 1.0);
+    format!(".dock {{ background-color: alpha(var(--glass-tint), {alpha:.2}); }}")
 }
 
 /// 화면 크기나 배율이 바뀌면(모니터의 논리 크기) `fit`을 부른다
@@ -324,6 +407,17 @@ mod tests {
         // 그래도 24보다 작게는 줄이지 않는다
         assert_eq!(icon_size_for(400, 20, true, 48), 24);
         assert_eq!(icon_size_for(1024, 0, false, 48), 48);
+    }
+
+    #[test]
+    fn transparency_sets_the_glass_alpha() {
+        // 기본값 0.4는 style.css의 --glass(60%)와 같다
+        assert_eq!(
+            glass_css(0.4),
+            ".dock { background-color: alpha(var(--glass-tint), 0.60); }"
+        );
+        assert!(glass_css(0.0).contains("1.00"));
+        assert!(glass_css(2.0).contains("0.00"));
     }
 
     #[test]

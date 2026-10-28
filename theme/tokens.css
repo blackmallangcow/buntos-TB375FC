@@ -53,6 +53,8 @@
    * glass-strong은 글이 많은 곳(메뉴, 제어 센터), glass는 넓은 패널(모든 앱, Dock) */
   --glass: rgba(255, 255, 255, 0.6);
   --glass-strong: rgba(246, 246, 248, 0.8);
+  /* glass의 불투명한 바탕색. 투명도를 사용자가 고르는 곳(Dock)은 alpha(var(--glass-tint), 값)로 쓴다 */
+  --glass-tint: rgb(255, 255, 255);
   /* 유리 가장자리: 안쪽 밝은 선과 바깥 얇은 선 */
   --glass-highlight: rgba(255, 255, 255, 0.6);
   --glass-outline: rgba(0, 0, 0, 0.12);
@@ -140,6 +142,7 @@
 
   --glass: rgba(36, 36, 40, 0.6);
   --glass-strong: rgba(40, 40, 44, 0.8);
+  --glass-tint: rgb(36, 36, 40);
   --glass-highlight: rgba(255, 255, 255, 0.14);
   --glass-outline: rgba(0, 0, 0, 0.5);
   --glass-fill: rgba(255, 255, 255, 0.1);

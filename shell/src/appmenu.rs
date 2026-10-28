@@ -22,6 +22,9 @@ struct AppMenuState {
     menubar: gtk::PopoverMenuBar,
     app_id: RefCell<Option<String>>,
     remote: RefCell<Option<gio::DBusActionGroup>>,
+    /// 지금 메뉴를 만든 창의 (앱 ID, 전체 화면). 창 제목처럼 메뉴에 없는 것만 바뀌면 다시 만들지
+    /// 않는다. 메뉴 막대를 다시 만드는 일은 느려서 자동 가리기 같은 다른 처리를 늦춘다
+    built: RefCell<Option<(String, bool)>>,
 }
 
 pub fn build(tr: &Rc<Translations>, toplevels: &Toplevels) -> gtk::PopoverMenuBar {
@@ -35,6 +38,7 @@ pub fn build(tr: &Rc<Translations>, toplevels: &Toplevels) -> gtk::PopoverMenuBa
         menubar: menubar.clone(),
         app_id: RefCell::new(None),
         remote: RefCell::new(None),
+        built: RefCell::new(None),
     });
     toplevels.subscribe(move |toplevels| update(&state, toplevels.active()));
     menubar
@@ -89,7 +93,14 @@ fn update(state: &Rc<AppMenuState>, active: Option<Toplevel>) {
         *state.app_id.borrow_mut() = app_id;
         *state.remote.borrow_mut() = remote;
     }
-    rebuild(state, active);
+    if *state.built.borrow() != shown_in_menu(active.as_ref()) {
+        rebuild(state, active);
+    }
+}
+
+/// 메뉴에 드러나는 창의 상태
+fn shown_in_menu(active: Option<&Toplevel>) -> Option<(String, bool)> {
+    active.map(|active| (active.app_id.clone(), active.fullscreen))
 }
 
 /// GApplication은 앱 ID를 버스 이름으로 쓰고, 동작을 앱 ID에서 만든 경로에 내보낸다
@@ -118,6 +129,7 @@ pub fn app_name(app_id: &str) -> String {
 }
 
 fn rebuild(state: &AppMenuState, active: Option<Toplevel>) {
+    *state.built.borrow_mut() = shown_in_menu(active.as_ref());
     let model = active.map(|active| {
         let remote = state.remote.borrow();
         let has = |action: &str| remote.as_ref().is_some_and(|r| r.has_action(action));

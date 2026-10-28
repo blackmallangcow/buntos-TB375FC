@@ -736,6 +736,14 @@ impl BuntState {
             _ => Vec::new(),
         };
 
+        // 막대를 숨길지 다시 보고(앞의 창이 최대화했을 수 있다), 다 보이지 않는 막대의 자리를 정한다.
+        // 숨기고 꺼낼 때의 미끄러짐은 이 렌더 루프가 프레임마다 그린다
+        self.update_bars(None);
+        let bar_places = match self.backend.outputs.get(&crtc) {
+            Some(surface) => self.bar_places(&surface.output),
+            None => Vec::new(),
+        };
+
         let UdevData {
             renderer,
             outputs,
@@ -821,7 +829,8 @@ impl BuntState {
             &output,
             1.0,
         ) {
-            Ok(space_elements) => {
+            Ok(mut space_elements) => {
+                render::place_bars(renderer, &mut space_elements, &bar_places, scale);
                 elements.extend(space_elements.into_iter().map(OutputRenderElements::Space))
             }
             Err(err) => tracing::warn!("failed to collect windows: {err:?}"),

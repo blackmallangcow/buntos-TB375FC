@@ -3,8 +3,8 @@
 #
 # bunt-shell 기본 설정. /etc/buntos/shell.toml이 있으면 그 파일을 쓴다.
 
+# Dock의 크기, 투명도, 자동 가리기는 시스템 설정의 "데스크탑 및 Dock"에서 고른다 (GSettings org.buntos.shell)
 [dock]
-icon-size = 48
 # 화면 아래 가장자리와의 간격. Dock 그림자용 여백(style.css)이 따로 있다
 margin-bottom = 0
 

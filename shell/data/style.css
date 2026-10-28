@@ -36,6 +36,24 @@ window.bunt-wallpaper.background {
   text-shadow: none;
 }
 
+/* 메뉴 막대 배경 보기: 흐린 유리 바탕에 화면 모드의 글씨색 (화면을 채우는 창이 있어도 같다) */
+.bar.background {
+  background-color: var(--glass);
+  color: var(--label);
+  text-shadow: none;
+}
+
+.bar.background menubutton > button:hover,
+.bar.background menubutton > button:checked,
+.bar.background menubar > item:hover,
+.bar.background menubar > item:selected {
+  background: var(--hover);
+}
+
+.bar.background menubutton > button image {
+  -gtk-icon-shadow: none;
+}
+
 /* GTK 메뉴 막대의 기본 바탕과 밑줄을 없앤다 */
 .bar menubar {
   padding: 0;
@@ -95,7 +113,7 @@ window.bunt-wallpaper.background {
   font-weight: 500;
 }
 
-/* Dock: 유리 판 */
+/* Dock: 유리 판. 바탕의 투명도는 시스템 설정을 따라 셸이 덮어쓴다(dock.rs) */
 .dock {
   /* 그림자가 창 경계에서 잘리지 않도록 창 안쪽에 여백을 둔다 */
   margin: var(--space-4);
@@ -127,6 +145,11 @@ menubutton.dock-item > button:checked {
   min-height: 4px;
   border-radius: 2px;
   background: var(--label);
+}
+
+/* 시스템 설정에서 "열린 응용 프로그램에 대한 표시기 보기"를 끄면 점 자리만 남긴다 */
+.dock.no-indicators .running-dot {
+  background: none;
 }
 
 .dock-separator {

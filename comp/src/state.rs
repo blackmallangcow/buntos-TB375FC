@@ -29,9 +29,10 @@ use smithay::{
     output::{Output, Scale as OutputScale},
     reexports::{
         calloop::{
-            Interest, LoopHandle, LoopSignal, Mode, PostAction,
+            Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken,
             channel::{self, Channel},
             generic::Generic,
+            timer::{TimeoutAction, Timer},
         },
         rustix::io::{FdFlags, fcntl_setfd},
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -91,7 +92,9 @@ use crate::{
     dbus::{self, Request},
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, handle_resize_commit},
     ime::InputMethodProcess,
+    panels::{self, Bar, BarInput, Edge, Fill, Panels, Reveal},
     prefs::{KeyRepeat, Prefs},
+    render,
     toplevels::ForeignToplevelState,
     udev::UdevData,
 };
@@ -99,8 +102,13 @@ use crate::{
 /// 새 창을 계단식으로 놓을 때의 간격 (논리 픽셀)
 const CASCADE_STEP: i32 = 32;
 const CASCADE_COUNT: i32 = 8;
-/// 셸 메뉴바 레이어의 이름 (shell/src/menubar.rs). 메뉴바 자체는 흐리지 않는다
+/// 셸 메뉴바 레이어의 이름 (shell/src/menubar.rs). 메뉴 막대 배경을 켰을 때만 흐린다
 const MENUBAR_NAMESPACE: &str = "bunt-menubar";
+/// 셸 Dock 레이어의 이름 (shell/src/dock.rs)
+const DOCK_NAMESPACE: &str = "bunt-dock";
+/// 막대의 독점 영역이 바뀐 뒤 최대화·전체 화면 창을 다시 맞추기까지 기다리는 시간.
+/// Dock 크기 슬라이더를 끄는 동안 창 크기가 계속 바뀌지 않게 한다
+const REFILL_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// 최대화하기 전 창의 위치와 크기. 창의 사용자 데이터에 둔다.
 #[derive(Default)]
@@ -135,6 +143,15 @@ pub struct BuntState {
 
     /// 시스템 설정에서 고른 값 (다음 로그인에도 쓴다)
     pub prefs: Prefs,
+    /// 메뉴 막대와 Dock을 언제 가리는지 (셸이 알려 준다)
+    pub panels: Panels,
+    /// 메뉴 막대와 Dock이 보이는 정도 (Bar::index 순서)
+    bars: [Reveal; 2],
+    /// 꺼낸 막대를 다시 숨길 때를 기다리는 타이머와 그때
+    bar_timer: Option<(RegistrationToken, Instant)>,
+    /// 마지막으로 본 창 영역 (보통 창, 최대화, 전체 화면). 막대가 바뀌면 달라진다
+    window_areas: Option<[Rectangle<i32, Logical>; 3]>,
+    refill_timer: Option<RegistrationToken>,
     pub dbus: dbus::Service,
     pub input_method_process: InputMethodProcess,
     pub input_method_exited: channel::Sender<()>,
@@ -261,6 +278,11 @@ impl BuntState {
             cursor_status: CursorImageStatus::default_named(),
             suppressed_keys: Vec::new(),
             prefs,
+            panels: Panels::default(),
+            bars: [Reveal::default(); 2],
+            bar_timer: None,
+            window_areas: None,
+            refill_timer: None,
             dbus,
             input_method_process: InputMethodProcess::default(),
             input_method_exited,
@@ -373,10 +395,11 @@ impl BuntState {
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
         let output = self.space.output_under(pos).next()?;
         let output_geo = self.space.output_geometry(output)?;
-        let layers = layer_map_for_output(output);
         let relative = pos - output_geo.loc.to_f64();
 
+        // upper_layer_under도 레이어 맵을 잠그므로 쓸 때만 잠근다
         let layer_surface_under = |layer: Layer| {
+            let layers = layer_map_for_output(output);
             let surface = layers.layer_under(layer, relative)?;
             let geo = layers.layer_geometry(surface)?;
             surface
@@ -384,8 +407,8 @@ impl BuntState {
                 .map(|(surface, loc)| (surface, (loc + geo.loc + output_geo.loc).to_f64()))
         };
 
-        layer_surface_under(Layer::Overlay)
-            .or_else(|| layer_surface_under(Layer::Top))
+        self.upper_layer_under(pos)
+            .map(|(_, surface, loc)| (surface, loc))
             .or_else(|| {
                 self.space
                     .element_under(pos)
@@ -399,19 +422,10 @@ impl BuntState {
             .or_else(|| layer_surface_under(Layer::Background))
     }
 
-    /// 좌표가 메뉴바·Dock 같은 위층 레이어 위인지
+    /// 좌표가 메뉴바·Dock 같은 위층 레이어 위인지. 숨은 막대와 레이어의 입력 영역 밖은 세지
+    /// 않으므로, 그 자리를 누르면 아래 창이 앞으로 온다
     pub fn is_over_top_layer(&self, pos: Point<f64, Logical>) -> bool {
-        let Some(output) = self.space.output_under(pos).next() else {
-            return false;
-        };
-        let Some(output_geo) = self.space.output_geometry(output) else {
-            return false;
-        };
-        let layers = layer_map_for_output(output);
-        let relative = pos - output_geo.loc.to_f64();
-        [Layer::Overlay, Layer::Top]
-            .into_iter()
-            .any(|layer| layers.layer_under(layer, relative).is_some())
+        self.upper_layer_under(pos).is_some()
     }
 
     /// 창을 맨 앞으로 가져와 활성화하고 키보드 포커스를 준다. 키보드를 독점하는 레이어 표면(모든 앱
@@ -602,45 +616,325 @@ impl BuntState {
         })
     }
 
-    /// 메뉴바·Dock이 차지하지 않는 화면 영역 (전역 좌표)
+    /// 보통 창이 쓰는 영역: 메뉴바·Dock이 차지하지 않는 화면 영역 (전역 좌표). 늘 숨는 막대의
+    /// 자리는 보통 창도 쓴다
     fn usable_area(&self) -> Option<Rectangle<i32, Logical>> {
-        let output = self.space.outputs().next()?;
-        let output_geo = self.space.output_geometry(output)?;
-        let mut zone = layer_map_for_output(output).non_exclusive_zone();
-        zone.loc += output_geo.loc;
-        Some(zone)
+        self.window_area(Fill::Normal)
     }
 
-    /// 전체 화면 창이 쓰는 영역: 출력 전체에서 위쪽 가장자리에 붙은 메뉴바 자리만 뺀다.
-    /// 전체 화면 창이 앞에 있으면 셸이 Dock을 숨긴다.
-    fn fullscreen_area(&self) -> Option<Rectangle<i32, Logical>> {
+    /// 창이 놓일 영역 (전역 좌표). 출력 전체에서 그 창이 덮지 않는 레이어의 독점 영역을 뺀다.
+    /// 메뉴 막대와 Dock은 자동 가리기 설정(panels)을 따르고, 다른 레이어는 전체 화면 창만 덮는다
+    fn window_area(&self, fill: Fill) -> Option<Rectangle<i32, Logical>> {
         let output = self.space.outputs().next()?;
         let mut area = self.space.output_geometry(output)?;
         let map = layer_map_for_output(output);
-        let top = map
-            .layers()
-            .filter_map(|layer| {
-                let state = layer.cached_state();
-                let at_top =
-                    state.anchor.contains(Anchor::TOP) && !state.anchor.contains(Anchor::BOTTOM);
-                match state.exclusive_zone {
-                    ExclusiveZone::Exclusive(zone) if at_top => i32::try_from(zone).ok(),
-                    _ => None,
-                }
-            })
-            .max()
-            .unwrap_or(0);
-        area.loc.y += top;
-        area.size.h -= top;
+        for layer in map.layers() {
+            let state = layer.cached_state();
+            let ExclusiveZone::Exclusive(amount) = state.exclusive_zone else {
+                continue;
+            };
+            let Some(edge) = Edge::of(state.anchor) else {
+                continue;
+            };
+            if !self.covered(layer, fill) {
+                let amount = i32::try_from(amount).unwrap_or(i32::MAX);
+                panels::reserve(
+                    &mut area,
+                    edge,
+                    amount.saturating_add(edge.margin(&state.margin)),
+                );
+            }
+        }
         Some(area)
+    }
+
+    /// 이렇게 놓이는 창이 이 레이어 자리까지 쓰는지
+    fn covered(&self, layer: &LayerSurface, fill: Fill) -> bool {
+        match self.bar_of(layer) {
+            Some(bar) => self.bar_mode(bar).covered_by(fill),
+            None => fill == Fill::Fullscreen,
+        }
+    }
+
+    /// 셸의 막대(메뉴 막대, Dock)인지
+    fn bar_of(&self, layer: &LayerSurface) -> Option<Bar> {
+        let bar = match layer.namespace() {
+            MENUBAR_NAMESPACE => Bar::MenuBar,
+            DOCK_NAMESPACE => Bar::Dock,
+            _ => return None,
+        };
+        self.is_privileged(layer.wl_surface()).then_some(bar)
+    }
+
+    fn bar_mode(&self, bar: Bar) -> panels::Autohide {
+        match bar {
+            Bar::MenuBar => self.panels.menu_bar,
+            Bar::Dock => self.panels.dock,
+        }
+    }
+
+    /// 앞에 있는(키보드를 받는) 창이 (최대화, 전체 화면)인지
+    fn front_window_fills(&self) -> (bool, bool) {
+        self.space
+            .elements()
+            .find_map(|window| {
+                let toplevel = window.toplevel()?;
+                Self::has_state(toplevel, xdg_toplevel::State::Activated).then(|| {
+                    (
+                        Self::has_state(toplevel, xdg_toplevel::State::Maximized),
+                        Self::has_state(toplevel, xdg_toplevel::State::Fullscreen),
+                    )
+                })
+            })
+            .unwrap_or((false, false))
+    }
+
+    /// 막대를 숨길지 꺼낼지 다시 정한다 (panels.rs). 포인터가 움직일 때(`pointer`는 새 위치), 화면을
+    /// 그릴 때, 숨기기를 기다리던 때가 됐을 때 부른다
+    pub fn update_bars(&mut self, pointer: Option<Point<f64, Logical>>) {
+        let Some(output) = self.space.outputs().next().cloned() else {
+            return;
+        };
+        let Some(output_geo) = self.space.output_geometry(&output) else {
+            return;
+        };
+        let pointer = pointer
+            .or_else(|| {
+                self.seat
+                    .get_pointer()
+                    .map(|pointer| pointer.current_location())
+            })
+            .unwrap_or_default();
+        let (maximized, fullscreen) = self.front_window_fills();
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        for bar in Bar::ALL {
+            let found = {
+                let map = layer_map_for_output(&output);
+                map.layers()
+                    .find(|layer| self.bar_of(layer) == Some(bar))
+                    .and_then(|layer| {
+                        let mut geo = map.layer_geometry(layer)?;
+                        geo.loc += output_geo.loc;
+                        let menu_open = PopupManager::popups_for_surface(layer.wl_surface())
+                            .next()
+                            .is_some();
+                        Some((geo, menu_open))
+                    })
+            };
+            let Some((geo, menu_open)) = found else {
+                continue;
+            };
+            let at_edge = match bar {
+                Bar::MenuBar => pointer.y < f64::from(output_geo.loc.y) + panels::EDGE,
+                Bar::Dock => {
+                    pointer.y >= f64::from(output_geo.loc.y + output_geo.size.h) - panels::EDGE
+                        && pointer.x >= f64::from(geo.loc.x)
+                        && pointer.x < f64::from(geo.loc.x + geo.size.w)
+                }
+            };
+            let input = BarInput {
+                covered: self.bar_mode(bar).hides(maximized, fullscreen),
+                at_edge,
+                inside: geo.to_f64().contains(pointer),
+                menu_open,
+            };
+            if let Some(at) = panels::decide(&mut self.bars[bar.index()], input, now) {
+                next = Some(next.map_or(at, |next| next.min(at)));
+            }
+        }
+        if let Some(at) = next {
+            self.schedule_bar_check(at);
+        }
+    }
+
+    /// `at`에 막대를 다시 본다 (꺼낸 막대를 떠난 뒤 숨기기)
+    fn schedule_bar_check(&mut self, at: Instant) {
+        if let Some((token, when)) = self.bar_timer {
+            if when == at {
+                return;
+            }
+            self.loop_handle.remove(token);
+            self.bar_timer = None;
+        }
+        let token = self
+            .loop_handle
+            .insert_source(Timer::from_deadline(at), |_, _, state| {
+                state.bar_timer = None;
+                state.update_bars(None);
+                TimeoutAction::Drop
+            });
+        self.bar_timer = token.ok().map(|token| (token, at));
+    }
+
+    /// 레이어를 그릴 자리의 옮김. `geo`는 출력 안 자리이고 `output_h`는 출력 높이다. 숨는 중인 막대는
+    /// 미끄러진 만큼 화면 밖으로 옮기고, 다 숨은 막대는 None이다 (그리지 않고 입력도 보내지 않는다)
+    fn layer_offset(
+        &self,
+        layer: &LayerSurface,
+        geo: Rectangle<i32, Logical>,
+        output_h: i32,
+        now: Instant,
+    ) -> Option<Point<i32, Logical>> {
+        let Some(bar) = self.bar_of(layer) else {
+            return Some(Point::default());
+        };
+        let value = self.bars[bar.index()].value(now);
+        if value <= 0.0 {
+            return None;
+        }
+        // 가장자리와 막대 사이의 여백까지 지나야 다 숨는다
+        let (distance, direction) = match bar {
+            Bar::MenuBar => (geo.loc.y + geo.size.h, -1),
+            Bar::Dock => (output_h - geo.loc.y, 1),
+        };
+        let moved = ((1.0 - value) * f64::from(distance.max(0))).round() as i32;
+        Some((0, direction * moved).into())
+    }
+
+    /// 다 보이지 않는 막대와 그 막대를 그릴 자리 (출력 안 좌표). 자리가 None이면 숨었다
+    pub fn bar_places(&self, output: &Output) -> Vec<render::BarPlace> {
+        let Some(output_h) = self.space.output_geometry(output).map(|geo| geo.size.h) else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        let map = layer_map_for_output(output);
+        map.layers()
+            .filter_map(|layer| {
+                self.bar_of(layer)?;
+                let geo = map.layer_geometry(layer)?;
+                let offset = self.layer_offset(layer, geo, output_h, now);
+                (offset != Some(Point::default())).then(|| render::BarPlace {
+                    layer: layer.clone(),
+                    at: offset.map(|offset| geo.loc + offset),
+                })
+            })
+            .collect()
+    }
+
+    /// 위층(overlay, top) 레이어 가운데 좌표 아래의 표면과 그 표면의 전역 위치. 숨은 막대는 건너뛰고
+    /// 미끄러지는 막대는 옮긴 자리로 본다
+    fn upper_layer_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(LayerSurface, WlSurface, Point<f64, Logical>)> {
+        let output = self.space.output_under(pos).next()?;
+        let output_geo = self.space.output_geometry(output)?;
+        let map = layer_map_for_output(output);
+        let relative = pos - output_geo.loc.to_f64();
+        let now = Instant::now();
+        [Layer::Overlay, Layer::Top].into_iter().find_map(|kind| {
+            map.layers_on(kind).rev().find_map(|layer| {
+                let geo = map.layer_geometry(layer)?;
+                let loc = geo.loc + self.layer_offset(layer, geo, output_geo.size.h, now)?;
+                let (surface, at) =
+                    layer.surface_under(relative - loc.to_f64(), WindowSurfaceType::ALL)?;
+                Some((layer.clone(), surface, (at + loc + output_geo.loc).to_f64()))
+            })
+        })
+    }
+
+    /// 셸이 막대 설정을 바꿨다. 화면을 채우는 창을 새 영역에 맞춘다
+    fn set_panels(&mut self, panels: Panels) {
+        if panels == self.panels {
+            return;
+        }
+        self.panels = panels;
+        tracing::info!(
+            "menu bar hides {:?}, Dock hides {:?}, menu bar background {}",
+            panels.menu_bar,
+            panels.dock,
+            panels.menu_bar_background
+        );
+        self.schedule_refill();
+        self.update_bars(None);
+    }
+
+    /// 레이어가 바뀐 뒤 부른다. 창 영역이 달라졌으면(막대의 독점 영역, 자동 가리기) 조금 뒤
+    /// 화면을 채우는 창을 다시 맞춘다
+    fn watch_window_areas(&mut self) {
+        let areas = match (
+            self.usable_area(),
+            self.window_area(Fill::Maximized),
+            self.window_area(Fill::Fullscreen),
+        ) {
+            (Some(usable), Some(maximized), Some(fullscreen)) => [usable, maximized, fullscreen],
+            _ => return,
+        };
+        if self
+            .window_areas
+            .replace(areas)
+            .is_some_and(|old| old != areas)
+        {
+            self.schedule_refill();
+        }
+    }
+
+    /// REFILL_DELAY 뒤 refill_windows를 부른다. 그 사이에 또 바뀌면 다시 기다린다
+    fn schedule_refill(&mut self) {
+        if let Some(token) = self.refill_timer.take() {
+            self.loop_handle.remove(token);
+        }
+        let token =
+            self.loop_handle
+                .insert_source(Timer::from_duration(REFILL_DELAY), |_, _, state| {
+                    state.refill_timer = None;
+                    state.refill_windows();
+                    TimeoutAction::Drop
+                });
+        match token {
+            Ok(token) => self.refill_timer = Some(token),
+            Err(err) => {
+                tracing::warn!("failed to schedule a window refit: {err}");
+                self.refill_windows();
+            }
+        }
+    }
+
+    /// 막대가 바뀐 뒤 최대화·전체 화면 창을 새 영역에 맞춘다. 보통 창은 그대로 둔다
+    /// (macOS에서도 Dock 크기를 바꿔도 창은 움직이지 않는다)
+    fn refill_windows(&mut self) {
+        self.window_areas = None;
+        let Some(usable) = self.usable_area() else {
+            return;
+        };
+        let windows: Vec<Window> = self.space.elements().cloned().collect();
+        for window in &windows {
+            let Some(toplevel) = window.toplevel() else {
+                continue;
+            };
+            toplevel.with_pending_state(|state| state.bounds = Some(usable.size));
+            if let Some(area) = self.filled_area(toplevel) {
+                toplevel.with_pending_state(|state| state.size = Some(area.size));
+                self.space.map_element(window.clone(), area.loc, false);
+            }
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_pending_configure();
+            }
+        }
+        for window in &windows {
+            self.space.raise_element(window, false);
+        }
+        self.watch_window_areas();
+    }
+
+    /// 최대화·전체 화면 창이 채울 영역. 둘 다 아니면 None
+    fn filled_area(&self, toplevel: &ToplevelSurface) -> Option<Rectangle<i32, Logical>> {
+        if Self::has_state(toplevel, xdg_toplevel::State::Fullscreen) {
+            self.window_area(Fill::Fullscreen)
+        } else if Self::has_state(toplevel, xdg_toplevel::State::Maximized) {
+            self.window_area(Fill::Maximized)
+        } else {
+            None
+        }
     }
 
     pub fn has_state(surface: &ToplevelSurface, state: xdg_toplevel::State) -> bool {
         surface.with_pending_state(|pending| pending.states.contains(state))
     }
 
-    /// 창의 최대화·전체 화면 상태를 바꾸고 그에 맞게 크기와 자리를 정한다. 전체 화면은
-    /// fullscreen_area, 최대화는 쓸 수 있는 영역을 채우고, 둘 다 아니면 원래 자리로 되돌린다.
+    /// 창의 최대화·전체 화면 상태를 바꾸고 그에 맞게 크기와 자리를 정한다. 최대화·전체 화면 창은
+    /// window_area를 채우고, 둘 다 아니면 원래 자리로 되돌린다.
     pub fn set_window_state(
         &mut self,
         surface: &ToplevelSurface,
@@ -664,14 +958,7 @@ impl BuntState {
             }
         });
 
-        let target = if Self::has_state(surface, xdg_toplevel::State::Fullscreen) {
-            self.fullscreen_area()
-        } else if Self::has_state(surface, xdg_toplevel::State::Maximized) {
-            self.usable_area()
-        } else {
-            None
-        };
-        match target {
+        match self.filled_area(surface) {
             Some(area) => {
                 surface.with_pending_state(|pending| pending.size = Some(area.size));
                 self.space.map_element(window.clone(), area.loc, true);
@@ -782,6 +1069,10 @@ impl CompositorHandler for BuntState {
         handle_resize_commit(&mut self.space, surface);
         self.ensure_initial_configure(surface);
         self.send_scale(surface);
+        // 막대의 독점 영역이 바뀌었으면(Dock 크기, 자동 가리기) 화면을 채우는 창을 다시 맞춘다
+        if self.is_layer_surface(surface) {
+            self.watch_window_areas();
+        }
     }
 }
 
@@ -1068,6 +1359,7 @@ impl WlrLayerShellHandler for BuntState {
             }
         }
         self.refresh_layer_focus();
+        self.watch_window_areas();
     }
 }
 
@@ -1225,9 +1517,15 @@ impl BuntState {
     }
 
     /// 뒤를 흐릴 셸 표면: 특권 셸 클라이언트의 위층(overlay, top) 레이어 표면과 그 xdg 팝업.
-    /// 메뉴바는 macOS처럼 흐리지 않는다 (투명하거나 검은색). 그 메뉴와 제어 센터 팝업은 흐린다
+    /// 메뉴바는 macOS 26처럼 흐리지 않는다(투명하거나 검은색). "메뉴 막대 배경 보기"를 켜면 흐린다.
+    /// 메뉴와 제어 센터 팝업은 늘 흐린다
     pub fn blur_surfaces(&self, output: &Output) -> Vec<WlSurface> {
+        let output_h = self
+            .space
+            .output_geometry(output)
+            .map_or(0, |geo| geo.size.h);
         let map = layer_map_for_output(output);
+        let now = Instant::now();
         let mut surfaces = Vec::new();
         for layer in map.layers() {
             let surface = layer.wl_surface();
@@ -1235,7 +1533,13 @@ impl BuntState {
             {
                 continue;
             }
-            if layer.namespace() != MENUBAR_NAMESPACE {
+            // 다 숨은 막대는 그리지 않는다
+            if let Some(geo) = map.layer_geometry(layer)
+                && self.layer_offset(layer, geo, output_h, now).is_none()
+            {
+                continue;
+            }
+            if layer.namespace() != MENUBAR_NAMESPACE || self.panels.menu_bar_background {
                 surfaces.push(surface.clone());
             }
             surfaces.extend(
@@ -1258,17 +1562,11 @@ impl BuntState {
 
     /// 누른 자리의 위층 레이어 표면이 키보드를 받으면(on_demand, exclusive) 그 표면을 돌려준다
     pub fn keyboard_layer_under(&self, pos: Point<f64, Logical>) -> Option<WlSurface> {
-        let output = self.space.output_under(pos).next()?;
-        let output_geo = self.space.output_geometry(output)?;
-        let map = layer_map_for_output(output);
-        let relative = pos - output_geo.loc.to_f64();
-        [Layer::Overlay, Layer::Top].into_iter().find_map(|layer| {
-            map.layer_under(layer, relative)
-                .filter(|layer| {
-                    layer.cached_state().keyboard_interactivity != KeyboardInteractivity::None
-                })
-                .map(|layer| layer.wl_surface().clone())
-        })
+        self.upper_layer_under(pos)
+            .filter(|(layer, ..)| {
+                layer.cached_state().keyboard_interactivity != KeyboardInteractivity::None
+            })
+            .map(|(layer, ..)| layer.wl_surface().clone())
     }
 
     /// 레이어 표면에 키보드 포커스를 준다 (on_demand 레이어를 눌렀을 때)
@@ -1336,7 +1634,7 @@ impl BuntState {
     /// 최대화·전체 화면 창은 새 영역을 채운다. 나머지 창은 macOS처럼 화면 안으로 옮기고, 그래도
     /// 넘치면 영역에 맞게 줄인다. 최대화를 풀 때 돌아갈 자리도 새 영역에 맞춘다
     pub fn refit_windows(&mut self) {
-        let (Some(usable), Some(full)) = (self.usable_area(), self.fullscreen_area()) else {
+        let Some(usable) = self.usable_area() else {
             return;
         };
         let windows: Vec<Window> = self.space.elements().cloned().collect();
@@ -1351,14 +1649,7 @@ impl BuntState {
                     *geo = fit_into(*geo, usable);
                 }
             }
-            let area = if Self::has_state(toplevel, xdg_toplevel::State::Fullscreen) {
-                Some(full)
-            } else if Self::has_state(toplevel, xdg_toplevel::State::Maximized) {
-                Some(usable)
-            } else {
-                None
-            };
-            match area {
+            match self.filled_area(toplevel) {
                 Some(area) => {
                     toplevel.with_pending_state(|state| state.size = Some(area.size));
                     self.space.map_element(window.clone(), area.loc, false);
@@ -1384,6 +1675,8 @@ impl BuntState {
         for window in &windows {
             self.space.raise_element(window, false);
         }
+        self.window_areas = None;
+        self.watch_window_areas();
     }
 
     pub fn handle_request(&mut self, request: Request) {
@@ -1396,6 +1689,7 @@ impl BuntState {
             } => self.set_output_mode(&name, width, height, refresh),
             Request::OutputScale { name, scale } => self.set_output_scale(&name, scale),
             Request::KeyboardRepeat { delay, rate } => self.set_keyboard_repeat(delay, rate),
+            Request::Panels(panels) => self.set_panels(panels),
         }
     }
 

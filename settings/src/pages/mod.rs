@@ -8,6 +8,8 @@ mod appearance;
 mod battery;
 mod bluetooth;
 mod datetime;
+mod default_apps;
+mod desktop_dock;
 mod display;
 mod keyboard;
 mod language;
@@ -36,28 +38,32 @@ pub enum Page {
     Battery,
     Appearance,
     MenuBar,
+    DesktopDock,
     Wallpaper,
     Display,
     Keyboard,
     Language,
     DateTime,
+    DefaultApps,
     About,
 }
 
 impl Page {
     /// 왼쪽 목록에 놓는 순서
-    pub const ALL: [Page; 12] = [
+    pub const ALL: [Page; 14] = [
         Page::Wifi,
         Page::Bluetooth,
         Page::Network,
         Page::Battery,
         Page::Appearance,
         Page::MenuBar,
+        Page::DesktopDock,
         Page::Wallpaper,
         Page::Display,
         Page::Keyboard,
         Page::Language,
         Page::DateTime,
+        Page::DefaultApps,
         Page::About,
     ];
 
@@ -70,11 +76,13 @@ impl Page {
             Self::Battery => "battery",
             Self::Appearance => "appearance",
             Self::MenuBar => "menu-bar",
+            Self::DesktopDock => "desktop-dock",
             Self::Wallpaper => "wallpaper",
             Self::Display => "display",
             Self::Keyboard => "keyboard",
             Self::Language => "language",
             Self::DateTime => "datetime",
+            Self::DefaultApps => "default-apps",
             Self::About => "about",
         }
     }
@@ -92,11 +100,13 @@ impl Page {
             Self::Battery => "page-battery",
             Self::Appearance => "page-appearance",
             Self::MenuBar => "page-menu-bar",
+            Self::DesktopDock => "page-desktop-dock",
             Self::Wallpaper => "page-wallpaper",
             Self::Display => "page-display",
             Self::Keyboard => "page-keyboard",
             Self::Language => "page-language",
             Self::DateTime => "page-datetime",
+            Self::DefaultApps => "page-default-apps",
             Self::About => "page-about",
         }
     }
@@ -114,11 +124,14 @@ impl Page {
             Self::Battery => "battery-full-symbolic",
             Self::Appearance => "preferences-desktop-appearance-symbolic",
             Self::MenuBar => "open-menu-symbolic",
+            // 셸이 설치하는 아이콘 (shell/data/icons)
+            Self::DesktopDock => "org.buntos.Dock-symbolic",
             Self::Wallpaper => "preferences-desktop-wallpaper-symbolic",
             Self::Display => "video-display-symbolic",
             Self::Keyboard => "input-keyboard-symbolic",
             Self::Language => "preferences-desktop-locale-symbolic",
             Self::DateTime => "preferences-system-time-symbolic",
+            Self::DefaultApps => "view-app-grid-symbolic",
             Self::About => "computer-symbolic",
         }
     }
@@ -128,8 +141,9 @@ impl Page {
         match self {
             Self::Wifi | Self::Bluetooth | Self::Network | Self::Display => Tint::Blue,
             Self::Battery => Tint::Green,
-            Self::Appearance | Self::MenuBar => Tint::Graphite,
+            Self::Appearance | Self::MenuBar | Self::DesktopDock => Tint::Graphite,
             Self::Wallpaper => Tint::Cyan,
+            Self::DefaultApps => Tint::Blue,
             Self::Keyboard | Self::DateTime | Self::About => Tint::Gray,
             Self::Language => Tint::Indigo,
         }
@@ -139,8 +153,12 @@ impl Page {
     pub fn section(self) -> u8 {
         match self {
             Self::Wifi | Self::Bluetooth | Self::Network | Self::Battery => 0,
-            Self::Appearance | Self::MenuBar | Self::Wallpaper | Self::Display => 1,
-            Self::Keyboard | Self::Language | Self::DateTime => 2,
+            Self::Appearance
+            | Self::MenuBar
+            | Self::DesktopDock
+            | Self::Wallpaper
+            | Self::Display => 1,
+            Self::Keyboard | Self::Language | Self::DateTime | Self::DefaultApps => 2,
             Self::About => 3,
         }
     }
@@ -153,11 +171,13 @@ impl Page {
             Self::Battery => battery::build(context),
             Self::Appearance => appearance::build(context),
             Self::MenuBar => menu_bar::build(context),
+            Self::DesktopDock => desktop_dock::build(context),
             Self::Wallpaper => wallpaper::build(context),
             Self::Display => display::build(context),
             Self::Keyboard => keyboard::build(context),
             Self::Language => language::build(context),
             Self::DateTime => datetime::build(context),
+            Self::DefaultApps => default_apps::build(context),
             Self::About => about::build(context),
         }
     }
@@ -243,6 +263,58 @@ pub fn bind_switch(settings: &gio::Settings, key: &str, switch: &gtk::Switch) {
     } else {
         switch.set_sensitive(false);
     }
+}
+
+/// GSettings의 문자열 키를 드롭다운과 묶는다. 드롭다운의 n번째 항목이 `values[n]`이다.
+/// 다른 곳에서 바꿔도 따라간다
+pub fn bind_choice(
+    settings: &gio::Settings,
+    key: &str,
+    dropdown: &gtk::DropDown,
+    values: &'static [&'static str],
+) {
+    if !has_key(settings, key) {
+        dropdown.set_sensitive(false);
+        return;
+    }
+    settings
+        .bind(key, dropdown, "selected")
+        .mapping(move |variant, _| {
+            let value = variant.str()?;
+            let index = values.iter().position(|choice| *choice == value)?;
+            Some((index as u32).to_value())
+        })
+        .set_mapping(move |value, _| {
+            let index = value.get::<u32>().ok()?;
+            values.get(index as usize).map(|choice| choice.to_variant())
+        })
+        .build();
+}
+
+/// GSettings의 숫자 키(i 또는 d)를 슬라이더와 묶는다. 끄는 동안 바로바로 적으므로 셸이 따라 바뀐다
+pub fn bind_scale(settings: &gio::Settings, key: &str, scale: &gtk::Scale) {
+    if !has_key(settings, key) {
+        scale.set_sensitive(false);
+        return;
+    }
+    let integer = settings.value(key).is::<i32>();
+    settings
+        .bind(key, &scale.adjustment(), "value")
+        .mapping(|variant, _| {
+            let value = variant
+                .get::<f64>()
+                .or_else(|| variant.get::<i32>().map(f64::from))?;
+            Some(value.to_value())
+        })
+        .set_mapping(move |value, _| {
+            let value = value.get::<f64>().ok()?;
+            Some(if integer {
+                (value.round() as i32).to_variant()
+            } else {
+                value.to_variant()
+            })
+        })
+        .build();
 }
 
 #[cfg(test)]

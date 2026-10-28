@@ -10,6 +10,7 @@ mod dbus;
 mod grabs;
 mod ime;
 mod input;
+mod panels;
 mod prefs;
 mod render;
 mod state;

@@ -613,6 +613,27 @@ list.source-picker > row {
   padding: 6px 0;
 }
 
+/* 파일 형식별 기본 앱 시트의 목록: 묶음 상자처럼 보인다 */
+scrolledwindow.file-types-frame {
+  border-radius: var(--radius-md);
+  background: var(--group-bg);
+}
+
+listview.file-types {
+  background: none;
+}
+
+listview.file-types > row {
+  margin: 0 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--separator);
+  background: none;
+}
+
+listview.file-types > row:last-child {
+  border-bottom: none;
+}
+
 list.source-picker > row:selected {
   background: none;
 }

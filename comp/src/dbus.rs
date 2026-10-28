@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 컴포지터 제어 D-Bus 서비스 (세션 버스 `org.buntos.Compositor`). 시스템 설정이 화면(해상도,
-//! 배율)과 키 반복을 읽고 바꾼다. 버스 일은 따로 도는 스레드가 맡는다. 읽기는 컴포지터가 미리
+//! 배율)과 키 반복을 읽고 바꾸고, 셸이 메뉴 막대·Dock 가리기 설정을 알린다.
+//! 버스 일은 따로 도는 스레드가 맡는다. 읽기는 컴포지터가 미리
 //! 적어 둔 사본(Snapshot)으로 답하고, 바꾸기는 값을 확인한 뒤 이벤트 루프로 넘긴다.
 //! 입력 소스 전환처럼 컴포지터가 다른 프로그램을 부르는 일도 이 스레드가 한다.
 
@@ -12,6 +13,8 @@ use std::{
 };
 
 use smithay::reexports::calloop::channel::Sender as LoopSender;
+
+use crate::panels::{Autohide, Panels};
 use zbus::{
     Message, blocking, fdo, interface,
     object_server::SignalEmitter,
@@ -77,6 +80,7 @@ pub enum Request {
         delay: u32,
         rate: u32,
     },
+    Panels(Panels),
 }
 
 /// 컴포지터가 D-Bus 스레드에 시키는 일
@@ -320,6 +324,29 @@ impl Api {
             delay: delay_ms,
             rate,
         })
+    }
+
+    /// 셸이 메뉴 막대와 Dock 설정을 알린다 (org.buntos.shell의 menu-bar-autohide, dock-autohide,
+    /// menu-bar-background). 가리기 값은 never, fullscreen, maximized, always다.
+    /// 최대화·전체 화면 창이 채우는 영역과 메뉴 막대 흐림이 바뀐다. 다음 로그인에는 셸이 다시 알린다
+    fn set_panels(
+        &self,
+        menu_bar_autohide: &str,
+        dock_autohide: &str,
+        menu_bar_background: bool,
+    ) -> fdo::Result<()> {
+        let parse = |value: &str| {
+            Autohide::parse(value).ok_or_else(|| {
+                fdo::Error::InvalidArgs(format!(
+                    "autohide must be never, fullscreen, maximized or always (got {value})"
+                ))
+            })
+        };
+        self.request(Request::Panels(Panels {
+            menu_bar: parse(menu_bar_autohide)?,
+            dock: parse(dock_autohide)?,
+            menu_bar_background,
+        }))
     }
 
     /// 모드, 배율, 연결이 바뀐 뒤 보낸다

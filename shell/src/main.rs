@@ -5,6 +5,7 @@
 
 mod appmenu;
 mod bluetooth;
+mod compositor;
 mod config;
 mod control_center;
 mod dbus;
@@ -46,7 +47,7 @@ const TRANSLATIONS: &Sources = &[
 ];
 /// GNOME 공용 데스크톱 설정. 시스템 설정 앱이 시계 형식과 밝게·어둡게를 여기에 쓴다
 const INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
-/// 셸 설정 (data/org.buntos.shell.gschema.xml). 시스템 설정의 메뉴 막대 페이지가 바꾼다
+/// 셸 설정 (data/org.buntos.shell.gschema.xml). 시스템 설정의 메뉴 막대, 데스크탑 및 Dock 페이지가 바꾼다
 const SHELL_SCHEMA: &str = "org.buntos.shell";
 
 fn main() -> glib::ExitCode {
@@ -85,8 +86,8 @@ fn main() -> glib::ExitCode {
         let launcher = Launcher::new(app, &tr, toplevels.as_ref());
         let dock = dock::build(app, &config, &tr, toplevels.as_ref(), &launcher);
         let banner = notification_center::banner(app, &notifications, &tr);
-        if let Some(toplevels) = &toplevels {
-            hide_dock_in_fullscreen(&dock, toplevels);
+        if let Some(settings) = shell_settings() {
+            compositor::share_panel_settings(&settings);
         }
         follow_color_scheme(vec![menubar, dock, banner, launcher.window().clone()]);
     });
@@ -127,15 +128,6 @@ fn interface_settings() -> Option<gio::Settings> {
 pub fn shell_settings() -> Option<gio::Settings> {
     gio::SettingsSchemaSource::default()?.lookup(SHELL_SCHEMA, true)?;
     Some(gio::Settings::new(SHELL_SCHEMA))
-}
-
-/// 앞에 있는 창이 전체 화면이면 Dock을 숨긴다 (macOS와 같다)
-fn hide_dock_in_fullscreen(dock: &gtk::ApplicationWindow, toplevels: &Toplevels) {
-    let dock = dock.clone();
-    toplevels.subscribe(move |toplevels| {
-        let fullscreen = toplevels.active().is_some_and(|active| active.fullscreen);
-        dock.set_visible(!fullscreen);
-    });
 }
 
 /// 시스템 설정에서 고른 밝게·어둡게(color-scheme)를 Dock, 알림 카드, 메뉴에 적용한다.

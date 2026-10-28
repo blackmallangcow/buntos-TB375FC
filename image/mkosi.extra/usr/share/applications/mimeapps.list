@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# buntOS 기본 앱 (XDG MIME 앱 명세의 배포판 기본값). 시스템 설정의 기본 앱 페이지에서 고르면
+# ~/.config/mimeapps.list에 적혀 이 파일보다 앞선다. 적지 않은 형식은 GIO가 그 형식을 여는 앱 가운데에서 고른다
+[Default Applications]
+x-scheme-handler/http=firefox-esr.desktop
+x-scheme-handler/https=firefox-esr.desktop
+text/html=firefox-esr.desktop
+application/xhtml+xml=firefox-esr.desktop
+text/plain=org.gnome.TextEditor.desktop
+application/pdf=org.gnome.Papers.desktop
+inode/directory=org.gnome.Nautilus.desktop
+image/png=org.gnome.Loupe.desktop
+image/jpeg=org.gnome.Loupe.desktop
+image/gif=org.gnome.Loupe.desktop
+image/webp=org.gnome.Loupe.desktop
+image/bmp=org.gnome.Loupe.desktop
+image/tiff=org.gnome.Loupe.desktop
+image/svg+xml=org.gnome.Loupe.desktop
+image/avif=org.gnome.Loupe.desktop
+image/heif=org.gnome.Loupe.desktop
+image/x-icon=org.gnome.Loupe.desktop
+image/vnd.microsoft.icon=org.gnome.Loupe.desktop
+image/apng=org.gnome.Loupe.desktop

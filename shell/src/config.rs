@@ -16,7 +16,6 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Dock {
-    pub icon_size: i32,
     pub margin_bottom: i32,
     pub items: Vec<DockItem>,
 }

@@ -1,8 +1,9 @@
-# buntOS 설계안 v0.3.8
+# buntOS 설계안 v0.3.9
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
 - 개정 이력
+  - v0.3.9 (2026-10-28): 11장에 메뉴 막대·Dock 자동 가리기(최대화한 창이 막대 자리까지 채움), Dock 크기·투명도, 시스템 설정의 데스크탑 및 Dock·기본 앱 페이지를 반영했다
   - v0.3.8 (2026-10-28): 11장에 화면 배율(소수 배율, viewporter, 화면이 바뀔 때 창 맞추기, macOS형 크기 고르기)을 반영하고 다음 작업 3번에서 분수 배율을 뺐다
   - v0.3.7 (2026-10-28): 5.2절과 11장에 메뉴 막대 항목(제어 센터, 배터리·전원 모드, Wi-Fi, 사운드, 입력 소스, 앱 항목), 가운데 뜨는 모든 앱 패널, 배경화면, 한글 입력기(fcitx5, input-method-v2), 컴포지터 제어 API, 시스템 설정 재디자인, 필수 드라이버·펌웨어를 반영하고 다음 작업을 고쳤다. UI 규칙은 [디자인 스펙](DESIGN-SPEC.md)으로 옮겼다
   - v0.3.6 (2026-10-28): 5.2절과 11장에 macOS형 메뉴바(앞에 있는 앱의 메뉴, 네트워크 아이콘, 알림 센터), 모든 앱 목록, 창 목록 프로토콜의 셸 전용 공개, NetworkManager를 반영하고 다음 작업을 고쳤다
@@ -213,9 +214,9 @@ Phase 2의 종료 조건은 2a~2d다(11장). 2e는 Phase 4·5의 실기기 판�
 
 | 컴포넌트 | 구현 | 비고 |
 |---|---|---|
-| `bunt-comp` | Rust, Smithay | 창 관리, 애니메이션, 제스처, 다중 seat, 신뢰 레이어. 창 목록·창 조작 프로토콜(wlr-foreign-toplevel)은 컴포지터가 직접 띄운 셸에게만, 입력기 프로토콜(input-method-v2, virtual-keyboard)은 직접 띄운 입력기(fcitx5)에게만 연다. 앱에는 text-input-v3를 준다. 시스템 설정이 쓰는 제어 API(D-Bus `org.buntos.Compositor1`: 화면 모드·배율, 키 반복)를 낸다 |
+| `bunt-comp` | Rust, Smithay | 창 관리, 애니메이션, 제스처, 다중 seat, 신뢰 레이어. 창 목록·창 조작 프로토콜(wlr-foreign-toplevel)은 컴포지터가 직접 띄운 셸에게만, 입력기 프로토콜(input-method-v2, virtual-keyboard)은 직접 띄운 입력기(fcitx5)에게만 연다. 앱에는 text-input-v3를 준다. 시스템 설정과 셸이 쓰는 제어 API(D-Bus `org.buntos.Compositor1`: 화면 모드·배율, 키 반복, 막대 자동 가리기)를 낸다. 셸의 메뉴 막대와 Dock을 macOS의 WindowServer처럼 숨기고 꺼낸다 |
 | `bunt-shell` | Rust, 레이어 셸 클라이언트. v0은 GTK4 + gtk4-layer-shell로 만들었고 ADR-001의 GTK4 시제품을 겸한다 | 메뉴바, 메뉴 막대 항목(입력 소스, 사운드, 배터리·전원 모드, Wi-Fi, Bluetooth, 앱의 StatusNotifierItem), 제어 센터, Dock, 모든 앱 패널, 알림, 배경화면. 메뉴바의 앱 메뉴는 앱이 D-Bus로 내보내는 동작(GAction)과 창 목록 프로토콜로 만든다. GNOME 앱처럼 창 안의 메뉴를 밖으로 내보내지 않는 앱은 그 메뉴를 옮길 수 없다 |
-| `bunt-settings` | Rust, 시스템 앱. v0은 ADR-001 잠정안대로 libadwaita 없이 GTK4와 자체 CSS로 만들었고, GTK4 시제품을 겸한다 | 시스템 설정. macOS 26 시스템 설정의 구성(검색 사이드바, 묶음 상자)을 따른다. Wi-Fi, Bluetooth, 네트워크, 배터리, 화면 모드, 메뉴 막대, 배경화면, 디스플레이, 키보드, 언어, 날짜와 시간, 정보 |
+| `bunt-settings` | Rust, 시스템 앱. v0은 ADR-001 잠정안대로 libadwaita 없이 GTK4와 자체 CSS로 만들었고, GTK4 시제품을 겸한다 | 시스템 설정. macOS 26 시스템 설정의 구성(검색 사이드바, 묶음 상자)을 따른다. Wi-Fi, Bluetooth, 네트워크, 배터리, 화면 모드, 메뉴 막대, 데스크탑 및 Dock, 배경화면, 디스플레이, 키보드, 언어, 날짜와 시간, 기본 앱, 정보 |
 | 공통 디자인 토큰 | CSS 변수 (`theme/tokens.css`) | 셸과 시스템 설정이 같은 색·모서리·글자 크기·유리 재질을 쓴다. 규칙은 [디자인 스펙](DESIGN-SPEC.md) |
 | 시스템 앱 UI 툴킷 | GTK4 또는 Qt6 중 Phase 1에서 시제품 비교 후 결정 | 선택 기준: (1) AT-SPI 접근성 노출 품질 (AI 계층의 입력이 됨), (2) 한국어 IME 품질, (3) 메모리 사용량 실측 |
 | 화면 키보드 | input-method-v2 클라이언트 | 두벌식/QWERTY, fcitx5와 연동 |
@@ -455,6 +456,11 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
   - 배율로 나눈 논리 화면이 1024×640보다 작아지지 않는 배율만 둔다. 기본 배율은 EDID의 화면 크기로 정한다
   - 배율이나 해상도가 바뀌면 창을 화면 안으로 옮기고, 넘치면 줄인다. Dock은 넘치면 아이콘을 줄인다
   - 시스템 설정 디스플레이 페이지를 macOS처럼 "더 큰 텍스트 ↔ 더 많은 공간"과 "~처럼 보임"으로 바꿨다. 규칙은 [디자인 스펙](DESIGN-SPEC.md) 3.1절
+- 메뉴 막대·Dock 설정과 기본 앱 (2026-10-28):
+  - 메뉴 막대와 Dock을 자동으로 가린다(항상, 최대화하거나 전체 화면일 때, 전체 화면일 때, 메뉴 막대는 안 함도). 숨은 막대는 화면 가장자리를 가리키면 미끄러져 나온다. 셸이 설정을 컴포지터 API(`SetPanels`)로 알리고, 컴포지터가 막대를 숨기고 꺼내며 최대화·전체 화면 창이 막대 자리까지 채울지 정한다. 셸에서 막대 표면을 숨기면 GTK가 그 표면을 다시 그리지 않는 일이 있어 컴포지터로 옮겼다
+  - Dock 크기(32~96px), 투명도, 실행 중 표시, 메뉴 막대 배경 보기(흐린 유리)
+  - 시스템 설정에 데스크탑 및 Dock 페이지(기본 웹 브라우저 포함)와 기본 앱 페이지를 더했다. 기본 앱은 종류별(웹 브라우저, 메일, 텍스트, 이미지, 음악, 동영상, PDF, 폴더)과 확장자별로 고르고 `mimeapps.list`에 적는다. 이미지에 배포판 기본값(`/usr/share/applications/mimeapps.list`)을 넣었다
+  - 규칙은 [디자인 스펙](DESIGN-SPEC.md) 3.2절, 8장, 9장
 - 필수 드라이버 (2026-10-28):
   - Debian non-free-firmware의 Wi-Fi·Bluetooth·GPU·오디오 펌웨어
   - wpasupplicant, bluez, PipeWire, UPower, power-profiles-daemon, iio-sensor-proxy

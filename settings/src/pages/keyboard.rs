@@ -91,33 +91,6 @@ fn step_scale(steps: usize) -> gtk::Scale {
     scale
 }
 
-/// 슬라이더 아래 양 끝 이름이 붙은 행
-fn slider_row(title: &str, scale: &gtk::Scale, low: &str, high: &str) -> gtk::ListBoxRow {
-    let ends = gtk::Box::builder().build();
-    ends.append(
-        &gtk::Label::builder()
-            .label(low)
-            .xalign(0.0)
-            .hexpand(true)
-            .css_classes(["row-subtitle"])
-            .build(),
-    );
-    ends.append(
-        &gtk::Label::builder()
-            .label(high)
-            .xalign(1.0)
-            .css_classes(["row-subtitle"])
-            .build(),
-    );
-    let control = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .width_request(260)
-        .build();
-    control.append(scale);
-    control.append(&ends);
-    widgets::row(title, &control)
-}
-
 fn language_name(tr: &Translations, code: &str) -> String {
     match code.split(['_', '-']).next().unwrap_or_default() {
         "ko" => tr.get("keyboard-language-korean"),
@@ -143,13 +116,13 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
     let repeat_list = widgets::group(&column, Some(&tr.get("keyboard-repeat")), None);
     let rate = step_scale(RATES.len());
     let delay = step_scale(DELAYS.len());
-    repeat_list.append(&slider_row(
+    repeat_list.append(&widgets::slider_row(
         &tr.get("keyboard-repeat-rate"),
         &rate,
         &tr.get("keyboard-off"),
         &tr.get("keyboard-fast"),
     ));
-    repeat_list.append(&slider_row(
+    repeat_list.append(&widgets::slider_row(
         &tr.get("keyboard-repeat-delay"),
         &delay,
         &tr.get("keyboard-long"),

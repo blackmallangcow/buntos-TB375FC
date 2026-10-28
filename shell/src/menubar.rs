@@ -4,7 +4,9 @@
 //! 메뉴바: 왼쪽에 로고 메뉴(시스템 설정, 다시 시작, 시스템 종료)와 앞에 있는 앱의 메뉴,
 //! 오른쪽에 메뉴 막대 항목(입력 소스, Bluetooth, 사운드, 배터리, Wi-Fi), 제어 센터,
 //! 날짜·시간(누르면 알림 센터). macOS처럼 평소에는 배경이 투명하고 글씨가 흰색이며,
-//! 앞에 있는 창이 화면을 채우면(최대화, 전체 화면) 배경이 검은색이 된다.
+//! 앞에 있는 창이 화면을 채우면(최대화, 전체 화면) 배경이 검은색이 된다. "메뉴 막대 배경 보기"를
+//! 켜면 늘 흐린 유리 바탕이다. 자동으로 숨고 위쪽 가장자리에서 나오는 것은 컴포지터가 한다
+//! (comp/src/panels.rs, 설정은 compositor.rs가 알린다).
 
 use std::rc::Rc;
 
@@ -18,7 +20,7 @@ use crate::{
     input_source::{self, InputSources},
     interface_settings, layer_window, network, notification_center,
     notifications::Notifications,
-    power, sound, status_items,
+    power, shell_settings, sound, status_items,
     toplevels::Toplevels,
 };
 
@@ -26,6 +28,8 @@ use crate::{
 const SETTINGS_COMMAND: &str = "bunt-settings";
 /// 로고 메뉴의 아이콘 (shell/data/icons). 없으면 글자로 보인다
 const LOGO_ICON: &str = "org.buntos.Logo-symbolic";
+/// 셸 설정 키: 메뉴 막대 배경 보기
+const BACKGROUND_KEY: &str = "menu-bar-background";
 
 pub fn build(
     app: &gtk::Application,
@@ -78,8 +82,29 @@ pub fn build(
     }
 
     window.set_child(Some(&bar));
+    if let Some(settings) = shell_settings() {
+        follow_background(&settings, &bar);
+    }
     window.present();
     window
+}
+
+/// 메뉴 막대 배경 보기를 켜면 흐린 유리 바탕에 화면 모드의 글씨색을 쓴다 (macOS 26과 같다)
+fn follow_background(settings: &gio::Settings, bar: &gtk::CenterBox) {
+    let apply = |settings: &gio::Settings, bar: &gtk::CenterBox| {
+        if settings.boolean(BACKGROUND_KEY) {
+            bar.add_css_class("background");
+        } else {
+            bar.remove_css_class("background");
+        }
+    };
+    // 처리기가 설정 객체를 붙들어 셸이 끝날 때까지 둔다
+    let (keep_alive, target) = (settings.clone(), bar.clone());
+    settings.connect_changed(Some(BACKGROUND_KEY), move |settings, _| {
+        let _ = &keep_alive;
+        apply(settings, &target);
+    });
+    apply(settings, bar);
 }
 
 fn logo_menu(tr: &Translations) -> gtk::MenuButton {
