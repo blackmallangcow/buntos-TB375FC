@@ -176,6 +176,8 @@ pub struct BuntState {
     pub screenshot_area: Option<AreaSelection>,
     /// 다음 프레임에 찍을 스크린샷
     pub screenshot_capture: Option<Capture>,
+    /// 셸이 알린 스크린샷 옵션 (저장 위치, 플로팅 썸네일)
+    pub screenshot_options: screenshots::Options,
 
     /// 시스템 설정에서 고른 값 (다음 로그인에도 쓴다)
     pub prefs: Prefs,
@@ -333,6 +335,7 @@ impl BuntState {
             switching: None,
             screenshot_area: None,
             screenshot_capture: None,
+            screenshot_options: screenshots::Options::default(),
             prefs,
             panels: Panels::default(),
             bars: [Reveal::default(); 2],
@@ -1911,6 +1914,8 @@ impl BuntState {
             }
             Request::RestoreMinimized(id) => self.restore_minimized(id),
             Request::SelectSwitcher { index, activate } => self.select_switcher(index, activate),
+            Request::ScreenshotOptions(options) => self.screenshot_options = options,
+            Request::Screenshot { mode, delay } => self.start_screenshot(mode, false, delay),
             Request::Agent(request) => self.agent_request(request),
         }
     }

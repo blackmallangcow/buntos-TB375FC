@@ -1199,7 +1199,7 @@ mod tests {
     use super::*;
 
     /// 컴포지터가 처음 내놓는 단축키 (분류마다 보이는 순서)
-    const KNOWN: [&str; 53] = [
+    const KNOWN: [&str; 54] = [
         "launcher.show",
         "launcher.dock-autohide",
         "windows.next-app",
@@ -1218,6 +1218,7 @@ mod tests {
         "screenshot.screen-clipboard",
         "screenshot.area",
         "screenshot.area-clipboard",
+        "screenshot.toolbar",
         "text.line-start",
         "text.line-end",
         "text.document-start",

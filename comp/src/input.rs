@@ -145,13 +145,15 @@ impl BuntState {
                         None => FilterResult::Forward,
                     };
                 }
-                // 스크린샷 영역을 고르는 동안에는 키를 앱에 보내지 않는다. Esc는 그만둔다
+                // 스크린샷 영역을 고르는 동안에는 키를 앱에 보내지 않는다. Esc는 그만두고, 스페이스는 영역
+                // 고르기와 창 고르기를 바꾼다
                 if state.screenshot_area.is_some() {
                     state.suppressed_keys.push(code.raw());
-                    let hit = if handle.modified_sym() == Keysym::Escape {
-                        Hit::Run(Builtin::CancelScreenshot)
-                    } else {
-                        Hit::Swallow
+                    let hit = match handle.modified_sym() {
+                        Keysym::Escape => Hit::Run(Builtin::CancelScreenshot),
+                        // macOS처럼 ⇧⌘4 뒤 스페이스는 창 하나를 찍는다
+                        Keysym::space => Hit::Run(Builtin::ScreenshotWindowMode),
+                        _ => Hit::Swallow,
                     };
                     return FilterResult::Intercept(Some((hit, code)));
                 }
@@ -322,7 +324,11 @@ impl BuntState {
             }
             Builtin::SwitchInputSource => self.dbus.send(Command::ToggleInputMethod),
             Builtin::Screenshot { area, clipboard } => self.screenshot(area, clipboard),
+            Builtin::ScreenshotToolbar => self
+                .dbus
+                .send(Command::ShortcutActivated("screenshot.toolbar")),
             Builtin::CancelScreenshot => self.cancel_screenshot(),
+            Builtin::ScreenshotWindowMode => self.toggle_screenshot_window(),
             Builtin::Switcher(key) => self.switcher_key_pressed(key),
             Builtin::Quit => self.loop_signal.stop(),
             Builtin::SwitchVt(vt) => {

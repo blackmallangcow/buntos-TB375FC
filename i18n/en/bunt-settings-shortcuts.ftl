@@ -64,6 +64,7 @@ shortcut-screenshot-screen = Save picture of screen as a file
 shortcut-screenshot-screen-clipboard = Copy picture of screen to the clipboard
 shortcut-screenshot-area = Save picture of selected area as a file
 shortcut-screenshot-area-clipboard = Copy picture of selected area to the clipboard
+shortcut-screenshot-toolbar = Screenshot and recording options
 shortcut-text-line-start = Move to beginning of line
 shortcut-text-line-end = Move to end of line
 shortcut-text-document-start = Move to beginning of document

@@ -64,6 +64,7 @@ shortcut-screenshot-screen = 화면을 파일로 저장
 shortcut-screenshot-screen-clipboard = 화면 사진을 클립보드에 복사
 shortcut-screenshot-area = 선택한 영역을 파일로 저장
 shortcut-screenshot-area-clipboard = 선택한 영역 사진을 클립보드에 복사
+shortcut-screenshot-toolbar = 스크린샷 및 기록 옵션
 shortcut-text-line-start = 줄의 시작으로 이동
 shortcut-text-line-end = 줄의 끝으로 이동
 shortcut-text-document-start = 문서의 시작으로 이동

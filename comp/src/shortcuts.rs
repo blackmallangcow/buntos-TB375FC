@@ -191,8 +191,12 @@ pub enum Builtin {
         area: bool,
         clipboard: bool,
     },
+    /// ⇧⌘5 스크린샷 도구 막대를 연다. 셸이 한다
+    ScreenshotToolbar,
     /// Esc: 스크린샷 영역 고르기를 그만둔다 (고르는 동안만, 표에 없는 고정 키)
     CancelScreenshot,
+    /// 스페이스: 스크린샷 영역 고르기와 창 고르기를 바꾼다 (고르는 동안만, 표에 없는 고정 키)
+    ScreenshotWindowMode,
     /// ⌘⇥ 앱 전환 창이 떠 있는 동안 ⌘와 함께 누른 키 (표에 없는 고정 키)
     Switcher(SwitcherKey),
     /// Ctrl+Alt+Backspace: 세션 끝내기 (표에 없는 고정 키)
@@ -475,6 +479,12 @@ pub const DEFS: &[Def] = &[
             area: true,
             clipboard: true,
         },
+    ),
+    run(
+        "screenshot.toolbar",
+        Category::Screenshots,
+        "<Shift><Super>5",
+        Builtin::ScreenshotToolbar,
     ),
     // 글 입력 칸의 커서 움직임과 지우기 (macOS의 텍스트 편집 단축키)
     text(

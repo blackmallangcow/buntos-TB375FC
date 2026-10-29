@@ -3,8 +3,9 @@
 
 //! 컴포지터 제어 D-Bus 서비스 (세션 버스 `org.buntos.Compositor`). 시스템 설정이 화면(해상도,
 //! 배율), 키 반복, 마우스, 키보드 단축키를 읽고 바꾸고 연결된 포인터 장치를 읽으며, 셸이 메뉴
-//! 막대·Dock 가리기 설정을 알리고 셸이 하는 단축키(모든 앱 보기, Dock 가리기)를 받는다. 셸은
-//! Dock의 최소화 칸에 보일 창 그림을 받아 누른 창을 되돌리고, ⌘⇥ 앱 전환 창을 그린다.
+//! 막대·Dock 가리기 설정을 알리고 셸이 하는 단축키(모든 앱 보기, Dock 가리기, ⇧⌘5)를 받는다. 셸은
+//! Dock의 최소화 칸에 보일 창 그림을 받아 누른 창을 되돌리고, ⌘⇥ 앱 전환 창을 그리며, ⇧⌘5 도구
+//! 막대로 스크린샷을 찍고 그 옵션을 알린다.
 //! 버스 일은 따로 도는 스레드가 맡는다. 읽기는 컴포지터가 미리
 //! 적어 둔 사본(Snapshot)으로 답하고, 바꾸기는 값을 확인한 뒤 이벤트 루프로 넘긴다.
 //! 입력 소스 전환처럼 컴포지터가 다른 프로그램을 부르는 일도 이 스레드가 한다.
@@ -24,8 +25,8 @@ use crate::{
     prefs::PointerPrefs,
     shortcuts::{self, Category, ShortcutInfo},
 };
-// 에이전트의 창 스크린샷
-use crate::screenshot::{Image, write_png};
+// 에이전트의 창 스크린샷, 셸의 ⇧⌘5 도구 막대
+use crate::screenshot::{self, Image, write_png};
 use zbus::{
     Message, blocking, fdo, interface,
     message::Header,
@@ -44,7 +45,7 @@ const FCITX_INTERFACE: &str = "org.fcitx.Fcitx.Controller1";
 
 /// 에이전트 전용 메서드(창 목록, 창 활성화, 키·포인터 입력)를 부를 수 있는 프로그램
 const AGENT_PATH: &str = "/usr/bin/buntd-agent";
-/// 셸 전용 메서드(최소화한 창의 그림, 앱 전환 창)를 부를 수 있는 프로그램
+/// 셸 전용 메서드(최소화한 창의 그림, 앱 전환 창, 스크린샷)를 부를 수 있는 프로그램
 const SHELL_PATH: &str = "/usr/bin/bunt-shell";
 /// 이벤트 루프가 에이전트 요청에 답하기를 기다리는 시간. 소프트웨어 렌더링으로 바쁜 VM에서는 프레임
 /// 하나에 수백 ms가 걸려, 500ms로는 창 목록의 답을 놓쳤다
@@ -313,6 +314,13 @@ pub enum Request {
         index: u32,
         activate: bool,
     },
+    /// 셸이 알린 스크린샷 옵션
+    ScreenshotOptions(screenshot::Options),
+    /// ⇧⌘5 도구 막대의 찍기: 화면은 `delay`초 뒤에 찍고, 영역과 창은 고르기를 시작한다
+    Screenshot {
+        mode: screenshot::Mode,
+        delay: u32,
+    },
     Agent(AgentRequest),
 }
 
@@ -335,6 +343,8 @@ pub enum Command {
     MinimizedWindowsChanged,
     /// AppSwitcherChanged 신호를 보낸다: 앱 전환 창의 앱(앱 ID, 최근 차례)과 고른 앱. -1이면 숨긴다
     AppSwitcher { apps: Vec<String>, selected: i32 },
+    /// ScreenshotSaved 신호를 보낸다: 저장한 스크린샷 파일의 경로 (셸이 미리 보기를 띄운다)
+    ScreenshotSaved(String),
 }
 
 pub struct Service {
@@ -399,6 +409,7 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
             Command::AppSwitcher { apps, selected } => {
                 emit(&connection, "AppSwitcherChanged", &(apps, selected))
             }
+            Command::ScreenshotSaved(path) => emit(&connection, "ScreenshotSaved", &(path,)),
         }
     }
 }
@@ -1041,6 +1052,47 @@ impl Api {
         self.request(Request::SelectSwitcher { index, activate })
     }
 
+    /// 셸이 스크린샷 옵션을 알린다 (⇧⌘5의 옵션). `location`은 pictures, desktop, documents,
+    /// clipboard다. `thumbnail`이면 저장한 뒤 ScreenshotSaved를 보내고(셸이 미리 보기를 띄운다),
+    /// 아니면 알림을 띄운다. 셸만 부른다
+    async fn set_screenshot_options(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        location: &str,
+        thumbnail: bool,
+    ) -> fdo::Result<()> {
+        check_shell(connection, &header).await?;
+        let location = screenshot::Location::parse(location).ok_or_else(|| {
+            fdo::Error::InvalidArgs(format!(
+                "location must be pictures, desktop, documents or clipboard (got {location})"
+            ))
+        })?;
+        self.request(Request::ScreenshotOptions(screenshot::Options {
+            location,
+            thumbnail,
+        }))
+    }
+
+    /// ⇧⌘5 도구 막대의 찍기. `mode`는 screen(`delay`초 뒤에 포인터가 있는 화면), area(끌어서 고른
+    /// 영역), window(눌러서 고른 창)다. 영역과 창은 고른 뒤 `delay`초 기다린다. 셸만 부른다
+    async fn screenshot(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        mode: &str,
+        delay: u32,
+    ) -> fdo::Result<()> {
+        check_shell(connection, &header).await?;
+        let mode = screenshot::Mode::parse(mode).ok_or_else(|| {
+            fdo::Error::InvalidArgs(format!("mode must be screen, area or window (got {mode})"))
+        })?;
+        self.request(Request::Screenshot {
+            mode,
+            delay: delay.min(60),
+        })
+    }
+
     /// 키보드 단축키 (표 순서). 항목마다 id(s), category(s), kind(s: key, switch),
     /// accelerator(s: GTK 가속기, 비면 키가 없다), default(s), enabled(b), default-enabled(b)
     fn get_shortcuts(&self) -> Vec<HashMap<String, Value<'static>>> {
@@ -1112,7 +1164,11 @@ impl Api {
         selected: i32,
     ) -> zbus::Result<()>;
 
-    /// 셸이 하는 단축키를 눌렀다 (launcher.show, launcher.dock-autohide)
+    /// 스크린샷을 파일로 저장한 뒤 보낸다 (플로팅 썸네일을 켰을 때). 셸이 화면 모서리에 미리 보기를 띄운다
+    #[zbus(signal)]
+    async fn screenshot_saved(emitter: &SignalEmitter<'_>, path: &str) -> zbus::Result<()>;
+
+    /// 셸이 하는 단축키를 눌렀다 (launcher.show, launcher.dock-autohide, screenshot.toolbar)
     #[zbus(signal)]
     async fn shortcut_activated(emitter: &SignalEmitter<'_>, id: &str) -> zbus::Result<()>;
 
