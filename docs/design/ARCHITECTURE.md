@@ -554,7 +554,8 @@ v0 구현 (2026-10-29, 접근 정책):
   - 화면 잠금(5.4절): 잠긴 동안 에이전트는 아무것도 읽거나 하지 못하고, 잠금 화면도 읽지 못한다. 잠금을 푸는 길은 사람이 잠금 화면에 친 암호뿐이다. 컴포지터 API에 잠금 해제 메서드가 없다.
   - Wi-Fi 암호와 Bluetooth PIN·확인 번호도 사람만 답한다. 세션의 NetworkManager 비밀 에이전트(`shell/src/secret_agent.rs`)와 BlueZ 기본 페어링 에이전트(`shell/src/pairing_agent.rs`, 능력 KeyboardDisplay)가 bunt-shell이다.
     - 창은 인증 창과 같은 틀이고 레이어 이름이 `bunt-secret-agent`, `bunt-pairing-agent`다. 컴포지터(`comp/src/agent.rs`의 `AUTH_NAMESPACES`)와 buntd-agent(`agent/src/atspi.rs`의 `HUMAN_ONLY_WINDOWS`)가 같은 목록으로 이 창들을 막는다.
-    - 사람이 고르지 않은 때 뜨는 창은 키보드를 바로 가져가지 않는다. Wi-Fi 암호 창은 사용자가 고른 연결(USER_REQUESTED)일 때만 키보드를 독점하고, 저장된 네트워크가 스스로 다시 연결하다 묻는 창과 Bluetooth 페어링 창(상대 기기가 먼저 청할 수 있다)은 눌러야 받는다. 다른 앱에 치던 글이 이 창으로 가지 않게 하기 위해서다.
+    - 사람이 고르지 않은 때 뜨는 창은 키보드를 바로 가져가지 않는다. Wi-Fi 암호 창은 메뉴 막대에서 사람이 방금 고른 네트워크일 때만 키보드를 독점하고, 그 밖의 창과 Bluetooth 페어링 창(상대 기기가 먼저 청할 수 있다)은 눌러야 받는다. 다른 앱에 치던 글이 이 창으로 가지 않게 하기 위해서다. NetworkManager의 USER_REQUESTED는 D-Bus로 연결을 켠 프로그램이면 어느 것이든 붙으므로 믿지 않는다: 같은 세션의 프로그램이 제 연결(사용자 소유, 비밀 저장)을 켜 창을 띄우면, 키보드를 가져간 창에 사람이 친 글이 그 연결에 저장되고 그 프로그램이 다시 읽을 수 있다.
+    - Bluetooth 서비스 허용(AuthorizeService)은 이번 연결만이다. 믿는 기기(Trusted)로 두면 그 기기의 다른 서비스(키보드 입력 등)도 묻지 않고 붙는다.
     - 에이전트는 NetworkManager·bluetoothd가 아닌 호출을 거절한다. 받은 비밀은 기록에 남기지 않고, 답한 뒤 메모리를 지운다.
     - NetworkManager는 받은 암호를 모든 사용자의 연결에 저장하기 전에 에이전트의 `org.freedesktop.NetworkManager.settings.modify.system` 권한을 본다(upstream 기본값 auth_admin_keep). Debian의 정책에 따라 관리자 인증 창이 먼저 뜰 수 있다.
   - 비밀 저장소(Secret Service)는 gnome-keyring이다. libpam-gnome-keyring이 pam-auth-update로 `common-auth`·`common-session`에 들어가므로, greetd 로그인의 암호로 login 키링을 열고 처음이면 만든다(macOS 로그인 키체인). 앱이 비밀을 저장할 때 따로 키링 암호를 묻거나 켤 때마다 잠금 해제 창이 뜨던 것이 없어졌다. 시스템 설정이 `passwd`로 암호를 바꾸면 키링 암호도 따라간다. Flatpak 앱은 Secret 포털(gnome-keyring 구현)로 같은 키링을 쓴다.
