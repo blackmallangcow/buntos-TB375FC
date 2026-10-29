@@ -11,14 +11,18 @@
 //! - DisplayPasskey, DisplayPinCode: 키보드에서 칠 코드를 보인다. 상대가 친 자릿수만큼 흐리게 한다 [취소]
 //! - RequestPasskey: 상대 기기에 보이는 6자리 코드를 받는다. RequestPinCode: 옛 기기의 PIN(1~16자)을 받는다
 //! - RequestAuthorization: 상대가 먼저 청한 페어링(확인 없는 방식)을 허락할지 [거부] [연결]
-//! - AuthorizeService: 믿는 기기가 아닌 기기가 서비스(오디오 등)에 연결할지 [거부] [허용]. 허용한 기기가 이미
-//!   페어링돼 있으면 믿는 기기(Trusted)로 둔다. macOS처럼 페어링한 기기는 다시 묻지 않는다
+//! - AuthorizeService: 믿는 기기가 아닌 기기가 서비스(오디오 등)에 연결할지 [거부] [허용]. 허용은 이번 연결만이다.
+//!   믿는 기기(Trusted)로 두면 그 기기의 다른 서비스(키보드 입력 등)도 묻지 않게 되므로 두지 않는다. 시스템
+//!   설정과 메뉴 막대에서 짝지은 기기는 짝지을 때 믿는 기기가 된다
 //! - Cancel: BlueZ가 요청을 거뒀다(시간 초과, 상대가 취소). Release: BlueZ가 에이전트를 내렸다
 //!
 //! 순서는 BlueZ의 src/agent.c, src/device.c와 같다.
 //! - 묻는 요청은 60초 안에 답해야 한다. 그 전에 창을 닫는다. 한 번에 하나만 온다.
 //! - 코드를 보이는 요청(Display*)은 바로 답해야 페어링이 이어진다. BlueZ는 끝났다고 알리지 않으므로 기기가
-//!   페어링되거나(Paired), 사람이 취소하거나(Device1.CancelPairing), 시간이 지나면 창을 닫는다.
+//!   페어링되거나(Paired), 사람이 취소하거나(Device1.CancelPairing), 시간이 지나면 창을 닫는다. 이미 페어링된
+//!   기기에는 CancelPairing을 부르지 않는다. BlueZ는 진행 중인 페어링이 없으면 그 호출로 페어링을 지운다.
+//! - 코드를 보이는 요청은 답을 기다리는 다른 요청이 있어도 온다. 다른 기기의 답을 기다리는 창이 떠 있으면 그 창을
+//!   지키고 코드는 보이지 않는다(상대가 한 자리 칠 때마다 다시 온다).
 //! - 창은 사람만 답한다(NAMESPACE). 상대 기기가 먼저 청할 수 있으므로 창은 눌러야 키보드를 받는다. 저절로 뜬
 //!   PIN 창이 다른 앱에 치던 글을 받아 상대 기기로 보내지 않게 한다. 받은 PIN·코드는 기록에 남기지 않는다.
 
@@ -367,7 +371,20 @@ impl Agent {
                 return;
             }
         }
-        // BlueZ는 요청을 하나씩 보낸다. 앞의 창이 남아 있으면(코드를 보이던 창) 닫는다
+        // BlueZ는 답을 기다리는 요청을 하나씩 보내지만, 코드 보이기(Display*)는 그것과 따로 온다. 다른 기기의 답을
+        // 기다리는 창이 떠 있으면 그 창을 지킨다. 예전에는 무엇이 오든 떠 있던 요청을 취소해, 사람이 고르지도 않은
+        // 서비스 요청이 거절되거나 다른 기기의 코드 입력이 끊겼다
+        let keep_waiting = !kind.waits()
+            && self
+                .current
+                .borrow()
+                .as_ref()
+                .is_some_and(|current| current.kind.waits() && current.device != device);
+        if keep_waiting {
+            invocation.return_value(None);
+            return;
+        }
+        // 앞의 창(코드를 보이던 창, 같은 기기의 물음)은 닫는다
         self.close_current(ERROR_CANCELED);
         let invocation = if kind.waits() {
             Some(invocation)
@@ -445,10 +462,14 @@ impl Agent {
             device.name = name;
         }
         device.icon = text("Icon").unwrap_or_default();
-        device.paired = props
-            .get("Paired")
-            .and_then(|value| value.get::<bool>())
-            .unwrap_or(false);
+        let flag = |key: &str| {
+            props
+                .get(key)
+                .and_then(|value| value.get::<bool>())
+                .unwrap_or(false)
+        };
+        // 키만 남은 기기(Bonded)도 페어링된 것으로 본다
+        device.paired = flag("Paired") || flag("Bonded");
         device
     }
 
@@ -530,7 +551,7 @@ impl Agent {
         let Some(invocation) = current.invocation else {
             // 코드를 보이던 창에서 사람이 취소했다: 페어링을 멈춘다
             if matches!(answer, Answer::Reject) {
-                self.cancel_pairing(&current.device);
+                self.cancel_pairing_if_unpaired(&current.device);
             }
             return;
         };
@@ -547,10 +568,9 @@ impl Agent {
             (Kind::Confirm { .. } | Kind::Authorize, Answer::Accept) => {
                 invocation.return_value(None)
             }
-            (Kind::Service { .. }, Answer::Accept) => {
-                invocation.return_value(None);
-                self.trust_if_paired(&current.device);
-            }
+            // 이번 연결만 허용한다. 예전에는 믿는 기기로 두어, 오디오를 허용한 기기가 키보드 입력(HID) 같은 다른
+            // 서비스로도 묻지 않고 붙을 수 있었다
+            (Kind::Service { .. }, Answer::Accept) => invocation.return_value(None),
             // 요청에 맞지 않는 답은 거절로 본다
             _ => invocation.return_dbus_error(ERROR_REJECTED, "unexpected answer"),
         }
@@ -586,24 +606,15 @@ impl Agent {
         }
     }
 
-    /// Device1.CancelPairing: 코드를 보이던 페어링을 사람이 취소했다
-    fn cancel_pairing(&self, device: &str) {
-        self.call_device(device, DEVICE_INTERFACE, "CancelPairing", None);
-    }
-
-    /// 서비스를 허용한 페어링된 기기는 믿는 기기로 둔다. 다음 연결부터 묻지 않는다
-    fn trust_if_paired(self: &Rc<Self>, device: &str) {
+    /// Device1.CancelPairing: 코드를 보이던 페어링을 사람이 취소했다. 이미 페어링된 기기(다시 짝짓다 끝난 기기 등)에는
+    /// 부르지 않는다. BlueZ는 진행 중인 페어링이 없으면 이 호출로 페어링을 지운다(device.c cancel_pairing →
+    /// btd_adapter_remove_bonding). 예전에는 늘 불러, 다시 짝지은 키보드의 코드 창을 닫다가 짝짓기를 지울 수 있었다
+    fn cancel_pairing_if_unpaired(self: &Rc<Self>, device: &str) {
         let agent = self.clone();
         let device = device.to_owned();
         glib::spawn_future_local(async move {
-            if agent.lookup(&device).await.paired {
-                // 튜플의 to_variant가 값을 v로 감싼다. 미리 감싸면 v 안에 v가 들어가 BlueZ가 거절한다
-                agent.call_device(
-                    &device,
-                    PROPERTIES,
-                    "Set",
-                    Some((DEVICE_INTERFACE, "Trusted", true.to_variant()).to_variant()),
-                );
+            if !agent.lookup(&device).await.paired {
+                agent.call_device(&device, DEVICE_INTERFACE, "CancelPairing", None);
             }
         });
     }
@@ -908,6 +919,13 @@ impl PairingDialog {
                 dialog.respond(Answer::Reject);
             }
         });
+        // 컴포지터가 창을 닫으면(화면을 뺐을 때) 거절로 답해 BlueZ가 60초를 기다리지 않게 한다
+        let weak = Rc::downgrade(&dialog);
+        dialog.frame.on_dismiss(move || {
+            if let Some(dialog) = weak.upgrade() {
+                dialog.respond(Answer::Reject);
+            }
+        });
         dialog
     }
 
@@ -1117,13 +1135,6 @@ mod tests {
         }
     }
 
-    fn test_bus() -> Option<gio::TestDBus> {
-        glib::find_program_in_path("dbus-daemon")?;
-        let bus = gio::TestDBus::new(gio::TestDBusFlags::NONE);
-        bus.up();
-        Some(bus)
-    }
-
     async fn connect(address: &str) -> gio::DBusConnection {
         gio::DBusConnection::for_address_future(
             address,
@@ -1166,7 +1177,7 @@ mod tests {
     /// BlueZ처럼 부르는 쪽에서 요청마다 맞는 답이 돌아온다. 기기 정보를 읽지 못하면 주소로 부른다
     #[test]
     fn requests_round_trip_over_dbus() {
-        let Some(bus) = test_bus() else {
+        let Some((_serial, bus)) = crate::service_dialog::test_bus() else {
             eprintln!("dbus-daemon is missing; skipping the D-Bus test");
             return;
         };
@@ -1271,7 +1282,7 @@ mod tests {
     /// Canceled로 끝내고 창을 닫는다
     #[test]
     fn displays_answer_at_once_and_cancel_closes() {
-        let Some(bus) = test_bus() else {
+        let Some((_serial, bus)) = crate::service_dialog::test_bus() else {
             eprintln!("dbus-daemon is missing; skipping the D-Bus test");
             return;
         };
@@ -1346,10 +1357,76 @@ mod tests {
         bus.down();
     }
 
+    /// 다른 기기의 답을 기다리는 창이 떠 있는 동안 온 코드 보이기는 그 창을 닫지 않는다
+    #[test]
+    fn displays_do_not_cancel_another_devices_prompt() {
+        let Some((_serial, bus)) = crate::service_dialog::test_bus() else {
+            eprintln!("dbus-daemon is missing; skipping the D-Bus test");
+            return;
+        };
+        let address = bus.bus_address().unwrap().to_string();
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                context.block_on(async {
+                    let agent_bus = connect(&address).await;
+                    let bluez = connect(&address).await;
+                    let fake = Fake::default();
+                    let (asked, closed, waiting, answers) = (
+                        fake.asked.clone(),
+                        fake.closed.clone(),
+                        fake.waiting.clone(),
+                        fake.answers.clone(),
+                    );
+                    let agent = Agent::new(Box::new(fake), PROMPT_TIMEOUT, DISPLAY_TIMEOUT);
+                    agent.export(&agent_bus).unwrap();
+                    agent
+                        .bluez
+                        .replace(bluez.unique_name().map(|name| name.to_string()));
+                    let name = agent_bus.unique_name().unwrap().to_string();
+                    let headset = glib::variant::ObjectPath::try_from(DEVICE).unwrap();
+                    let keyboard = glib::variant::ObjectPath::try_from(
+                        "/org/bluez/hci0/dev_11_22_33_44_55_66",
+                    )
+                    .unwrap();
+
+                    answers.borrow_mut().push_back(None);
+                    let service = call(
+                        &bluez,
+                        &name,
+                        "AuthorizeService",
+                        (headset.clone(), "0000110b-0000-1000-8000-00805f9b34fb").to_variant(),
+                    );
+                    let display_then_answer = async {
+                        while waiting.borrow().is_none() {
+                            glib::timeout_future(Duration::from_millis(10)).await;
+                        }
+                        call(
+                            &bluez,
+                            &name,
+                            "DisplayPasskey",
+                            (keyboard.clone(), 4321u32, 0u16).to_variant(),
+                        )
+                        .await
+                        .unwrap();
+                        // 헤드폰의 물음은 그대로 떠 있다
+                        assert_eq!(closed.get(), 0);
+                        assert_eq!(asked.borrow().len(), 1);
+                        let responder = waiting.borrow_mut().take().unwrap();
+                        responder.respond(Answer::Accept);
+                    };
+                    let (service, ()) = join(service, display_then_answer).await;
+                    service.unwrap();
+                })
+            })
+            .unwrap();
+        bus.down();
+    }
+
     /// 아무도 답하지 않으면 시간이 지나 Canceled로 답하고 창을 닫는다
     #[test]
     fn unanswered_requests_expire() {
-        let Some(bus) = test_bus() else {
+        let Some((_serial, bus)) = crate::service_dialog::test_bus() else {
             eprintln!("dbus-daemon is missing; skipping the D-Bus test");
             return;
         };
