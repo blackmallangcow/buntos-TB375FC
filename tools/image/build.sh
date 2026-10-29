@@ -26,6 +26,11 @@ out="${BUNTOS_IMAGE_DIR:-$build_root/$board}"
 mkdir -p "$out"
 mkosi=$(command -v mkosi || echo "$HOME/.local/bin/mkosi")
 extra=()
+# mkosi vm의 VM 이름. 이미지(BUNTOS_IMAGE_DIR)마다 달라 다른 이미지로 띄운 VM과 함께 돌 수 있다.
+# mkosi의 기본 이름(image)은 빌드 VM 안에서 하나만 돈다("Another virtual machine named image")
+if [[ $# -gt 0 ]]; then
+	extra+=(--machine="buntos-$(basename "$out")")
+fi
 
 # 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, buntd-agent와 bunt)를 빌드해 이미지에 넣을
 # 트리로 모은다.
