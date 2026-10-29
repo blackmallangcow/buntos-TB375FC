@@ -102,7 +102,7 @@ use crate::{
     config::Config,
     dbus::{self, Request},
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, handle_resize_commit},
-    ime::InputMethodProcess,
+    ime::{InputMethodProcess, Preedit},
     input::ModifierChord,
     panels::{self, Bar, BarInput, Edge, Fill, Panels, Reveal},
     prefs::{KeyRepeat, PointerPrefs, Prefs},
@@ -195,6 +195,8 @@ pub struct BuntState {
     pub dbus: dbus::Service,
     pub input_method_process: InputMethodProcess,
     pub input_method_exited: channel::Sender<()>,
+    /// 입력기가 앱에 보이고 있는 조합 중인 글자. 포커스를 옮기기 전에 확정한다
+    pub preedit: Preedit,
 
     pub backend: UdevData,
     /// 화면 잠금 (session_lock.rs)
@@ -355,6 +357,7 @@ impl BuntState {
             dbus,
             input_method_process: InputMethodProcess::default(),
             input_method_exited,
+            preedit: Preedit::default(),
             backend,
             session_lock,
             session,
@@ -527,11 +530,9 @@ impl BuntState {
         }
         let exclusive = self.exclusive_layer().is_some();
         if let Some(keyboard) = self.seat.get_keyboard().filter(|_| !exclusive) {
-            keyboard.set_focus(
-                self,
-                target.toplevel().map(|t| t.wl_surface().clone()),
-                serial,
-            );
+            let next = target.toplevel().map(|t| t.wl_surface().clone());
+            self.commit_preedit_before_focus(next.as_ref());
+            keyboard.set_focus(self, next, serial);
         }
         self.space.elements().for_each(|window| {
             if let Some(toplevel) = window.toplevel() {
@@ -614,6 +615,7 @@ impl BuntState {
             }
         });
         if let Some(keyboard) = self.seat.get_keyboard() {
+            self.commit_preedit_before_focus(None);
             keyboard.set_focus(self, None, serial);
         }
         self.refresh_all_windows();
@@ -1473,7 +1475,9 @@ impl XdgShellHandler for BuntState {
                 grab.ungrab(PopupUngrabStrategy::All);
                 return;
             }
-            keyboard.set_focus(self, grab.current_grab(), serial);
+            let next = grab.current_grab();
+            self.commit_preedit_before_focus(next.as_ref());
+            keyboard.set_focus(self, next, serial);
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }
         if let Some(pointer) = seat.get_pointer() {
@@ -1746,6 +1750,7 @@ impl BuntState {
                 .as_ref()
                 .is_some_and(|focus| focus.is_alive() && self.root_surface(focus) == layer);
             if !inside {
+                self.commit_preedit_before_focus(Some(&layer));
                 keyboard.set_focus(self, Some(layer), serial);
             }
             return;
@@ -1831,6 +1836,7 @@ impl BuntState {
                 .current_focus()
                 .is_none_or(|focus| self.root_surface(&focus) != *surface)
         {
+            self.commit_preedit_before_focus(Some(surface));
             keyboard.set_focus(self, Some(surface.clone()), serial);
         }
     }
