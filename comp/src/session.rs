@@ -11,10 +11,13 @@
 //! - 응용 프로그램 강제 종료(⌥⌘⎋): 셸이 창을 가진 앱 목록과 응답 여부를 받고(GetApps) 고른 앱을 끝낸다
 //!   (ForceQuit, SIGKILL). 응답 없는 앱은 핑(xdg_wm_base.ping)에 NOT_RESPONDING 넘게 답하지 않은 앱이다.
 //! - 셸 전용 D-Bus 메서드(로그아웃, 앱 목록, 강제 종료)는 컴포지터가 띄운 셸 프로세스만 부른다(dbus.rs).
+//! - 특권 클라이언트(셸, 입력기, 잠금 화면)의 실행 파일은 시스템 디렉터리에서만 찾는다(trusted_executable).
 
 use std::{
     cell::Cell,
     error::Error,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
     process::ExitStatus,
     sync::mpsc,
     time::{Duration, Instant},
@@ -53,6 +56,8 @@ const LOGOUT_WAIT: Duration = Duration::from_secs(10);
 const LOGOUT_STEP: Duration = Duration::from_millis(200);
 /// 핑에 이만큼 답하지 않은 앱은 응답하지 않는 것으로 본다 (macOS도 몇 초 뒤 "응답 없음"으로 보인다)
 const NOT_RESPONDING: Duration = Duration::from_secs(3);
+/// 특권 클라이언트(셸, 입력기, 잠금 화면)를 찾는 디렉터리. root만 쓸 수 있는 곳만 둔다
+pub const TRUSTED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 /// 로그아웃 취소 알림
 const TRANSLATIONS: &Sources = &[
     ("ko", include_str!("../../i18n/ko/bunt-comp.ftl")),
@@ -387,6 +392,25 @@ fn answered_in_time(sent: Instant, now: Instant) -> bool {
     now.saturating_duration_since(sent) < NOT_RESPONDING
 }
 
+/// 특권 클라이언트의 실행 파일 (state.rs의 spawn_trusted). 경로로 적었으면 그대로 쓰고, 이름만 적었으면
+/// TRUSTED_PATH에서만 찾는다. 세션의 PATH에는 사용자가 쓸 수 있는 디렉터리(Debian의 ~/.profile이 넣는
+/// ~/.local/bin, ~/bin)가 앞에 올 수 있다. 같은 사용자 프로그램이 거기에 같은 이름의 파일을 두고 잠금 화면이나
+/// 입력기를 끝내면, 컴포지터가 다시 띄울 때 그 파일이 잠금 해제나 키보드 잡기 같은 특권 프로토콜을 얻는다
+pub fn trusted_executable(program: &str) -> Option<PathBuf> {
+    find_executable(program, TRUSTED_PATH.split(':').map(Path::new))
+}
+
+/// `dirs`에서 차례로 찾은 실행 파일. 경로로 적은 프로그램은 찾지 않고 그대로 돌려준다
+fn find_executable<'a>(program: &str, dirs: impl IntoIterator<Item = &'a Path>) -> Option<PathBuf> {
+    if program.contains('/') {
+        return Some(PathBuf::from(program));
+    }
+    dirs.into_iter().map(|dir| dir.join(program)).find(|path| {
+        path.metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +423,36 @@ mod tests {
         assert!(!answered_in_time(sent, sent + NOT_RESPONDING));
         // 시계가 거꾸로 가도 응답 없음으로 보지 않는다
         assert!(answered_in_time(sent + Duration::from_secs(1), sent));
+    }
+
+    #[test]
+    fn trusted_programs_are_found_only_in_system_directories() {
+        // 시스템 디렉터리만 둔다: 홈이나 상대 경로, 빈 칸(현재 디렉터리)이 없어야 한다
+        for dir in TRUSTED_PATH.split(':') {
+            assert!(dir.starts_with('/') && !dir.starts_with("/home"), "{dir}");
+        }
+        let dir = std::env::temp_dir().join(format!("bunt-comp-trusted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let data = dir.join("data");
+        std::fs::write(&data, "").unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let dirs = [Path::new("/nonexistent"), dir.as_path()];
+        assert_eq!(find_executable("tool", dirs), Some(tool.clone()));
+        // 실행 권한이 없는 파일, 없는 파일, 디렉터리는 찾지 않는다
+        assert_eq!(find_executable("data", dirs), None);
+        assert_eq!(find_executable("missing", dirs), None);
+        assert_eq!(find_executable("", dirs), None);
+        // 경로로 적은 프로그램은 그대로 쓴다
+        assert_eq!(
+            find_executable("/usr/bin/bunt-lock", dirs),
+            Some(PathBuf::from("/usr/bin/bunt-lock"))
+        );
+        // 세션의 PATH에 같은 이름이 있어도 보지 않는다
+        assert_eq!(find_executable("tool", [Path::new("/nonexistent")]), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

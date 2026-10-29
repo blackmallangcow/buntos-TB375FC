@@ -108,7 +108,7 @@ use crate::{
     prefs::{KeyRepeat, PointerPrefs, Prefs},
     render,
     screenshot::{self as screenshots, AreaSelection, Capture, Image},
-    session::Session,
+    session::{self, Session},
     session_lock::SessionLock,
     shmdiff,
     shortcuts::{self, Builtin, Shortcuts},
@@ -388,6 +388,15 @@ impl BuntState {
         client: ClientState,
     ) -> Option<std::process::Child> {
         let (program, args) = command.split_first()?;
+        // 특권 클라이언트는 세션의 PATH가 아니라 root만 쓰는 시스템 디렉터리에서만 찾는다 (session.rs의
+        // trusted_executable). 사용자가 쓸 수 있는 PATH 디렉터리에 둔 같은 이름의 파일이 특권을 얻지 못하게 한다
+        let Some(executable) = session::trusted_executable(program) else {
+            tracing::warn!("{program} is not in {}", session::TRUSTED_PATH);
+            return None;
+        };
+        // 입력기와 잠금 화면은 사용자의 PATH가 필요 없으므로, 그 안에서 실행하는 프로그램(env가 찾는 fcitx5 등)도
+        // 시스템 디렉터리에서만 찾게 한다. 셸은 사용자가 설치한 앱을 열어야 하므로 세션의 PATH를 그대로 둔다
+        let system_path = client.input_method || client.lock_screen;
         let (ours, theirs) = match UnixStream::pair() {
             Ok(pair) => pair,
             Err(err) => {
@@ -405,13 +414,16 @@ impl BuntState {
             return None;
         }
         // 앱의 그리기 방식(gpu.rs)도 준다. 셸이 여는 앱은 셸의 환경을 물려받는다
-        match std::process::Command::new(program)
+        let mut process = std::process::Command::new(&executable);
+        process
             .args(args)
             .env("WAYLAND_DISPLAY", &self.socket_name)
             .env("WAYLAND_SOCKET", theirs.as_raw_fd().to_string())
-            .envs(self.backend.client_env().iter().copied())
-            .spawn()
-        {
+            .envs(self.backend.client_env().iter().copied());
+        if system_path {
+            process.env("PATH", session::TRUSTED_PATH);
+        }
+        match process.spawn() {
             Ok(child) => Some(child),
             Err(err) => {
                 tracing::warn!("failed to start {program}: {err}");
