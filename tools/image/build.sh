@@ -8,7 +8,11 @@
 #   tools/image/build.sh qemu-aarch64 --ephemeral=yes vm   빌드한 이미지를 임시 복사본으로 부팅
 # 산출물은 저장소 밖 $BUNTOS_BUILD_DIR/<보드>에 둔다 (기본 ~/buntos-build).
 # BUNTOS_IMAGE_DIR을 주면 이미지만 그 디렉터리에 만든다 (다른 사람이 띄운 VM이 기본 이미지를
-# 쓰는 동안 따로 빌드해 시험할 때). tools/image/vmctl.sh도 같은 변수를 읽는다.
+# 쓰는 동안 따로 빌드해 시험할 때). tools/image/vmctl.sh와 tests/e2e도 같은 변수를 읽는다.
+# 자체 컴포넌트의 cargo 대상 디렉터리는 CARGO_TARGET_DIR이고, 없으면 $BUNTOS_BUILD_DIR/cargo-target이다.
+# 다른 소스 트리(git worktree)에서 빌드할 때는 따로 준다. cargo는 작업 공간 안의 경로를 상대 경로로
+# 기억하므로, 두 소스 트리가 한 디렉터리를 쓰면 서로의 산출물을 다시 빌드하거나 소스가 더 오래된 쪽이
+# 다른 트리의 바이너리를 그대로 쓴다.
 # 이 파일은 실행 중에도 bash가 이어 읽으므로, 빌드가 도는 동안 고칠 때는 새 파일로 바꿔 넣는다.
 set -euo pipefail
 
@@ -46,7 +50,7 @@ stage_components() {
 	fi
 	local cargo target
 	cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
-	target="$build_root/cargo-target"
+	target="${CARGO_TARGET_DIR:-$build_root/cargo-target}"
 	(cd "$repo" && CARGO_TARGET_DIR="$target" "$cargo" build --release --locked --workspace)
 	rm -rf "$out/stage"
 	install -D -m 0755 "$target/release/bunt-comp" "$out/stage/usr/bin/bunt-comp"
