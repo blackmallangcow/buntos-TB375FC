@@ -174,6 +174,16 @@ impl Frame {
         self.window.add_controller(keys);
     }
 
+    /// 우리가 닫지 않았는데 창이 닫히면(화면을 빼 컴포지터가 레이어 창을 닫았을 때 등) `dismiss`를 부른다.
+    /// 부르지 않으면 물음이 답 없이 남아 NetworkManager·BlueZ가 시간이 다 될 때까지 기다리고, 그동안 다음
+    /// 요청도 묻지 못한다. close()는 창을 없애므로(destroy) 이 신호가 오지 않는다
+    pub fn on_dismiss(&self, dismiss: impl Fn() + 'static) {
+        self.window.connect_close_request(move |_| {
+            dismiss();
+            glib::Propagation::Proceed
+        });
+    }
+
     /// 틀렸을 때처럼 판을 옆으로 흔든다 (style.css의 shake-a, shake-b)
     pub fn shake(&self) {
         let shake = self.shakes.get();
@@ -275,6 +285,23 @@ pub(crate) fn text_field(fields: &gtk::Box, placeholder: &str, text: &str) -> gt
     entry.update_property(&[gtk::accessible::Property::Label(placeholder)]);
     fields.append(&entry);
     entry
+}
+
+/// 시험용 D-Bus(dbus-daemon)를 띄운다. dbus-daemon이 없으면 None(시험을 건너뛴다). 비밀 에이전트와 페어링
+/// 에이전트의 시험이 같이 쓴다. GTestDBus는 띄울 때 프로세스의 환경 변수(DBUS_SESSION_BUS_ADDRESS)를 바꾸므로
+/// 여러 시험 스레드가 한꺼번에 띄우면 서로 엉킨다. 그래서 잠금을 쥔 동안만 하나씩 돈다
+#[cfg(test)]
+pub(crate) fn test_bus() -> Option<(std::sync::MutexGuard<'static, ()>, gtk4::gio::TestDBus)> {
+    use gtk4::gio;
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    glib::find_program_in_path("dbus-daemon")?;
+    // 앞의 시험이 실패해 잠금이 독이 들어도 다음 시험은 돈다
+    let serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let bus = gio::TestDBus::new(gio::TestDBusFlags::NONE);
+    bus.up();
+    Some((serial, bus))
 }
 
 #[cfg(test)]

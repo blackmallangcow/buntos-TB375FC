@@ -94,6 +94,16 @@ fn signal_icon(strength: u8) -> &'static str {
     }
 }
 
+/// SSID 바이트를 보이는 이름으로. UTF-8이 아닌 바이트와 제어 문자(NUL 등)는 U+FFFD로 바꾼다. 예전에는
+/// NUL을 그대로 두어, 그런 이름을 GTK 글로 넘길 때 잘리거나 멈출 수 있었다. 비밀 에이전트도 같은 규칙으로
+/// 메뉴 막대에서 고른 네트워크와 견준다
+pub(crate) fn ssid_text(ssid: &[u8]) -> String {
+    String::from_utf8_lossy(ssid)
+        .chars()
+        .map(|char| if char.is_control() { '\u{FFFD}' } else { char })
+        .collect()
+}
+
 /// 검색된 Wi-Fi 네트워크 (같은 이름의 접속 지점은 가장 센 것 하나)
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccessPoint {
@@ -212,7 +222,7 @@ impl Network {
     /// 연결된 Wi-Fi 이름
     pub fn ssid(&self) -> Option<String> {
         let ssid: Vec<u8> = dbus::property(self.0.access_point.borrow().as_ref()?, "Ssid")?;
-        Some(String::from_utf8_lossy(&ssid).into_owned())
+        Some(ssid_text(&ssid))
     }
 
     pub fn has_wifi(&self) -> bool {
@@ -369,7 +379,7 @@ impl Network {
             let ssid = props
                 .get("Ssid")
                 .and_then(|value| value.get::<Vec<u8>>())
-                .map(|ssid| String::from_utf8_lossy(&ssid).into_owned())
+                .map(|ssid| ssid_text(&ssid))
                 .unwrap_or_default();
             if ssid.is_empty() {
                 continue;
@@ -452,10 +462,7 @@ impl Network {
                 .and_then(|wireless| wireless.get("ssid"))
                 .and_then(|ssid| ssid.get::<Vec<u8>>());
             if let Some(ssid) = ssid {
-                saved.insert(
-                    String::from_utf8_lossy(&ssid).into_owned(),
-                    path.as_str().to_owned(),
-                );
+                saved.insert(ssid_text(&ssid), path.as_str().to_owned());
             }
         }
         saved
@@ -475,7 +482,12 @@ impl Network {
         let (Some(device), Some(ap)) = (device, ap) else {
             return;
         };
-        match join_kind(access_point, saved.is_some(), secret_agent::registered()) {
+        let kind = join_kind(access_point, saved.is_some(), secret_agent::registered());
+        if kind != Join::Settings {
+            // 이 네트워크를 묻는 Wi-Fi 암호 창은 사람이 방금 고른 것이라 키보드를 바로 받는다
+            secret_agent::expect_join(&access_point.ssid);
+        }
+        match kind {
             Join::Saved => {
                 let Some(Ok(saved)) =
                     saved.map(|saved| glib::variant::ObjectPath::try_from(saved.to_owned()))
@@ -813,6 +825,14 @@ mod tests {
         assert_eq!(join_kind(&point(true, false), false, false), Join::Settings);
         // 802.1X는 사용자 이름이 있어야 연결을 만들 수 있다
         assert_eq!(join_kind(&point(true, true), false, true), Join::Settings);
+    }
+
+    #[test]
+    fn ssids_keep_text_but_lose_control_characters() {
+        assert_eq!(ssid_text("집 Wi-Fi".as_bytes()), "집 Wi-Fi");
+        assert_eq!(ssid_text(b"Lab\0Guest"), "Lab\u{FFFD}Guest");
+        assert_eq!(ssid_text(b"\xff\nx"), "\u{FFFD}\u{FFFD}x");
+        assert_eq!(ssid_text(b""), "");
     }
 
     #[test]

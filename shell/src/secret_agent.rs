@@ -13,8 +13,9 @@
 //!   settings.modify.system 권한이 있는지 polkit에 묻는다(관리자 인증 창이 뜰 수 있다).
 //! - 비밀은 기록에 남기지 않고, 답한 뒤 사본을 0으로 덮는다(service_dialog::Secret).
 //! - 창은 사람만 답한다. 레이어 이름(NAMESPACE)을 보고 컴포지터가 에이전트 입력을 거절하고 buntd-agent가
-//!   읽지 않는다. 사람이 고른 연결(USER_REQUESTED)이 아니면 창을 눌러야 키보드를 받는다. 저절로 뜬 창이
-//!   다른 앱에 치던 글을 받아 암호로 보내지 않게 한다.
+//!   읽지 않는다. 메뉴 막대에서 사람이 방금 고른 네트워크([`expect_join`])가 아니면 창을 눌러야 키보드를
+//!   받는다. 저절로 뜬 창이 다른 앱에 치던 글을 받아 암호로 보내지 않게 한다. NetworkManager의 USER_REQUESTED는
+//!   D-Bus로 연결을 켠 프로그램이면 어느 것이든 붙으므로 그것만으로는 키보드를 주지 않는다.
 //!
 //! 순서와 오류는 NetworkManager의 nm-agent-manager.c, nm-secret-agent.c와 같다.
 //! - GetSecrets는 120초 안에 답해야 한다. 그 뒤의 답은 버려지므로 115초에 창을 닫는다.
@@ -26,14 +27,17 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     rc::{Rc, Weak},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bunt_i18n::{FluentArgs, Translations};
 use gtk4::{self as gtk, gio, glib, prelude::*};
 use gtk4_layer_shell::KeyboardMode;
 
-use crate::service_dialog::{self, Frame, Secret};
+use crate::{
+    network::ssid_text,
+    service_dialog::{self, Frame, Secret},
+};
 
 /// 창의 레이어 이름이자 접근성 이름. 사람만 답하는 창의 목록(comp/src/agent.rs, agent/src/atspi.rs)에 있다
 pub(crate) const NAMESPACE: &str = "bunt-secret-agent";
@@ -55,10 +59,12 @@ const ERROR_UNKNOWN_METHOD: &str = "org.freedesktop.DBus.Error.UnknownMethod";
 const ALLOW_INTERACTION: u32 = 0x1;
 /// 가진 비밀이 틀렸으니 새로 물어라 (물어도 된다는 뜻도 있다)
 const REQUEST_NEW: u32 = 0x2;
-/// 사람이 D-Bus로 고른 연결이다. 없으면 NetworkManager가 저절로 연결하다 물었다
+/// 어떤 프로그램이 D-Bus로 켠 연결이다. 없으면 NetworkManager가 저절로 연결하다 물었다
 const USER_REQUESTED: u32 = 0x4;
-/// NetworkManager가 GetSecrets의 답을 기다리는 시간은 120초다. 그보다 조금 일찍 창을 닫는다
+/// NetworkManager가 GetSecrets의 답을 기다리는 시간은 120초다(요청을 보낸 때부터). 그보다 조금 일찍 창을 닫는다
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(115);
+/// 메뉴 막대에서 고른 네트워크를 묻는 창이 키보드를 바로 받는 동안. 처음 물음과, 틀린 암호를 다시 묻는 물음까지
+const EXPECT_JOIN: Duration = Duration::from_secs(150);
 
 const WIRELESS: &str = "802-11-wireless";
 const WIRELESS_SECURITY: &str = "802-11-wireless-security";
@@ -97,11 +103,30 @@ type Settings = HashMap<String, HashMap<String, glib::Variant>>;
 thread_local! {
     /// NetworkManager에 등록됐는지. 메뉴 막대는 등록돼 있을 때만 새 네트워크의 암호를 이 에이전트에게 맡긴다
     static REGISTERED: Cell<bool> = const { Cell::new(false) };
+    /// 메뉴 막대에서 사람이 방금 고른 네트워크와, 그 네트워크를 묻는 창이 키보드를 바로 받아도 되는 마지막 때
+    static EXPECTED: RefCell<Option<(String, Instant)>> = const { RefCell::new(None) };
 }
 
 /// 이 에이전트가 NetworkManager에 등록돼 있는지
 pub fn registered() -> bool {
     REGISTERED.with(Cell::get)
+}
+
+/// 메뉴 막대가 사람이 고른 네트워크를 켜기 직전에 알린다. 그 네트워크를 묻는 창은 키보드를 바로 받는다
+pub fn expect_join(network: &str) {
+    EXPECTED.with(|expected| {
+        expected.replace(Some((network.to_owned(), Instant::now() + EXPECT_JOIN)));
+    });
+}
+
+/// 이 네트워크를 메뉴 막대에서 방금 골랐는지
+fn join_expected(network: &str) -> bool {
+    EXPECTED.with(|expected| {
+        expected
+            .borrow()
+            .as_ref()
+            .is_some_and(|(name, until)| name == network && Instant::now() < *until)
+    })
 }
 
 /// 제목에 쓰는 보안 방식
@@ -111,8 +136,8 @@ pub(crate) enum Security {
     Wpa2,
     /// WPA3 개인용 (sae)
     Wpa3,
-    /// WEP. passphrase는 wep-key-type이 2(암호 문구)인지
-    Wep { passphrase: bool },
+    /// WEP
+    Wep { key_type: WepKeyType },
     /// Cisco LEAP
     Leap,
 }
@@ -127,6 +152,16 @@ impl Security {
             Self::Leap => "leap",
         }
     }
+}
+
+/// WEP 키의 꼴 (NMWepKeyType). 빈 설정으로 만든 새 연결은 모른다(0)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WepKeyType {
+    Unknown,
+    /// 16진수 10·26자리나 ASCII 5·13자
+    Key,
+    /// 1~64바이트의 암호 문구 (NetworkManager가 키로 바꾼다)
+    Passphrase,
 }
 
 /// 사람에게 받을 비밀
@@ -158,10 +193,41 @@ impl Fields {
                 ..
             } => wpa_psk_valid(secret),
             Self::Password {
-                security: Security::Wep { passphrase },
+                security: Security::Wep { key_type },
                 ..
-            } => wep_key_valid(secret, *passphrase),
+            } => wep_key_valid(secret, *key_type),
             _ => !secret.is_empty(),
+        }
+    }
+
+    /// 바이트 길이만으로 받을 수 있는지 정해지면 Some. 글자를 보아야 하면 None(64자리 WPA 키, WEP 키).
+    /// 창은 칸의 글을 꺼내지 않고 이것으로 [연결]을 켜고 끈다
+    pub fn accepts_length(&self, bytes: usize) -> Option<bool> {
+        match self {
+            Self::Password {
+                security: Security::Wpa2,
+                ..
+            } => match bytes {
+                8..=63 => Some(true),
+                64 => None,
+                _ => Some(false),
+            },
+            Self::Password {
+                security:
+                    Security::Wep {
+                        key_type: WepKeyType::Key,
+                    },
+                ..
+            } => match bytes {
+                5 | 10 | 13 | 26 => None,
+                _ => Some(false),
+            },
+            // 암호 문구이거나 꼴을 모르면 1~64바이트는 모두 된다(키의 꼴도 그 안에 든다)
+            Self::Password {
+                security: Security::Wep { .. },
+                ..
+            } => Some((1..=64).contains(&bytes)),
+            _ => Some(bytes > 0),
         }
     }
 }
@@ -175,17 +241,21 @@ fn wpa_psk_valid(psk: &str) -> bool {
     }
 }
 
-/// WEP: 키는 10·26자리 16진수나 5·13자 ASCII, 암호 문구는 1~64바이트. 형식을 모르면 키로 본다
-fn wep_key_valid(key: &str, passphrase: bool) -> bool {
-    if passphrase {
-        return (1..=64).contains(&key.len());
-    }
-    match key.len() {
+/// WEP: 키는 10·26자리 16진수나 5·13자 ASCII, 암호 문구는 1~64바이트. 꼴을 모르면 둘 가운데 하나면 된다
+/// (예전에는 모르는 꼴을 키로만 보아, 빈 설정으로 만든 새 연결에서 암호 문구를 받지 않았다)
+fn wep_key_valid(key: &str, key_type: WepKeyType) -> bool {
+    let as_key = || match key.len() {
         10 | 26 => key.bytes().all(|byte| byte.is_ascii_hexdigit()),
         5 | 13 => key
             .bytes()
             .all(|byte| byte.is_ascii_graphic() || byte == b' '),
         _ => false,
+    };
+    let as_passphrase = || (1..=64).contains(&key.len());
+    match key_type {
+        WepKeyType::Key => as_key(),
+        WepKeyType::Passphrase => as_passphrase(),
+        WepKeyType::Unknown => as_key() || as_passphrase(),
     }
 }
 
@@ -198,7 +268,8 @@ pub(crate) struct Prompt {
     pub fields: Fields,
     /// 전에 준 비밀이 틀렸다 (REQUEST_NEW)
     pub retry: bool,
-    /// 사람이 고른 연결이다 (USER_REQUESTED)
+    /// 사람이 메뉴 막대에서 방금 고른 네트워크다: USER_REQUESTED가 붙었고 메뉴 막대가 그 네트워크를 켰다
+    /// ([`expect_join`]). 이때만 창이 키보드를 바로 받는다
     pub user_requested: bool,
 }
 
@@ -247,11 +318,12 @@ fn prompt_for(
             .unwrap_or_default()
     };
     let wireless = text("connection", "type") == WIRELESS;
+    // 제어 문자(NUL 등)는 바꿔 둔다. 메뉴 막대의 네트워크 이름과 같은 규칙이라 expect_join과 견줄 수 있다
     let network = value(WIRELESS, "ssid")
         .and_then(|ssid| ssid.get::<Vec<u8>>())
-        .map(|ssid| String::from_utf8_lossy(&ssid).into_owned())
+        .map(|ssid| ssid_text(&ssid))
         .filter(|ssid| !ssid.is_empty())
-        .unwrap_or_else(|| text("connection", "id"));
+        .unwrap_or_else(|| ssid_text(text("connection", "id").as_bytes()));
     let fields = match setting {
         WIRELESS_SECURITY => {
             let password = |security| {
@@ -275,12 +347,16 @@ fn prompt_for(
                         .and_then(|index| index.get::<u32>())
                         .unwrap_or(0)
                         .min(3);
-                    // NMWepKeyType: 2는 암호 문구
-                    let passphrase = value(WIRELESS_SECURITY, "wep-key-type")
+                    // NMWepKeyType: 1은 키, 2는 암호 문구, 0(빈 설정으로 만든 연결)은 모른다
+                    let key_type = match value(WIRELESS_SECURITY, "wep-key-type")
                         .and_then(|kind| kind.get::<u32>())
-                        == Some(2);
+                    {
+                        Some(1) => WepKeyType::Key,
+                        Some(2) => WepKeyType::Passphrase,
+                        _ => WepKeyType::Unknown,
+                    };
                     Some(Fields::Password {
-                        security: Security::Wep { passphrase },
+                        security: Security::Wep { key_type },
                         key: format!("wep-key{index}"),
                     })
                 }
@@ -294,13 +370,39 @@ fn prompt_for(
                 .and_then(|methods| methods.into_iter().next())
                 .unwrap_or_default();
             let identity = text(IEEE_8021X, "identity");
-            // 힌트가 있으면 그것을 따르고, 없으면 첫 EAP 방식으로 정한다 (GNOME 셸과 같다)
-            if hinted("private-key-password") || (!hinted("password") && method == "tls") {
-                Some(Fields::PrivateKey { identity })
-            } else if hinted("password") || PASSWORD_METHODS.contains(&method.as_str()) {
-                Some(Fields::Credentials { identity })
+            // 인증서 칸이 PKCS#11(스마트카드)이면 NetworkManager는 그 PIN(…-cert-password)을 묻는다
+            let pkcs11 = |key: &str| {
+                value(IEEE_8021X, key)
+                    .and_then(|cert| cert.get::<Vec<u8>>())
+                    .is_some_and(|cert| cert.starts_with(b"pkcs11:"))
+            };
+            let phase2 = Some(text(IEEE_8021X, "phase2-auth"))
+                .filter(|auth| !auth.is_empty())
+                .unwrap_or_else(|| text(IEEE_8021X, "phase2-autheap"));
+            // 이 창이 받는 비밀은 암호와 개인 키 암호뿐이다. 다른 비밀을 엉뚱한 칸으로 받아 답하면 NetworkManager가
+            // 틀렸다고 다시 묻기를 되풀이하므로, 받지 못하는 비밀이면 묻지 않는다
+            if !hints.is_empty() {
+                // NetworkManager가 필요한 비밀을 알려 주면 그대로 따른다 (유선 802.1X. Wi-Fi는 힌트가 없다)
+                if hinted("password") {
+                    Some(Fields::Credentials { identity })
+                } else if hinted("private-key-password") {
+                    Some(Fields::PrivateKey { identity })
+                } else {
+                    None
+                }
             } else {
-                None
+                // 힌트가 없으면 NetworkManager의 need_secrets처럼 방식으로 정한다
+                match method.as_str() {
+                    "tls" if !pkcs11("client-cert") && !pkcs11("ca-cert") => {
+                        Some(Fields::PrivateKey { identity })
+                    }
+                    // 터널 안이 TLS면 phase2 개인 키 암호다
+                    "peap" | "ttls" if phase2 == "tls" => None,
+                    method if PASSWORD_METHODS.contains(&method) => {
+                        Some(Fields::Credentials { identity })
+                    }
+                    _ => None,
+                }
             }
         }
         _ => None,
@@ -354,6 +456,8 @@ struct Pending {
     request: Request,
     prompt: Prompt,
     invocation: gio::DBusMethodInvocation,
+    /// NetworkManager가 요청을 보낸 때. 기다리는 시간은 여기서부터 센다
+    arrived: Instant,
 }
 
 struct Current {
@@ -434,10 +538,12 @@ impl Agent {
             invocation.return_dbus_error(ERROR_INVALID_ARGS, "unexpected arguments");
             return;
         };
-        let Some(prompt) = request.prompt.clone() else {
+        let Some(mut prompt) = request.prompt.clone() else {
             invocation.return_dbus_error(ERROR_NO_SECRETS, "this agent has no such secrets");
             return;
         };
+        // 키보드를 바로 주는 것은 메뉴 막대에서 사람이 고른 네트워크뿐이다 (머리 주석)
+        prompt.user_requested &= join_expected(&prompt.network);
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         self.queue.borrow_mut().push_back(Pending {
@@ -445,6 +551,7 @@ impl Agent {
             request,
             prompt,
             invocation,
+            arrived: Instant::now(),
         });
         self.show_next();
     }
@@ -454,15 +561,28 @@ impl Agent {
         if self.current.borrow().is_some() {
             return;
         }
-        let Some(pending) = self.queue.borrow_mut().pop_front() else {
-            return;
+        // 줄을 서 있던 시간은 빼고 센다. NetworkManager는 요청을 보낸 때부터 120초를 기다리고, 그 뒤로는
+        // CancelGetSecrets 없이 답을 버린다. 예전에는 창이 뜬 때부터 다시 115초를 세어, 줄을 서 있던 요청은
+        // NetworkManager가 그만둔 뒤에도 창이 남아 사람이 친 암호가 버려졌다
+        let (pending, left) = loop {
+            let Some(pending) = self.queue.borrow_mut().pop_front() else {
+                return;
+            };
+            let left = self.timeout.saturating_sub(pending.arrived.elapsed());
+            // 남은 시간이 사람이 칠 만큼이 아니면 묻지 않는다
+            if left >= self.timeout / 10 {
+                break (pending, left);
+            }
+            pending
+                .invocation
+                .return_dbus_error(ERROR_NO_SECRETS, "the request waited too long");
         };
         let id = pending.id;
         let prompt = pending.prompt.clone();
-        let (weak, timeout) = (Rc::downgrade(self), self.timeout);
+        let weak = Rc::downgrade(self);
         // 이 스레드의 기본 컨텍스트에서 센다 (시험은 따로 만든 컨텍스트를 돌린다)
         let timer = glib::spawn_future_local(async move {
-            glib::timeout_future(timeout).await;
+            glib::timeout_future(left).await;
             if let Some(agent) = weak.upgrade() {
                 agent.expire(id);
             }
@@ -505,6 +625,10 @@ impl Agent {
         } = current.pending;
         match answer {
             Answer::Secret(secret) => {
+                // 틀린 암호를 다시 묻는 창도 키보드를 바로 받게 한다
+                if prompt.user_requested {
+                    expect_join(&prompt.network);
+                }
                 let reply = secrets_reply(&request.setting, prompt.fields.key(), &secret);
                 invocation.return_value(Some(&reply));
             }
@@ -692,7 +816,7 @@ impl SecretDialog {
         prompt: &Prompt,
         responder: Responder,
     ) -> Rc<SecretDialog> {
-        // 사람이 고른 연결이면 바로 칠 수 있게 키보드를 받고, 저절로 뜬 창은 눌러야 받는다
+        // 메뉴 막대에서 사람이 고른 네트워크면 바로 칠 수 있게 키보드를 받고, 그 밖의 창은 눌러야 받는다
         let keyboard = if prompt.user_requested {
             KeyboardMode::Exclusive
         } else {
@@ -747,11 +871,9 @@ impl SecretDialog {
             retry: prompt.retry,
         });
         let weak = Rc::downgrade(&dialog);
-        dialog.password.connect_changed(move |entry| {
+        dialog.password.connect_changed(move |_| {
             if let Some(dialog) = weak.upgrade() {
-                dialog
-                    .join
-                    .set_sensitive(dialog.fields.accepts(&entry.text()));
+                dialog.join.set_sensitive(dialog.acceptable());
             }
         });
         let weak = Rc::downgrade(&dialog);
@@ -772,6 +894,12 @@ impl SecretDialog {
                 dialog.respond(Answer::Cancel);
             }
         });
+        let weak = Rc::downgrade(&dialog);
+        dialog.frame.on_dismiss(move || {
+            if let Some(dialog) = weak.upgrade() {
+                dialog.respond(Answer::Cancel);
+            }
+        });
         dialog
     }
 
@@ -782,13 +910,26 @@ impl SecretDialog {
         }
     }
 
+    /// 칸의 글이 받을 수 있는 암호인지. 길이로 정해지면 글을 꺼내지 않는다. text()는 GTK가 보안 메모리에 둔
+    /// 암호를 지워지지 않는 사본으로 꺼내므로, 예전처럼 글자를 칠 때마다 꺼내지 않는다
+    fn acceptable(&self) -> bool {
+        let bytes = self
+            .password
+            .delegate()
+            .and_downcast::<gtk::Text>()
+            .map(|text| text.buffer().bytes());
+        match bytes.and_then(|bytes| self.fields.accepts_length(bytes)) {
+            Some(decided) => decided,
+            None => self.fields.accepts(&self.password.text()),
+        }
+    }
+
     /// 연결: 칸이 받을 수 있는 암호일 때만 (Enter도 기본 단추를 누른다)
     fn submit(&self) {
-        let text = self.password.text();
-        if !self.fields.accepts(&text) {
+        if !self.acceptable() {
             return;
         }
-        let secret = Secret::new(&text);
+        let secret = Secret::new(&self.password.text());
         self.password.set_text("");
         self.respond(Answer::Secret(secret));
     }
@@ -891,8 +1032,23 @@ mod tests {
                 .unwrap()
                 .fields,
             Fields::Password {
-                security: Security::Wep { passphrase: true },
+                security: Security::Wep {
+                    key_type: WepKeyType::Passphrase
+                },
                 key: "wep-key2".into()
+            }
+        );
+        // 빈 설정으로 만든 새 연결은 키의 꼴을 모른다
+        let unknown = wifi("Old", &[("key-mgmt", "none".to_variant())]);
+        assert_eq!(
+            prompt_for(&unknown, WIRELESS_SECURITY, &[], ALLOW_INTERACTION)
+                .unwrap()
+                .fields,
+            Fields::Password {
+                security: Security::Wep {
+                    key_type: WepKeyType::Unknown
+                },
+                key: "wep-key0".into()
             }
         );
         let leap = wifi(
@@ -957,8 +1113,72 @@ mod tests {
         // 힌트가 방식보다 앞선다
         let hinted = prompt_for(&tls, IEEE_8021X, &["password".into()], ALLOW_INTERACTION);
         assert!(matches!(hinted.unwrap().fields, Fields::Credentials { .. }));
+        // 이 창이 받지 못하는 비밀을 알려 오면 묻지 않는다 (엉뚱한 칸으로 답하면 NetworkManager가 다시 묻기를 되풀이한다)
+        let pin = prompt_for(
+            &tls,
+            IEEE_8021X,
+            &["client-cert-password".into()],
+            ALLOW_INTERACTION,
+        );
+        assert!(pin.is_none());
         let sim = enterprise(WIRELESS, &["sim"], "");
         assert!(prompt_for(&sim, IEEE_8021X, &[], ALLOW_INTERACTION).is_none());
+    }
+
+    #[test]
+    fn enterprise_secrets_this_dialog_cannot_take_are_not_asked() {
+        // 터널 안이 TLS면 phase2 개인 키 암호가 필요하다
+        let mut inner_tls = enterprise(WIRELESS, &["ttls"], "hong");
+        inner_tls
+            .get_mut(IEEE_8021X)
+            .unwrap()
+            .insert("phase2-autheap".into(), "tls".to_variant());
+        assert!(prompt_for(&inner_tls, IEEE_8021X, &[], ALLOW_INTERACTION).is_none());
+        let mut inner_password = enterprise(WIRELESS, &["peap"], "hong");
+        inner_password
+            .get_mut(IEEE_8021X)
+            .unwrap()
+            .insert("phase2-auth".into(), "mschapv2".to_variant());
+        assert!(matches!(
+            prompt_for(&inner_password, IEEE_8021X, &[], ALLOW_INTERACTION)
+                .unwrap()
+                .fields,
+            Fields::Credentials { .. }
+        ));
+        // 스마트카드(PKCS#11) 인증서의 PIN은 개인 키 암호 칸으로 받지 않는다
+        let mut smartcard = enterprise(WIRELESS, &["tls"], "hong");
+        smartcard.get_mut(IEEE_8021X).unwrap().insert(
+            "client-cert".into(),
+            b"pkcs11:token=card".to_vec().to_variant(),
+        );
+        assert!(prompt_for(&smartcard, IEEE_8021X, &[], ALLOW_INTERACTION).is_none());
+        let mut file_key = enterprise(WIRELESS, &["tls"], "hong");
+        file_key.get_mut(IEEE_8021X).unwrap().insert(
+            "client-cert".into(),
+            b"file:///etc/cert.pem\0".to_vec().to_variant(),
+        );
+        assert!(matches!(
+            prompt_for(&file_key, IEEE_8021X, &[], ALLOW_INTERACTION)
+                .unwrap()
+                .fields,
+            Fields::PrivateKey { .. }
+        ));
+    }
+
+    #[test]
+    fn network_names_lose_control_characters() {
+        let nul = wifi("Lab\0Guest", &[("key-mgmt", "wpa-psk".to_variant())]);
+        let prompt = prompt_for(&nul, WIRELESS_SECURITY, &[], ALLOW_INTERACTION).unwrap();
+        assert_eq!(prompt.network, "Lab\u{FFFD}Guest");
+    }
+
+    #[test]
+    fn only_networks_picked_in_the_menu_take_the_keyboard() {
+        expect_join("집 Wi-Fi");
+        assert!(join_expected("집 Wi-Fi"));
+        assert!(!join_expected("Lab"));
+        expect_join("Lab");
+        assert!(!join_expected("집 Wi-Fi"));
     }
 
     #[test]
@@ -976,27 +1196,84 @@ mod tests {
         assert!(!wpa.accepts(&"a".repeat(65)));
         // 한글은 글자마다 3바이트다: 3글자(9바이트)는 된다
         assert!(wpa.accepts("한글암"));
-        let wep = Fields::Password {
-            security: Security::Wep { passphrase: false },
+        let wep_field = |key_type| Fields::Password {
+            security: Security::Wep { key_type },
             key: "wep-key0".into(),
         };
+        let wep = wep_field(WepKeyType::Key);
         assert!(wep.accepts("abcde"));
         assert!(wep.accepts("0123456789"));
         assert!(!wep.accepts("012345678g"));
         assert!(!wep.accepts("abcdef"));
-        let wep_phrase = Fields::Password {
-            security: Security::Wep { passphrase: true },
-            key: "wep-key0".into(),
-        };
+        let wep_phrase = wep_field(WepKeyType::Passphrase);
         assert!(wep_phrase.accepts("x"));
         assert!(!wep_phrase.accepts(""));
         assert!(!wep_phrase.accepts(&"x".repeat(65)));
+        // 꼴을 모르면 키나 암호 문구 가운데 하나면 된다 (nm_utils_wep_key_valid의 UNKNOWN)
+        let wep_unknown = wep_field(WepKeyType::Unknown);
+        assert!(wep_unknown.accepts("abcde"));
+        assert!(wep_unknown.accepts("my old router"));
+        assert!(!wep_unknown.accepts(""));
+        assert!(!wep_unknown.accepts(&"x".repeat(65)));
         let sae = Fields::Password {
             security: Security::Wpa3,
             key: "psk".into(),
         };
         assert!(sae.accepts("x"));
         assert!(!sae.accepts(""));
+    }
+
+    /// 창은 길이로 정해지면 칸의 글을 꺼내지 않는다. 길이로 정한 것이 글을 보고 정한 것과 같아야 한다
+    #[test]
+    fn length_checks_agree_with_full_checks() {
+        let fields = [
+            Fields::Password {
+                security: Security::Wpa2,
+                key: "psk".into(),
+            },
+            Fields::Password {
+                security: Security::Wpa3,
+                key: "psk".into(),
+            },
+            Fields::Password {
+                security: Security::Wep {
+                    key_type: WepKeyType::Key,
+                },
+                key: "wep-key0".into(),
+            },
+            Fields::Password {
+                security: Security::Wep {
+                    key_type: WepKeyType::Passphrase,
+                },
+                key: "wep-key0".into(),
+            },
+            Fields::Password {
+                security: Security::Wep {
+                    key_type: WepKeyType::Unknown,
+                },
+                key: "wep-key0".into(),
+            },
+            Fields::Credentials {
+                identity: "hong".into(),
+            },
+        ];
+        let samples = [
+            String::new(),
+            "abcde".into(),
+            "0123456789".into(),
+            "12345678".into(),
+            "한글암".into(),
+            "0f".repeat(32),
+            "g".repeat(64),
+            "x".repeat(65),
+        ];
+        for field in &fields {
+            for sample in &samples {
+                if let Some(decided) = field.accepts_length(sample.len()) {
+                    assert_eq!(decided, field.accepts(sample), "{field:?} {sample:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1080,14 +1357,6 @@ mod tests {
         }
     }
 
-    /// dbus-daemon으로 시험용 버스를 띄운다. 없으면 None (시험을 건너뛴다)
-    fn test_bus() -> Option<gio::TestDBus> {
-        glib::find_program_in_path("dbus-daemon")?;
-        let bus = gio::TestDBus::new(gio::TestDBusFlags::NONE);
-        bus.up();
-        Some(bus)
-    }
-
     async fn connect(address: &str) -> gio::DBusConnection {
         gio::DBusConnection::for_address_future(
             address,
@@ -1133,7 +1402,7 @@ mod tests {
     /// NetworkManager처럼 부르는 쪽에서 GetSecrets를 거쳐 사람의 답이 a{sa{sv}}로 돌아온다
     #[test]
     fn get_secrets_round_trip_over_dbus() {
-        let Some(bus) = test_bus() else {
+        let Some((_serial, bus)) = crate::service_dialog::test_bus() else {
             eprintln!("dbus-daemon is missing; skipping the D-Bus test");
             return;
         };
@@ -1157,6 +1426,8 @@ mod tests {
                     let path = "/org/freedesktop/NetworkManager/Settings/1";
 
                     answers.borrow_mut().push_back(Some("correct horse"));
+                    // 메뉴 막대에서 고른 네트워크다
+                    expect_join("Home");
                     let flags = ALLOW_INTERACTION | USER_REQUESTED;
                     let secrets =
                         get_secrets(&manager, &name, &connection, path, WIRELESS_SECURITY, flags)
@@ -1198,6 +1469,67 @@ mod tests {
                     .unwrap_err();
                     assert_eq!(dbus_error_name(&error), ERROR_ACCESS_DENIED);
                     assert_eq!(asked.borrow().len(), 2);
+
+                    // 다른 프로그램이 켠 연결은 USER_REQUESTED가 붙어도 키보드를 바로 받지 않는다
+                    let lab = wifi("Lab", &[("key-mgmt", "wpa-psk".to_variant())]);
+                    answers.borrow_mut().push_back(Some("lab password"));
+                    get_secrets(&manager, &name, &lab, path, WIRELESS_SECURITY, flags)
+                        .await
+                        .unwrap();
+                    assert!(!asked.borrow()[2].user_requested);
+                })
+            })
+            .unwrap();
+        bus.down();
+    }
+
+    /// 줄을 서 있던 요청도 NetworkManager가 보낸 때부터 센다. 남은 시간이 너무 짧으면 묻지 않고 NoSecrets로 답한다
+    #[test]
+    fn queued_requests_keep_network_managers_deadline() {
+        let Some((_serial, bus)) = crate::service_dialog::test_bus() else {
+            eprintln!("dbus-daemon is missing; skipping the D-Bus test");
+            return;
+        };
+        let address = bus.bus_address().unwrap().to_string();
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                context.block_on(async {
+                    let agent_bus = connect(&address).await;
+                    let manager = connect(&address).await;
+                    let fake = Fake::default();
+                    let (asked, answers) = (fake.asked.clone(), fake.answers.clone());
+                    let agent = Agent::new(Box::new(fake), Duration::from_millis(400));
+                    agent.export(&agent_bus).unwrap();
+                    agent
+                        .manager
+                        .replace(manager.unique_name().map(|name| name.to_string()));
+                    let name = agent_bus.unique_name().unwrap().to_string();
+                    let home = wifi("Home", &[("key-mgmt", "wpa-psk".to_variant())]);
+                    let lab = wifi("Lab", &[("key-mgmt", "wpa-psk".to_variant())]);
+                    // 첫 물음은 아무도 답하지 않는다. 그동안 둘째 요청이 줄을 선다
+                    answers.borrow_mut().extend([None, Some("late")]);
+                    let first = get_secrets(
+                        &manager,
+                        &name,
+                        &home,
+                        "/org/freedesktop/NetworkManager/Settings/1",
+                        WIRELESS_SECURITY,
+                        ALLOW_INTERACTION,
+                    );
+                    let second = get_secrets(
+                        &manager,
+                        &name,
+                        &lab,
+                        "/org/freedesktop/NetworkManager/Settings/2",
+                        WIRELESS_SECURITY,
+                        ALLOW_INTERACTION,
+                    );
+                    let (first, second, ()) = futures_join(first, second, async {}).await;
+                    assert_eq!(dbus_error_name(&first.unwrap_err()), ERROR_NO_SECRETS);
+                    assert_eq!(dbus_error_name(&second.unwrap_err()), ERROR_NO_SECRETS);
+                    // 둘째 요청은 창을 띄우지 않았다
+                    assert_eq!(asked.borrow().len(), 1);
                 })
             })
             .unwrap();
@@ -1207,7 +1539,7 @@ mod tests {
     /// CancelGetSecrets는 떠 있는 물음을 닫고 AgentCanceled로 답하게 한다. 기다리던 다음 요청은 그 뒤에 묻는다
     #[test]
     fn cancel_closes_the_prompt_and_asks_the_next_one() {
-        let Some(bus) = test_bus() else {
+        let Some((_serial, bus)) = crate::service_dialog::test_bus() else {
             eprintln!("dbus-daemon is missing; skipping the D-Bus test");
             return;
         };
@@ -1294,7 +1626,7 @@ mod tests {
     /// 아무도 답하지 않으면 시간이 지나 창을 닫고 NoSecrets로 답한다. 늦은 답은 버린다
     #[test]
     fn unanswered_prompts_expire() {
-        let Some(bus) = test_bus() else {
+        let Some((_serial, bus)) = crate::service_dialog::test_bus() else {
             eprintln!("dbus-daemon is missing; skipping the D-Bus test");
             return;
         };
