@@ -11,6 +11,11 @@ EnumerateWithTriggerKeys=True
 0=Control+space
 1=Hangul
 
+# 왼쪽 Shift만 눌렀다 떼면 첫 입력 소스(영문)와 지금 입력 소스를 오가는 fcitx5 기본 단축키를 끈다(빈 목록).
+# macOS에는 없는 동작이라, 쌍자음을 치려다 Shift만 떼면 한글 모드가 영문으로 바뀌었다. 수정 키만으로 바꾸는
+# 단축키(⌃⇧ 등)는 컴포지터가 시스템 설정의 키보드 단축키대로 한다
+[Hotkey/AltTriggerKeys]
+
 [Behavior]
 # macOS처럼 입력 소스는 앱마다가 아니라 전체에 하나다
 ShareInputState=All
