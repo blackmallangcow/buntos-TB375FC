@@ -3,6 +3,7 @@
 
 //! Dock: 화면 아래에서 앱을 실행한다. 실행 중인 앱은 아이콘 아래에 점이 붙고, 누르면 새로
 //! 띄우지 않고 그 앱의 창을 앞으로 가져온다. Dock에 없는 앱이 실행 중이면 구분선 뒤에 보인다.
+//! 최소화한 창은 macOS처럼 오른쪽 끝, 구분선 뒤에 창 그림으로 놓이고 누르면 돌아온다(minimized.rs).
 //! macOS의 Dock처럼 화면이 좁거나 앱이 많아 넘치면 아이콘을 줄여 화면 안에 둔다.
 //! 크기, 투명도, 실행 중 표시는 시스템 설정의 "데스크탑 및 Dock"을 따른다. 자동으로 숨고 아래쪽
 //! 가장자리에서 나오는 것은 컴포지터가 한다(comp/src/panels.rs).
@@ -20,7 +21,9 @@ use crate::{
     clip_input_to_child,
     config::{Builtin, Config, DockItem},
     launcher::{self, Launcher},
-    layer_window, shell_settings,
+    layer_window,
+    minimized::{self, Minimized},
+    shell_settings,
     toplevels::Toplevels,
 };
 
@@ -60,8 +63,8 @@ pub fn activate_or_launch(
     }
 }
 
-/// Dock 단추의 내용: 아이콘과 그 아래 실행 중 표시 점
-pub fn app_button_content(image: &gtk::Image) -> (gtk::Box, gtk::Box) {
+/// Dock 단추의 내용: 아이콘(최소화 칸은 창 그림)과 그 아래 실행 중 표시 점
+pub fn app_button_content(image: &impl IsA<gtk::Widget>) -> (gtk::Box, gtk::Box) {
     let dot = gtk::Box::builder()
         .halign(gtk::Align::Center)
         .css_classes(["running-dot"])
@@ -81,8 +84,10 @@ const DOCK_CHROME: i32 = 2 * 28 + 2 * 10 + 2;
 /// 단추 안에서 아이콘 밖의 너비(좌우 4px)와 단추 사이 간격 (style.css, build의 spacing)
 const ITEM_PADDING: i32 = 8;
 const ITEM_SPACING: i32 = 6;
-/// 실행 중인 앱 앞 구분선(선과 좌우 여백)과 그 뒤 간격
+/// 실행 중인 앱·최소화한 창 앞 구분선(선과 좌우 여백)과 그 뒤 간격
 const SEPARATOR_WIDTH: i32 = 5 + ITEM_SPACING;
+/// 최소화한 창 그림 위 앱 아이콘의 크기 (창 그림 크기에 대한 비율, 5분의 2)
+const BADGE_RATIO: (i32, i32) = (2, 5);
 /// 화면 가장자리에 남기는 틈
 const SCREEN_MARGIN: i32 = 8;
 /// 아무리 좁아도 이보다 작게 줄이지 않는다
@@ -122,6 +127,51 @@ fn app_button(
         dot,
     };
     (button, item)
+}
+
+/// 최소화한 창 단추: 창 그림의 오른쪽 아래에 앱 아이콘을 얹는다(macOS). 누르면 그 창이 돌아온다.
+/// 창 그림은 아이콘처럼 아이콘 크기의 정사각형 안에 비율을 지켜 그린다(fit_icons가 함께 줄인다).
+/// 그림이 없으면(컴포지터가 그리지 못했으면) 앱 아이콘만 그린다
+fn minimized_button(window: &Minimized, icon_size: i32) -> gtk::Button {
+    let info = gio_unix::DesktopAppInfo::new(&format!("{}.desktop", window.app_id));
+    let overlay = gtk::Overlay::new();
+    match &window.thumbnail {
+        Some(texture) => {
+            let picture = gtk::Image::from_paintable(Some(texture));
+            picture.set_pixel_size(icon_size);
+            picture.add_css_class("dock-window");
+            overlay.set_child(Some(&picture));
+            let badge = app_image(info.as_ref(), badge_size(icon_size));
+            badge.add_css_class("dock-badge");
+            badge.set_halign(gtk::Align::End);
+            badge.set_valign(gtk::Align::End);
+            overlay.add_overlay(&badge);
+        }
+        None => overlay.set_child(Some(&app_image(info.as_ref(), icon_size))),
+    }
+    // 실행 중 표시 점은 늘 비워 두지만 자리는 남겨 다른 아이콘과 높이를 맞춘다
+    let (content, _dot) = app_button_content(&overlay);
+    let name = match window.title.is_empty() {
+        false => window.title.clone(),
+        true => info
+            .as_ref()
+            .map(|info| info.name().to_string())
+            .unwrap_or_else(|| window.app_id.clone()),
+    };
+    let button = gtk::Button::builder()
+        .child(&content)
+        .tooltip_text(&name)
+        .css_classes(["dock-item", "dock-minimized"])
+        .build();
+    button.update_property(&[gtk::accessible::Property::Label(&name)]);
+    let id = window.id;
+    button.connect_clicked(move |_| minimized::restore(id));
+    button
+}
+
+/// 창 그림 위 앱 아이콘의 크기
+fn badge_size(icon_size: i32) -> i32 {
+    (icon_size * BADGE_RATIO.0 / BADGE_RATIO.1).max(12)
 }
 
 fn app_image(info: Option<&gio_unix::DesktopAppInfo>, icon_size: i32) -> gtk::Image {
@@ -207,11 +257,33 @@ pub fn build(
     let running = gtk::Box::builder().spacing(6).build();
     dock.append(&separator);
     dock.append(&running);
+    // 최소화한 창: 오른쪽 끝, 구분선 뒤 (macOS Dock의 오른쪽 칸)
+    let minimized_separator = gtk::Separator::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes(["dock-separator"])
+        .visible(false)
+        .build();
+    let minimized_box = gtk::Box::builder().spacing(6).build();
+    dock.append(&minimized_separator);
+    dock.append(&minimized_box);
     let fit: Rc<dyn Fn()> = {
-        let (window, dock, separator) = (window.clone(), dock.clone(), separator.clone());
+        let (window, dock) = (window.clone(), dock.clone());
         let icon_size = icon_size.clone();
-        Rc::new(move || fit_icons(&window, &dock, &separator, icon_size.get()))
+        Rc::new(move || fit_icons(&window, &dock, icon_size.get()))
     };
+    {
+        let (fit, icon_size) = (fit.clone(), icon_size.clone());
+        minimized::follow(move |windows| {
+            while let Some(child) = minimized_box.first_child() {
+                minimized_box.remove(&child);
+            }
+            for window in &windows {
+                minimized_box.append(&minimized_button(window, icon_size.get()));
+            }
+            minimized_separator.set_visible(!windows.is_empty());
+            fit();
+        });
+    }
 
     if let Some(toplevels) = toplevels {
         let pinned = Rc::new(pinned);
@@ -344,13 +416,8 @@ fn follow_monitors(display: &gtk::gdk::Display, fit: &Rc<dyn Fn()>) {
     });
 }
 
-/// Dock이 화면 너비에 들어가도록 아이콘 크기를 정한다
-fn fit_icons(
-    window: &gtk::ApplicationWindow,
-    dock: &gtk::Box,
-    separator: &gtk::Separator,
-    max: i32,
-) {
+/// Dock이 화면 너비에 들어가도록 아이콘 크기를 정한다. 최소화한 창 그림도 아이콘 하나로 센다
+fn fit_icons(window: &gtk::ApplicationWindow, dock: &gtk::Box, max: i32) {
     let display = WidgetExt::display(window);
     let monitor = window
         .surface()
@@ -359,22 +426,27 @@ fn fit_icons(
     let Some(monitor) = monitor else {
         return;
     };
-    let images = images_in(dock.upcast_ref());
+    let mut parts = DockParts::default();
+    parts.collect(dock.upcast_ref());
     let size = icon_size_for(
         monitor.geometry().width(),
-        images.len() as i32,
-        separator.is_visible(),
+        parts.icons.len() as i32,
+        parts.separators,
         max,
     );
-    for image in images {
+    for image in parts.icons {
         if image.pixel_size() != size {
             image.set_pixel_size(size);
         }
     }
+    for badge in parts.badges {
+        badge.set_pixel_size(badge_size(size));
+    }
 }
 
-/// 아이콘 `items`개가 너비 `screen`인 화면에 들어가는 가장 큰 아이콘 크기 (`max`까지)
-fn icon_size_for(screen: i32, items: i32, separator: bool, max: i32) -> i32 {
+/// 아이콘 `items`개와 구분선 `separators`개가 너비 `screen`인 화면에 들어가는 가장 큰 아이콘 크기
+/// (`max`까지)
+fn icon_size_for(screen: i32, items: i32, separators: i32, max: i32) -> i32 {
     if items <= 0 {
         return max;
     }
@@ -382,22 +454,36 @@ fn icon_size_for(screen: i32, items: i32, separator: bool, max: i32) -> i32 {
         + 2 * SCREEN_MARGIN
         + (items - 1) * ITEM_SPACING
         + items * ITEM_PADDING
-        + if separator { SEPARATOR_WIDTH } else { 0 };
+        + separators * SEPARATOR_WIDTH;
     ((screen - fixed) / items).clamp(MIN_ICON_SIZE.min(max), max)
 }
 
-/// 위젯 아래의 모든 아이콘
-fn images_in(widget: &gtk::Widget) -> Vec<gtk::Image> {
-    let mut images = Vec::new();
-    let mut child = widget.first_child();
-    while let Some(current) = child {
-        match current.downcast_ref::<gtk::Image>() {
-            Some(image) => images.push(image.clone()),
-            None => images.extend(images_in(&current)),
+/// Dock에서 크기를 맞출 것: 아이콘(앱 아이콘과 최소화한 창 그림), 창 그림 위 앱 아이콘, 보이는
+/// 구분선 수
+#[derive(Default)]
+struct DockParts {
+    icons: Vec<gtk::Image>,
+    badges: Vec<gtk::Image>,
+    separators: i32,
+}
+
+impl DockParts {
+    fn collect(&mut self, widget: &gtk::Widget) {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(image) = current.downcast_ref::<gtk::Image>() {
+                match image.has_css_class("dock-badge") {
+                    true => self.badges.push(image.clone()),
+                    false => self.icons.push(image.clone()),
+                }
+            } else if current.is::<gtk::Separator>() {
+                self.separators += i32::from(current.is_visible());
+            } else {
+                self.collect(&current);
+            }
+            child = current.next_sibling();
         }
-        child = current.next_sibling();
     }
-    images
 }
 
 #[cfg(test)]
@@ -407,13 +493,24 @@ mod tests {
     #[test]
     fn icons_shrink_only_when_the_dock_would_overflow() {
         // 1024×640처럼 보이는 화면에는 기본 Dock(앱 10개)이 그대로 들어간다
-        assert_eq!(icon_size_for(1024, 10, false, 48), 48);
+        assert_eq!(icon_size_for(1024, 10, 0, 48), 48);
         // 좁은 화면이나 실행 중인 앱이 많으면 줄인다
-        assert_eq!(icon_size_for(640, 10, false, 48), 41);
-        assert_eq!(icon_size_for(1024, 16, true, 48), 43);
+        assert_eq!(icon_size_for(640, 10, 0, 48), 41);
+        assert_eq!(icon_size_for(1024, 16, 1, 48), 43);
+        // 최소화한 창 칸의 구분선도 자리를 차지한다
+        assert_eq!(icon_size_for(1013, 16, 1, 48), 43);
+        assert_eq!(icon_size_for(1013, 16, 2, 48), 42);
         // 그래도 24보다 작게는 줄이지 않는다
-        assert_eq!(icon_size_for(400, 20, true, 48), 24);
-        assert_eq!(icon_size_for(1024, 0, false, 48), 48);
+        assert_eq!(icon_size_for(400, 20, 1, 48), 24);
+        assert_eq!(icon_size_for(1024, 0, 0, 48), 48);
+    }
+
+    #[test]
+    fn badges_are_two_fifths_of_the_picture() {
+        assert_eq!(badge_size(48), 19);
+        assert_eq!(badge_size(96), 38);
+        // 작은 Dock에서도 알아볼 수 있게 12px보다 작게는 줄이지 않는다
+        assert_eq!(badge_size(24), 12);
     }
 
     #[test]

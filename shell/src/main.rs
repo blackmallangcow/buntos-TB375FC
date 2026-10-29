@@ -15,6 +15,7 @@ mod extras;
 mod input_source;
 mod launcher;
 mod menubar;
+mod minimized;
 mod network;
 mod notification_center;
 mod notifications;

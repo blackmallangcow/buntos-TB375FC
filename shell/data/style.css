@@ -159,6 +159,12 @@ menubutton.dock-item > button:checked {
   background: var(--separator);
 }
 
+/* 최소화한 창의 그림. 오른쪽 아래의 앱 아이콘은 그림 위에 얹는다(dock.rs). 창 그림은 컴포지터가 둥근
+   모서리째 떠서 보낸다. 흰 창이 유리 판에 묻히지 않게 창 모양을 따라 옅은 그림자를 둔다 */
+image.dock-window {
+  -gtk-icon-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
 /* 모든 앱 (macOS 26 응용 프로그램 창): 화면을 덮는 투명한 창 가운데의 유리 패널 */
 .launcher-panel {
   padding: var(--space-3) var(--space-5) var(--space-2);
