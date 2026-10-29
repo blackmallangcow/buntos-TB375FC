@@ -6,7 +6,8 @@
 # 넣고(boot-to-shell.sh), 이 스크립트는 준비와 확인만 한다. 그래서 키가 실제 입력과 같은 길(libinput →
 # 컴포지터 단축키 → 앱)을 거친다. 직렬 콘솔의 root로 실행하며 마지막 줄이 답이다.
 # 사용법: shortcuts.sh prepare | value | focus | screenshots | dbus | terminal-prepare | terminal |
-#         chord-prepare | input-method | chord-reset
+#         chord-prepare | input-method | chord-reset | minimize-button | restore-dock | switcher |
+#         preview | toolbar
 set -u
 
 user=buntos
@@ -17,6 +18,18 @@ compositor() {
 		busctl --user call org.buntos.Compositor /org/buntos/Compositor org.buntos.Compositor1 "$@" 2>&1
 }
 document() { A snapshot --app org.gnome.TextEditor -i | grep -m1 textbox | grep -o 'ref=e[0-9]*' | cut -d= -f2; }
+# 셸의 Dock에서 그 이름의 단추 (최소화한 창은 창 제목이 이름이다)
+dock_button() { A snapshot --app bunt-shell -i | grep -aF "button \"$1\"" | grep -o 'ref=e[0-9]*' | head -1 | cut -d= -f2; }
+# 최소화 단추로 내린 텍스트 편집기 창의 제목
+minimized_title=/tmp/e2e-minimized-title
+# 셸의 그 이름의 창이 뜰 때까지 20초 기다려 shown이나 hidden을 답한다 (숨은 창은 에이전트에 보이지 않는다)
+shell_window() {
+	for _ in $(seq 40); do
+		A snapshot --app bunt-shell -i | grep -aq "window \"$1\"" && break
+		sleep 0.5
+	done
+	A snapshot --app bunt-shell -i | grep -aq "window \"$1\"" && echo shown || echo hidden
+}
 
 case "${1:-}" in
 prepare)
@@ -80,8 +93,40 @@ dbus)
 	reset=$(compositor GetShortcuts | grep -c '"accelerator" s "<Alt>c"')
 	echo "$((count > 40)) $conflict $changed $reset"
 	;;
+minimize-button)
+	# 텍스트 편집기 창의 최소화 단추(앱이 xdg_toplevel.set_minimized를 보낸다)를 누르고, 그 창이 Dock의
+	# 최소화 칸에 창 제목으로 놓일 때까지 기다린다. 그 단추 수를 답한다
+	A apps | grep -a -A3 '^gnome-text-editor' | grep -a -m1 'window "' |
+		sed 's/^ *- window "\(.*\)"\( \[.*\)\?$/\1/' >"$minimized_title"
+	title=$(cat "$minimized_title")
+	button=$(A snapshot --app org.gnome.TextEditor -i | grep -a -m1 'button "최소화"' | grep -o 'ref=e[0-9]*' | cut -d= -f2)
+	A click "$button" --app org.gnome.TextEditor >/dev/null
+	for _ in $(seq 40); do
+		[[ -n "$(dock_button "$title")" ]] && break
+		sleep 0.5
+	done
+	echo "docked $(A snapshot --app bunt-shell -i | grep -acF "button \"$title\"")"
+	;;
+restore-dock)
+	# Dock의 최소화 칸에서 그 창을 누르고, 키보드 포커스를 가진 앱 ID를 답한다
+	A click "$(dock_button "$(cat "$minimized_title")")" --app bunt-shell >/dev/null
+	sleep 1
+	compositor GetFocus | sed -E 's/^ussb [0-9]+ "([^"]*)".*/\1/'
+	;;
+switcher)
+	# ⌘를 누른 채 ⇥를 누른 동안 셸의 앱 전환 창이 뜨는지 (뜨기 전 잠깐 기다리고, 느린 VM은 처음 그리기가 늦다)
+	shell_window bunt-switcher
+	;;
+preview)
+	# 저장한 스크린샷의 미리 보기(플로팅 썸네일)가 뜨는지
+	shell_window bunt-screenshot-preview
+	;;
+toolbar)
+	# ⇧⌘5 스크린샷 도구 막대가 뜨는지
+	shell_window bunt-screenshot
+	;;
 *)
-	echo "사용법: $0 prepare | value | focus | screenshots | dbus | terminal-prepare | terminal | chord-prepare | input-method | chord-reset" >&2
+	echo "사용법: $0 prepare | value | focus | screenshots | dbus | terminal-prepare | terminal | chord-prepare | input-method | chord-reset | minimize-button | restore-dock | switcher | preview | toolbar" >&2
 	exit 2
 	;;
 esac

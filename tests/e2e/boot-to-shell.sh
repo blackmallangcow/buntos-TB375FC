@@ -213,6 +213,19 @@ if [[ "$agent_refs" != NONE ]]; then
 	keys keys:meta_l+tab sleep:1
 	guest focus
 	check "⌘⇥로 최소화한 앱이 돌아온다" "$answer" org.buntos.Settings
+	# 창의 최소화 단추로 내린 창은 Dock 오른쪽 끝의 최소화 칸에 놓이고, 누르면 돌아온다
+	guest minimize-button
+	check "창의 최소화 단추로 내린 창이 Dock의 최소화 칸에 놓인다" "$answer" "docked 1"
+	guest restore-dock
+	check "Dock의 최소화 칸을 누르면 그 창이 돌아온다" "$answer" org.gnome.TextEditor
+	# ⌘를 누른 채 ⇥를 누르면 앱 전환 창이 뜨고, ⌘를 떼면 고른 앱(바로 앞에 쓴 앱)으로 간다. 앞의 keys는
+	# 키를 함께 눌렀다 떼므로 여기서는 ⌘를 따로 누르고 뗀다
+	keys down:meta_l sleep:0.1 down:tab sleep:0.05 up:tab
+	guest switcher
+	check "⌘⇥를 누르고 있으면 앱 전환 창이 뜬다" "$answer" shown
+	keys up:meta_l sleep:1
+	guest focus
+	check "⌘를 떼면 앱 전환 창에서 고른 앱으로 간다" "$answer" org.buntos.Settings
 	keys keys:meta_l+spc sleep:1.5
 	guest focus
 	check "⌘스페이스로 모든 앱을 연다" "$answer" bunt-launcher
@@ -220,9 +233,16 @@ if [[ "$agent_refs" != NONE ]]; then
 	guest screenshots
 	before=$answer
 	[[ "$before" =~ ^[0-9]+$ ]] || fail "e2e 6번: 스크린샷 수를 읽지 못했다 ($before)"
-	keys keys:shift+meta_l+3 sleep:3
+	# 미리 보기는 5초 뒤 사라지므로 저장한 파일을 세기 전에 본다
+	keys keys:shift+meta_l+3 sleep:1
+	guest preview
+	check "저장한 스크린샷이 화면 오른쪽 아래에 미리 보기로 뜬다" "$answer" shown
 	guest screenshots
 	check "⇧⌘3으로 화면을 사진 폴더에 저장한다" "$answer" "$((before + 1))"
+	keys keys:shift+meta_l+5
+	guest toolbar
+	check "⇧⌘5로 스크린샷 도구 막대를 연다" "$answer" shown
+	keys keys:esc sleep:1
 	guest dbus
 	check "단축키 API (목록, 겹치는 키 거절, 바꾸기, 기본값)" "$answer" "1 1 1 0"
 	# 터미널: 편집기에서 ⌘C로 복사한 명령을 ⌥↩로 연 foot에 ⌘V(Ctrl+Shift+V로 간다)로 붙여 실행하고 ⌘W로 닫는다
