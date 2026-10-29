@@ -71,6 +71,15 @@ const LAUNCH_TREE_WAIT: Duration = Duration::from_secs(4);
 /// 포털을 기다리느라 바쁜 앱은 늦게 켠다
 const TEXT_INPUT_WAIT: Duration = Duration::from_secs(1);
 const TEXT_INPUT_STEP: Duration = Duration::from_millis(20);
+/// 화면 밖 요소를 휠로 보이게 할 때 돌리는 횟수의 상한과 그 사이의 쉼
+const SCROLL_TURNS: usize = 30;
+const SCROLL_PAUSE: Duration = Duration::from_millis(120);
+/// 한 번에 돌리는 눈금 수의 상한과 눈금 하나로 어림하는 거리(논리 픽셀). GTK는 눈금 하나에 페이지
+/// 크기에 따라 수십 픽셀을 움직이므로 넉넉히 어림해 지나치지 않게 한다
+const SCROLL_NOTCHES: f64 = 5.0;
+const SCROLL_PIXELS: f64 = 60.0;
+/// 스크롤한 뒤 요소가 보이기(SHOWING)를 기다리는 시간
+const SHOWN_WAIT: Duration = Duration::from_secs(1);
 /// 스크린샷 폴더($XDG_RUNTIME_DIR, 메모리)에 남기는 파일 수
 const SCREENSHOTS_KEPT: usize = 20;
 /// 세션을 열 때 접근성을 켜며 버스의 답을 기다리는 시간. 로그인 중의 VM에서는 접근성 버스가 뜨는 데
@@ -84,6 +93,18 @@ struct Target {
     window_title: String,
     item: Option<Item>,
     parent: Option<Item>,
+    /// 요소가 웹 페이지에서 스크롤해 가려졌다 (동작 전에 보이게 스크롤한다)
+    off_screen: bool,
+    /// 요소가 웹 페이지 안에 있다 (Firefox는 그 동작과 자리를 늦게 알린다)
+    web: bool,
+}
+
+/// ref 없는 동작(press, type, scroll)을 받을 창
+enum Chosen {
+    /// 접근성 트리가 있는 창
+    Tree(Box<Target>),
+    /// 트리가 없는 창 (pid, 제목). 키와 휠은 보내고 diff는 없다
+    Blind(u32, String),
 }
 
 /// 그린 범위: 머리줄을 포함한 트리 글과 그 앱의 보이는 창 (경로, 제목)
@@ -840,8 +861,12 @@ impl Agent {
         let target = tree
             .get(&path)
             .ok_or_else(|| agent_error(format!("{reference} is gone; take a new snapshot")))?;
-        if !target.shown() {
-            return Err(agent_error(format!("{reference} is not on screen")));
+        // 웹 페이지에서 스크롤해 가려진 요소는 동작이 먼저 보이게 스크롤한다. 숨긴 요소(닫힌 팝오버, 다른
+        // 탭 페이지)는 스크롤해도 보이지 않는다
+        if !tree.visible(target) {
+            return Err(agent_error(format!(
+                "{reference} is hidden (in a closed popover, another tab page or the like)"
+            )));
         }
         if target.states & (state::SENSITIVE | state::ENABLED) == 0 {
             return Err(agent_error(format!("{reference} is disabled")));
@@ -860,6 +885,8 @@ impl Agent {
             window_title,
             parent: tree.get(&target.parent).cloned(),
             item: Some(target.clone()),
+            off_screen: tree.off_screen(target),
+            web: tree.in_web_page(target),
         })
     }
 
@@ -896,7 +923,7 @@ impl Agent {
         }
         let session = params.session.clone().unwrap_or_else(|| "default".into());
         let found = if params.target.is_empty() {
-            if params.action != "press" && params.action != "type" {
+            if !matches!(params.action.as_str(), "press" | "type" | "scroll") {
                 let or = if params.action == "click" {
                     " or --at x,y"
                 } else {
@@ -907,24 +934,29 @@ impl Agent {
                     format!("{} needs a ref{or}", params.action),
                 ));
             }
-            // 키는 지금 키보드 포커스를 가진 창으로 간다
+            if params.action == "scroll" && params.amount.is_none() {
+                return Err((
+                    protocol::INVALID_PARAMS,
+                    "scroll needs a direction (up, down, left, right) or a ref".into(),
+                ));
+            }
+            // 키와 휠은 `--app`의 창이나 지금 키보드 포커스를 가진 창으로 간다
             if a11y.auth_dialog_focused().await {
                 return Err(auth_dialog());
             }
-            let apps = self.list(&a11y).await?;
-            let focus = a11y.focus().await;
-            let Some((app, window)) = active_window(&apps, focus.as_ref()) else {
-                return self.press_blind(&a11y, &params, focus.as_ref()).await;
-            };
-            Target {
-                bus: app.bus.clone(),
-                window: window.path.clone(),
-                window_title: window.title.clone(),
-                item: None,
-                parent: None,
+            match self.window_for(&a11y, params.app.as_deref()).await? {
+                Chosen::Tree(target) => *target,
+                Chosen::Blind(pid, title) => {
+                    return self.act_blind(&a11y, &params, pid, &title).await;
+                }
             }
         } else {
-            self.find_target(&a11y, &session, &params.target).await?
+            let target = self.find_target(&a11y, &session, &params.target).await?;
+            if let Some(query) = &params.app {
+                self.check_ref_app(&a11y, &target.bus, query, &params.target)
+                    .await?;
+            }
+            target
         };
         self.check_app(&a11y, &found.bus).await?;
         let Target {
@@ -933,11 +965,47 @@ impl Agent {
             window_title,
             item,
             parent,
+            off_screen,
+            web,
         } = found;
 
         let roots = [window.clone()];
         let before = self.render(&a11y, &session, &bus, &roots, FULL).await?;
-        let (mut done, expect) = match (params.action.as_str(), &item) {
+        // 화면 밖 요소는 사람처럼 먼저 보이게 스크롤한다 (휠만 돌릴 scroll은 그 자리에서 돌린다)
+        let wheel_only = params.action == "scroll" && params.amount.is_some();
+        let scrolled = match item.as_ref().filter(|_| off_screen && !wheel_only) {
+            Some(target) => Some(
+                scroll_into_view(&a11y, &bus, &window_title, target)
+                    .await
+                    .map_err(|(code, message)| (code, format!("{}: {message}", params.target)))?,
+            ),
+            None => None,
+        };
+        let (done, expect) = match (params.action.as_str(), &item) {
+            ("scroll", Some(_)) if !wheel_only => (
+                scrolled
+                    .clone()
+                    .unwrap_or_else(|| "it is already on screen".into()),
+                None,
+            ),
+            ("scroll", target) => {
+                let pid = a11y
+                    .pid(&bus)
+                    .await
+                    .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
+                let over = target.as_ref().map(|target| (bus.as_str(), target));
+                (
+                    wheel(
+                        &a11y,
+                        pid,
+                        &window_title,
+                        over,
+                        params.amount.unwrap_or_default(),
+                    )
+                    .await?,
+                    None,
+                )
+            }
             ("press" | "type", _) => {
                 press(&a11y, &bus, &window_title, item.as_ref(), &params).await?
             }
@@ -950,7 +1018,7 @@ impl Agent {
                 None,
             ),
             (_, Some(target)) => {
-                let done = match perform(&a11y, &bus, target, parent.as_ref(), &params).await? {
+                let done = match perform(&a11y, &bus, target, parent.as_ref(), web, &params).await? {
                     Some(done) => done,
                     // 접근성 동작이 없는 요소는 사람처럼 포인터로 누른다
                     None => format!(
@@ -963,10 +1031,14 @@ impl Agent {
                     .then(|| Expect::Text(params.value.clone().unwrap_or_default()));
                 (done, expect)
             }
-            (_, None) => unreachable!("only press and type work without a ref"),
+            (_, None) => unreachable!("only press, type and scroll work without a ref"),
+        };
+        let mut done = match scrolled.filter(|_| params.action != "scroll") {
+            Some(scrolled) => format!("{scrolled}, then {done}"),
+            None => done,
         };
 
-        let settled = self
+        let settled = match self
             .settle(
                 &a11y,
                 &session,
@@ -975,7 +1047,23 @@ impl Agent {
                 &before.text,
                 settle_limit(params.settle_ms),
             )
-            .await?;
+            .await
+        {
+            Ok(settled) => settled,
+            // 동작이 앱을 끝냈다 (닫기, 문서 버리기): 동작은 됐으므로 실패로 알리지 않는다. 실패로 보이면
+            // AI가 같은 동작을 되풀이할 수 있다
+            Err(_) if a11y.pid(&bus).await.is_none() => {
+                return Ok(Acted {
+                    done: format!("{done}; then the app quit (window {window_title:?} closed)"),
+                    diff: String::new(),
+                    settled_ms: 0,
+                    settled: true,
+                    observed: false,
+                    new_windows: Vec::new(),
+                });
+            }
+            Err(failure) => return Err(failure),
+        };
         let acted = self.finish(&session, &bus, &window, &before, settled, done.clone());
         tracing::info!(
             action = %params.action,
@@ -1041,13 +1129,29 @@ impl Agent {
         done: String,
     ) -> Acted {
         let after = settled.after;
-        let diff = diff::unified(&before.text, &after.text);
         let new_windows = after
             .windows
             .iter()
             .filter(|(path, _)| !before.windows.iter().any(|(known, _)| known == path))
             .map(|(_, title)| title.clone())
             .collect();
+        // 동작이 그 창을 닫았다 (앱은 남았다): 사라진 줄의 diff 대신 닫혔다고 알린다
+        if !after.windows.iter().any(|(path, _)| path == window) {
+            let title = before
+                .windows
+                .iter()
+                .find(|(path, _)| path == window)
+                .map_or("", |(_, title)| title.as_str());
+            return Acted {
+                done: format!("{done}; then its window {title:?} closed"),
+                diff: String::new(),
+                settled_ms: settled.ms,
+                settled: settled.settled,
+                observed: false,
+                new_windows,
+            };
+        }
+        let diff = diff::unified(&before.text, &after.text);
         let scope = format!("window {bus} {window}");
         self.sessions
             .get(session)
@@ -1062,24 +1166,108 @@ impl Agent {
         }
     }
 
-    /// 키보드 포커스를 가진 창에 접근성 트리가 없을 때의 press·type: 키와 글은 그 창으로 가고 diff는 없다
-    async fn press_blind(
+    /// ref 없는 동작(press, type, scroll)을 받을 창: `--app`의 창(트리가 있으면 그 앱의 활성 창이나 첫
+    /// 창)이나 키보드 포커스를 가진 창. `--app`의 창은 키와 휠이 그리로 가게 앞으로 가져온다
+    async fn window_for(&mut self, a11y: &A11y, app: Option<&str>) -> Result<Chosen, Failure> {
+        let apps = self.list(a11y).await?;
+        let Some(query) = app else {
+            let focus = a11y.focus().await;
+            if let Some((app, window)) = active_window(&apps, focus.as_ref()) {
+                return Ok(Chosen::Tree(Box::new(Target {
+                    bus: app.bus.clone(),
+                    window: window.path.clone(),
+                    window_title: window.title.clone(),
+                    item: None,
+                    parent: None,
+                    off_screen: false,
+                    web: false,
+                })));
+            }
+            return match focus.filter(|focus| !focus.layer) {
+                Some(focus) => Ok(Chosen::Blind(focus.pid, focus.title)),
+                None => Err(agent_error(
+                    "no window has the keyboard focus; pass --app or a ref",
+                )),
+            };
+        };
+        let placed = a11y.windows().await.unwrap_or_else(|err| {
+            tracing::warn!("cannot read the window list: {err}");
+            Vec::new()
+        });
+        let installed = desktop::installed(&desktop::language());
+        if let Ok(app) = find_app(&apps, &placed, &installed, query)
+            && let Some(window) = app
+                .windows
+                .iter()
+                .find(|window| window.states & state::ACTIVE != 0)
+                .or_else(|| app.windows.first())
+        {
+            if let Some(pid) = app.pid {
+                activate(a11y, pid, &window.title).await?;
+            }
+            return Ok(Chosen::Tree(Box::new(Target {
+                bus: app.bus.clone(),
+                window: window.path.clone(),
+                window_title: window.title.clone(),
+                item: None,
+                parent: None,
+                off_screen: false,
+                web: false,
+            })));
+        }
+        // 트리가 없는 창 (접근성을 켜기 전에 뜬 Firefox, foot 등)
+        let window = find_window(&placed, &apps, &installed, query)?;
+        Ok(Chosen::Blind(window.pid, window.title.clone()))
+    }
+
+    /// ref가 `--app`이 가리키는 앱의 것인지. 아니면 어느 앱의 것인지 알린다
+    async fn check_ref_app(
+        &mut self,
+        a11y: &A11y,
+        bus: &str,
+        query: &str,
+        reference: &str,
+    ) -> Result<(), Failure> {
+        let apps = self.list(a11y).await?;
+        let placed = a11y.windows().await.unwrap_or_default();
+        let installed = desktop::installed(&desktop::language());
+        let app = find_app(&apps, &placed, &installed, query)?;
+        if app.bus == bus {
+            return Ok(());
+        }
+        let owner = apps
+            .iter()
+            .find(|app| app.bus == bus)
+            .map_or(bus, |app| app.name.as_str());
+        Err((
+            protocol::INVALID_PARAMS,
+            format!(
+                "{reference} is in {owner}, not in {}; drop --app (a ref already names its app)",
+                app.name
+            ),
+        ))
+    }
+
+    /// 접근성 트리가 없는 창에 키·글·휠을 보낸다: 그 창을 앞으로 가져와 보내고, diff는 없다
+    async fn act_blind(
         &mut self,
         a11y: &A11y,
         params: &ActParams,
-        focus: Option<&Focus>,
+        pid: u32,
+        title: &str,
     ) -> Result<Acted, Failure> {
-        let Some(focus) = focus.filter(|focus| !focus.layer) else {
-            return Err(agent_error("no window has the keyboard focus; pass a ref"));
-        };
-        if self.blocked_pids(a11y).await?.contains(&focus.pid) {
+        if self.blocked_pids(a11y).await?.contains(&pid) {
             return Err(blocked_app());
         }
-        let (done, _) = press(a11y, "", &focus.title, None, params).await?;
+        activate(a11y, pid, title).await?;
+        let done = if params.action == "scroll" {
+            wheel(a11y, pid, title, None, params.amount.unwrap_or_default()).await?
+        } else {
+            press(a11y, "", title, None, params).await?.0
+        };
         Ok(Acted {
             done: format!(
-                "{done} in {:?}, which has no accessibility tree (take a screenshot to see it)",
-                focus.title
+                "{done} in {title:?}, which has no accessibility tree (take a screenshot to see it)"
             ),
             diff: String::new(),
             settled_ms: 0,
@@ -1318,11 +1506,16 @@ fn reason(err: &zbus::Error) -> String {
 
 /// 접근성 트리가 없는 창을 읽으려 할 때의 알림
 fn no_tree(window: &str, app_id: &str, pid: u32) -> String {
+    let why = if no_accessibility(app_id) {
+        "this app does not support accessibility at all, so a restart does not help"
+    } else {
+        "Chromium, Electron, Firefox and Qt apps that started before accessibility was turned on \
+         (before an AI was first allowed) expose it only after a restart"
+    };
     format!(
-        "{window} ({app_id}, pid {pid}) has no accessibility tree: Chromium, Electron, Firefox and \
-         Qt apps that started before accessibility was turned on expose it only after a restart. \
-         Pass --app to read another app (see `bunt agent apps`), or use `bunt agent screenshot` \
-         and `click --at` on this one"
+        "{window} ({app_id}, pid {pid}) has no accessibility tree: {why}. Pass --app to read \
+         another app (see `bunt agent apps`), or use `bunt agent screenshot` and `click --at` \
+         on this one"
     )
 }
 
@@ -1388,6 +1581,7 @@ async fn perform(
     bus: &str,
     target: &Item,
     parent: Option<&Item>,
+    web: bool,
     params: &ActParams,
 ) -> Result<Option<String>, Failure> {
     let failed = |what: &str, err: zbus::Error| agent_error(format!("{what} failed: {err}"));
@@ -1405,7 +1599,7 @@ async fn perform(
         .map(|parent| (parent.path.as_str(), target.index));
     match params.action.as_str() {
         "click" => {
-            let actions = a11y.actions(bus, &target.path).await;
+            let actions = a11y.actions(bus, &target.path, web).await;
             if let Some((index, name)) = CLICK_ACTIONS.iter().find_map(|wanted| {
                 actions
                     .iter()
@@ -1528,8 +1722,22 @@ fn untracked(apps: &[AppRef], placed: &[Placed], installed: &[DesktopApp]) -> Ve
             app_id: window.app_id.clone(),
             pid: window.pid,
             title: window.title.clone(),
+            unsupported: no_accessibility(&window.app_id),
         })
         .collect()
+}
+
+/// 접근성(AT-SPI)을 아예 지원하지 않는 앱 (앱 ID). 다시 켜도 트리가 없다
+const NO_ACCESSIBILITY: [&str; 5] = [
+    "foot",
+    "footclient",
+    "Alacritty",
+    "kitty",
+    "org.wezfurlong.wezterm",
+];
+
+fn no_accessibility(app_id: &str) -> bool {
+    NO_ACCESSIBILITY.contains(&app_id)
 }
 
 /// `--app`이 가리키는 컴포지터 창 (접근성 트리가 없는 창도). 차례로: pid나 앱 ID가 같은 창, 설치된 앱
@@ -1600,7 +1808,7 @@ fn in_scope(items: &[Item], roots: &[String], hidden: bool) -> Vec<usize> {
     let mut stack: Vec<&str> = roots.iter().map(String::as_str).collect();
     while let Some(path) = stack.pop() {
         let Some(item) = tree.get(path) else { continue };
-        if !hidden && !item.shown() {
+        if !hidden && !tree.visible(item) {
             continue;
         }
         if item.wants_value() || item.wants_text() || item.wants_attributes() {
@@ -1855,17 +2063,7 @@ async fn pointer_click(
         .pid(bus)
         .await
         .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
-    let windows = a11y
-        .windows()
-        .await
-        .map_err(|err| agent_error(format!("cannot read the window list: {err}")))?;
-    let window = windows
-        .iter()
-        .rev()
-        .filter(|window| window.pid == pid)
-        .find(|window| window.title == window_title)
-        .or_else(|| windows.iter().rev().find(|window| window.pid == pid))
-        .ok_or_else(|| agent_error("the compositor has no window for this app"))?;
+    let window = compositor_window(a11y, pid, window_title).await?;
     let (x, y, width, height) = a11y
         .extents(bus, &target.path)
         .await
@@ -1874,9 +2072,7 @@ async fn pointer_click(
         return Err(agent_error("the element has no size on screen"));
     }
     // 다른 창에 가려 있으면 그 창을 누르게 되므로 먼저 앞으로 가져온다
-    a11y.activate_window(pid, &window.title)
-        .await
-        .map_err(|err| agent_error(format!("activating the window failed: {err}")))?;
+    activate(a11y, pid, &window.title).await?;
     let at = (
         f64::from(window.x + x) + f64::from(width) / 2.0,
         f64::from(window.y + y) + f64::from(height) / 2.0,
@@ -1888,6 +2084,182 @@ async fn pointer_click(
         "clicked with the pointer at ({:.0}, {:.0})",
         at.0, at.1
     ))
+}
+
+/// 컴포지터가 놓은 그 pid의 창: 제목이 같은 창, 없으면 맨 위 창
+async fn compositor_window(a11y: &A11y, pid: u32, title: &str) -> Result<Placed, Failure> {
+    let windows = a11y
+        .windows()
+        .await
+        .map_err(|err| agent_error(format!("cannot read the window list: {err}")))?;
+    windows
+        .iter()
+        .rev()
+        .filter(|window| window.pid == pid)
+        .find(|window| window.title == title)
+        .or_else(|| windows.iter().rev().find(|window| window.pid == pid))
+        .cloned()
+        .ok_or_else(|| agent_error("the compositor has no window for this app"))
+}
+
+/// 창을 앞으로 가져온다
+async fn activate(a11y: &A11y, pid: u32, title: &str) -> Result<(), Failure> {
+    a11y.activate_window(pid, title)
+        .await
+        .map_err(|err| agent_error(format!("activating the window failed: {err}")))?;
+    Ok(())
+}
+
+/// 휠을 돌린다: 요소가 있으면 그 위에서, 없으면 창 가운데에서. 눈금 수는 (가로, 세로)이고
+/// 오른쪽·아래가 +다. 휠은 포인터 아래의 스크롤 영역을 움직이므로 요소는 스크롤할 목록이나 문서다
+async fn wheel(
+    a11y: &A11y,
+    pid: u32,
+    window_title: &str,
+    over: Option<(&str, &Item)>,
+    [dx, dy]: [f64; 2],
+) -> Result<String, Failure> {
+    let window = compositor_window(a11y, pid, window_title).await?;
+    let (width, height) = (f64::from(window.width), f64::from(window.height));
+    let (x, y) = match over {
+        Some((bus, target)) => {
+            let (x, y, w, h) = a11y
+                .extents(bus, &target.path)
+                .await
+                .map_err(|err| agent_error(format!("cannot tell where the element is: {err}")))?;
+            // 창보다 큰 문서는 창 안에 보이는 부분의 가운데
+            let middle = |start: i32, length: i32, size: f64| {
+                let from = f64::from(start).max(0.0);
+                let to = f64::from(start.saturating_add(length)).min(size);
+                if to > from {
+                    (from + to) / 2.0
+                } else {
+                    size / 2.0
+                }
+            };
+            (middle(x, w, width), middle(y, h, height))
+        }
+        None => (width / 2.0, height / 2.0),
+    };
+    activate(a11y, pid, &window.title).await?;
+    let at = (f64::from(window.x) + x, f64::from(window.y) + y);
+    a11y.scroll(at.0, at.1, dx, dy)
+        .await
+        .map_err(|err| agent_error(format!("scrolling failed: {}", reason(&err))))?;
+    Ok(format!(
+        "scrolled {} at ({:.0}, {:.0})",
+        notches(dx, dy),
+        at.0,
+        at.1
+    ))
+}
+
+/// "down 5 notches", "left 2 notches and up 1 notch"
+fn notches(dx: f64, dy: f64) -> String {
+    let one = |amount: f64, minus: &str, plus: &str| {
+        let count = amount.abs();
+        let unit = if count == 1.0 { "notch" } else { "notches" };
+        let way = if amount < 0.0 { minus } else { plus };
+        format!("{way} {count} {unit}")
+    };
+    match (dx != 0.0, dy != 0.0) {
+        (true, true) => format!("{} and {}", one(dx, "left", "right"), one(dy, "up", "down")),
+        (true, false) => one(dx, "left", "right"),
+        _ => one(dy, "up", "down"),
+    }
+}
+
+/// 화면 밖 요소를 보이게 스크롤한다. 앱이 스스로 하면(Component.ScrollTo, Firefox) 그것을 쓰고, 못
+/// 하면(GTK4는 지원하지 않는다) 요소가 있는 쪽으로 창 가운데에서 휠을 돌리며 요소가 창 안에 들어올
+/// 때까지 다시 본다
+async fn scroll_into_view(
+    a11y: &A11y,
+    bus: &str,
+    window_title: &str,
+    target: &Item,
+) -> Result<String, Failure> {
+    let path = target.path.as_str();
+    // Firefox는 웹 페이지 요소의 자리를 받아 둔 뒤에야 ScrollTo 뒤의 보임 상태(SHOWING)를 고친다
+    let _ = a11y.extents(bus, path).await;
+    if matches!(a11y.scroll_to(bus, path).await, Ok(true))
+        && wait_until_shown(a11y, bus, path).await
+    {
+        return Ok("scrolled it into view".into());
+    }
+    let pid = a11y
+        .pid(bus)
+        .await
+        .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
+    let window = compositor_window(a11y, pid, window_title).await?;
+    activate(a11y, pid, &window.title).await?;
+    let center = (
+        f64::from(window.x) + f64::from(window.width) / 2.0,
+        f64::from(window.y) + f64::from(window.height) / 2.0,
+    );
+    let mut last = None;
+    for turn in 1..=SCROLL_TURNS {
+        let (x, y, width, height) = a11y
+            .extents(bus, path)
+            .await
+            .map_err(|err| agent_error(format!("cannot tell where it is: {err}")))?;
+        let (dx, dy) = (
+            toward(x, width, window.width),
+            toward(y, height, window.height),
+        );
+        if dx == 0.0 && dy == 0.0 {
+            if wait_until_shown(a11y, bus, path).await {
+                return Ok(format!(
+                    "scrolled it into view with the wheel ({turn} turns)"
+                ));
+            }
+            break;
+        }
+        // 더 움직이지 않으면 끝에 닿았거나 휠로 움직이는 영역이 아니다
+        if last == Some((x, y)) {
+            break;
+        }
+        last = Some((x, y));
+        a11y.scroll(center.0, center.1, dx, dy)
+            .await
+            .map_err(|err| agent_error(format!("scrolling failed: {}", reason(&err))))?;
+        async_io::Timer::after(SCROLL_PAUSE).await;
+    }
+    Err(agent_error(
+        "it is off screen and scrolling did not bring it into view; scroll the list or page that \
+         holds it (bunt agent scroll down --ref <list>) and take a new snapshot",
+    ))
+}
+
+/// 요소(창 기준 start, 길이 length)가 창(크기 size) 밖에 있는 쪽으로 돌릴 눈금 수. 멀수록 많이
+/// 돌리되(한 번에 SCROLL_NOTCHES까지) 창 안이면 0이다. 창보다 큰 요소는 머리를 창 위에 맞춘다
+fn toward(start: i32, length: i32, size: i32) -> f64 {
+    let distance = if start < 0 {
+        start
+    } else if start + length > size {
+        (start + length - size).min(start)
+    } else {
+        return 0.0;
+    };
+    let notches = (f64::from(distance) / SCROLL_PIXELS).round();
+    notches
+        .clamp(-SCROLL_NOTCHES, SCROLL_NOTCHES)
+        .abs()
+        .max(1.0)
+        * f64::from(distance.signum())
+}
+
+/// 요소가 보일 때까지(SHOWING) 잠깐 기다린다
+async fn wait_until_shown(a11y: &A11y, bus: &str, path: &str) -> bool {
+    let started = Instant::now();
+    loop {
+        if a11y.states(bus, path).await & state::SHOWING != 0 {
+            return true;
+        }
+        if started.elapsed() >= SHOWN_WAIT {
+            return false;
+        }
+        async_io::Timer::after(SETTLE_STEP).await;
+    }
 }
 
 #[cfg(test)]

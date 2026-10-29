@@ -9,7 +9,7 @@
 use std::{
     collections::{HashMap, HashSet},
     pin::pin,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_io::Timer;
@@ -38,6 +38,8 @@ const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 const APPLICATION: &str = "org.freedesktop.Application";
 /// AtspiCoordType의 WINDOW: 창(최상위 표면) 기준 좌표
 const COORD_WINDOW: u32 = 1;
+/// Component.ScrollTo의 ATSPI_SCROLL_ANYWHERE: 보이게만 한다
+const SCROLL_ANYWHERE: u32 = 6;
 /// linux 입력의 왼쪽 단추 (BTN_LEFT)
 const BUTTON_LEFT: u32 = 0x110;
 /// 한 번에 보내는 호출 수
@@ -50,6 +52,12 @@ const MAX_ITEMS: usize = 20_000;
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// 컴포지터가 창을 그려 PNG로 만들기를 기다리는 시간 (소프트웨어 렌더링 VM에서 큰 창)
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Firefox는 웹 페이지 요소의 자리와 동작을 처음 물으면 모른다고(자리 (-1, -1, -1, -1), 동작 0개) 답하고
+/// 콘텐츠 프로세스에서 받아 둔다(쓸 때 켜는 캐시). 그동안 다시 묻는 간격과 상한
+const LAZY_STEP: Duration = Duration::from_millis(100);
+const LAZY_WAIT: Duration = Duration::from_millis(600);
+/// 자리를 모르는 요소의 GetExtents
+const UNKNOWN_EXTENTS: (i32, i32, i32, i32) = (-1, -1, -1, -1);
 
 /// (버스 이름, 객체 경로)
 type ObjectRef = (String, OwnedObjectPath);
@@ -248,6 +256,11 @@ impl A11y {
         self.compositor("Click", &(x, y, BUTTON_LEFT)).await
     }
 
+    /// 화면의 논리 좌표로 포인터를 옮겨 휠을 돌린다. dx, dy는 눈금 수이고 오른쪽·아래가 +다
+    pub async fn scroll(&self, x: f64, y: f64, dx: f64, dy: f64) -> zbus::Result<()> {
+        self.compositor("Scroll", &(x, y, dx, dy)).await
+    }
+
     /// 그 pid의 창(제목이 같은 것 먼저) 안의 (x, y)를 왼쪽 단추로 누른다. x, y는 그 창 스크린샷의
     /// 픽셀이다. 누른 화면의 논리 좌표를 돌려준다. 창 밖이거나 그 점 위에 다른 것이 있으면 오류다
     pub async fn click_window(
@@ -366,7 +379,8 @@ impl A11y {
             .unwrap_or_default()
     }
 
-    async fn states(&self, bus: &str, path: &str) -> u64 {
+    /// 요소의 지금 상태 비트 (Accessible.GetState). 읽을 수 없으면 0
+    pub async fn states(&self, bus: &str, path: &str) -> u64 {
         self.call::<_, Vec<u32>>(bus, path, ACCESSIBLE, "GetState", &())
             .await
             .map_or(0, |words| states(&words))
@@ -649,14 +663,20 @@ impl A11y {
 
     /// 요소가 내놓은 동작의 이름. 번호는 DoAction의 번호다. GetActions는 지역화한 이름("토글")을
     /// 주고 쓸 수 없는 동작을 빼므로, 동작 수와 GetName으로 지역화하지 않은 이름을 읽는다
-    pub async fn actions(&self, bus: &str, path: &str) -> Vec<String> {
-        let count = self
-            .call::<_, OwnedValue>(bus, path, PROPERTIES, "Get", &(ACTION, "NActions"))
-            .await
-            .ok()
-            .and_then(|value| value.downcast_ref::<i32>().ok())
-            .unwrap_or(0)
-            .clamp(0, 16);
+    /// `web`이면(웹 페이지의 요소) 0개일 때 Firefox가 받아 오기를 LAZY_WAIT까지 기다린다
+    pub async fn actions(&self, bus: &str, path: &str, web: bool) -> Vec<String> {
+        let started = Instant::now();
+        let count = loop {
+            let count = self
+                .call::<_, OwnedValue>(bus, path, PROPERTIES, "Get", &(ACTION, "NActions"))
+                .await
+                .map(|value| value.downcast_ref::<i32>().unwrap_or(0));
+            match count {
+                Ok(0) if web && started.elapsed() < LAZY_WAIT => Timer::after(LAZY_STEP).await,
+                Ok(count) => break count.clamp(0, 16),
+                Err(_) => break 0,
+            };
+        };
         join_all((0..count).map(|index| async move {
             self.call::<_, String>(bus, path, ACTION, "GetName", &(index,))
                 .await
@@ -756,9 +776,24 @@ impl A11y {
         .await
     }
 
-    /// 요소의 자리와 크기 (창 기준 논리 좌표: x, y, 너비, 높이)
+    /// 요소의 자리와 크기 (창 기준 논리 좌표: x, y, 너비, 높이). 모르면 (-1, -1, -1, -1)
     pub async fn extents(&self, bus: &str, path: &str) -> zbus::Result<(i32, i32, i32, i32)> {
-        self.call(bus, path, COMPONENT, "GetExtents", &(COORD_WINDOW,))
+        let started = Instant::now();
+        loop {
+            let extents = self
+                .call(bus, path, COMPONENT, "GetExtents", &(COORD_WINDOW,))
+                .await?;
+            if extents != UNKNOWN_EXTENTS || started.elapsed() >= LAZY_WAIT {
+                return Ok(extents);
+            }
+            Timer::after(LAZY_STEP).await;
+        }
+    }
+
+    /// 앱이 요소가 보이게 스스로 스크롤한다 (Component.ScrollTo). Firefox는 하고, GTK4는 지원하지
+    /// 않는다(NotSupported)
+    pub async fn scroll_to(&self, bus: &str, path: &str) -> zbus::Result<bool> {
+        self.call(bus, path, COMPONENT, "ScrollTo", &(SCROLL_ANYWHERE,))
             .await
     }
 }

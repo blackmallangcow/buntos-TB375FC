@@ -43,22 +43,37 @@ Commands:
                            ref) through its text input, in any language. Fails when no text
                            field has the focus; --keys then presses a key for each character
                            instead (layout characters only), e.g. in a terminal or a game
+  scroll <ref>             Scroll until the element is on screen
+  scroll <up|down|left|right> [<notches>] [--ref <ref>]
+                           Turn the mouse wheel (default 5 notches) over the ref, or over the
+                           middle of the active window. Use the ref of the list or page to move
 
 After an action the reply is what changed in that window once it stopped changing.
-Take a new snapshot when refs may have moved.
+Elements of a web page that are scrolled out of view are marked [offscreen]; an action on
+one scrolls it into view first. Take a new snapshot when refs may have moved.
 
-Options for snapshot and actions:
+Options for snapshot:
   --app <name>             Read this app's windows instead (app name, window title, pid)
   --ref <eN>               Read only below a ref from an earlier snapshot
   -i, --interactive        Only elements that can be clicked or typed into
   --hidden                 Include hidden elements
   --diff                   Print only what changed since the last snapshot of the same scope
+
+Options for actions:
+  --app <name>             Without a ref (click --at, press, type, scroll): act on this app's
+                           window instead of the one with the keyboard focus. With a ref it
+                           only checks that the ref is in that app
   --settle <ms>            Wait at most this long for the window to stop changing after an
                            action (default 3000; 0 reads it once right away). A page that is
                            still loading counts as changing
+
+Options for all:
   --session <name>         Session for refs and diffs (default: default)
   --json                   Print the reply as JSON
 ";
+
+/// scroll의 기본 눈금 수
+const SCROLL_NOTCHES: f64 = 5.0;
 
 fn main() -> ExitCode {
     // `| head`처럼 읽는 쪽이 먼저 닫으면 다른 명령줄 도구처럼 조용히 끝난다 (Rust는 SIGPIPE를 무시해
@@ -83,6 +98,7 @@ fn main() -> ExitCode {
             act(action, target, Some(value), rest)
         }
         ["agent", action @ ("press" | "type"), keys, rest @ ..] => press(action, keys, rest),
+        ["agent", "scroll", rest @ ..] => scroll(rest),
         ["agent", "launch", app, rest @ ..] => launch(app, rest),
         []
         | ["help" | "-h" | "--help", ..]
@@ -142,17 +158,69 @@ fn apps(args: &[&str]) -> Result<(), String> {
     let untracked: Vec<Untracked> =
         serde_json::from_value(reply["untracked"].clone()).unwrap_or_default();
     if !untracked.is_empty() {
-        println!(
-            "# no accessibility tree (restart the app to read it; screenshot and click --at work):"
-        );
+        println!("# no accessibility tree (screenshot, click --at, press and scroll still work):");
     }
     for window in untracked {
+        let why = if window.unsupported {
+            "the app does not support accessibility"
+        } else {
+            "restart the app to read it"
+        };
         println!(
-            "{} pid={} app={}\n  - window {:?}",
+            "{} pid={} app={} ({why})\n  - window {:?}",
             window.name, window.pid, window.app_id, window.title
         );
     }
     Ok(())
+}
+
+/// `scroll <ref>`나 `scroll <방향> [눈금 수] [--ref <ref>]`
+fn scroll(args: &[&str]) -> Result<(), String> {
+    let (params, json) = scroll_params(args)?;
+    send_act(&params, json)
+}
+
+fn scroll_params(args: &[&str]) -> Result<(ActParams, bool), String> {
+    let Some((&first, rest)) = args.split_first() else {
+        return Err("scroll needs a ref or a direction (up, down, left, right)".into());
+    };
+    let direction = match first {
+        "up" => Some([0.0, -1.0]),
+        "down" => Some([0.0, 1.0]),
+        "left" => Some([-1.0, 0.0]),
+        "right" => Some([1.0, 0.0]),
+        _ => None,
+    };
+    let mut params = ActParams {
+        action: "scroll".into(),
+        ..ActParams::default()
+    };
+    let Some([x, y]) = direction else {
+        // 방향이 아니면 보이게 할 ref다
+        params.target = first.to_string();
+        let json = act_options(&mut params, rest)?;
+        return Ok((params, json));
+    };
+    let (count, mut rest) = match rest.split_first() {
+        Some((count, after)) if !count.starts_with('-') => {
+            let count: f64 = count
+                .parse()
+                .ok()
+                .filter(|count: &f64| count.is_finite() && *count > 0.0)
+                .ok_or(format!(
+                    "scroll needs a positive number of notches, not {count:?}"
+                ))?;
+            (count, after.to_vec())
+        }
+        _ => (SCROLL_NOTCHES, rest.to_vec()),
+    };
+    if let Some(at) = rest.iter().position(|arg| *arg == "--ref") {
+        params.target = rest.get(at + 1).ok_or("--ref needs a value")?.to_string();
+        rest.drain(at..=at + 1);
+    }
+    params.amount = Some([x * count, y * count]);
+    let json = act_options(&mut params, &rest)?;
+    Ok((params, json))
 }
 
 fn screenshot(args: &[&str]) -> Result<(), String> {
@@ -261,18 +329,23 @@ fn act(action: &str, target: &str, value: Option<&str>, args: &[&str]) -> Result
         ..ActParams::default()
     };
     let json = act_options(&mut params, args)?;
-    let params = serde_json::to_value(&params).map_err(|err| err.to_string())?;
-    let reply = protocol::call("act", params)?;
+    send_act(&params, json)
+}
+
+/// 동작을 보내고 답을 적는다: 한 일, 기다린 시간, 새 창, 그 창의 diff
+fn send_act(params: &ActParams, json: bool) -> Result<(), String> {
+    let value = serde_json::to_value(params).map_err(|err| err.to_string())?;
+    let reply = protocol::call("act", value)?;
     if json {
         println!("{reply:#}");
         return Ok(());
     }
     let acted: Acted = serde_json::from_value(reply)
         .map_err(|err| format!("bad reply from buntd-agent: {err}"))?;
-    let subject = if target.is_empty() {
+    let subject = if params.target.is_empty() {
         String::new()
     } else {
-        format!("{target}: ")
+        format!("{}: ", params.target)
     };
     if !acted.observed {
         println!("# {subject}{}", acted.done);
@@ -327,10 +400,10 @@ fn act_options(params: &mut ActParams, args: &[&str]) -> Result<bool, String> {
         }
     }
     let (action, has_ref) = (params.action.as_str(), !params.target.is_empty());
+    // --app은 어느 동작에나 된다: ref가 없으면 그 앱의 창에 하고, 있으면 ref가 그 앱의 것인지 본다
     let misplaced = [
         (params.pointer, "--pointer", action == "click" && has_ref),
         (params.at.is_some(), "--at", action == "click" && !has_ref),
-        (params.app.is_some(), "--app", params.at.is_some()),
         (
             params.keep_focus,
             "--keep-focus",
@@ -447,5 +520,30 @@ mod tests {
         assert!(params("press", "", &["--keep-focus"]).is_err());
         assert!(params("press", "e4", &["--keys"]).is_err());
         assert!(params("fill", "e4", &["--settle", "soon"]).is_err());
+        // --app은 ref가 없으면 그 앱의 창에 하고, 있으면 ref가 그 앱의 것인지 본다
+        assert!(params("click", "e3", &["--app", "계산기"]).is_ok());
+        assert!(params("press", "", &["--app", "firefox"]).is_ok());
+    }
+
+    #[test]
+    fn scroll_takes_a_ref_or_a_direction_with_notches() {
+        let into_view = scroll_params(&["e12"]).unwrap().0;
+        assert_eq!((into_view.target.as_str(), into_view.amount), ("e12", None));
+        let down = scroll_params(&["down"]).unwrap().0;
+        assert_eq!(down.amount, Some([0.0, SCROLL_NOTCHES]));
+        let up = scroll_params(&["up", "3", "--ref", "e7", "--app", "firefox"])
+            .unwrap()
+            .0;
+        assert_eq!(
+            (up.target.as_str(), up.amount, up.app.as_deref()),
+            ("e7", Some([0.0, -3.0]), Some("firefox"))
+        );
+        assert_eq!(
+            scroll_params(&["left", "2"]).unwrap().0.amount,
+            Some([-2.0, 0.0])
+        );
+        assert!(scroll_params(&[]).is_err());
+        assert!(scroll_params(&["down", "0"]).is_err());
+        assert!(scroll_params(&["down", "--ref"]).is_err());
     }
 }

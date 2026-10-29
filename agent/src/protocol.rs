@@ -91,7 +91,7 @@ pub struct ActParams {
     /// 지난 스냅샷의 ref (예: "e12")
     #[serde(rename = "ref")]
     pub target: String,
-    /// click, fill, set, focus, select, press, type
+    /// click, fill, set, focus, select, press, type, scroll
     pub action: String,
     /// fill의 글, set의 값, press의 키, type의 글
     pub value: Option<String>,
@@ -100,8 +100,11 @@ pub struct ActParams {
     /// click을 ref 대신 창 안의 이 점에 포인터로 한다. 창 스크린샷(`screenshot`)의 픽셀이고 창의 왼쪽
     /// 위가 (0, 0)이다
     pub at: Option<[f64; 2]>,
-    /// `at`으로 누를 창의 앱 (`snapshot`의 app과 같다). 없으면 키보드 포커스를 가진 창
+    /// 동작할 창의 앱 (`snapshot`의 app과 같다). ref가 없는 동작(click --at, press, type, scroll)은 그
+    /// 앱의 창에 하고, 없으면 키보드 포커스를 가진 창에 한다. ref가 있으면 ref가 그 앱의 것인지 본다
     pub app: Option<String>,
+    /// scroll에서 돌릴 휠 눈금 수 (가로, 세로. 오른쪽·아래가 +). 없으면 ref가 보이게 스크롤한다
+    pub amount: Option<[f64; 2]>,
     /// press·type에 ref가 있을 때 그 창만 앞으로 가져오고 키보드 포커스는 창 안에서 옮기지 않는다
     pub keep_focus: bool,
     /// type에서 키보드 포커스를 가진 앱이 글 입력을 켜지 않았으면 글자마다 키를 친다. 없으면 치지 않고
@@ -213,6 +216,9 @@ pub struct Untracked {
     pub app_id: String,
     pub pid: u32,
     pub title: String,
+    /// 접근성을 아예 지원하지 않는 앱이다(foot 같은 터미널). 거짓이면 다시 켜면 트리를 내놓는다
+    #[serde(default)]
+    pub unsupported: bool,
 }
 
 /// 데몬에 요청 하나를 보내고 답을 기다린다

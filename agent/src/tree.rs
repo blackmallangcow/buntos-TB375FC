@@ -6,7 +6,8 @@
 //! - 역할 이름은 ARIA(Playwright)의 것을 쓴다. 모델이 웹에서 익힌 이름 그대로다
 //! - 뜻 없는 그릇(이름 없는 panel, filler, scroll pane 등)은 줄 없이 자식을 끌어올린다
 //! - 누를 수 있는 요소와 범위로 쓸 그릇(창, 대화 상자, 목록 등)에 ref를 단다
-//! - 숨은 요소는 뺀다. 긴 글은 자르고 남은 글자 수를 적는다
+//! - 숨은 요소는 뺀다. 웹 페이지에서 스크롤해 가려진 요소는 `[offscreen]`을 달아 낸다. 긴 글은
+//!   자르고 남은 글자 수를 적는다
 
 use std::collections::HashMap;
 
@@ -416,6 +417,35 @@ impl<'a> Tree<'a> {
         self.children.get(path).map_or(&[], Vec::as_slice)
     }
 
+    /// 그 화면에 있는 요소: 보이거나, 보이는 웹 페이지 안에서 스크롤해 가려졌다 (ref로 다룰 수 있다)
+    pub fn visible(&self, item: &Item) -> bool {
+        item.shown() || self.off_screen(item)
+    }
+
+    /// 보이는 웹 문서 안에 있지만 스크롤해 가려진 요소. Firefox와 Chromium은 화면 밖 요소에서
+    /// SHOWING만 뺀다. 웹 문서 밖에서 VISIBLE만 있는 요소는 GTK3의 다른 탭 페이지처럼 숨은 것이고, 뒤쪽
+    /// 탭의 문서는 그 자신이 보이지 않는다
+    pub fn off_screen(&self, item: &Item) -> bool {
+        item.has(state::VISIBLE) && !item.has(state::SHOWING) && self.in_shown_page(item)
+    }
+
+    fn in_shown_page(&self, item: &Item) -> bool {
+        self.ancestors(item)
+            .any(|parent| parent.role == role::DOCUMENT_WEB && parent.shown())
+    }
+
+    /// 웹 문서(Firefox, Chromium, Electron 앱의 페이지) 안의 요소인가
+    pub fn in_web_page(&self, item: &Item) -> bool {
+        self.ancestors(item)
+            .any(|parent| parent.role == role::DOCUMENT_WEB)
+    }
+
+    /// 부모부터 위로 (부모가 고리를 이루는 잘못된 목록에서는 MAX_DEPTH에서 멈춘다)
+    fn ancestors<'s>(&'s self, item: &Item) -> impl Iterator<Item = &'a Item> + 's {
+        std::iter::successors(self.get(&item.parent), |parent| self.get(&parent.parent))
+            .take(MAX_DEPTH)
+    }
+
     /// 보이는 자식 수가 알려진 수보다 적은 객체 (아직 GTK가 만들지 않은 자식이 있다)
     pub fn missing(&self) -> Vec<&'a str> {
         self.by_path
@@ -516,7 +546,7 @@ impl Render<'_, '_> {
         if self.cut {
             return;
         }
-        if !self.options.hidden && !item.shown() {
+        if !self.options.hidden && !self.tree.visible(item) {
             return;
         }
         match kind(item) {
@@ -645,7 +675,7 @@ impl Render<'_, '_> {
     fn has_control(&self, item: &Item) -> bool {
         let mut stack: Vec<&Item> = self.tree.children(&item.path).to_vec();
         while let Some(child) = stack.pop() {
-            if !child.shown() {
+            if !self.tree.visible(child) {
                 continue;
             }
             if let Kind::Line(role) = kind(child)
@@ -663,7 +693,7 @@ impl Render<'_, '_> {
         let mut found = None;
         let mut stack: Vec<&Item> = self.tree.children(&item.path).to_vec();
         while let Some(child) = stack.pop() {
-            if !child.shown() {
+            if !self.tree.visible(child) {
                 continue;
             }
             match kind(child) {
@@ -683,7 +713,7 @@ impl Render<'_, '_> {
     /// 아래의 첫 글 (조작 위젯 안은 보지 않는다)
     fn first_text(&self, item: &Item) -> Option<String> {
         for child in self.tree.children(&item.path) {
-            if !child.shown() {
+            if !self.tree.visible(child) {
                 continue;
             }
             match kind(child) {
@@ -721,6 +751,11 @@ impl Render<'_, '_> {
         if is_interactive || scope(role) {
             line.push_str(&format!(" [ref={}]", (self.refs)(&item.path)));
         }
+        if self.tree.off_screen(item) {
+            line.push_str(" [offscreen]");
+        } else if !item.shown() {
+            line.push_str(" [hidden]");
+        }
         for attribute in attributes(item, role, name, is_interactive) {
             line.push_str(&format!(" [{attribute}]"));
         }
@@ -746,9 +781,6 @@ fn collapse(text: &str) -> String {
 /// 줄 끝에 붙는 상태와 값. `name`은 줄에 쓴 이름이다
 fn attributes(item: &Item, role: &str, name: &str, is_interactive: bool) -> Vec<String> {
     let mut out = Vec::new();
-    if !item.shown() {
-        out.push("hidden".into());
-    }
     if is_interactive && !item.has(state::SENSITIVE) && !item.has(state::ENABLED) {
         out.push("disabled".into());
     }
@@ -964,6 +996,42 @@ mod tests {
         assert!(!document.busy());
         document.states |= state::BUSY;
         assert!(document.busy());
+    }
+
+    #[test]
+    fn scrolled_out_web_content_is_kept_and_marked() {
+        // Firefox: 스크롤해 가려진 요소는 VISIBLE만 있다. 뒤쪽 탭의 문서는 문서 자신이 보이지 않고,
+        // 웹 문서 밖에서 VISIBLE만 있는 것(GTK3의 다른 탭 페이지)은 숨은 것이다
+        let mut window = item("/w", "", 0, role::FRAME, "Mozilla Firefox");
+        window.child_count = 3;
+        let document = item("/d", "/w", 0, role::DOCUMENT_WEB, "긴 글");
+        let mut bottom = item("/b", "/d", 0, role::BUTTON, "맨 아래 단추");
+        bottom.states = state::VISIBLE | state::SENSITIVE;
+        let mut background = item("/d2", "/w", 1, role::DOCUMENT_WEB, "뒤쪽 탭");
+        background.states = state::VISIBLE;
+        let mut behind = item("/b2", "/d2", 0, role::BUTTON, "뒤쪽 단추");
+        behind.states = state::VISIBLE | state::SENSITIVE;
+        let mut page = item("/p", "/w", 2, role::PANEL, "다른 페이지");
+        page.states = state::VISIBLE;
+        let items = vec![window, document, bottom, background, behind, page];
+        let tree = Tree::new(&items);
+        assert!(tree.off_screen(&items[2]) && tree.visible(&items[2]));
+        assert!(!tree.visible(&items[3]) && !tree.visible(&items[4]));
+        assert!(!tree.off_screen(&items[5]) && !tree.visible(&items[5]));
+        assert!(tree.in_web_page(&items[2]) && !tree.in_web_page(&items[5]));
+        let options = Options {
+            interactive: true,
+            hidden: false,
+        };
+        let lines = render(&tree, &["/w"], &options, &mut refs());
+        assert_eq!(
+            lines,
+            [
+                "- window \"Mozilla Firefox\" [ref=e1]:",
+                "  - document \"긴 글\" [ref=e2]:",
+                "    - button \"맨 아래 단추\" [ref=e3] [offscreen]",
+            ]
+        );
     }
 
     #[test]
