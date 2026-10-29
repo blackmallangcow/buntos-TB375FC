@@ -364,8 +364,21 @@ pub fn banner(
     window.set_resizable(false);
     clip_input_to_child(&window);
 
+    // 포인터가 배너 위에 있는 동안은 보이는 시간을 세지 않는다. 읽거나 펼치는 동안 사라지지 않는다
+    let hovered = Rc::new(Cell::new(false));
+    let motion = gtk::EventControllerMotion::new();
+    {
+        let hovered = hovered.clone();
+        motion.connect_enter(move |_, _, _| hovered.set(true));
+    }
+    {
+        let hovered = hovered.clone();
+        motion.connect_leave(move |_| hovered.set(false));
+    }
+    window.add_controller(motion);
+
     // 배너마다 번호를 매겨 마지막 배너만 숨긴다
-    let shown = Rc::new(std::cell::Cell::new(0u32));
+    let shown = Rc::new(Cell::new(0u32));
     let tr = tr.clone();
     let banner = window.clone();
     notifications.subscribe(move |notifications, change| {
@@ -373,6 +386,7 @@ pub fn banner(
             // 보이던 알림이 치워지면 배너도 내린다
             if notifications.get(shown.get()).is_none() {
                 window.set_visible(false);
+                hovered.set(false);
             }
             return;
         };
@@ -387,13 +401,25 @@ pub fn banner(
         content.set_width_request(CARD_WIDTH + 2 * BANNER_MARGIN);
         content.add_css_class("banner");
         window.set_child(Some(&content));
+        // 새 배너는 포인터가 움직여 들어오기 전까지 가리키지 않은 것이다
+        hovered.set(false);
         window.present();
         shown.set(*id);
-        let (window, shown, id) = (window.clone(), shown.clone(), *id);
-        glib::timeout_add_seconds_local_once(BANNER_SECONDS, move || {
-            if shown.get() == id {
-                window.set_visible(false);
+        let (window, shown, hovered, id) = (window.clone(), shown.clone(), hovered.clone(), *id);
+        let left = Cell::new(BANNER_SECONDS);
+        glib::timeout_add_seconds_local(1, move || {
+            // 새 알림이 이 배너를 바꿨다
+            if shown.get() != id {
+                return glib::ControlFlow::Break;
             }
+            if !hovered.get() {
+                left.set(left.get() - 1);
+            }
+            if left.get() > 0 {
+                return glib::ControlFlow::Continue;
+            }
+            window.set_visible(false);
+            glib::ControlFlow::Break
         });
     });
     banner
