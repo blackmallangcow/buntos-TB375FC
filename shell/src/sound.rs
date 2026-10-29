@@ -3,6 +3,8 @@
 
 //! 메뉴 막대의 사운드 항목과 음량. PipeWire의 세션 관리자(WirePlumber)에 wpctl로 묻고 바꾼다.
 //! 출력 장치가 없으면(소리 장치가 없는 VM) 항목을 숨긴다. 누르면 음량 막대와 출력 장치가 나온다.
+//! wpctl 출력 읽기와 채널 음량은 시스템 설정의 사운드 페이지와 함께 쓰는 bunt-sound 크레이트에 있다. 시스템
+//! 설정에서 균형을 둔 장치는 음량을 바꿔도 균형이 그대로다(wpctl set-volume은 모든 채널을 같게 둔다).
 
 use std::{
     cell::{Cell, RefCell},
@@ -11,68 +13,21 @@ use std::{
 };
 
 use bunt_i18n::Translations;
-use gtk4::{self as gtk, gio, glib, prelude::*};
+use bunt_sound::{
+    mixer, run,
+    wpctl::{DEFAULT_SINK, Node, Section},
+};
+use gtk4::{self as gtk, glib, prelude::*};
 
-use crate::extras::{self, Listeners, Menu, Visibility};
+use crate::{
+    extras::{self, Listeners, Menu, Visibility},
+    menubar::open_settings,
+};
 
-const DEFAULT_SINK: &str = "@DEFAULT_AUDIO_SINK@";
 /// 다른 곳(앱, 키)에서 바꾼 음량을 따라가는 간격
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// 막대를 끄는 동안 wpctl을 너무 자주 부르지 않게 모으는 시간
 const SET_DELAY: Duration = Duration::from_millis(60);
-
-/// 출력 장치 (wpctl status의 Sinks)
-#[derive(Debug, Clone, PartialEq)]
-pub struct Sink {
-    pub id: u32,
-    pub name: String,
-    pub default: bool,
-}
-
-/// `wpctl get-volume` 출력: "Volume: 0.40" 또는 "Volume: 0.40 [MUTED]"
-fn parse_volume(text: &str) -> Option<(f64, bool)> {
-    let rest = text.trim().strip_prefix("Volume:")?.trim();
-    let (number, flags) = rest.split_once(' ').unwrap_or((rest, ""));
-    Some((number.parse().ok()?, flags.contains("MUTED")))
-}
-
-/// `wpctl status`의 Audio 아래 Sinks 목록
-fn parse_sinks(status: &str) -> Vec<Sink> {
-    let mut sinks = Vec::new();
-    let mut in_audio = false;
-    let mut in_sinks = false;
-    for line in status.lines() {
-        if !line.starts_with([' ', '│', '├', '└']) {
-            in_audio = line.trim() == "Audio";
-            in_sinks = false;
-            continue;
-        }
-        let item = line.trim_start_matches([' ', '│', '├', '└', '─']);
-        if item.ends_with(':') {
-            in_sinks = in_audio && item == "Sinks:";
-            continue;
-        }
-        if !in_sinks || item.is_empty() {
-            continue;
-        }
-        let default = item.starts_with('*');
-        let item = item.trim_start_matches('*').trim_start();
-        let Some((id, rest)) = item.split_once('.') else {
-            continue;
-        };
-        let Ok(id) = id.trim().parse() else {
-            continue;
-        };
-        let name = rest
-            .split(" [vol:")
-            .next()
-            .unwrap_or(rest)
-            .trim()
-            .to_owned();
-        sinks.push(Sink { id, name, default });
-    }
-    sinks
-}
 
 /// 음량 아이콘
 pub fn volume_icon(volume: f64, muted: bool) -> &'static str {
@@ -89,31 +44,19 @@ pub fn volume_icon(volume: f64, muted: bool) -> &'static str {
 pub struct Sound(Rc<Inner>);
 
 struct Inner {
-    /// 출력 장치가 없으면 None
+    /// (음량, 음소거). 출력 장치가 없으면 None
     volume: Cell<Option<(f64, bool)>>,
+    /// 마지막으로 읽은 채널 음량. 균형을 둔 장치의 음량을 바꿀 때 채널 사이의 비를 둔다
+    mixer: RefCell<Option<mixer::Volume>>,
     pending: Cell<Option<f64>>,
     listeners: Listeners<Sound>,
-}
-
-/// wpctl을 실행해 표준 출력을 받는다
-async fn wpctl(args: &[&str]) -> Option<String> {
-    let mut argv: Vec<&std::ffi::OsStr> = vec!["wpctl".as_ref()];
-    argv.extend(args.iter().map(|arg| std::ffi::OsStr::new(*arg)));
-    let process = gio::Subprocess::newv(
-        &argv,
-        gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_SILENCE,
-    )
-    .ok()?;
-    let (stdout, _) = process.communicate_utf8_future(None).await.ok()?;
-    process
-        .is_successful()
-        .then(|| stdout.map(|text| text.to_string()))?
 }
 
 impl Sound {
     pub fn start() -> Self {
         let sound = Self(Rc::new(Inner {
             volume: Cell::new(None),
+            mixer: RefCell::default(),
             pending: Cell::new(None),
             listeners: RefCell::default(),
         }));
@@ -132,14 +75,18 @@ impl Sound {
     pub fn refresh(&self) {
         let weak = Rc::downgrade(&self.0);
         glib::spawn_future_local(async move {
-            let volume = wpctl(&["get-volume", DEFAULT_SINK])
-                .await
-                .and_then(|text| parse_volume(&text));
+            // wpctl get-volume은 첫 채널의 음량을 준다. 균형을 둔 장치에서도 가장 큰 채널을 보이려고 채널 음량을 읽는다
+            let mixer = run::volume(DEFAULT_SINK).await;
+            let volume = mixer.as_ref().map(|mixer| (mixer.level(), mixer.muted));
             let Some(inner) = weak.upgrade() else {
                 return;
             };
             // 막대를 끄는 중이면 그 값이 먼저다
-            if inner.pending.get().is_some() || inner.volume.get() == volume {
+            if inner.pending.get().is_some() {
+                return;
+            }
+            inner.mixer.replace(mixer);
+            if inner.volume.get() == volume {
                 return;
             }
             inner.volume.set(volume);
@@ -181,10 +128,18 @@ impl Sound {
             };
             let sound = Sound(inner);
             sound.notify();
+            let mixer = sound.0.mixer.borrow().clone();
             glib::spawn_future_local(async move {
-                let level = format!("{volume:.2}");
-                wpctl(&["set-mute", DEFAULT_SINK, "0"]).await;
-                wpctl(&["set-volume", "-l", "1.0", DEFAULT_SINK, &level]).await;
+                run::set_mute(DEFAULT_SINK, false).await;
+                // 균형을 둔 장치는 채널 사이의 비를 둔 채 바꾼다. 채널을 모르면 전처럼 wpctl set-volume이다
+                match mixer {
+                    Some(mixer) => run::set_level(DEFAULT_SINK, &mixer, volume).await,
+                    None => {
+                        let level = format!("{volume:.2}");
+                        run::run(&["wpctl", "set-volume", "-l", "1.0", DEFAULT_SINK, &level]).await
+                    }
+                };
+                sound.refresh();
             });
         });
     }
@@ -192,23 +147,20 @@ impl Sound {
     pub fn toggle_mute(&self) {
         let sound = self.clone();
         glib::spawn_future_local(async move {
-            wpctl(&["set-mute", DEFAULT_SINK, "toggle"]).await;
+            run::toggle_mute(DEFAULT_SINK).await;
             sound.0.volume.set(None);
             sound.refresh();
         });
     }
 
-    pub async fn sinks() -> Vec<Sink> {
-        wpctl(&["status"])
-            .await
-            .map(|status| parse_sinks(&status))
-            .unwrap_or_default()
+    pub async fn sinks() -> Vec<Node> {
+        run::nodes(Section::Sinks).await
     }
 
     pub fn set_default_sink(&self, id: u32) {
         let sound = self.clone();
         glib::spawn_future_local(async move {
-            wpctl(&["set-default", &id.to_string()]).await;
+            run::set_default(id).await;
             sound.0.volume.set(None);
             sound.refresh();
         });
@@ -309,6 +261,9 @@ pub fn extra(tr: &Rc<Translations>, sound: &Sound) -> gtk::MenuButton {
                 devices.append(&row);
             }
         });
+        // macOS처럼 맨 아래에 시스템 설정의 사운드 페이지로 가는 줄을 둔다
+        menu.separator();
+        menu.action(&tr.get("sound-settings"), || open_settings(Some("sound")));
     });
     button
 }
@@ -316,55 +271,6 @@ pub fn extra(tr: &Rc<Translations>, sound: &Sound) -> gtk::MenuButton {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn volumes_are_parsed() {
-        assert_eq!(parse_volume("Volume: 0.40\n"), Some((0.40, false)));
-        assert_eq!(parse_volume("Volume: 0.75 [MUTED]\n"), Some((0.75, true)));
-        assert_eq!(parse_volume("nothing"), None);
-    }
-
-    #[test]
-    fn sinks_are_read_from_status() {
-        let status = "\
-PipeWire 'pipewire-0' [1.4.9, buntos@buntos, cookie:1]
- └─ Clients:
-        33. WirePlumber                         [1.4.9, buntos@buntos, pid:812]
-
-Audio
- ├─ Devices:
- │      45. Built-in Audio                      [alsa]
- │
- ├─ Sinks:
- │  *   52. Built-in Audio Analog Stereo        [vol: 0.40]
- │      60. HDMI Output                         [vol: 1.00 MUTED]
- │
- ├─ Sources:
- │  *   53. Built-in Audio Analog Stereo        [vol: 1.00]
- │
- └─ Streams:
-
-Video
- ├─ Devices:
- ├─ Sinks:
- │      70. Not audio                           [vol: 1.00]
-";
-        assert_eq!(
-            parse_sinks(status),
-            vec![
-                Sink {
-                    id: 52,
-                    name: "Built-in Audio Analog Stereo".into(),
-                    default: true
-                },
-                Sink {
-                    id: 60,
-                    name: "HDMI Output".into(),
-                    default: false
-                },
-            ]
-        );
-    }
 
     #[test]
     fn volume_icons() {

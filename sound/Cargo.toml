@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "bunt-sound"
+description = "buntOS sound: reading and changing PipeWire volumes with wpctl and pw-cli, and finding sound theme files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# pw-dump의 JSON (노드의 채널 음량, 카드의 경로)
+serde_json = "1"
+# 명령 실행 (셸과 시스템 설정의 GTK 주 루프에서 기다린다). GTK가 쓰는 판과 같다
+gio = "0.22"

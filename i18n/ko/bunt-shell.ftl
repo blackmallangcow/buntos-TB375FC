@@ -236,3 +236,6 @@ pairing-service-network = 네트워크
 pairing-service-serial = 직렬 포트
 # 메뉴 막대 Bluetooth 메뉴의 근처 기기 (메뉴가 열린 동안 찾고, 누르면 짝짓는다)
 bluetooth-nearby = 근처 기기
+
+## 사운드 메뉴와 알림 (시스템 설정의 사운드·알림 페이지)
+sound-settings = 사운드 설정…

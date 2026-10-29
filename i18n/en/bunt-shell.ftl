@@ -239,3 +239,6 @@ pairing-service-network = network
 pairing-service-serial = serial port
 # Nearby devices in the menu bar Bluetooth menu (searched while the menu is open; click to pair)
 bluetooth-nearby = Nearby Devices
+
+## Sound menu and notifications (the Sound and Notifications pages of System Settings)
+sound-settings = Sound Settings…
