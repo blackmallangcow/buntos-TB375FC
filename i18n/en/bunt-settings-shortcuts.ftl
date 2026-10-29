@@ -100,3 +100,9 @@ shortcut-app-zoom-in = Zoom In
 shortcut-app-zoom-out = Zoom Out
 shortcut-app-zoom-reset = Actual Size
 shortcut-app-other-command-keys = Send other ⌘ shortcuts to apps as Ctrl shortcuts
+# Lock screen, log out and force quit (the Apple menu shortcuts on macOS)
+shortcut-category-session = Lock Screen & Log Out
+shortcut-windows-force-quit = Force Quit Applications
+shortcut-session-lock-screen = Lock Screen
+shortcut-session-log-out = Log Out
+shortcut-session-log-out-now = Log Out Without Confirming

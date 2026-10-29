@@ -100,3 +100,9 @@ shortcut-app-zoom-in = 확대
 shortcut-app-zoom-out = 축소
 shortcut-app-zoom-reset = 실제 크기
 shortcut-app-other-command-keys = 그 밖의 ⌘ 단축키를 앱의 Ctrl 단축키로 보내기
+# 화면 잠금, 로그아웃, 강제 종료 (macOS의 Apple 메뉴 단축키)
+shortcut-category-session = 화면 잠금 및 로그아웃
+shortcut-windows-force-quit = 응용 프로그램 강제 종료
+shortcut-session-lock-screen = 화면 잠금
+shortcut-session-log-out = 로그아웃
+shortcut-session-log-out-now = 확인 없이 로그아웃
