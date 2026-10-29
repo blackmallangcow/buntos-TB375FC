@@ -33,8 +33,9 @@ use smithay::{
         renderer::{
             ImportMemWl,
             element::{
-                Kind, RenderElementStates, default_primary_scanout_output_compare,
+                Element, Id, Kind, RenderElementStates, default_primary_scanout_output_compare,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                solid::SolidColorRenderElement,
                 surface::render_elements_from_surface_tree,
             },
             gles::{GlesRenderer, ffi},
@@ -77,6 +78,7 @@ use crate::{
     dbus::{Command, OutputInfo, PointerDevice},
     prefs::{ModePref, PointerPrefs},
     render::{self, OutputRenderElements},
+    screenshot::{self, AreaSelection},
     state::BuntState,
 };
 
@@ -982,6 +984,31 @@ impl BuntState {
                 }
             }
         }
+        // 스크린샷에는 커서를 넣지 않는다
+        let cursor_ids: Vec<Id> = elements
+            .iter()
+            .map(|element| element.id().clone())
+            .collect();
+
+        // ⇧⌘4로 고르는 영역: 커서 아래, 창과 막대 위
+        if let Some(parts) = self
+            .screenshot_area
+            .as_mut()
+            .and_then(AreaSelection::layout)
+        {
+            for (location, buffer) in parts {
+                let location = (location - output_geo.loc).to_physical_precise_round(scale);
+                elements.push(OutputRenderElements::Solid(
+                    SolidColorRenderElement::from_buffer(
+                        buffer,
+                        location,
+                        scale,
+                        1.0,
+                        Kind::Unspecified,
+                    ),
+                ));
+            }
+        }
 
         match space_render_elements::<_, smithay::desktop::Window, _>(
             renderer,
@@ -1017,6 +1044,25 @@ impl BuntState {
             FrameFlags::DEFAULT
         };
 
+        // 스크린샷: 커서를 뺀 같은 장면을 따로 그려 읽는다. 저장과 알림은 프레임을 낸 뒤에 한다
+        let screenshot = match self.screenshot_capture.take() {
+            Some(capture) if capture.output == output => {
+                let scene: Vec<&Elements> = elements
+                    .iter()
+                    .filter(|element| !cursor_ids.contains(element.id()))
+                    .collect();
+                let image =
+                    screenshot::capture_scene(renderer, &scene, &output, capture.area, CLEAR_COLOR)
+                        .inspect_err(|err| tracing::warn!("failed to take a screenshot: {err}"))
+                        .ok();
+                Some((capture.clipboard, image))
+            }
+            other => {
+                self.screenshot_capture = other;
+                None
+            }
+        };
+
         let started = std::time::Instant::now();
         let rendered = surface
             .drm_output
@@ -1048,6 +1094,9 @@ impl BuntState {
         }
         if let Some(states) = &states {
             self.note_visible_surfaces(&output, states);
+        }
+        if let Some((clipboard, image)) = screenshot {
+            self.screenshot_taken(clipboard, image);
         }
 
         // 이번 프레임에 보인 표면만 바로 다음 프레임 알림을 받는다. 다른 창에 다 가려진 창, 숨은

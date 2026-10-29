@@ -11,6 +11,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# 사용자에게 보이는 문구(스크린샷 알림, 파일 이름)
+bunt-i18n = { path = "../i18n" }
+# 스크린샷 파일 이름의 지역 시각 (localtime_r)
+libc = "0.2"
+# 스크린샷을 PNG로
+png = "0.18"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 tracing = "0.1"

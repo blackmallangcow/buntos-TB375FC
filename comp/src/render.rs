@@ -11,7 +11,8 @@ use smithay::{
         renderer::{
             element::{
                 AsRenderElements, Element, Id, memory::MemoryRenderBuffer,
-                memory::MemoryRenderBufferRenderElement, surface::WaylandSurfaceRenderElement,
+                memory::MemoryRenderBufferRenderElement, solid::SolidColorRenderElement,
+                surface::WaylandSurfaceRenderElement,
             },
             gles::GlesRenderer,
         },
@@ -30,6 +31,8 @@ smithay::backend::renderer::element::render_elements! {
     Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
     Blur = BlurElement,
+    // 스크린샷 영역 고르기 (screenshot.rs)
+    Solid = SolidColorRenderElement,
 }
 
 impl std::fmt::Debug for OutputRenderElements {
@@ -39,6 +42,7 @@ impl std::fmt::Debug for OutputRenderElements {
             Self::Memory(element) => f.debug_tuple("Memory").field(element).finish(),
             Self::Surface(element) => f.debug_tuple("Surface").field(element).finish(),
             Self::Blur(element) => f.debug_tuple("Blur").field(element).finish(),
+            Self::Solid(element) => f.debug_tuple("Solid").field(element).finish(),
             Self::_GenericCatcher(_) => f.write_str("GenericCatcher"),
         }
     }

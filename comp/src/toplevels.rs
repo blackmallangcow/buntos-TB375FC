@@ -24,7 +24,10 @@ use smithay::{
     wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
 };
 
-use crate::state::{BuntState, ClientState};
+use crate::{
+    state::{BuntState, ClientState},
+    windows,
+};
 
 const VERSION: u32 = 3;
 
@@ -77,13 +80,14 @@ fn title_and_app_id(window: &Window) -> (String, String) {
     })
 }
 
-/// 프로토콜의 state 배열: 상태 값(u32)을 기계 바이트 순서로 이어 붙인다
+/// 프로토콜의 state 배열: 상태 값(u32)을 기계 바이트 순서로 이어 붙인다. 최소화하거나 가린 창은
+/// 최소화로 알린다
 fn encoded_states(window: &Window) -> Vec<u8> {
     use zwlr_foreign_toplevel_handle_v1::State;
     let Some(toplevel) = window.toplevel() else {
         return Vec::new();
     };
-    toplevel.with_pending_state(|pending| {
+    let mut states: Vec<u8> = toplevel.with_pending_state(|pending| {
         [
             (xdg_toplevel::State::Maximized, State::Maximized),
             (xdg_toplevel::State::Activated, State::Activated),
@@ -93,7 +97,11 @@ fn encoded_states(window: &Window) -> Vec<u8> {
         .filter(|(xdg, _)| pending.states.contains(*xdg))
         .flat_map(|(_, state)| (state as u32).to_ne_bytes())
         .collect()
-    })
+    });
+    if windows::is_hidden(window) {
+        states.extend((State::Minimized as u32).to_ne_bytes());
+    }
+    states
 }
 
 impl BuntState {
@@ -184,7 +192,7 @@ impl BuntState {
     }
 
     pub fn refresh_all_windows(&self) {
-        for window in self.space.elements() {
+        for window in self.all_windows() {
             self.refresh_window_info(window);
         }
     }
@@ -208,7 +216,7 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ()> for BuntState {
         data_init: &mut DataInit<'_, Self>,
     ) {
         let manager = data_init.init(resource, ());
-        let windows: Vec<Window> = state.space.elements().cloned().collect();
+        let windows: Vec<Window> = state.all_windows().cloned().collect();
         for window in &windows {
             state.send_new_handle(&manager, window);
         }
@@ -288,7 +296,11 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, HandleData> for BuntState {
             Request::UnsetFullscreen => {
                 state.set_window_state(&toplevel, xdg_toplevel::State::Fullscreen, false)
             }
-            // 최소화는 아직 없다. set_rectangle은 최소화 애니메이션의 목표 위치라 쓰지 않는다
+            Request::SetMinimized => state.minimize(&window),
+            Request::UnsetMinimized => {
+                state.focus_window(&window, SERIAL_COUNTER.next_serial());
+            }
+            // set_rectangle은 최소화 애니메이션의 목표 위치라 쓰지 않는다
             _ => {}
         }
     }

@@ -92,6 +92,7 @@ fn main() -> glib::ExitCode {
         if let Some(settings) = shell_settings() {
             compositor::share_panel_settings(&settings);
         }
+        compositor::follow_shortcuts(&launcher, shell_settings());
         follow_color_scheme(vec![menubar, dock, banner, launcher.window().clone()]);
     });
     app.run()

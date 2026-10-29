@@ -7,7 +7,10 @@ use std::{
     cell::{Cell, RefCell},
     error::Error,
     ffi::OsString,
-    os::{fd::AsRawFd, unix::net::UnixStream},
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::net::UnixStream,
+    },
     sync::Arc,
     time::Instant,
 };
@@ -15,8 +18,8 @@ use std::{
 use smithay::{
     backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
     delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_fractional_scale,
-    delegate_output, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_dialog,
-    delegate_xdg_shell,
+    delegate_keyboard_shortcuts_inhibit, delegate_output, delegate_seat, delegate_shm,
+    delegate_viewporter, delegate_xdg_dialog, delegate_xdg_shell,
     desktop::{
         LayerSurface, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
         PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -61,9 +64,13 @@ use smithay::{
             FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
         },
         input_method::{InputMethodManagerState, InputMethodSeat},
+        keyboard_shortcuts_inhibit::{
+            KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState,
+            KeyboardShortcutsInhibitor,
+        },
         output::{OutputHandler, OutputManagerState},
         selection::{
-            SelectionHandler,
+            SelectionHandler, SelectionTarget,
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
                 set_data_device_focus,
@@ -96,11 +103,16 @@ use crate::{
     dbus::{self, Request},
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, handle_resize_commit},
     ime::InputMethodProcess,
+    input::ModifierChord,
     panels::{self, Bar, BarInput, Edge, Fill, Panels, Reveal},
     prefs::{KeyRepeat, PointerPrefs, Prefs},
-    render, shmdiff,
+    render,
+    screenshot::{self as screenshots, AreaSelection, Capture, Image},
+    shmdiff,
+    shortcuts::{self, Builtin, Shortcuts},
     toplevels::ForeignToplevelState,
     udev::UdevData,
+    windows::{self, HiddenWindow, Switching},
 };
 
 /// 새 창을 계단식으로 놓을 때의 간격 (논리 픽셀)
@@ -144,6 +156,26 @@ pub struct BuntState {
     pub cursor_status: CursorImageStatus,
     /// 컴포지터가 가로챈 단축키의 키. 뗄 때도 앱에 보내지 않는다
     pub suppressed_keys: Vec<u32>,
+    /// 키보드 단축키 (표와 시스템 설정에서 바꾼 값)
+    pub shortcuts: Shortcuts,
+    /// 앱에 옮겨 보낸 단축키를 누르고 있는 동안 되풀이하는 타이머
+    pub key_repeat: Option<RegistrationToken>,
+    /// 수정 키만 누르는 중 (⌃⇧ 같은 조합 단축키)
+    pub modifier_chord: Option<ModifierChord>,
+    /// 키 처리가 끝난 뒤 할 수정 키 조합 단축키
+    pub chord_hit: Option<Builtin>,
+    /// 앱이 단축키를 막아 둔 표면 (zwp_keyboard_shortcuts_inhibit). 시스템 설정이 키를 받아 적을 때 쓴다
+    pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
+    /// 포커스를 받은 차례의 창 (앞이 최근). 앱 전환이 쓴다
+    pub recent: Vec<Window>,
+    /// 최소화하거나 가려 공간에서 내린 창
+    pub hidden: Vec<HiddenWindow>,
+    /// ⌘를 누른 채 앱·윈도우를 전환하는 중
+    pub switching: Option<Switching>,
+    /// ⇧⌘4로 스크린샷 영역을 고르는 중
+    pub screenshot_area: Option<AreaSelection>,
+    /// 다음 프레임에 찍을 스크린샷
+    pub screenshot_capture: Option<Capture>,
 
     /// 시스템 설정에서 고른 값 (다음 로그인에도 쓴다)
     pub prefs: Prefs,
@@ -201,8 +233,10 @@ impl BuntState {
         // Firefox는 배율이 1이 아니면 viewporter 없이는 본문을 제 크기로 보이지 못한다
         ViewporterState::new::<Self>(&dh);
         FractionalScaleManagerState::new::<Self>(&dh);
+        let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<Self>(&dh);
 
         let prefs = Prefs::load();
+        let shortcuts = Shortcuts::new(&prefs.shortcuts);
         let repeat = prefs.keyboard.unwrap_or(KeyRepeat {
             delay: config.keyboard.repeat_delay.max(0) as u32,
             rate: config.keyboard.repeat_rate.max(0) as u32,
@@ -231,6 +265,7 @@ impl BuntState {
         dbus.update(|snapshot| {
             snapshot.repeat_delay = repeat.delay;
             snapshot.repeat_rate = repeat.rate;
+            snapshot.shortcuts = shortcuts.info();
         });
         let (input_method_exited, exited_channel) = channel::channel();
         loop_handle
@@ -286,6 +321,16 @@ impl BuntState {
             seat,
             cursor_status: CursorImageStatus::default_named(),
             suppressed_keys: Vec::new(),
+            shortcuts,
+            key_repeat: None,
+            modifier_chord: None,
+            chord_hit: None,
+            keyboard_shortcuts_inhibit_state,
+            recent: Vec::new(),
+            hidden: Vec::new(),
+            switching: None,
+            screenshot_area: None,
+            screenshot_capture: None,
             prefs,
             panels: Panels::default(),
             bars: [Reveal::default(); 2],
@@ -386,9 +431,9 @@ impl BuntState {
         }
     }
 
+    /// 그 표면의 창. 최소화하거나 가려 공간에서 내린 창도 찾는다
     pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
-        self.space
-            .elements()
+        self.all_windows()
             .find(|window| {
                 window
                     .toplevel()
@@ -441,9 +486,11 @@ impl BuntState {
     /// 함께 앞으로 와서 창 위에 남고, 모달 대화 상자가 있으면 그 대화 상자가 활성화되어 키보드를
     /// 받는다(macOS의 시트처럼). 모달 창이 부모 뒤로 숨으면 GTK가 부모의 누르기를 버려서 입력이 먹지
     /// 않는 것처럼 보였다. 키보드를 독점하는 레이어 표면(모든 앱 패널 등)이 떠 있으면 키보드는 그
-    /// 표면에 그대로 두고, 표면이 사라질 때 이 창에 준다
+    /// 표면에 그대로 두고, 표면이 사라질 때 이 창에 준다. 최소화하거나 가린 창은 제자리에 다시 놓는다
     pub fn focus_window(&mut self, window: &Window, serial: Serial) {
+        self.restore_hidden(window);
         let target = self.raise_with_dialogs(window);
+        self.note_focus(&target);
         for other in self.space.elements() {
             other.set_activated(*other == target);
         }
@@ -1026,6 +1073,10 @@ impl BuntState {
         let Some(window) = self.window_for_surface(surface.wl_surface()) else {
             return;
         };
+        // 내린 창의 크기를 바꾸면(앱이 스스로 최대화를 청하면) 다시 놓고 바꾼다
+        if windows::is_hidden(&window) {
+            self.restore_hidden(&window);
+        }
         let restore = window.user_data().get_or_insert(RestoreGeometry::default);
         let normal = !Self::has_state(surface, xdg_toplevel::State::Maximized)
             && !Self::has_state(surface, xdg_toplevel::State::Fullscreen);
@@ -1337,6 +1388,7 @@ impl XdgShellHandler for BuntState {
             return;
         };
         self.forget_window(&window);
+        self.forget_recent(&window);
         self.space.unmap_elem(&window);
         if self.active_window().is_none() {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -1482,6 +1534,8 @@ impl SeatHandler for BuntState {
             self.loop_handle
                 .insert_idle(|state| state.refresh_layer_focus());
         }
+        // 되풀이하던 단축키는 포커스가 바뀌면 멈춘다
+        self.stop_key_repeat();
         self.publish_focus(focused);
     }
 }
@@ -1494,7 +1548,7 @@ impl BuntState {
     }
 
     /// 키보드 포커스 표면의 클라이언트와 그 최상위 표면
-    fn focus_info(&self, surface: &WlSurface) -> dbus::Focus {
+    pub(crate) fn focus_info(&self, surface: &WlSurface) -> dbus::Focus {
         let pid = self
             .display_handle
             .get_client(surface.id())
@@ -1545,7 +1599,7 @@ impl BuntState {
     }
 
     /// 활성 상태인 창
-    fn active_window(&self) -> Option<Window> {
+    pub(crate) fn active_window(&self) -> Option<Window> {
         self.space
             .elements()
             .rev()
@@ -1834,8 +1888,29 @@ impl BuntState {
             Request::KeyboardRepeat { delay, rate } => self.set_keyboard_repeat(delay, rate),
             Request::Panels(panels) => self.set_panels(panels),
             Request::Pointer(pointer) => self.set_pointer_prefs(pointer),
+            Request::Shortcut {
+                id,
+                accelerator,
+                enabled,
+            } => {
+                shortcuts::remember(&mut self.prefs.shortcuts, &id, accelerator, enabled);
+                self.shortcuts_changed();
+            }
+            Request::ResetShortcuts(category) => {
+                shortcuts::reset(&mut self.prefs.shortcuts, &category);
+                self.shortcuts_changed();
+            }
             Request::Agent(request) => self.agent_request(request),
         }
+    }
+
+    /// 바꾼 단축키를 저장하고 쓰기 시작한다
+    fn shortcuts_changed(&mut self) {
+        self.prefs.save();
+        self.shortcuts = Shortcuts::new(&self.prefs.shortcuts);
+        let info = self.shortcuts.info();
+        self.dbus.update(|snapshot| snapshot.shortcuts = info);
+        self.dbus.send(dbus::Command::ShortcutsChanged);
     }
 
     /// 지금 쓰는 마우스 설정. 고른 적이 없으면 기본값과 comp.toml의 커서 크기다
@@ -1859,8 +1934,41 @@ impl BuntState {
     }
 }
 
+/// 컴포지터가 클립보드에 넣는 것은 스크린샷뿐이다. 앱이 읽을 때 PNG로 만들어 따로 도는 스레드가 쓴다
 impl SelectionHandler for BuntState {
-    type SelectionUserData = ();
+    type SelectionUserData = Arc<Image>;
+
+    fn send_selection(
+        &mut self,
+        _ty: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        image: &Arc<Image>,
+    ) {
+        if mime_type != screenshots::PNG_MIME {
+            return;
+        }
+        let image = image.clone();
+        std::thread::spawn(move || {
+            let file = std::io::BufWriter::new(std::fs::File::from(fd));
+            if let Err(err) = screenshots::write_png(&image, file) {
+                tracing::warn!("failed to paste the screenshot: {err}");
+            }
+        });
+    }
+}
+
+/// 앱이 단축키를 막으면(시스템 설정이 새 단축키를 받아 적을 때, VM 화면 같은 앱) 그 표면에 포커스가
+/// 있는 동안 컴포지터 단축키를 거치지 않고 키를 그대로 보낸다. 가상 터미널 전환만은 남는다
+impl KeyboardShortcutsInhibitHandler for BuntState {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.keyboard_shortcuts_inhibit_state
+    }
+
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        inhibitor.activate();
+    }
 }
 
 impl DataDeviceHandler for BuntState {
@@ -1940,6 +2048,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, WlrLayerSurfaceUserData> for BuntState {
 }
 
 delegate_seat!(BuntState);
+delegate_keyboard_shortcuts_inhibit!(BuntState);
 delegate_data_device!(BuntState);
 delegate_output!(BuntState);
 delegate_viewporter!(BuntState);

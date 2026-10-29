@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 키보드·포인터 입력 처리와 컴포지터 단축키
+//! 키보드·포인터 입력 처리와 컴포지터 단축키 (단축키 표는 shortcuts.rs)
+
+use std::time::Duration;
 
 use smithay::{
     backend::{
@@ -12,51 +14,66 @@ use smithay::{
         session::Session,
     },
     input::{
-        keyboard::{FilterResult, Keysym, ModifiersState},
+        keyboard::{FilterResult, Keycode, Keysym, KeysymHandle, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
+    reexports::calloop::timer::{TimeoutAction, Timer},
     utils::{Logical, Point, SERIAL_COUNTER},
+    wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
 };
 
-use crate::{dbus::Command, state::BuntState};
+use crate::{
+    dbus::Command,
+    prefs::KeyRepeat,
+    shortcuts::{self, Accel, Builtin, Hit, Key, Mods, Place},
+    state::BuntState,
+};
 
-/// 컴포지터가 가로채는 단축키 동작
-enum Action {
-    /// Ctrl+Alt+Backspace: 세션 끝내기
-    Quit,
-    /// Alt+Enter: 터미널 열기
-    Terminal,
-    /// Alt+F4: 포커스된 창 닫기
-    CloseWindow,
-    /// Ctrl+Alt+F1..F12: 가상 터미널 전환
-    SwitchVt(i32),
-    /// Ctrl+Space(macOS 기본), 한/영 키: 입력 소스 전환. 입력 칸에 포커스가 없어도 동작한다
-    ToggleInputSource,
+/// 앱에 키를 옮겨 보낼 때 잠시 떼거나 누르는 수정 키
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Modifier {
+    Ctrl,
+    Alt,
+    Shift,
+    Logo,
 }
 
-fn shortcut(modifiers: &ModifiersState, sym: Keysym) -> Option<Action> {
-    let raw = sym.raw();
-    let first_vt = Keysym::XF86_Switch_VT_1.raw();
-    if (first_vt..=Keysym::XF86_Switch_VT_12.raw()).contains(&raw) {
-        return Some(Action::SwitchVt((raw - first_vt + 1) as i32));
+impl Modifier {
+    fn wanted_by(self, key: &Key) -> bool {
+        match self {
+            Modifier::Ctrl => key.mods.ctrl,
+            Modifier::Alt => key.mods.alt,
+            Modifier::Shift => key.mods.shift,
+            Modifier::Logo => key.mods.logo,
+        }
     }
-    if sym == Keysym::Hangul
-        || (sym == Keysym::space
-            && modifiers.ctrl
-            && !modifiers.alt
-            && !modifiers.shift
-            && !modifiers.logo)
-    {
-        Some(Action::ToggleInputSource)
-    } else if sym == Keysym::BackSpace && modifiers.ctrl && modifiers.alt {
-        Some(Action::Quit)
-    } else if sym == Keysym::Return && modifiers.alt {
-        Some(Action::Terminal)
-    } else if sym == Keysym::F4 && modifiers.alt {
-        Some(Action::CloseWindow)
-    } else {
-        None
-    }
+}
+
+const MODIFIER_KEYS: [(Keysym, Modifier); 10] = [
+    (Keysym::Control_L, Modifier::Ctrl),
+    (Keysym::Control_R, Modifier::Ctrl),
+    (Keysym::Alt_L, Modifier::Alt),
+    (Keysym::Alt_R, Modifier::Alt),
+    (Keysym::Meta_L, Modifier::Alt),
+    (Keysym::Meta_R, Modifier::Alt),
+    (Keysym::Shift_L, Modifier::Shift),
+    (Keysym::Shift_R, Modifier::Shift),
+    (Keysym::Super_L, Modifier::Logo),
+    (Keysym::Super_R, Modifier::Logo),
+];
+
+/// 수정 키를 누르기 시작해 모두 뗄 때까지: 함께 누른 수정 키 모두와, 그사이 다른 키를 눌렀는지
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ModifierChord {
+    mods: Mods,
+    other_key: bool,
+}
+
+fn modifier_of(sym: Keysym) -> Option<Modifier> {
+    MODIFIER_KEYS
+        .iter()
+        .find(|(key, _)| *key == sym)
+        .map(|(_, modifier)| *modifier)
 }
 
 impl BuntState {
@@ -92,20 +109,35 @@ impl BuntState {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
+        // 앱에 옮겨 보내며 되풀이하던 단축키는 다른 키를 누르거나 떼면 멈춘다
+        self.stop_key_repeat();
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(&event);
         let pressed = event.state() == KeyState::Pressed;
-        let action = keyboard.input::<Option<Action>, _>(
+        let hit = keyboard.input::<Option<(Hit, Keycode)>, _>(
             self,
             event.key_code(),
             event.state(),
             serial,
             time,
             |state, modifiers, handle| {
-                let code = handle.raw_code().raw();
-                // 단축키로 가로챈 키는 뗄 때도 앱(과 입력기)에 보내지 않는다
+                let code = handle.raw_code();
+                state.track_modifier_chord(
+                    pressed,
+                    handle.modified_sym().is_modifier_key(),
+                    modifiers,
+                );
                 if !pressed {
-                    return match state.suppressed_keys.iter().position(|key| *key == code) {
+                    // ⌘를 떼면 앱·윈도우 전환을 마친다
+                    if !modifiers.logo {
+                        state.finish_switching();
+                    }
+                    // 단축키로 가로챈 키는 뗄 때도 앱(과 입력기)에 보내지 않는다
+                    return match state
+                        .suppressed_keys
+                        .iter()
+                        .position(|key| *key == code.raw())
+                    {
                         Some(index) => {
                             state.suppressed_keys.swap_remove(index);
                             FilterResult::Intercept(None)
@@ -113,28 +145,146 @@ impl BuntState {
                         None => FilterResult::Forward,
                     };
                 }
-                match shortcut(modifiers, handle.modified_sym()) {
-                    Some(action) => {
-                        state.suppressed_keys.push(code);
-                        FilterResult::Intercept(Some(action))
+                // 스크린샷 영역을 고르는 동안에는 키를 앱에 보내지 않는다. Esc는 그만둔다
+                if state.screenshot_area.is_some() {
+                    state.suppressed_keys.push(code.raw());
+                    let hit = if handle.modified_sym() == Keysym::Escape {
+                        Hit::Run(Builtin::CancelScreenshot)
+                    } else {
+                        Hit::Swallow
+                    };
+                    return FilterResult::Intercept(Some((hit, code)));
+                }
+                match state.shortcut_for(modifiers, &handle) {
+                    Some(hit) => {
+                        state.suppressed_keys.push(code.raw());
+                        FilterResult::Intercept(Some((hit, code)))
                     }
                     None => FilterResult::Forward,
                 }
             },
         );
-        if let Some(Some(action)) = action {
-            self.run(action);
+        if let Some(Some((hit, code))) = hit {
+            self.perform(hit, code);
+        }
+        // 수정 키만으로 된 단축키는 마지막으로 뗀 수정 키를 앱에 보낸 뒤에 한다
+        if let Some(builtin) = self.chord_hit.take() {
+            self.run(builtin);
         }
     }
 
-    fn run(&mut self, action: Action) {
-        match action {
-            Action::Quit => self.loop_signal.stop(),
-            Action::Terminal => {
-                let terminal = self.config.session.terminal.clone();
-                self.spawn(&terminal);
+    /// 수정 키만 눌렀다 뗀 것(⌃⇧)을 알아본다. 모두 떼는 순간 함께 누른 수정 키가 둘 이상이고 그사이
+    /// 다른 키를 누르지 않았으면, 그 조합에 정한 단축키를 키 처리가 끝난 뒤에 한다. 수정 키는 늘
+    /// 앱에 보내므로 ⌃⇧C 같은 앱 단축키와 겹치지 않는다
+    fn track_modifier_chord(&mut self, pressed: bool, modifier: bool, state: &ModifiersState) {
+        let held = Mods::of(state);
+        if pressed {
+            let chord = self.modifier_chord.get_or_insert_default();
+            if modifier {
+                chord.mods = chord.mods.union(held);
+            } else {
+                chord.other_key = true;
             }
-            Action::CloseWindow => {
+            return;
+        }
+        if held != Mods::default() {
+            return;
+        }
+        let Some(chord) = self.modifier_chord.take() else {
+            return;
+        };
+        if !chord.other_key && chord.mods.count() >= 2 && !self.shortcuts_inhibited() {
+            self.chord_hit = self.shortcuts.modifiers_only(chord.mods);
+        }
+    }
+
+    /// 누른 키로 컴포지터가 할 일. 없으면 키를 앱에 그대로 보낸다
+    fn shortcut_for(
+        &mut self,
+        modifiers: &ModifiersState,
+        handle: &KeysymHandle<'_>,
+    ) -> Option<Hit> {
+        let sym = handle.modified_sym();
+        let first_vt = Keysym::XF86_Switch_VT_1.raw();
+        if (first_vt..=Keysym::XF86_Switch_VT_12.raw()).contains(&sym.raw()) {
+            return Some(Hit::Run(Builtin::SwitchVt(
+                (sym.raw() - first_vt + 1) as i32,
+            )));
+        }
+        // 가상 터미널 전환만 빼고, 단축키를 막은 앱(키를 받아 적는 시스템 설정 등)에는 그대로 보낸다
+        if self.shortcuts_inhibited() {
+            return None;
+        }
+        // 표에 없는 고정 키: 한/영 키(입력 소스 전환), Ctrl+Alt+Backspace(세션 끝내기)
+        if sym == Keysym::Hangul {
+            return Some(Hit::Run(Builtin::SwitchInputSource));
+        }
+        if sym == Keysym::BackSpace && modifiers.ctrl && modifiers.alt {
+            return Some(Hit::Run(Builtin::Quit));
+        }
+        // 배열과 Shift에 상관없이 그 키의 첫 단계 라틴 기호로 맞춘다 (⇧⌘3은 #이 아니라 3)
+        let key = shortcuts::normalize(handle.raw_latin_sym_or_raw_current_sym().unwrap_or(sym));
+        if key.is_modifier_key() {
+            return None;
+        }
+        let pressed = Accel {
+            mods: Mods::of(modifiers),
+            key,
+        };
+        self.shortcuts.lookup(pressed, self.key_place())
+    }
+
+    /// 키보드 포커스가 있는 곳: 글을 입력하는 중인지, 터미널인지
+    fn key_place(&self) -> Place {
+        let focus = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus());
+        Place {
+            typing: self.text_input_active(),
+            terminal: focus
+                .is_some_and(|surface| shortcuts::is_terminal(&self.focus_info(&surface).app_id)),
+        }
+    }
+
+    /// 키보드 포커스를 가진 표면이 단축키를 막아 두었는지 (zwp_keyboard_shortcuts_inhibit)
+    fn shortcuts_inhibited(&self) -> bool {
+        self.seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|surface| self.seat.keyboard_shortcuts_inhibitor_for_surface(&surface))
+            .is_some_and(|inhibitor| inhibitor.is_active())
+    }
+
+    fn perform(&mut self, hit: Hit, code: Keycode) {
+        match hit {
+            Hit::Run(builtin) => self.run(builtin),
+            Hit::Send { keys, repeat } => {
+                self.send_keys(&keys);
+                if repeat {
+                    self.repeat_keys(code, keys);
+                }
+            }
+            Hit::Swallow => {}
+        }
+    }
+
+    fn run(&mut self, builtin: Builtin) {
+        match builtin {
+            Builtin::ShowLauncher => self.dbus.send(Command::ShortcutActivated("launcher.show")),
+            Builtin::ToggleDockAutohide => self
+                .dbus
+                .send(Command::ShortcutActivated("launcher.dock-autohide")),
+            Builtin::NextApp => self.switch_app(1),
+            Builtin::PreviousApp => self.switch_app(-1),
+            Builtin::NextWindow => self.switch_window(1),
+            Builtin::PreviousWindow => self.switch_window(-1),
+            Builtin::QuitApp => self.quit_active_app(),
+            Builtin::Minimize => self.minimize_active(),
+            Builtin::HideApp => self.hide_active_app(),
+            Builtin::HideOthers => self.hide_other_apps(),
+            Builtin::ToggleFullscreen => self.toggle_fullscreen(),
+            Builtin::CloseWindow => {
                 let focus = self
                     .seat
                     .get_keyboard()
@@ -145,12 +295,130 @@ impl BuntState {
                     toplevel.send_close();
                 }
             }
-            Action::SwitchVt(vt) => {
+            Builtin::OpenTerminal => {
+                let terminal = self.config.session.terminal.clone();
+                self.spawn(&terminal);
+            }
+            Builtin::SwitchInputSource => self.dbus.send(Command::ToggleInputMethod),
+            Builtin::Screenshot { area, clipboard } => self.screenshot(area, clipboard),
+            Builtin::CancelScreenshot => self.cancel_screenshot(),
+            Builtin::Quit => self.loop_signal.stop(),
+            Builtin::SwitchVt(vt) => {
                 if let Err(err) = self.backend.session.change_vt(vt) {
                     tracing::warn!("failed to switch to VT {vt}: {err}");
                 }
             }
-            Action::ToggleInputSource => self.dbus.send(Command::ToggleInputMethod),
+        }
+    }
+
+    /// 앱에 키를 차례로 보낸다. 누르고 있는 수정 키 가운데 보낼 키에 없는 것(⌘ 등)은 잠시 떼었다가
+    /// 다시 누르고, 보낼 키에만 있는 수정 키는 잠시 누른다. 앱과 입력기는 정말 그렇게 누른 것처럼
+    /// 받으므로 ⌘C가 Ctrl+C로 간다. 보낸 키는 컴포지터 단축키를 다시 거치지 않는다
+    pub(crate) fn send_keys(&mut self, keys: &[Key]) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        for key in keys {
+            let Some(code) = self.keycode_for(key.sym) else {
+                tracing::warn!("no key in the keymap for {:?}", key.sym);
+                continue;
+            };
+            let held: Vec<(Keycode, Modifier)> = keyboard.with_pressed_keysyms(|handles| {
+                handles
+                    .iter()
+                    .filter_map(|handle| {
+                        let sym = handle.raw_syms().first().copied()?;
+                        modifier_of(sym).map(|modifier| (handle.raw_code(), modifier))
+                    })
+                    .collect()
+            });
+            let release: Vec<Keycode> = held
+                .iter()
+                .filter(|(_, modifier)| !modifier.wanted_by(key))
+                .map(|(code, _)| *code)
+                .collect();
+            let mut press = Vec::new();
+            for (modifier, sym) in [
+                (Modifier::Ctrl, Keysym::Control_L),
+                (Modifier::Alt, Keysym::Alt_L),
+                (Modifier::Shift, Keysym::Shift_L),
+            ] {
+                if modifier.wanted_by(key)
+                    && !held.iter().any(|(_, other)| *other == modifier)
+                    && let Some(code) = self.keycode_for(sym)
+                {
+                    press.push(code);
+                }
+            }
+            let time = self.start_time.elapsed().as_millis() as u32;
+            let send = |state: &mut BuntState, code: Keycode, key_state: KeyState| {
+                keyboard.input::<(), _>(
+                    state,
+                    code,
+                    key_state,
+                    SERIAL_COUNTER.next_serial(),
+                    time,
+                    |_, _, _| FilterResult::Forward,
+                );
+            };
+            for code in &release {
+                send(self, *code, KeyState::Released);
+            }
+            for code in &press {
+                send(self, *code, KeyState::Pressed);
+            }
+            for key_state in [KeyState::Pressed, KeyState::Released] {
+                keyboard.input_forward(
+                    self,
+                    code,
+                    key_state,
+                    SERIAL_COUNTER.next_serial(),
+                    time,
+                    false,
+                );
+            }
+            for code in press.iter().rev() {
+                send(self, *code, KeyState::Released);
+            }
+            for code in release.iter().rev() {
+                send(self, *code, KeyState::Pressed);
+            }
+        }
+    }
+
+    /// 옮겨 보낸 키를 누르고 있는 동안 키 반복 설정대로 되풀이한다. 앱은 컴포지터가 한 번 눌렀다 뗀
+    /// 키를 받으므로 스스로 되풀이하지 않는다. 누른 키(`code`)를 떼면 멈춘다
+    fn repeat_keys(&mut self, code: Keycode, keys: Vec<Key>) {
+        let repeat = self.prefs.keyboard.unwrap_or(KeyRepeat {
+            delay: self.config.keyboard.repeat_delay.max(0) as u32,
+            rate: self.config.keyboard.repeat_rate.max(0) as u32,
+        });
+        if repeat.rate == 0 {
+            return;
+        }
+        let interval = Duration::from_millis(1000 / u64::from(repeat.rate));
+        let timer = Timer::from_duration(Duration::from_millis(u64::from(repeat.delay)));
+        let source = self.loop_handle.insert_source(timer, move |_, _, state| {
+            let held = state
+                .seat
+                .get_keyboard()
+                .is_some_and(|keyboard| keyboard.pressed_keys().contains(&code));
+            if !held {
+                state.key_repeat = None;
+                return TimeoutAction::Drop;
+            }
+            state.send_keys(&keys);
+            TimeoutAction::ToDuration(interval)
+        });
+        match source {
+            Ok(token) => self.key_repeat = Some(token),
+            Err(err) => tracing::warn!("failed to repeat a shortcut: {err}"),
+        }
+    }
+
+    pub fn stop_key_repeat(&mut self) {
+        if let Some(token) = self.key_repeat.take() {
+            self.loop_handle.remove(token);
         }
     }
 
@@ -178,10 +446,24 @@ impl BuntState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
+        let serial = SERIAL_COUNTER.next_serial();
+        // 스크린샷 영역을 고르는 동안에는 포인터만 옮기고 앱에는 보내지 않는다
+        if self.screenshot_pointer_moved(pos) {
+            pointer.motion(
+                self,
+                None,
+                &MotionEvent {
+                    location: pos,
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(self);
+            return;
+        }
         // 화면 가장자리에 닿으면 숨은 막대를 꺼내고, 꺼낸 막대를 떠나면 숨길 때를 잰다
         self.update_bars(Some(pos));
         let under = self.surface_under(pos);
-        let serial = SERIAL_COUNTER.next_serial();
         pointer.motion(
             self,
             under,
@@ -204,6 +486,9 @@ impl BuntState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
+        if self.screenshot_button(button, state) {
+            return;
+        }
         let serial = SERIAL_COUNTER.next_serial();
 
         // 키보드를 받는 레이어 표면(on_demand)을 누르면 그 표면에 포커스를 준다.
@@ -240,6 +525,9 @@ impl BuntState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
+        if self.screenshot_area.is_some() {
+            return;
+        }
         let source = event.source();
         // 시스템 설정의 스크롤 속도 (배수)
         let speed = self.pointer_prefs().scroll_speed;

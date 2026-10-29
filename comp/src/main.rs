@@ -14,10 +14,13 @@ mod input;
 mod panels;
 mod prefs;
 mod render;
+mod screenshot;
 mod shmdiff;
+mod shortcuts;
 mod state;
 mod toplevels;
 mod udev;
+mod windows;
 
 fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

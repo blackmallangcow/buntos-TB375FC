@@ -10,7 +10,7 @@ use smithay::{
     desktop::{Window, layer_map_for_output},
     input::keyboard::{FilterResult, Keycode, xkb},
     reexports::wayland_server::Resource,
-    utils::SERIAL_COUNTER,
+    utils::{Rectangle, SERIAL_COUNTER},
     wayland::{
         compositor::with_states, shell::xdg::XdgToplevelSurfaceData, text_input::TextInputSeat,
     },
@@ -104,11 +104,20 @@ impl BuntState {
             .get_keyboard()
             .and_then(|keyboard| keyboard.current_focus())
             .map(|surface| self.root_surface(&surface));
-        self.space
+        // 최소화하거나 가린 창은 돌아올 자리로 알린다. 활성화하면 그 자리에 다시 놓인다
+        let shown = self
+            .space
             .elements()
-            .filter_map(|window| {
+            .map(|window| (window, self.space.element_geometry(window)));
+        let hidden = self.hidden.iter().map(|hidden| {
+            let size = hidden.window.geometry().size;
+            (&hidden.window, Some(Rectangle::new(hidden.location, size)))
+        });
+        shown
+            .chain(hidden)
+            .filter_map(|(window, geometry)| {
                 let toplevel = window.toplevel()?;
-                let geometry = self.space.element_geometry(window)?;
+                let geometry = geometry?;
                 let (title, app_id) = with_states(toplevel.wl_surface(), |states| {
                     states
                         .data_map
@@ -136,12 +145,14 @@ impl BuntState {
             .collect()
     }
 
-    /// 그 pid의 창 가운데 제목이 같은 창, 없으면 맨 위 창을 앞으로 가져온다
+    /// 그 pid의 창 가운데 제목이 같은 창, 없으면 맨 위 창을 앞으로 가져온다. 최소화하거나 가린 창도
+    /// 고를 수 있고, 고르면 제자리에 다시 놓인다
     fn agent_activate(&mut self, pid: u32, title: &str) -> bool {
         let windows: Vec<Window> = self
             .space
             .elements()
             .rev()
+            .chain(self.hidden.iter().map(|hidden| &hidden.window))
             .filter(|window| self.client_pid(window) == pid)
             .cloned()
             .collect();
@@ -205,7 +216,7 @@ impl BuntState {
     }
 
     /// 지금 배열에서 그 기호를 내는 키 코드 (수정 없이, 첫 단계에서)
-    fn keycode_for(&mut self, keysym: xkb::Keysym) -> Option<Keycode> {
+    pub(crate) fn keycode_for(&mut self, keysym: xkb::Keysym) -> Option<Keycode> {
         self.key_for(keysym, 0)
     }
 
@@ -253,7 +264,7 @@ impl BuntState {
         Ok(Typed::Keys)
     }
 
-    fn text_input_active(&self) -> bool {
+    pub(crate) fn text_input_active(&self) -> bool {
         let mut active = false;
         self.seat
             .text_input()

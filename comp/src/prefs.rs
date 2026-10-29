@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 사용자가 시스템 설정에서 고른 값(화면 모드와 배율, 키 반복, 마우스). 다음 로그인에도 쓰도록
-//! `$XDG_CONFIG_HOME/buntos/comp-state.toml`에 저장하며, 시스템 기본값(comp.toml)보다 앞선다.
+//! 사용자가 시스템 설정에서 고른 값(화면 모드와 배율, 키 반복, 마우스, 키보드 단축키). 다음
+//! 로그인에도 쓰도록 `$XDG_CONFIG_HOME/buntos/comp-state.toml`에 저장하며, 시스템 기본값(comp.toml,
+//! 단축키 표)보다 앞선다.
 
-use std::{io::ErrorKind, path::PathBuf};
+use std::{collections::BTreeMap, io::ErrorKind, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,22 @@ pub struct Prefs {
     pub pointer: Option<PointerPrefs>,
     #[serde(default, rename = "output", skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputPrefs>,
+    /// 기본값과 다르게 바꾼 단축키 (단축키 ID → 값)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shortcuts: BTreeMap<String, ShortcutPref>,
+}
+
+/// 바꾼 단축키 하나. 키가 비면 키를 지운 것이다
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortcutPref {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 /// 키를 누르고 있을 때 반복이 시작되기까지의 시간(ms)과 초당 반복 횟수. 횟수가 0이면 반복하지 않는다
@@ -161,6 +178,13 @@ mod tests {
             refresh: 60_000,
         });
         prefs.output_mut("Virtual-1").scale = Some(2.0);
+        prefs.shortcuts.insert(
+            "app.copy".into(),
+            ShortcutPref {
+                key: "<Alt>c".into(),
+                enabled: false,
+            },
+        );
         let text = toml::to_string(&prefs).unwrap();
         assert_eq!(toml::from_str::<Prefs>(&text).unwrap(), prefs);
         assert_eq!(prefs.outputs.len(), 1);

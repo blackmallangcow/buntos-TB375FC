@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 컴포지터 제어 D-Bus 서비스 (세션 버스 `org.buntos.Compositor`). 시스템 설정이 화면(해상도,
-//! 배율), 키 반복, 마우스를 읽고 바꾸고 연결된 포인터 장치를 읽으며, 셸이 메뉴 막대·Dock 가리기
-//! 설정을 알린다.
+//! 배율), 키 반복, 마우스, 키보드 단축키를 읽고 바꾸고 연결된 포인터 장치를 읽으며, 셸이 메뉴
+//! 막대·Dock 가리기 설정을 알리고 셸이 하는 단축키(모든 앱 보기, Dock 가리기)를 받는다.
 //! 버스 일은 따로 도는 스레드가 맡는다. 읽기는 컴포지터가 미리
 //! 적어 둔 사본(Snapshot)으로 답하고, 바꾸기는 값을 확인한 뒤 이벤트 루프로 넘긴다.
 //! 입력 소스 전환처럼 컴포지터가 다른 프로그램을 부르는 일도 이 스레드가 한다.
@@ -21,6 +21,7 @@ use crate::{
     cursor,
     panels::{Autohide, Panels},
     prefs::PointerPrefs,
+    shortcuts::{self, Category, ShortcutInfo},
 };
 use zbus::{
     Message, blocking, fdo, interface,
@@ -104,6 +105,7 @@ pub struct Snapshot {
     pub pointer: PointerPrefs,
     pub pointer_devices: Vec<PointerDevice>,
     pub focus: Option<Focus>,
+    pub shortcuts: Vec<ShortcutInfo>,
 }
 
 /// 에이전트가 보는 창 하나 (GetWindows)
@@ -210,6 +212,14 @@ pub enum Request {
     },
     Panels(Panels),
     Pointer(PointerPrefs),
+    /// 단축키 하나를 바꾼다 (가속기는 확인해 바르게 썼다. 비면 키가 없다)
+    Shortcut {
+        id: String,
+        accelerator: String,
+        enabled: bool,
+    },
+    /// 한 묶음(빈 문자열이면 전부)의 단축키를 기본값으로 되돌린다
+    ResetShortcuts(String),
     Agent(AgentRequest),
 }
 
@@ -222,6 +232,12 @@ pub enum Command {
     PointerDevicesChanged,
     /// 입력 소스를 바꾼다 (한/영 전환)
     ToggleInputMethod,
+    /// ShortcutsChanged 신호를 보낸다
+    ShortcutsChanged,
+    /// ShortcutActivated 신호를 보낸다: 셸이 하는 단축키를 눌렀다
+    ShortcutActivated(&'static str),
+    /// 알림을 띄운다 (셸의 알림 서버, org.freedesktop.Notifications)
+    Notify { title: String, body: String },
 }
 
 pub struct Service {
@@ -254,6 +270,11 @@ impl Service {
         // 스레드가 없으면(버스 연결 실패) 버린다
         let _ = self.commands.send(command);
     }
+
+    /// 다른 스레드(스크린샷 저장)가 명령을 보낼 때 쓴다
+    pub fn sender(&self) -> mpsc::Sender<Command> {
+        self.commands.clone()
+    }
 }
 
 fn run(api: Api, commands: mpsc::Receiver<Command>) {
@@ -271,30 +292,46 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
     };
     for command in commands {
         match command {
-            Command::OutputsChanged => {
-                if let Err(err) = connection.emit_signal(
-                    None::<&str>,
-                    OBJECT_PATH,
-                    INTERFACE,
-                    "OutputsChanged",
-                    &(),
-                ) {
-                    tracing::warn!("failed to emit OutputsChanged: {err}");
-                }
-            }
-            Command::PointerDevicesChanged => {
-                if let Err(err) = connection.emit_signal(
-                    None::<&str>,
-                    OBJECT_PATH,
-                    INTERFACE,
-                    "PointerDevicesChanged",
-                    &(),
-                ) {
-                    tracing::warn!("failed to emit PointerDevicesChanged: {err}");
-                }
-            }
+            Command::OutputsChanged => emit(&connection, "OutputsChanged", &()),
+            Command::PointerDevicesChanged => emit(&connection, "PointerDevicesChanged", &()),
             Command::ToggleInputMethod => toggle_input_method(&connection),
+            Command::ShortcutsChanged => emit(&connection, "ShortcutsChanged", &()),
+            Command::ShortcutActivated(id) => emit(&connection, "ShortcutActivated", &(id,)),
+            Command::Notify { title, body } => notify(&connection, &title, &body),
         }
+    }
+}
+
+/// 알림을 띄운다. 제목을 앱 이름으로도 쓴다 (macOS의 스크린샷 알림처럼)
+fn notify(connection: &blocking::Connection, title: &str, body: &str) {
+    let hints: HashMap<&str, Value<'_>> = HashMap::new();
+    if let Err(err) = connection.call_method(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        Some("org.freedesktop.Notifications"),
+        "Notify",
+        &(
+            title,
+            0u32,
+            "",
+            title,
+            body,
+            Vec::<&str>::new(),
+            hints,
+            -1i32,
+        ),
+    ) {
+        tracing::warn!("failed to show a notification: {err}");
+    }
+}
+
+fn emit<B: serde::Serialize + DynamicType>(
+    connection: &blocking::Connection,
+    name: &str,
+    body: &B,
+) {
+    if let Err(err) = connection.emit_signal(None::<&str>, OBJECT_PATH, INTERFACE, name, body) {
+        tracing::warn!("failed to emit {name}: {err}");
     }
 }
 
@@ -740,6 +777,68 @@ impl Api {
             menu_bar_background,
         }))
     }
+
+    /// 키보드 단축키 (표 순서). 항목마다 id(s), category(s), kind(s: key, switch),
+    /// accelerator(s: GTK 가속기, 비면 키가 없다), default(s), enabled(b), default-enabled(b)
+    fn get_shortcuts(&self) -> Vec<HashMap<String, Value<'static>>> {
+        let snapshot = self.snapshot.lock().unwrap();
+        snapshot
+            .shortcuts
+            .iter()
+            .map(|info| {
+                HashMap::from([
+                    ("id".to_owned(), Value::from(info.id.clone())),
+                    ("category".to_owned(), Value::from(info.category.clone())),
+                    ("kind".to_owned(), Value::from(info.kind.clone())),
+                    (
+                        "accelerator".to_owned(),
+                        Value::from(info.accelerator.clone()),
+                    ),
+                    ("default".to_owned(), Value::from(info.default.clone())),
+                    ("enabled".to_owned(), Value::from(info.enabled)),
+                    (
+                        "default-enabled".to_owned(),
+                        Value::from(info.default_enabled),
+                    ),
+                ])
+            })
+            .collect()
+    }
+
+    /// 단축키 하나를 바꾸고 다음 로그인에도 쓴다. 가속기가 비면 키를 지운다. 켜고 끄기만 하는
+    /// 항목(kind switch)은 가속기를 보지 않는다. 켠 다른 항목이 같은 키를 쓰면 오류
+    fn set_shortcut(&self, id: &str, accelerator: &str, enabled: bool) -> fdo::Result<()> {
+        let accelerator = shortcuts::check(
+            &self.snapshot.lock().unwrap().shortcuts,
+            id,
+            accelerator,
+            enabled,
+        )
+        .map_err(fdo::Error::InvalidArgs)?;
+        self.request(Request::Shortcut {
+            id: id.to_owned(),
+            accelerator,
+            enabled,
+        })
+    }
+
+    /// 한 묶음(category)의 단축키를 기본값으로 되돌린다. 빈 문자열이면 전부
+    fn reset_shortcuts(&self, category: &str) -> fdo::Result<()> {
+        if !category.is_empty() && !Category::ALL.iter().any(|known| known.id() == category) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "unknown shortcut category {category:?}"
+            )));
+        }
+        self.request(Request::ResetShortcuts(category.to_owned()))
+    }
+
+    /// 단축키를 바꾼 뒤 보낸다
+    #[zbus(signal)]
+    async fn shortcuts_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    /// 셸이 하는 단축키를 눌렀다 (launcher.show, launcher.dock-autohide)
+    #[zbus(signal)]
+    async fn shortcut_activated(emitter: &SignalEmitter<'_>, id: &str) -> zbus::Result<()>;
 
     /// 모드, 배율, 연결이 바뀐 뒤 보낸다
     #[zbus(signal)]
