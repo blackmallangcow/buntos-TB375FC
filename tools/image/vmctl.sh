@@ -13,12 +13,14 @@
 #   tools/image/vmctl.sh qmp 동작...   tools/image/qmp.py 동작 (click:X,Y, type:글자, keys:A+B, screen:경로 ...)
 #   tools/image/vmctl.sh stop
 # 시험 계정은 부팅 때 systemd 자격 증명 buntos.account로 만든다. 기본은 buntos(uid 1000, 암호 buntos,
-# 관리자)이고, VMCTL_ACCOUNT="계정 이름:전체 이름:암호"로 바꾼다. VMCTL_ACCOUNT=를 비워 주면 계정 없이
+# 관리자)이고, VMCTL_ACCOUNT="계정 이름:별칭:암호"로 바꾼다. VMCTL_ACCOUNT=를 비워 주면 계정 없이
 # 띄워 처음 켤 때의 계정 만들기 화면이 나온다. 암호는 QMP로 치므로 영문 소문자와 숫자만 쓴다.
 # 빌드 VM 메모리를 넘지 않게 한 번에 VMCTL_SLOTS대(기본 2)까지만 띄우고, 자리가 없으면 start가 기다린다.
 # 이미지 빌드(tools/image/build.sh)가 도는 동안에는 띄우지 않고 기다린다. 띄운 뒤에는 빌드가
 # 이미지 파일을 새로 만들어도 이미 연 파일을 계속 쓰므로 영향이 없다.
 # VMCTL_QEMU_ARGS로 QEMU 인자를 더할 수 있다 (예: -vnc unix:/경로/vnc.sock).
+# 디스크(임시 덮어쓰기)는 VMCTL_DISK_SIZE(기본 16G)이고, buntOS가 부팅 때 루트를 디스크 끝까지 늘린다.
+# 덮어쓰기는 쓴 만큼만 자리를 차지한다. 빈 값을 주면 이미지 크기 그대로 띄운다.
 # BUNTOS_IMAGE_DIR을 주면 그 디렉터리의 이미지를 띄운다 (tools/image/build.sh와 같다).
 set -euo pipefail
 
@@ -94,7 +96,8 @@ start)
 	exec 7>"$image_dir.lock"
 	flock -s 7
 	image="$image_dir/buntos.raw"
-	qemu-img create -q -f qcow2 -F raw -b "$image" "$work/disk.qcow2"
+	disk_size=${VMCTL_DISK_SIZE-16G}
+	qemu-img create -q -f qcow2 -F raw -b "$image" "$work/disk.qcow2" ${disk_size:+"$disk_size"}
 	exec 7>&-
 	cp /usr/share/AAVMF/AAVMF_VARS.fd "$work/vars.fd"
 	account=${VMCTL_ACCOUNT-buntos:buntOS:buntos}
