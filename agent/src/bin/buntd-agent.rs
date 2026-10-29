@@ -27,7 +27,7 @@ use std::{
 
 use bunt_access::{Client, Policy};
 use bunt_agent::{
-    atspi::{self, A11y, AUTH_WINDOW, AppRef, Focus, LOCK_WINDOW, Placed, ROOT, WindowRef},
+    atspi::{self, A11y, AppRef, Focus, LOCK_WINDOW, Placed, ROOT, WindowRef},
     desktop::{self, DesktopApp},
     diff,
     protocol::{
@@ -490,7 +490,8 @@ impl Agent {
         Ok(a11y)
     }
 
-    /// 앱 목록. 관리자 인증 창과 잠금 화면은 빼서 스냅샷 범위에도 들지 않는다
+    /// 앱 목록. 사람만 답하는 창(관리자 인증, Wi-Fi 암호, Bluetooth 페어링)과 잠금 화면은 빼서 스냅샷
+    /// 범위에도 들지 않는다
     async fn list(&mut self, a11y: &A11y) -> Result<Vec<AppRef>, Failure> {
         let mut apps = a11y.apps().await.map_err(|err| {
             self.a11y = None;
@@ -498,8 +499,9 @@ impl Agent {
         })?;
         apps.retain(|app| app.name != LOCK_WINDOW);
         for app in &mut apps {
-            app.windows
-                .retain(|window| window.title != AUTH_WINDOW && window.title != LOCK_WINDOW);
+            app.windows.retain(|window| {
+                !atspi::is_human_only(&window.title) && window.title != LOCK_WINDOW
+            });
         }
         Ok(apps)
     }
@@ -918,7 +920,7 @@ impl Agent {
         let window_title = tree
             .get(&window)
             .map_or(String::new(), |item| item.name.clone());
-        if window_title == AUTH_WINDOW {
+        if atspi::is_human_only(&window_title) {
             return Err(auth_dialog());
         }
         if window_title == LOCK_WINDOW {

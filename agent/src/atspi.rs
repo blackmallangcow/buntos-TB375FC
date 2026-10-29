@@ -29,6 +29,15 @@ pub const ROOT: &str = "/org/a11y/atspi/accessible/root";
 /// 셸의 관리자 인증 창: 레이어 이름이자 창의 접근성 이름. 사람만 답하는 창이라 에이전트는 읽지도
 /// 조작하지도 않는다
 pub const AUTH_WINDOW: &str = "bunt-polkit-agent";
+/// 사람만 답하는 셸 창 모두: 관리자 인증 창, Wi-Fi 암호 창(비밀 에이전트), Bluetooth 페어링 창(페어링
+/// 에이전트). 하나였던 인증 창 검사를 이 목록으로 넓혔다
+pub const HUMAN_ONLY_WINDOWS: [&str; 3] = [AUTH_WINDOW, "bunt-secret-agent", "bunt-pairing-agent"];
+
+/// 사람만 답하는 셸 창의 이름(레이어 이름이나 창의 접근성 이름)인지
+pub fn is_human_only(name: &str) -> bool {
+    HUMAN_ONLY_WINDOWS.contains(&name)
+}
+
 /// 잠금 화면(bunt-lock): 앱 이름이자 창의 접근성 이름. 사람만 암호를 치는 화면이라 에이전트는 읽지도 조작하지도
 /// 않는다. 잠긴 동안에는 데몬이 모든 요청을 거절하므로, 이 이름은 잠금을 푼 뒤 잠금 화면이 끝나기까지의 틈을 막는다
 pub const LOCK_WINDOW: &str = "bunt-lock";
@@ -214,11 +223,11 @@ impl A11y {
         })
     }
 
-    /// 키보드 포커스가 셸의 관리자 인증 창(레이어 `bunt-polkit-agent`)에 있는지
+    /// 키보드 포커스가 사람만 답하는 셸 창(관리자 인증, Wi-Fi 암호, Bluetooth 페어링)에 있는지
     pub async fn auth_dialog_focused(&self) -> bool {
         matches!(
             self.compositor::<_, (u32, String, String, bool)>("GetFocus", &()).await,
-            Ok((_, namespace, _, true)) if namespace == AUTH_WINDOW
+            Ok((_, namespace, _, true)) if is_human_only(&namespace)
         )
     }
 
@@ -887,5 +896,20 @@ mod tests {
         let set = states(&[1124073472, 0]);
         assert_eq!(set, state::SENSITIVE | state::SHOWING | state::VISIBLE);
         assert_eq!(states(&[0, 1 << 11]), state::READ_ONLY);
+    }
+
+    #[test]
+    fn human_only_windows_cover_every_secret_dialog() {
+        // 셸의 레이어 이름 (polkit_agent.rs, secret_agent.rs, pairing_agent.rs)
+        for name in [
+            "bunt-polkit-agent",
+            "bunt-secret-agent",
+            "bunt-pairing-agent",
+        ] {
+            assert!(is_human_only(name), "{name}");
+        }
+        assert!(!is_human_only("bunt-banner"));
+        assert!(!is_human_only("bunt-polkit"));
+        assert!(!is_human_only(""));
     }
 }

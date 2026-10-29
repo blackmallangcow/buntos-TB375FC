@@ -41,8 +41,13 @@ use smithay::{
 
 /// evdev 키 코드 + 8 (xkb 키 코드)의 범위
 const KEYCODES: std::ops::RangeInclusive<u32> = 8..=255;
-/// 셸의 관리자 인증 창(polkit 인증 에이전트)의 레이어 이름. 이 창은 사람만 답한다
-const AUTH_NAMESPACE: &str = "bunt-polkit-agent";
+/// 사람만 답하는 셸 창의 레이어 이름: 관리자 인증 창(polkit 인증 에이전트), Wi-Fi 암호 창(NetworkManager
+/// 비밀 에이전트), Bluetooth 페어링 창(BlueZ 페어링 에이전트). 하나였던 이름을 목록으로 넓혔다
+const AUTH_NAMESPACES: [&str; 3] = [
+    "bunt-polkit-agent",
+    "bunt-secret-agent",
+    "bunt-pairing-agent",
+];
 /// 글 입력에 한 번에 확정하는 바이트 수. Wayland 메시지 하나는 4KB를 넘지 못한다
 const COMMIT_BYTES: usize = 2048;
 /// 창 스크린샷에서 창의 비치는 부분(둥근 모서리 등) 뒤에 까는 색 (미리 곱한 RGBA)
@@ -154,7 +159,7 @@ impl BuntState {
         self.space.outputs().any(|output| {
             layer_map_for_output(output)
                 .layers()
-                .any(|layer| layer.namespace() == AUTH_NAMESPACE)
+                .any(|layer| AUTH_NAMESPACES.contains(&layer.namespace()))
         })
     }
 
