@@ -5,11 +5,19 @@
 //! (D-Bus의 에이전트 전용 메서드, ARCHITECTURE 6장). 입력은 사용자의 seat에 넣으며 실제 입력과
 //! 같은 길을 거친다. 키는 컴포지터 단축키를 거치지 않는다. 에이전트 전용 seat는 뒤에 둔다
 
+use std::{sync::mpsc, time::Duration};
+
 use smithay::{
-    backend::input::{ButtonState, KeyState},
+    backend::input::{Axis, AxisSource, ButtonState, KeyState},
     desktop::{Window, layer_map_for_output},
-    input::keyboard::{FilterResult, Keycode, xkb},
-    reexports::wayland_server::Resource,
+    input::{
+        keyboard::{FilterResult, Keycode, xkb},
+        pointer::AxisFrame,
+    },
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::Resource,
+    },
     utils::{Rectangle, SERIAL_COUNTER},
     wayland::{
         compositor::with_states, shell::xdg::XdgToplevelSurfaceData, text_input::TextInputSeat,
@@ -39,6 +47,11 @@ const AUTH_NAMESPACE: &str = "bunt-polkit-agent";
 const COMMIT_BYTES: usize = 2048;
 /// 창 스크린샷에서 창의 비치는 부분(둥근 모서리 등) 뒤에 까는 색 (미리 곱한 RGBA)
 const BACKDROP: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// 휠 눈금 하나의 거리. 실제 휠의 이벤트와 같다(v120 120이 15 논리 픽셀, input.rs의 on_axis)
+const NOTCH: f64 = 15.0;
+/// 포인터가 새 표면에 들어간 뒤 휠을 돌리기까지 기다리는 시간. Firefox는 들어옴(enter) 바로 뒤에 온
+/// 휠을 버린다. 사람의 포인터도 창에 들어와 머문 뒤에 휠을 돌린다
+const ENTER_PAUSE: Duration = Duration::from_millis(100);
 
 impl BuntState {
     pub fn agent_request(&mut self, request: AgentRequest) {
@@ -87,6 +100,18 @@ impl BuntState {
                     }
                 });
             }
+            AgentRequest::Scroll {
+                x,
+                y,
+                dx,
+                dy,
+                reply,
+            } => match refused {
+                Some(why) => {
+                    let _ = reply.send(Err(why));
+                }
+                None => self.agent_scroll(x, y, dx, dy, reply),
+            },
             AgentRequest::Commit { text, reply } => {
                 let _ = reply.send(match refused {
                     Some(why) => Err(why),
@@ -328,6 +353,67 @@ impl BuntState {
         self.pointer_moved((x, y).into(), time);
         self.press_button(button, ButtonState::Pressed, time);
         self.press_button(button, ButtonState::Released, time.saturating_add(1));
+    }
+
+    /// 포인터를 (x, y)로 옮겨 휠을 돌리고 답한다. dx, dy는 눈금 수이고 오른쪽·아래가 +다. 시스템 설정의
+    /// 스크롤 속도와 자연스러운 스크롤은 사람의 장치에만 쓴다. 포인터가 다른 표면에 들어가면
+    /// ENTER_PAUSE 뒤에 그 자리에서 한 번 더 움직이고 돌린다
+    fn agent_scroll(
+        &mut self,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+        reply: mpsc::Sender<Result<(), Refused>>,
+    ) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            let _ = reply.send(Ok(()));
+            return;
+        };
+        let before = pointer.current_focus();
+        let time = self.start_time.elapsed().as_millis() as u32;
+        self.pointer_moved((x, y).into(), time);
+        if pointer.current_focus() == before {
+            self.agent_wheel(dx, dy);
+            let _ = reply.send(Ok(()));
+            return;
+        }
+        let timer = self.loop_handle.insert_source(
+            Timer::from_duration(ENTER_PAUSE),
+            move |_, _, state| {
+                // 기다리는 사이에 인증 창이 떴으면 돌리지 않는다
+                let _ = reply.send(if state.auth_dialog_open() {
+                    Err(Refused::AuthDialog)
+                } else {
+                    let time = state.start_time.elapsed().as_millis() as u32;
+                    state.pointer_moved((x, y).into(), time);
+                    state.agent_wheel(dx, dy);
+                    Ok(())
+                });
+                TimeoutAction::Drop
+            },
+        );
+        if let Err(err) = timer {
+            tracing::warn!("failed to schedule the agent's wheel: {}", err.error);
+        }
+    }
+
+    /// 포인터 아래의 표면에 휠 눈금을 보낸다
+    fn agent_wheel(&mut self, dx: f64, dy: f64) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let time = self.start_time.elapsed().as_millis() as u32;
+        let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
+        for (axis, notches) in [(Axis::Horizontal, dx), (Axis::Vertical, dy)] {
+            if notches != 0.0 {
+                frame = frame
+                    .value(axis, notches * NOTCH)
+                    .v120(axis, (notches * 120.0).round() as i32);
+            }
+        }
+        pointer.axis(self, frame);
+        pointer.frame(self);
     }
 
     /// 그 pid의 창 가운데 제목이 같은 창, 없으면 맨 위 창 (agent_activate와 같은 차례). 최소화하거나

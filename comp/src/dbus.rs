@@ -48,6 +48,8 @@ const AGENT_PATH: &str = "/usr/bin/buntd-agent";
 const AGENT_REPLY: Duration = Duration::from_secs(2);
 /// 창을 따로 그려 읽기를 기다리는 시간 (소프트웨어 렌더링 VM의 큰 창)
 const CAPTURE_REPLY: Duration = Duration::from_secs(5);
+/// 에이전트가 한 번에 돌릴 수 있는 휠 눈금 수
+const MAX_NOTCHES: f64 = 50.0;
 
 /// 시스템 설정에 보이는 출력 하나
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -219,6 +221,14 @@ pub enum AgentRequest {
         x: f64,
         y: f64,
         button: u32,
+        reply: mpsc::Sender<Result<(), Refused>>,
+    },
+    /// 그 자리로 포인터를 옮겨 휠을 돌린다 (눈금 수, 오른쪽·아래가 +)
+    Scroll {
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
         reply: mpsc::Sender<Result<(), Refused>>,
     },
     /// 켜진 글 입력에만 글을 확정한다. 켜진 글 입력이 없으면 아무것도 치지 않고 false
@@ -708,6 +718,37 @@ impl Api {
             x,
             y,
             button,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
+    /// 에이전트 전용: 논리 좌표 (x, y)로 포인터를 옮겨 휠을 돌린다. dx, dy는 휠 눈금 수이고
+    /// 오른쪽·아래가 +다(눈금 하나는 실제 휠의 한 칸)
+    async fn scroll(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    ) -> fdo::Result<()> {
+        check_agent(connection, &header).await?;
+        if ![x, y, dx, dy].iter().all(|value| value.is_finite())
+            || dx.abs() > MAX_NOTCHES
+            || dy.abs() > MAX_NOTCHES
+        {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "x and y must be numbers, dx and dy at most {MAX_NOTCHES} notches"
+            )));
+        }
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::Scroll {
+            x,
+            y,
+            dx,
+            dy,
             reply,
         }))?;
         answer(receiver)
