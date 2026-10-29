@@ -13,6 +13,8 @@ agent-limit-note = These settings apply to access through the buntOS agent (bunt
 # Names of the [+] and [−] buttons (they show only icons; used for tooltips and accessibility)
 agent-add-client = Add AI
 agent-remove-client = Remove AI
+# Second line of an AI row’s tooltip. The first line is the program path with * in it
+agent-client-any-version = Stays allowed when an update changes the version or build hash at *.
 agent-add-app = Add App
 agent-remove-app = Remove App
 agent-cancel = Cancel

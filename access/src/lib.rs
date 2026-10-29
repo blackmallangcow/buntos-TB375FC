@@ -9,6 +9,9 @@
 //! - 에이전트 데몬(buntd-agent)은 소켓에 붙은 프로세스를 [`identify`]로 알아보고, [`Policy::allows`]로
 //!   받을지, [`Policy::blocks`]로 앱에 접근하게 할지 정한다. 받지 않은 클라이언트는 [`record_request`]로
 //!   남기고, 설정 페이지가 [`requests`]로 읽어 더할 AI로 보여 준다.
+//! - 허용 목록은 실행 파일 경로로 맞춘다. 사용자 홈 아래의 스스로 업데이트하는 AI(클로드 코드 등)는
+//!   판 번호·빌드 해시 자리를 `*`로 바꾼 패턴으로도 맞춰 업데이트해도 허용이 풀리지 않는다
+//!   ([`version_pattern`]).
 //! - 데몬 안에서 쓰므로 비동기와 네트워크 없이 파일만 읽고 쓴다.
 //!
 //! 데몬이 지키는 정책이다. 같은 사용자로 도는 프로그램이 접근성 버스(AT-SPI)에 직접 붙으면 막지
@@ -19,11 +22,13 @@ use std::path::PathBuf;
 mod desktop;
 mod files;
 mod identify;
+mod pattern;
 mod policy;
 mod requests;
 
 pub use desktop::{DesktopApp, desktop_app};
 pub use identify::{ProgramError, can_identify, identify, program_client};
+pub use pattern::version_pattern;
 pub use policy::{
     AllowedClient, POLICY_PATH, Policy, PolicyError, normalize_app_id, valid_app_id, valid_name,
     valid_path,

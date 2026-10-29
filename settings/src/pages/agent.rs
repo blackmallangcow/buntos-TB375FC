@@ -10,6 +10,10 @@
 //! `pkexec bunt-access-helper …`로 하므로 셸의 인증 창이 계정 암호를 묻는다(polkit 동작
 //! org.buntos.agent.access.change, 바꿀 때마다 묻는다). [+]는 접근을 요청했던 AI(에이전트 데몬의 요청
 //! 기록)와 "다른 프로그램…"(실행 파일 고르기), 설치된 앱 목록을 보여 준다.
+//!
+//! 도우미는 홈 아래의 스스로 업데이트하는 AI에 판 번호·빌드 해시 패턴을 붙인다
+//! (`bunt_access::version_pattern`). AI 줄의 도움말은 그 패턴과 뜻을 보인다. macOS 목록처럼 줄에는
+//! 부제를 달지 않는다.
 
 use std::{
     cell::{Cell, RefCell},
@@ -19,7 +23,7 @@ use std::{
     rc::Rc,
 };
 
-use bunt_access::{HELPER_PATH, Policy, ProgramError, Request};
+use bunt_access::{AllowedClient, HELPER_PATH, Policy, ProgramError, Request};
 use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
 
 use super::Context;
@@ -285,15 +289,18 @@ impl AgentPage {
         self.apps.update_buttons(busy);
     }
 
-    /// AI 줄: 아이콘, 이름, 스위치. 도움말은 실행하는 명령이다
+    /// AI 줄: 아이콘, 이름, 스위치. 도움말은 허용한 명령이다 ([`client_tooltip`])
     fn client_row(
         self: &Rc<Self>,
-        client: &bunt_access::AllowedClient,
+        client: &AllowedClient,
         apps: &[gio::AppInfo],
     ) -> gtk::ListBoxRow {
         let icon = program_icon(&client.exe, client.script.as_deref(), apps);
         let (row, accessories) = widgets::rich_row(Some(&icon), &client.name, None);
-        row.set_tooltip_text(Some(&command_line(&client.exe, client.script.as_deref())));
+        row.set_tooltip_text(Some(&client_tooltip(
+            client,
+            &self.context.tr.get("agent-client-any-version"),
+        )));
         let switch = gtk::Switch::builder()
             .active(client.enabled)
             .valign(gtk::Align::Center)
@@ -385,7 +392,7 @@ impl AgentPage {
         );
         let requests: Vec<Request> = {
             let policy = self.policy.borrow();
-            // 이미 목록에 있거나 지워진 프로그램은 빼고 보인다
+            // 이미 목록의 항목에 맞거나(패턴에 맞는 다른 판 포함) 지워진 프로그램은 빼고 보인다
             bunt_access::requests()
                 .into_iter()
                 .filter(|request| {
@@ -724,6 +731,22 @@ fn command_line(exe: &Path, script: Option<&Path>) -> String {
     }
 }
 
+/// 허용한 AI의 도움말: 명령. 판 번호·빌드 해시 패턴이 있으면 패턴으로 보이고 그 뜻(note)을 붙인다
+fn client_tooltip(client: &AllowedClient, note: &str) -> String {
+    let command = command_line(
+        client.exe_pattern.as_deref().unwrap_or(&client.exe),
+        client
+            .script_pattern
+            .as_deref()
+            .or(client.script.as_deref()),
+    );
+    if client.exe_pattern.is_some() || client.script_pattern.is_some() {
+        format!("{command}\n{note}")
+    } else {
+        command
+    }
+}
+
 enum Outcome {
     Changed,
     /// 인증 창에서 취소했다 (pkexec 126)
@@ -792,6 +815,36 @@ mod tests {
         assert_eq!(
             command_line(Path::new("/usr/bin/node"), Some(Path::new("/opt/cli.js"))),
             "/usr/bin/node /opt/cli.js"
+        );
+    }
+
+    #[test]
+    fn tooltips_show_the_version_pattern() {
+        let mut client = AllowedClient {
+            name: "claude".into(),
+            exe: "/home/u/.local/share/claude/versions/2.1.308".into(),
+            exe_pattern: None,
+            script: None,
+            script_pattern: None,
+            enabled: true,
+        };
+        assert_eq!(
+            client_tooltip(&client, "note"),
+            "/home/u/.local/share/claude/versions/2.1.308"
+        );
+        client.exe_pattern = Some("/home/u/.local/share/claude/versions/*".into());
+        assert_eq!(
+            client_tooltip(&client, "note"),
+            "/home/u/.local/share/claude/versions/*\nnote"
+        );
+        // 인터프리터는 그대로, 스크립트만 패턴
+        client.exe = "/usr/bin/node".into();
+        client.exe_pattern = None;
+        client.script = Some("/home/u/.nvm/versions/node/v22.11.0/lib/cli.js".into());
+        client.script_pattern = Some("/home/u/.nvm/versions/node/*/lib/cli.js".into());
+        assert_eq!(
+            client_tooltip(&client, "note"),
+            "/usr/bin/node /home/u/.nvm/versions/node/*/lib/cli.js\nnote"
         );
     }
 }

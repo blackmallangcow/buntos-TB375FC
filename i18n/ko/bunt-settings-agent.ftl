@@ -13,6 +13,8 @@ agent-limit-note = 이 설정은 buntOS 에이전트(bunt agent)를 거치는 �
 # [+] [−] 단추의 이름 (아이콘만 보이므로 도움말과 접근성 이름으로 쓴다)
 agent-add-client = AI 추가
 agent-remove-client = AI 제거
+# AI 줄 도움말의 둘째 줄. 첫 줄은 * 자리가 있는 실행 파일 경로다
+agent-client-any-version = 업데이트로 * 자리의 버전이나 빌드 해시가 바뀌어도 계속 허용합니다.
 agent-add-app = 앱 추가
 agent-remove-app = 앱 제거
 agent-cancel = 취소

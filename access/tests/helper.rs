@@ -1,15 +1,17 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 특권 도우미를 실행해 본다. BUNT_ACCESS_POLICY_FILE로 임시 정책 파일을 준다
+//! 특권 도우미를 실행해 본다. BUNT_ACCESS_POLICY_FILE로 임시 정책 파일을, BUNT_ACCESS_HOME으로 시험
+//! 홈을 준다
 
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
-use bunt_access::Policy;
+use bunt_access::{Client, Policy};
 
 const HELPER: &str = env!("CARGO_BIN_EXE_bunt-access-helper");
 
@@ -27,6 +29,19 @@ fn helper(policy: &Path, args: &[&str]) -> Output {
         .env("BUNT_ACCESS_POLICY_FILE", policy)
         .output()
         .unwrap()
+}
+
+/// base 아래에 실행 파일을 만든다. base부터 그 디렉터리까지는 umask와 상관없이 0700이다
+fn program(base: &Path, relative: &str) -> PathBuf {
+    let path = base.join(relative);
+    let mut dir = path.parent().unwrap().to_path_buf();
+    fs::create_dir_all(&dir).unwrap();
+    while dir.starts_with(base) {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        dir.pop();
+    }
+    fs::write(&path, b"\x7fELF").unwrap();
+    fs::canonicalize(&path).unwrap()
 }
 
 #[test]
@@ -70,6 +85,80 @@ fn changes_the_policy_file() {
     let read = Policy::load_from(&policy);
     assert!(read.clients.is_empty());
     assert_eq!(read.blocked_apps, ["org.gnome.Nautilus"]);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn keeps_updating_ais_in_the_home_allowed() {
+    let dir = temp_dir("versions");
+    let home = dir.join("home");
+    let policy = dir.join("agent-access.toml");
+    let add = |exe: &Path| {
+        let output = Command::new(HELPER)
+            .args(["add-client", "claude", exe.to_str().unwrap()])
+            .env("BUNT_ACCESS_POLICY_FILE", &policy)
+            .env("BUNT_ACCESS_HOME", &home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Policy::load_from(&policy)
+    };
+    let pattern_of = |policy: &Policy, exe: &Path| {
+        let client = policy.clients.iter().find(|client| client.exe == exe);
+        client.unwrap().exe_pattern.clone()
+    };
+    let client = |exe: PathBuf| Client {
+        name: "claude".into(),
+        exe,
+        script: None,
+        admin: false,
+    };
+
+    // Code 탭의 클로드 코드: 판 번호와 해시 디렉터리
+    let code = ".config/Claude/claude-code";
+    let old = program(&home, &format!("{code}/2.1.308/a93ded4b1b47/claude"));
+    let home = fs::canonicalize(&home).unwrap();
+    let read = add(&old);
+    assert_eq!(
+        pattern_of(&read, &old),
+        Some(home.join(format!("{code}/*/*/claude")))
+    );
+    let updated = home.join(format!("{code}/2.1.310/0f3c9a1b2d4e/claude"));
+    assert!(read.allows(&client(updated.clone())));
+    assert!(!read.allows(&client(home.join("Downloads/claude"))));
+    assert!(!read.allows(&client(
+        home.join(format!("{code}/2.1.310/0f3c9a1b2d4e/agent"))
+    )));
+
+    // 네이티브 CLI: 판 번호가 파일 이름이다
+    let native = program(&home, ".local/share/claude/versions/2.1.308");
+    let read = add(&native);
+    assert_eq!(
+        pattern_of(&read, &native),
+        Some(home.join(".local/share/claude/versions/*"))
+    );
+    assert!(read.allows(&client(home.join(".local/share/claude/versions/2.1.310"))));
+
+    // 다른 사용자가 새 판을 만들 수 있는 디렉터리 아래와 홈 밖은 정확히 비교한다
+    let shared = program(&home, "shared/1.0/agent");
+    fs::set_permissions(home.join("shared"), fs::Permissions::from_mode(0o1777)).unwrap();
+    assert_eq!(pattern_of(&add(&shared), &shared), None);
+    let outside = program(&dir, "opt/agent/1.0/agent");
+    assert_eq!(pattern_of(&add(&outside), &outside), None);
+
+    // 업데이트한 판을 다시 더하면 옛 항목 자리에 한 줄로 합쳐진다
+    let updated = program(&home, &format!("{code}/2.1.310/0f3c9a1b2d4e/claude"));
+    let read = add(&updated);
+    assert_eq!(read.clients.len(), 4);
+    assert_eq!(read.clients[0].exe, updated);
+    assert_eq!(
+        read.clients[0].exe_pattern,
+        Some(home.join(format!("{code}/*/*/claude")))
+    );
     fs::remove_dir_all(dir).unwrap();
 }
 

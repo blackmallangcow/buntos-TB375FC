@@ -8,19 +8,24 @@
 //! 관리자 암호를 묻는다(auth_admin_keep이면 허용받은 AI가 남은 인증으로 제 권한을 늘릴 수 있다).
 //! 입력을 검사하고, 정책 디렉터리를 잠근 채 읽고 고쳐 원자적으로 쓴다.
 //!
-//! 시험할 때는 BUNT_ACCESS_POLICY_FILE로 다른 파일을 준다. pkexec는 환경 변수를 넘기지 않으므로
-//! 이 변수는 root 권한으로 이어지지 않는다.
+//! AI를 더할 때 실행 파일과 스크립트가 시스템 설정을 연 사용자(PKEXEC_UID)의 홈 아래에 있으면 판 번호·빌드
+//! 해시 자리를 `*`로 바꾼 패턴도 적는다([`version_pattern`]). 스스로 업데이트하는 AI가 업데이트한 뒤에도
+//! 허용이 풀리지 않는다.
+//!
+//! 시험할 때는 BUNT_ACCESS_POLICY_FILE로 다른 파일을 주고, 그때만 BUNT_ACCESS_HOME으로 패턴을 만들 홈도
+//! 준다. pkexec는 환경 변수를 넘기지 않으므로 이 변수들은 root 권한으로 이어지지 않는다.
 
 use std::{
     env,
     fs::{self, File},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
 use bunt_access::{
-    POLICY_PATH, Policy, can_identify, normalize_app_id, valid_app_id, valid_name, valid_path,
+    AllowedClient, POLICY_PATH, Policy, can_identify, normalize_app_id, valid_app_id, valid_name,
+    valid_path, version_pattern,
 };
 
 const USAGE: &str = "\
@@ -33,11 +38,8 @@ usage: bunt-access-helper <command> [arguments]
   unblock-app APP_ID...";
 
 enum Command {
-    Add {
-        name: String,
-        exe: PathBuf,
-        script: Option<PathBuf>,
-    },
+    /// 패턴은 검사(check)가 채운다
+    Add(AllowedClient),
     Remove {
         exe: PathBuf,
         script: Option<PathBuf>,
@@ -79,7 +81,8 @@ fn run() -> Result<(), Failure> {
         })
         .collect::<Result<Vec<String>, Failure>>()?;
     let command = parse(&args)?;
-    let path = match env::var_os("BUNT_ACCESS_POLICY_FILE") {
+    let test = env::var_os("BUNT_ACCESS_POLICY_FILE");
+    let path = match &test {
         Some(path) => PathBuf::from(path),
         None => {
             if !running_as_root() {
@@ -88,7 +91,7 @@ fn run() -> Result<(), Failure> {
             PathBuf::from(POLICY_PATH)
         }
     };
-    let command = check(command)?;
+    let command = check(command, test.is_some())?;
     update(&path, command).map_err(|err| Failure::Invalid(format!("{}: {err}", path.display())))
 }
 
@@ -116,11 +119,14 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 ));
             };
             let (exe, script) = client(rest)?;
-            Command::Add {
+            Command::Add(AllowedClient {
                 name: name.trim().to_owned(),
                 exe,
+                exe_pattern: None,
                 script,
-            }
+                script_pattern: None,
+                enabled: true,
+            })
         }
         "remove-client" => {
             let (exe, script) = client(rest)?;
@@ -140,8 +146,9 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
     })
 }
 
-/// 입력을 검사한다. 더하는 클라이언트는 있는 파일이어야 하고 링크를 푼 경로로 적는다
-fn check(command: Command) -> Result<Command, Failure> {
+/// 입력을 검사한다. 더하는 클라이언트는 있는 파일이어야 하고 링크를 푼 경로로 적는다. 홈 아래의
+/// 경로에는 판 번호·빌드 해시 패턴을 붙인다 (test면 BUNT_ACCESS_HOME을 홈으로 쓴다)
+fn check(command: Command, test: bool) -> Result<Command, Failure> {
     let path = |path: &Path| {
         if valid_path(path) {
             Ok(())
@@ -165,7 +172,9 @@ fn check(command: Command) -> Result<Command, Failure> {
             .collect::<Result<Vec<_>, _>>()
     };
     match command {
-        Command::Add { name, exe, script } => {
+        Command::Add(AllowedClient {
+            name, exe, script, ..
+        }) => {
             if !valid_name(&name) {
                 return Err(Failure::Invalid(
                     "the name must be 1 to 64 characters without control characters".into(),
@@ -196,7 +205,20 @@ fn check(command: Command) -> Result<Command, Failure> {
                     exe.display()
                 )));
             }
-            Ok(Command::Add { name, exe, script })
+            // 업데이트로 판 번호·빌드 해시 자리만 바뀐 실행 파일과 스크립트도 맞도록
+            let home = caller_home(test);
+            let pattern = |path: &Path| {
+                home.as_ref()
+                    .and_then(|(uid, home)| version_pattern(path, home, *uid))
+            };
+            Ok(Command::Add(AllowedClient {
+                name,
+                exe_pattern: pattern(&exe),
+                exe,
+                script_pattern: script.as_deref().and_then(pattern),
+                script,
+                enabled: true,
+            }))
         }
         Command::Remove { exe, script } => {
             path(&exe)?;
@@ -255,7 +277,7 @@ fn update(path: &Path, command: Command) -> Result<(), String> {
     };
     let before = policy.clone();
     match command {
-        Command::Add { name, exe, script } => policy.add_client(&name, &exe, script.as_deref()),
+        Command::Add(client) => policy.add_client(client),
         Command::Remove { exe, script } => {
             policy.remove_client(&exe, script.as_deref());
         }
@@ -285,13 +307,65 @@ fn update(path: &Path, command: Command) -> Result<(), String> {
     policy.save_to(path).map_err(|err| err.to_string())
 }
 
-/// 유효 uid가 0인지 (/proc/self/status)
+/// 유효 uid가 0인지
 fn running_as_root() -> bool {
-    fs::read_to_string("/proc/self/status").is_ok_and(|status| {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix("Uid:"))
-            .and_then(|uids| uids.split_whitespace().nth(1))
-            == Some("0")
-    })
+    status_uid(1) == Some(0)
+}
+
+/// /proc/self/status의 uid. 0번째는 실제, 1번째는 유효 uid다
+fn status_uid(index: usize) -> Option<u32> {
+    fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .nth(index)?
+        .parse()
+        .ok()
+}
+
+/// 패턴을 만들 사용자와 홈: pkexec가 준 PKEXEC_UID(없으면 실제 uid)와 /etc/passwd의 그 홈.
+/// 시험(test)에서 BUNT_ACCESS_HOME이 있으면 그 디렉터리와 그 주인을 쓴다
+fn caller_home(test: bool) -> Option<(u32, PathBuf)> {
+    if let Some(home) = env::var_os("BUNT_ACCESS_HOME").filter(|_| test) {
+        let home = PathBuf::from(home);
+        return Some((fs::metadata(&home).ok()?.uid(), home));
+    }
+    let uid = env::var("PKEXEC_UID")
+        .ok()
+        .and_then(|uid| uid.parse().ok())
+        .or_else(|| status_uid(0))?;
+    let home = home_of(&fs::read_to_string("/etc/passwd").ok()?, uid)?;
+    Some((uid, home))
+}
+
+/// passwd 형식(이름:암호:uid:gid:설명:홈:셸)에서 uid의 홈. 절대 경로가 아니면 None
+fn home_of(passwd: &str, uid: u32) -> Option<PathBuf> {
+    passwd
+        .lines()
+        .map(|line| line.split(':').collect::<Vec<_>>())
+        .find(|fields| fields.len() == 7 && fields[2].parse() == Ok(uid))
+        .map(|fields| PathBuf::from(fields[5]))
+        .filter(|home| home.is_absolute())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_home_of_a_uid() {
+        let passwd = "\
+root:x:0:0:root:/root:/bin/bash
+nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+buntos:x:1000:1000:buntOS:/home/buntos:/bin/bash
+broken:x:1001
+relative:x:1002:1002::home/relative:/bin/sh
+";
+        assert_eq!(home_of(passwd, 1000), Some(PathBuf::from("/home/buntos")));
+        assert_eq!(home_of(passwd, 0), Some(PathBuf::from("/root")));
+        assert_eq!(home_of(passwd, 1001), None);
+        assert_eq!(home_of(passwd, 1002), None);
+        assert_eq!(home_of(passwd, 4242), None);
+    }
 }
