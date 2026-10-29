@@ -6,7 +6,8 @@
 # `bunt agent`로만 한다. 계산기에서 6 × 7을 계산해 결과를 읽고, 텍스트 편집기에 채운 뒤 입력기를 한글
 # 모드로 두고 글을 더 친다(글 입력으로 넣으므로 바뀌지 않아야 한다). ref가 없는 화면은 창 스크린샷에서 찾은
 # 픽셀을 누른다(계산기의 '=' 단추, Firefox 캔버스). Firefox 주소 막대에서는 fill이 실패를 성공으로 알리지
-# 않는지, 글 칸이 아닌 곳에 type하면 키로 바꿔 치지 않는지 본다. 시스템 설정 사이드바도 눌러 본다.
+# 않는지, 글 칸이 아닌 곳에 type하면 키로 바꿔 치지 않는지 본다. 긴 웹 페이지의 글과 화면 밖 단추, 휠 스크롤,
+# 다른 탭 페이지(시스템 정보)를 빼는지, 앱을 끝내는 동작을 알리는지, 시스템 설정 사이드바도 본다.
 # 직렬 콘솔의 root로 실행한다(boot-to-shell.sh가 넣어 돌린다). 마지막 줄은 "E2E5_RESULT 통과 실패"다
 set -u
 
@@ -103,6 +104,7 @@ PY
 # 다시 돌려도 같도록 이 시나리오가 쓰는 앱을 닫고 시작한다
 pkill -f /usr/bin/gnome-calculator
 pkill -f /usr/bin/gnome-text-editor
+pkill -f /usr/bin/gnome-system-monitor
 sleep 1
 
 # 계산기: 이름이 아니라 데스크톱 ID로 열어 언어와 상관없게 한다
@@ -140,6 +142,24 @@ check "스크린샷에서 찾은 '=' 자리를 누르면 계산한다" \
 	"$(A snapshot --app org.gnome.Calculator -i | grep -m1 'textbox .*\[focused\]' | value)" 50
 check "창 밖의 점은 누르지 않는다" \
 	"$(A click --at 99999,1 --app org.gnome.Calculator 2>&1 | grep -c 'outside the window')" 1
+
+# ref에 --app을 함께 쓰면 그 앱의 ref인지 본다. 앱을 끝내는 동작(닫기)은 실패가 아니라 앱이 끝났다고 알린다
+one=$(ref 'button "1"' <<<"$calculator")
+check "ref와 같은 앱의 --app은 받는다" "$(A click "$one" --app org.gnome.Calculator >/dev/null && echo ok)" ok
+check "ref와 다른 앱의 --app은 그렇다고 알린다" \
+	"$(A click "$one" --app org.gnome.TextEditor 2>&1 | grep -c 'drop --app')" 1
+check "닫기 단추를 누르면 앱이 끝났다고 알린다" \
+	"$(A click "$(ref 'button "\(닫기\|Close\)"' <<<"$calculator")" | grep -c 'then the app quit')" 1
+
+# 시스템 정보: 다른 탭 페이지로 넘긴 내용은 스냅샷에 나오지 않는다. GTK4는 숨긴 GtkStack 페이지의 내용을
+# 목록에 보이는 상태로 남긴다
+monitor=$(open_app org.gnome.SystemMonitor)
+A click "$(ref 'tab "\(자원\|Resources\)' <<<"$monitor")" >/dev/null
+A click "$(ref 'tab "\(파일\|File\)' <<<"$monitor")" >/dev/null
+check "다른 탭 페이지(자원)의 내용은 스냅샷에 나오지 않는다" \
+	"$(A snapshot --app org.gnome.SystemMonitor | grep -c 'CPU')" 0
+pkill -f /usr/bin/gnome-system-monitor
+sleep 1
 
 # Firefox: 후기에서 주소 막대의 fill은 성공했다고 알렸지만 비어 있었다. 이제는 글이 남았거나, 남지 않았으면
 # type --ref를 권하는 오류여야 한다. 그 주소로 연 캔버스를 스크린샷의 픽셀로 누르고(lichess 체스판처럼 트리에
@@ -184,6 +204,37 @@ check "글 칸이 아닌 곳에는 type이 치지 않고 알린다" "$(A type ab
 shot=$(A screenshot --app firefox-esr)
 clicked=$(A click --at "$(png red "$(tail -1 <<<"$shot")")" --app firefox-esr)
 check "스크린샷에서 찾은 캔버스의 빨간 칸을 누른다" "$(grep -c '^+ *- text: "hit"$' <<<"$clicked")" 1
+
+# 긴 웹 페이지: 문단의 글은 링크 사이에 차례대로 나오고(Firefox가 자식 자리에 둔 U+FFFC 없이), 화면 밖 단추는
+# [offscreen]으로 나온다. 휠로 내리고, 화면 밖 단추를 누르면 먼저 보이게 스크롤해 누른다
+long=/tmp/e2e-agent-long.html
+cat >"$long" <<'HTML'
+<!doctype html>
+<meta charset="utf-8">
+<title>top</title>
+<p>첫 문단: 오늘 서울은 <a href="#a">흐림</a> 이고 밤부터 비가 옵니다.</p>
+<div style="height: 4000px"></div>
+<button onclick="document.title = 'bottom-clicked'">맨 아래 단추</button>
+<script>
+addEventListener("scroll", () => {
+  if (!document.title.startsWith("bottom")) document.title = "y=" + Math.round(scrollY);
+});
+</script>
+HTML
+chmod 644 "$long"
+A press ctrl+a --ref "$address" >/dev/null
+A type "file://$long" --ref "$address" >/dev/null
+A press Return --settle 2000 >/dev/null
+text=$(A snapshot --app firefox-esr)
+check "문단의 글이 링크 사이에 차례대로 나온다" \
+	"$(grep -A2 -- '- text: "첫 문단: 오늘 서울은"' <<<"$text" | grep -c -e 'link "흐림"' -e 'text: "이고 밤부터 비가 옵니다."')" 2
+check "글에 자식 자리 표시(U+FFFC)가 없다" "$(grep -c $'\xef\xbf\xbc' <<<"$text")" 0
+bottom=$(A snapshot --app firefox-esr -i | grep -m1 '맨 아래 단추.*\[offscreen\]' | grep -o 'ref=e[0-9]*' | cut -d= -f2)
+check "화면 밖 단추는 [offscreen]으로 나온다" "$((${#bottom} > 0))" 1
+A scroll down 5 --app firefox-esr >/dev/null
+check "휠로 페이지를 내린다" "$(A snapshot --app firefox-esr | grep -c -m1 'window "y=[1-9]')" 1
+check "화면 밖 단추를 누르면 먼저 보이게 스크롤한다" "$(A click "$bottom" | grep -c 'scrolled it into view')" 1
+check "그 단추가 눌린다" "$(A snapshot --app firefox-esr | grep -c -m1 'window "bottom-clicked')" 1
 pkill -f /usr/lib/firefox-esr/firefox-esr
 sleep 1
 
