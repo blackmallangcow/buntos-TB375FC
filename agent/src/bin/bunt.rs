@@ -54,7 +54,8 @@ Options for snapshot and actions:
   --hidden                 Include hidden elements
   --diff                   Print only what changed since the last snapshot of the same scope
   --settle <ms>            Wait at most this long for the window to stop changing after an
-                           action (default 3000; 0 reads it once right away)
+                           action (default 3000; 0 reads it once right away). A page that is
+                           still loading counts as changing
   --session <name>         Session for refs and diffs (default: default)
   --json                   Print the reply as JSON
 ";

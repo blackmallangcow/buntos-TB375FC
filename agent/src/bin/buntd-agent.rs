@@ -92,6 +92,8 @@ struct Rendered {
     lines: usize,
     items: usize,
     windows: Vec<(String, String)>,
+    /// 범위 안의 문서가 불러오는 중이다 (BUSY). 멈췄다고 보지 않는다
+    busy: bool,
 }
 
 #[derive(Default)]
@@ -626,6 +628,9 @@ impl Agent {
             agent_error(format!("cannot read {bus}: {err}"))
         })?;
         let wanted = in_scope(&items, roots, options.hidden);
+        let busy = wanted
+            .iter()
+            .any(|&at| items[at].busy() && items[at].shown());
         a11y.enrich(bus, &mut items, wanted).await;
         let pid = a11y.pid(bus).await;
 
@@ -660,6 +665,7 @@ impl Agent {
             lines: lines.len(),
             items: items.len(),
             windows,
+            busy,
         })
     }
 
@@ -1008,7 +1014,8 @@ impl Agent {
         loop {
             async_io::Timer::after(SETTLE_STEP).await;
             let now = self.render(a11y, session, bus, roots, FULL).await?;
-            if now.text != last {
+            // 불러오는 중인 문서(Firefox가 페이지를 받는 동안)는 바뀌고 있는 것으로 본다
+            if now.text != last || now.busy {
                 changed = Some(Instant::now());
             }
             let quiet = changed.map(|at| at.elapsed());

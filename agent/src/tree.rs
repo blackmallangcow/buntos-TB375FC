@@ -98,6 +98,8 @@ pub mod role {
 /// AT-SPI 상태 비트 (atspi-constants.h의 AtspiStateType)
 pub mod state {
     pub const ACTIVE: u64 = 1 << 1;
+    /// 불러오는 중 (Firefox의 문서가 페이지를 받는 동안)
+    pub const BUSY: u64 = 1 << 3;
     pub const CHECKED: u64 = 1 << 4;
     pub const EDITABLE: u64 = 1 << 7;
     pub const ENABLED: u64 = 1 << 8;
@@ -181,6 +183,11 @@ impl Item {
     /// 화면에 보이는가 (숨은 위젯, 닫힌 팝오버의 내용은 VISIBLE이나 SHOWING이 없다)
     pub fn shown(&self) -> bool {
         self.has(state::VISIBLE) && self.has(state::SHOWING)
+    }
+
+    /// 불러오는 중인가 (페이지를 받는 문서)
+    pub fn busy(&self) -> bool {
+        self.has(state::BUSY)
     }
 
     /// 값을 따로 읽을 객체인가
@@ -949,6 +956,14 @@ mod tests {
             !items[3].wants_text(),
             "links read their name, not their text"
         );
+    }
+
+    #[test]
+    fn a_loading_document_is_busy() {
+        let mut document = item("/d", "/w", 0, role::DOCUMENT_WEB, "");
+        assert!(!document.busy());
+        document.states |= state::BUSY;
+        assert!(document.busy());
     }
 
     #[test]
