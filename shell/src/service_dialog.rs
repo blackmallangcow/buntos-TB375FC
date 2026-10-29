@@ -202,9 +202,29 @@ impl Frame {
     }
 }
 
+/// 이보다 긴 낱말(네트워크·기기 이름)은 줄 바꿈을 막지 않는다. 막으면 창이 그 낱말만큼 넓어진다
+const KEEP_WORD_CHARS: usize = 16;
+
+/// 띄어 쓴 낱말마다 줄 바꿈을 막은 Pango 마크업 (CSS의 word-break: keep-all, AI 접근 요청 창과 같다).
+/// Pango는 한글 음절 사이마다 줄을 바꿀 수 있다고 보아 "필요합|니다"처럼 낱말 가운데에서 바꾸기 때문이다
+fn keep_words(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            let escaped = glib::markup_escape_text(word);
+            if word.chars().count() > KEEP_WORD_CHARS {
+                escaped.to_string()
+            } else {
+                format!("<span allow_breaks=\"false\">{escaped}</span>")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn text_label(text: &str, class: &str) -> gtk::Label {
     gtk::Label::builder()
-        .label(text)
+        .label(keep_words(text))
+        .use_markup(true)
         .justify(gtk::Justification::Center)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
@@ -266,5 +286,16 @@ mod tests {
         let secret = Secret::new("correct horse");
         assert_eq!(secret.as_str(), "correct horse");
         assert_eq!(format!("{secret:?}"), "Secret(13 bytes)");
+    }
+
+    #[test]
+    fn words_stay_together_but_long_names_may_break() {
+        assert_eq!(
+            keep_words("“<집>”에 암호가"),
+            "<span allow_breaks=\"false\">“&lt;집&gt;”에</span> \
+             <span allow_breaks=\"false\">암호가</span>"
+        );
+        let long = "a".repeat(KEEP_WORD_CHARS + 1);
+        assert_eq!(keep_words(&long), long);
     }
 }
