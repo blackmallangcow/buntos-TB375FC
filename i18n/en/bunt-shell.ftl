@@ -214,3 +214,28 @@ secret-cancel = Cancel
 secret-join = Join
 # Administrator authentication message (auth-action-…). NetworkManager asks when it saves a Wi-Fi password in a system connection
 auth-action-org-freedesktop-NetworkManager-settings-modify-system = { $app } wants to change network settings for all users.
+
+## Bluetooth pairing dialog (pairing_agent.rs, BlueZ pairing agent), like the macOS pairing request. $name is the device name
+pairing-title = Bluetooth Pairing Request
+pairing-confirm = Confirm that “{ $name }” shows the same code.
+pairing-display = Type the following code on “{ $name }”, then press Return or Enter.
+pairing-pin = Enter the PIN code for “{ $name }”. It is in the device’s manual (0000 or 1234 are common).
+pairing-passkey = Enter the 6-digit code shown on “{ $name }”.
+pairing-authorize = “{ $name }” wants to pair with this computer.
+pairing-pin-placeholder = PIN Code
+pairing-passkey-placeholder = Code
+pairing-cancel = Cancel
+pairing-connect = Connect
+pairing-deny = Deny
+pairing-allow = Allow
+# When a device that is not trusted wants to use a service. $service is the service name (pairing-service-… below, or the UUID)
+pairing-service-title = Bluetooth Connection Request
+pairing-service = “{ $name }” wants to use the { $service } service of this computer.
+pairing-service-audio = audio
+pairing-service-handsfree = hands-free
+pairing-service-input = keyboard and mouse
+pairing-service-files = file transfer
+pairing-service-network = network
+pairing-service-serial = serial port
+# Nearby devices in the menu bar Bluetooth menu (searched while the menu is open; click to pair)
+bluetooth-nearby = Nearby Devices

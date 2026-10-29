@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Bluetooth: 켜고 끄기, 내 기기(연결·연결 해제·지우기), 주변 기기(찾기·연결). BlueZ D-Bus를 쓴다.
-//! 페이지가 보이는 동안만 주변 기기를 찾는다. PIN을 묻는 기기용 페어링 에이전트는 아직 없어서
-//! 확인 없이 페어링되는 기기(헤드폰, 마우스 등)만 연결된다
+//! 페이지가 보이는 동안만 주변 기기를 찾는다. 이 앱은 페어링 에이전트를 두지 않으므로 Pair는
+//! BlueZ의 기본 에이전트인 셸의 페어링 에이전트(Bluetooth 페어링 창)가 확인 번호와 PIN을 묻는다
 
 use std::{
     cell::{Cell, RefCell},
@@ -495,7 +495,10 @@ impl BluetoothPage {
             }
             .await;
             page.set_busy(&path, false);
-            if let Err(err) = result {
+            // 페어링 창에서 사람이 취소하거나 거부한 것은 알리지 않는다
+            if let Err(err) = result
+                && !canceled_by_user(&err)
+            {
                 page.context
                     .notify_error("bluetooth-connect-error", dbus::message(&err));
             }
@@ -533,9 +536,36 @@ impl BluetoothPage {
     }
 }
 
+/// 페어링 창(셸의 페어링 에이전트)에서 사람이 취소하거나 거부해 BlueZ가 돌려준 오류
+fn canceled_by_user(error: &glib::Error) -> bool {
+    gio::DBusError::remote_error(error).is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "org.bluez.Error.AuthenticationCanceled" | "org.bluez.Error.AuthenticationRejected"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_canceled_in_the_dialog_is_not_an_error() {
+        let error = |name| gio::DBusError::new_for_dbus_error(name, "");
+        assert!(canceled_by_user(&error(
+            "org.bluez.Error.AuthenticationCanceled"
+        )));
+        assert!(canceled_by_user(&error(
+            "org.bluez.Error.AuthenticationRejected"
+        )));
+        assert!(!canceled_by_user(&error(
+            "org.bluez.Error.AuthenticationTimeout"
+        )));
+        assert!(!canceled_by_user(&error(
+            "org.bluez.Error.ConnectionAttemptFailed"
+        )));
+    }
 
     #[test]
     fn device_icons_fall_back_to_bluetooth() {

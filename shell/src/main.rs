@@ -29,7 +29,9 @@ mod toplevels;
 mod wallpaper;
 // 로고 메뉴의 강제 종료, 잠자기, 화면 잠금, 로그아웃
 mod session;
-// 시스템 서비스가 사람에게 묻는 창: Wi-Fi 암호(NetworkManager 비밀 에이전트)와 그 틀
+// 시스템 서비스가 사람에게 묻는 창: Bluetooth 페어링(BlueZ 에이전트), Wi-Fi 암호(NetworkManager 비밀
+// 에이전트)와 그 틀
+mod pairing_agent;
 mod secret_agent;
 mod service_dialog;
 
@@ -84,6 +86,8 @@ fn main() -> glib::ExitCode {
         agent_access::start(app, &tr);
         // 저장된 Wi-Fi의 암호가 바뀌었거나 새 네트워크에 암호가 필요할 때 NetworkManager가 묻는 창
         secret_agent::start(app, &tr);
+        // 시스템 설정과 Bluetooth 메뉴의 페어링, 상대 기기가 청한 페어링에서 코드를 묻고 보이는 창
+        pairing_agent::start(app, &tr);
         let services = Services {
             network: Network::start(),
             bluetooth: Bluetooth::start(),

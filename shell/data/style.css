@@ -1014,3 +1014,19 @@ checkbutton.auth-check {
   font-size: var(--text-footnote);
   color: var(--label);
 }
+
+/* 페어링 코드(pairing_agent.rs): 크게, 숫자 너비를 맞춰 보인다. 상대가 친 자릿수는 마크업으로 흐리게 한다 */
+.pairing-code {
+  margin-top: var(--space-3);
+  font-size: var(--text-large-title);
+  font-weight: 600;
+  font-feature-settings: "tnum";
+  letter-spacing: 4px;
+  color: var(--label);
+}
+
+/* 메뉴 막대 Bluetooth 메뉴: 근처 기기 제목 옆의 찾는 중 표시 */
+.extra-section spinner {
+  min-width: 12px;
+  min-height: 12px;
+}

@@ -211,3 +211,28 @@ secret-cancel = 취소
 secret-join = 연결
 # 관리자 인증 창의 설명(auth-action-…). Wi-Fi 암호를 시스템 연결에 저장할 때 NetworkManager가 묻는다
 auth-action-org-freedesktop-NetworkManager-settings-modify-system = 모든 사용자의 네트워크 설정을 바꾸려고 합니다.
+
+## Bluetooth 페어링 창 (pairing_agent.rs, BlueZ 페어링 에이전트). macOS의 페어링 요청을 따른다. $name은 기기 이름
+pairing-title = Bluetooth 페어링 요청
+pairing-confirm = “{ $name }”에 같은 코드가 보이는지 확인하십시오.
+pairing-display = “{ $name }”에서 다음 코드를 입력한 다음 Return 또는 Enter 키를 누르십시오.
+pairing-pin = “{ $name }”의 PIN 코드를 입력하십시오. 기기 설명서에 적혀 있습니다(0000이나 1234가 흔합니다).
+pairing-passkey = “{ $name }”에 보이는 6자리 코드를 입력하십시오.
+pairing-authorize = “{ $name }”이(가) 이 컴퓨터와 페어링하려고 합니다.
+pairing-pin-placeholder = PIN 코드
+pairing-passkey-placeholder = 코드
+pairing-cancel = 취소
+pairing-connect = 연결
+pairing-deny = 거부
+pairing-allow = 허용
+# 믿는 기기가 아닌 기기가 서비스에 연결하려 할 때. $service는 서비스 이름(아래 pairing-service-…, 모르면 UUID)
+pairing-service-title = Bluetooth 연결 요청
+pairing-service = “{ $name }”이(가) 이 컴퓨터의 { $service } 서비스에 연결하려고 합니다.
+pairing-service-audio = 오디오
+pairing-service-handsfree = 핸즈프리
+pairing-service-input = 키보드·마우스
+pairing-service-files = 파일 전송
+pairing-service-network = 네트워크
+pairing-service-serial = 직렬 포트
+# 메뉴 막대 Bluetooth 메뉴의 근처 기기 (메뉴가 열린 동안 찾고, 누르면 짝짓는다)
+bluetooth-nearby = 근처 기기

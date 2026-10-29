@@ -103,6 +103,12 @@ impl Frame {
         label
     }
 
+    pub fn message(&self, text: &str) -> gtk::Label {
+        let label = text_label(text, "auth-message");
+        self.panel.append(&label);
+        label
+    }
+
     /// 칸을 쌓는 상자
     pub fn fields(&self) -> gtk::Box {
         let fields = gtk::Box::builder()
