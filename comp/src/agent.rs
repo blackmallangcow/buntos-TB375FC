@@ -450,7 +450,7 @@ impl BuntState {
 
     fn agent_capture(&mut self, pid: u32, title: &str) -> Result<(Image, f64), Refused> {
         let window = self.agent_window(pid, title).ok_or(Refused::NoWindow)?;
-        self.capture_window(&window).map_err(|err| {
+        self.capture_window(&window, BACKDROP).map_err(|err| {
             tracing::warn!("agent: cannot draw the window of pid {pid}: {err}");
             Refused::CaptureFailed
         })
@@ -458,8 +458,13 @@ impl BuntState {
 
     /// 창 하나만 따로 그려 읽는다 (screenshot.rs의 capture_scene). 다른 창, 셸, 커서는 넣지 않으므로 가려진
     /// 부분도 보이고 막은 앱이나 인증 창이 섞이지 않는다. 창 영역(xdg 창 영역)의 왼쪽 위가 그림의 (0, 0)이고
-    /// 그 밖으로 나온 그림자와 팝업은 잘린다. 비치는 부분은 흰 바탕 위에 그린다
-    fn capture_window(&mut self, window: &Window) -> Result<(Image, f64), String> {
+    /// 그 밖으로 나온 그림자와 팝업은 잘린다. 비치는 부분은 `backdrop` 위에 그린다(에이전트는 흰 바탕,
+    /// Dock의 최소화 칸은 투명)
+    pub fn capture_window(
+        &mut self,
+        window: &Window,
+        backdrop: [f32; 4],
+    ) -> Result<(Image, f64), String> {
         let output = self.window_output(window).ok_or("there is no output")?;
         let scale = output.current_scale().fractional_scale();
         let geometry = window.geometry();
@@ -471,7 +476,7 @@ impl BuntState {
             window.render_elements(renderer, origin, Scale::from(scale), 1.0);
         let scene: Vec<&OutputRenderElements> = elements.iter().collect();
         let area = Rectangle::from_size(geometry.size);
-        let image = screenshot::capture_scene(renderer, &scene, &output, Some(area), BACKDROP)?;
+        let image = screenshot::capture_scene(renderer, &scene, &output, Some(area), backdrop)?;
         Ok((image, scale))
     }
 

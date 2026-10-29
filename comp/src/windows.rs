@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 창 다루기 단축키: 앱 전환(⌘⇥), 같은 앱의 윈도우 전환(⌘`), 앱 종료(⌘Q), 최소화(⌘M), 가리기
-//! (⌘H, ⌥⌘H), 전체 화면(⌃⌘F). 최소화하거나 가린 창은 공간에서 내려 두었다가, 그 창을 활성화하면
-//! (Dock, ⌘⇥, 에이전트) 제자리에 다시 놓는다. 앱은 같은 연결(클라이언트)의 창들이다.
+//! 창 다루기 단축키: 앱 전환(⌘⇥), 같은 앱의 윈도우 전환(⌘`), 앱 종료(⌘Q), 최소화(⌘M과 창의 최소화
+//! 단추), 가리기(⌘H, ⌥⌘H), 전체 화면(⌃⌘F). 최소화하거나 가린 창은 공간에서 내려 두었다가, 그 창을
+//! 활성화하면(Dock, ⌘⇥, 에이전트) 제자리에 다시 놓는다. 앱은 같은 연결(클라이언트)의 창들이다.
+//! 최소화한 창은 내리기 전에 그림을 떠 두고 셸에 알린다. 셸이 Dock의 최소화 칸에 늘어놓는다.
 
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+};
 
 use smithay::{
     desktop::{PopupKind, PopupManager, Window},
@@ -16,7 +23,20 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
-use crate::state::BuntState;
+use crate::{
+    dbus::{Command, MinimizedInfo},
+    screenshot::Image,
+    state::BuntState,
+    toplevels::title_and_app_id,
+};
+
+/// Dock의 최소화 칸에 보일 창 그림의 긴 변(물리 픽셀). 가장 큰 Dock 아이콘(96px)을 2배 배율로
+/// 그려도 흐려지지 않는다
+const THUMBNAIL_SIZE: u32 = 256;
+/// 창 그림의 비치는 부분(둥근 모서리)은 비운다
+const TRANSPARENT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+/// 최소화한 창의 번호. 셸이 이 번호로 되돌려 달라고 한다
+static NEXT_MINIMIZED_ID: AtomicU32 = AtomicU32::new(1);
 
 /// 창을 공간에서 내린 까닭
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +52,8 @@ pub struct HiddenWindow {
     pub window: Window,
     pub location: Point<i32, Logical>,
     pub kind: Hidden,
+    /// 최소화한 창의 번호와 내리기 전에 뜬 그림 (가린 창은 없다)
+    minimized: Option<(u32, Option<Arc<Image>>)>,
 }
 
 /// ⌘를 누른 채 ⇥나 `를 거듭 누르는 동안의 전환. ⌘를 떼면 끝난다
@@ -95,7 +117,14 @@ impl BuntState {
     /// 닫힌 창을 최근 순서, 내린 창, 진행 중인 전환에서 지운다
     pub fn forget_recent(&mut self, window: &Window) {
         self.recent.retain(|other| other != window);
+        let minimized = self
+            .hidden
+            .iter()
+            .any(|hidden| hidden.window == *window && hidden.minimized.is_some());
         self.hidden.retain(|hidden| hidden.window != *window);
+        if minimized {
+            self.publish_minimized();
+        }
         if let Some(switching) = &mut self.switching {
             switching.order.retain(|other| other != window);
             if switching.order.is_empty() {
@@ -127,11 +156,63 @@ impl BuntState {
                     }
                 });
         self.hidden = keep;
+        let minimized = restore.iter().any(|hidden| hidden.minimized.is_some());
         for hidden in restore {
             set_hidden(&hidden.window, false);
             self.space
                 .map_element(hidden.window.clone(), hidden.location, false);
             self.refresh_window_info(&hidden.window);
+        }
+        if minimized {
+            self.publish_minimized();
+        }
+    }
+
+    /// 셸이 Dock의 최소화 칸에서 누른 창을 제자리에 놓고 포커스를 준다
+    pub fn restore_minimized(&mut self, id: u32) {
+        let window = self
+            .hidden
+            .iter()
+            .find(|hidden| {
+                hidden
+                    .minimized
+                    .as_ref()
+                    .is_some_and(|(other, _)| *other == id)
+            })
+            .map(|hidden| hidden.window.clone());
+        if let Some(window) = window {
+            self.focus_window(&window, SERIAL_COUNTER.next_serial());
+        }
+    }
+
+    /// 최소화한 창 목록을 D-Bus 사본에 적고 셸에 알린다 (먼저 내린 창이 앞)
+    pub fn publish_minimized(&self) {
+        let minimized: Vec<MinimizedInfo> = self
+            .hidden
+            .iter()
+            .filter_map(|hidden| {
+                let (id, thumbnail) = hidden.minimized.clone()?;
+                let (title, app_id) = title_and_app_id(&hidden.window);
+                Some(MinimizedInfo {
+                    id,
+                    app_id,
+                    title,
+                    thumbnail,
+                })
+            })
+            .collect();
+        self.dbus.update(|snapshot| snapshot.minimized = minimized);
+        self.dbus.send(Command::MinimizedWindowsChanged);
+    }
+
+    /// Dock에 보일 창 그림. 창만 따로 그려 긴 변을 THUMBNAIL_SIZE로 줄인다
+    fn thumbnail(&mut self, window: &Window) -> Option<Arc<Image>> {
+        match self.capture_window(window, TRANSPARENT) {
+            Ok((image, _)) => Some(Arc::new(shrink(image, THUMBNAIL_SIZE))),
+            Err(err) => {
+                tracing::warn!("cannot draw the minimized window: {err}");
+                None
+            }
         }
     }
 
@@ -140,6 +221,13 @@ impl BuntState {
         let Some(location) = self.space.element_location(window) else {
             return;
         };
+        // 팝업을 닫고 비활성으로 바꾸기 전, 화면에 보이던 그대로 뜬다
+        let minimized = (kind == Hidden::Minimized).then(|| {
+            (
+                NEXT_MINIMIZED_ID.fetch_add(1, Ordering::Relaxed),
+                self.thumbnail(window),
+            )
+        });
         if let Some(toplevel) = window.toplevel() {
             for (popup, _) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
                 if let PopupKind::Xdg(popup) = popup {
@@ -151,12 +239,17 @@ impl BuntState {
         }
         self.space.unmap_elem(window);
         set_hidden(window, true);
+        let publish = minimized.is_some();
         self.hidden.push(HiddenWindow {
             window: window.clone(),
             location,
             kind,
+            minimized,
         });
         self.refresh_window_info(window);
+        if publish {
+            self.publish_minimized();
+        }
     }
 
     /// 창을 내린 뒤 포커스를 줄 창: 최근 순서로 보이는 창 (`prefer` 앱의 창이 먼저)
@@ -183,7 +276,7 @@ impl BuntState {
         }
     }
 
-    /// ⌘M, 창 목록(셸)의 최소화 요청
+    /// ⌘M, 창의 최소화 단추(xdg_toplevel.set_minimized), 창 목록(셸)의 최소화 요청
     pub fn minimize(&mut self, window: &Window) {
         if !self.is_shown(window) {
             return;
@@ -339,5 +432,80 @@ impl BuntState {
         if let Some(window) = self.active_window() {
             self.note_focus(&window);
         }
+    }
+}
+
+/// 그림을 긴 변이 `max` 픽셀 이하가 되게 줄인다. 작은 그림은 그대로 둔다. 줄인 픽셀은 그 자리에 든
+/// 원래 픽셀의 평균이다 (그린 그림은 알파를 미리 곱해 두었으므로 그대로 평균 내도 된다)
+fn shrink(image: Image, max: u32) -> Image {
+    let longest = image.width.max(image.height);
+    if longest <= max || image.width == 0 || image.height == 0 {
+        return image;
+    }
+    let width = (image.width * max / longest).max(1);
+    let height = (image.height * max / longest).max(1);
+    // 줄인 픽셀 i가 덮는 원래 픽셀 범위 (빈 범위가 없게 적어도 하나)
+    let span = |i: u32, from: u32, to: u32| {
+        let start = i * from / to;
+        (start, ((i + 1) * from / to).max(start + 1))
+    };
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        let (top, bottom) = span(y, image.height, height);
+        for x in 0..width {
+            let (left, right) = span(x, image.width, width);
+            let mut sum = [0u32; 4];
+            for row in top..bottom {
+                let start = (row * image.width + left) as usize * 4;
+                let end = (row * image.width + right) as usize * 4;
+                for pixel in image.rgba[start..end].as_chunks::<4>().0 {
+                    for (total, channel) in sum.iter_mut().zip(pixel) {
+                        *total += u32::from(*channel);
+                    }
+                }
+            }
+            let count = (bottom - top) * (right - left);
+            rgba.extend(sum.map(|total| ((total + count / 2) / count) as u8));
+        }
+    }
+    Image {
+        width,
+        height,
+        rgba,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
+        Image {
+            width,
+            height,
+            rgba,
+        }
+    }
+
+    #[test]
+    fn thumbnails_average_the_pixels_they_cover() {
+        // 4×2를 긴 변 2로: 왼쪽 2×2와 오른쪽 2×2의 평균
+        let mut rgba = Vec::new();
+        for value in [0u8, 100, 200, 255, 0, 100, 200, 255] {
+            rgba.extend([value, value, value, 255]);
+        }
+        let small = shrink(image(4, 2, rgba), 2);
+        assert_eq!((small.width, small.height), (2, 1));
+        assert_eq!(small.rgba, vec![50, 50, 50, 255, 228, 228, 228, 255]);
+    }
+
+    #[test]
+    fn small_images_stay_as_they_are() {
+        let small = shrink(image(2, 1, vec![1; 8]), 256);
+        assert_eq!((small.width, small.height, small.rgba), (2, 1, vec![1; 8]));
+        // 아주 납작한 그림도 높이가 0이 되지 않는다
+        let flat = shrink(image(1000, 1, vec![9; 4000]), 10);
+        assert_eq!((flat.width, flat.height), (10, 1));
+        assert_eq!(flat.rgba.len(), 40);
     }
 }

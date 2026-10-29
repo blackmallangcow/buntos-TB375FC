@@ -3,7 +3,8 @@
 
 //! 컴포지터 제어 D-Bus 서비스 (세션 버스 `org.buntos.Compositor`). 시스템 설정이 화면(해상도,
 //! 배율), 키 반복, 마우스, 키보드 단축키를 읽고 바꾸고 연결된 포인터 장치를 읽으며, 셸이 메뉴
-//! 막대·Dock 가리기 설정을 알리고 셸이 하는 단축키(모든 앱 보기, Dock 가리기)를 받는다.
+//! 막대·Dock 가리기 설정을 알리고 셸이 하는 단축키(모든 앱 보기, Dock 가리기)를 받는다. 셸은
+//! Dock의 최소화 칸에 보일 창 그림을 받아 누른 창을 되돌린다.
 //! 버스 일은 따로 도는 스레드가 맡는다. 읽기는 컴포지터가 미리
 //! 적어 둔 사본(Snapshot)으로 답하고, 바꾸기는 값을 확인한 뒤 이벤트 루프로 넘긴다.
 //! 입력 소스 전환처럼 컴포지터가 다른 프로그램을 부르는 일도 이 스레드가 한다.
@@ -43,6 +44,8 @@ const FCITX_INTERFACE: &str = "org.fcitx.Fcitx.Controller1";
 
 /// 에이전트 전용 메서드(창 목록, 창 활성화, 키·포인터 입력)를 부를 수 있는 프로그램
 const AGENT_PATH: &str = "/usr/bin/buntd-agent";
+/// 셸 전용 메서드(최소화한 창의 그림)를 부를 수 있는 프로그램
+const SHELL_PATH: &str = "/usr/bin/bunt-shell";
 /// 이벤트 루프가 에이전트 요청에 답하기를 기다리는 시간. 소프트웨어 렌더링으로 바쁜 VM에서는 프레임
 /// 하나에 수백 ms가 걸려, 500ms로는 창 목록의 답을 놓쳤다
 const AGENT_REPLY: Duration = Duration::from_secs(2);
@@ -102,6 +105,27 @@ pub struct Focus {
     pub layer: bool,
 }
 
+/// 최소화한 창 하나 (Dock의 최소화 칸)
+#[derive(Clone)]
+pub struct MinimizedInfo {
+    /// 셸이 되돌려 달라고 할 때 쓰는 번호
+    pub id: u32,
+    pub app_id: String,
+    pub title: String,
+    /// 내리기 전에 뜬 창 그림 (알파를 미리 곱한 RGBA). 그리지 못했으면 없다
+    pub thumbnail: Option<Arc<Image>>,
+}
+
+impl std::fmt::Debug for MinimizedInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinimizedInfo")
+            .field("id", &self.id)
+            .field("app_id", &self.app_id)
+            .field("title", &self.title)
+            .finish_non_exhaustive()
+    }
+}
+
 /// 컴포지터 상태의 사본. 컴포지터가 바뀔 때마다 고쳐 쓴다
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -112,6 +136,8 @@ pub struct Snapshot {
     pub pointer_devices: Vec<PointerDevice>,
     pub focus: Option<Focus>,
     pub shortcuts: Vec<ShortcutInfo>,
+    /// 먼저 최소화한 창이 앞
+    pub minimized: Vec<MinimizedInfo>,
 }
 
 /// 에이전트가 보는 창 하나 (GetWindows)
@@ -280,6 +306,8 @@ pub enum Request {
     },
     /// 한 묶음(빈 문자열이면 전부)의 단축키를 기본값으로 되돌린다
     ResetShortcuts(String),
+    /// 최소화한 창(번호)을 제자리에 놓고 포커스를 준다
+    RestoreMinimized(u32),
     Agent(AgentRequest),
 }
 
@@ -298,6 +326,8 @@ pub enum Command {
     ShortcutActivated(&'static str),
     /// 알림을 띄운다 (셸의 알림 서버, org.freedesktop.Notifications)
     Notify { title: String, body: String },
+    /// MinimizedWindowsChanged 신호를 보낸다
+    MinimizedWindowsChanged,
 }
 
 pub struct Service {
@@ -358,6 +388,7 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
             Command::ShortcutsChanged => emit(&connection, "ShortcutsChanged", &()),
             Command::ShortcutActivated(id) => emit(&connection, "ShortcutActivated", &(id,)),
             Command::Notify { title, body } => notify(&connection, &title, &body),
+            Command::MinimizedWindowsChanged => emit(&connection, "MinimizedWindowsChanged", &()),
         }
     }
 }
@@ -468,11 +499,24 @@ impl Api {
     }
 }
 
-/// 에이전트 전용 메서드는 buntd-agent만 부른다. 키와 포인터를 넣고 모든 창 제목을 읽기 때문이다.
-/// 경로가 아니라 파일(장치·inode)을 견준다: 사용자 이름공간에서 다른 파일을 그 경로에 bind mount하면
-/// /proc/<pid>/exe의 경로는 같게 보인다
+/// 에이전트 전용 메서드는 buntd-agent만 부른다. 키와 포인터를 넣고 모든 창 제목을 읽기 때문이다
 async fn check_agent(connection: &zbus::Connection, header: &Header<'_>) -> fdo::Result<()> {
-    let denied = || fdo::Error::AccessDenied(format!("only {AGENT_PATH} may call this"));
+    check_program(connection, header, AGENT_PATH).await
+}
+
+/// 셸 전용 메서드는 bunt-shell만 부른다. 다른 앱 창의 그림이 들어 있기 때문이다
+async fn check_shell(connection: &zbus::Connection, header: &Header<'_>) -> fdo::Result<()> {
+    check_program(connection, header, SHELL_PATH).await
+}
+
+/// 부른 프로그램이 `path`인지 본다. 경로가 아니라 파일(장치·inode)을 견준다: 사용자 이름공간에서
+/// 다른 파일을 그 경로에 bind mount하면 /proc/<pid>/exe의 경로는 같게 보인다
+async fn check_program(
+    connection: &zbus::Connection,
+    header: &Header<'_>,
+    path: &str,
+) -> fdo::Result<()> {
+    let denied = || fdo::Error::AccessDenied(format!("only {path} may call this"));
     let sender = header.sender().ok_or_else(denied)?;
     let pid = fdo::DBusProxy::new(connection)
         .await?
@@ -480,10 +524,10 @@ async fn check_agent(connection: &zbus::Connection, header: &Header<'_>) -> fdo:
         .await?;
     match (
         std::fs::metadata(format!("/proc/{pid}/exe")),
-        std::fs::metadata(AGENT_PATH),
+        std::fs::metadata(path),
     ) {
-        (Ok(running), Ok(agent))
-            if running.dev() == agent.dev() && running.ino() == agent.ino() =>
+        (Ok(running), Ok(program))
+            if running.dev() == program.dev() && running.ino() == program.ino() =>
         {
             Ok(())
         }
@@ -934,6 +978,46 @@ impl Api {
         }))
     }
 
+    /// 최소화한 창 (먼저 내린 창이 앞). 셸만 부른다. 항목마다 (번호, 앱 ID, 제목, 그림 너비, 높이,
+    /// 픽셀): 픽셀은 알파를 미리 곱한 RGBA, 위 줄부터, 줄 너비는 너비 × 4다. 그림이 없으면 너비와
+    /// 높이가 0이다. 그림이 커서 a{sv}(바이트마다 variant)로 보내지 않는다
+    async fn get_minimized_windows(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<Vec<(u32, String, String, u32, u32, Vec<u8>)>> {
+        check_shell(connection, &header).await?;
+        let minimized = self.snapshot.lock().unwrap().minimized.clone();
+        Ok(minimized
+            .into_iter()
+            .map(|window| {
+                let (width, height, pixels) = window
+                    .thumbnail
+                    .map(|image| (image.width, image.height, image.rgba.clone()))
+                    .unwrap_or_default();
+                (
+                    window.id,
+                    window.app_id,
+                    window.title,
+                    width,
+                    height,
+                    pixels,
+                )
+            })
+            .collect())
+    }
+
+    /// 최소화한 창(GetMinimizedWindows의 id)을 제자리에 놓고 포커스를 준다. 셸만 부른다
+    async fn restore_minimized(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        id: u32,
+    ) -> fdo::Result<()> {
+        check_shell(connection, &header).await?;
+        self.request(Request::RestoreMinimized(id))
+    }
+
     /// 키보드 단축키 (표 순서). 항목마다 id(s), category(s), kind(s: key, switch),
     /// accelerator(s: GTK 가속기, 비면 키가 없다), default(s), enabled(b), default-enabled(b)
     fn get_shortcuts(&self) -> Vec<HashMap<String, Value<'static>>> {
@@ -991,6 +1075,10 @@ impl Api {
     /// 단축키를 바꾼 뒤 보낸다
     #[zbus(signal)]
     async fn shortcuts_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    /// 창을 최소화하거나, 최소화한 창이 돌아오거나 닫힌 뒤 보낸다
+    #[zbus(signal)]
+    async fn minimized_windows_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 
     /// 셸이 하는 단축키를 눌렀다 (launcher.show, launcher.dock-autohide)
     #[zbus(signal)]

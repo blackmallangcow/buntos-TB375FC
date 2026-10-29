@@ -207,12 +207,14 @@ impl BuntState {
 
         // v6: 표면마다 알맞은 버퍼 배율과 회전을 알린다 (wl_surface.preferred_buffer_scale)
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
-        // 최소화와 창 메뉴는 아직 없으므로 앱이 해당 버튼을 보이지 않게 한다
+        // 창 메뉴는 아직 없으므로 앱이 그 버튼을 보이지 않게 한다. 최소화한 창은 Dock의 최소화 칸에
+        // 놓인다(windows.rs)
         let xdg_shell_state = XdgShellState::new_with_capabilities::<Self>(
             &dh,
             [
                 xdg_toplevel::WmCapabilities::Maximize,
                 xdg_toplevel::WmCapabilities::Fullscreen,
+                xdg_toplevel::WmCapabilities::Minimize,
             ],
         );
         // 앱이 모달 대화 상자(GTK의 모달 창, 시스템 설정의 시트)를 알린다. focus_window가 쓴다
@@ -1357,6 +1359,13 @@ impl XdgShellHandler for BuntState {
         self.set_window_state(&surface, xdg_toplevel::State::Fullscreen, false);
     }
 
+    /// 창의 최소화 단추
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            self.minimize(&window);
+        }
+    }
+
     fn title_changed(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for_surface(surface.wl_surface()) {
             self.refresh_window_info(&window);
@@ -1900,6 +1909,7 @@ impl BuntState {
                 shortcuts::reset(&mut self.prefs.shortcuts, &category);
                 self.shortcuts_changed();
             }
+            Request::RestoreMinimized(id) => self.restore_minimized(id),
             Request::Agent(request) => self.agent_request(request),
         }
     }
