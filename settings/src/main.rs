@@ -23,10 +23,11 @@ use crate::{
 };
 
 const APP_ID: &str = "org.buntos.Settings";
-/// 공통 디자인 토큰(theme/tokens.css) 다음에 이 앱의 CSS. 사용자 및 그룹, AI 에이전트 페이지와
-/// 키보드 단축키 시트의 CSS는 따로 둔다
+/// 공통 디자인 토큰(theme/tokens.css)과 모든 앱의 창 단추(theme/gtk4-apps.css) 다음에 이 앱의 CSS.
+/// 사용자 및 그룹, AI 에이전트 페이지와 키보드 단축키 시트의 CSS는 따로 둔다
 const STYLE: &str = concat!(
     include_str!("../../theme/tokens.css"),
+    include_str!("../../theme/gtk4-apps.css"),
     include_str!("../data/style.css"),
     include_str!("../data/users.css"),
     include_str!("../data/agent.css"),

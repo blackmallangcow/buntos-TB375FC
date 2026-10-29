@@ -17,4 +17,14 @@ export XCURSOR_SIZE=24
 # 컴포지터가 아직 dmabuf를 지원하지 않아 GTK는 CPU로 그린다
 export GSK_RENDERER=cairo
 
+# 앱의 창 단추를 macOS의 신호등으로 그린다. GTK는 시스템 전체에 입힐 CSS를 따로 읽지 않으므로,
+# 사용자 CSS가 없을 때만 buntOS 모양을 읽는 사용자 CSS를 만든다. 사용자가 만든 파일은 건드리지 않는다
+for version in 3.0 4.0; do
+	css="${XDG_CONFIG_HOME:-$HOME/.config}/gtk-$version/gtk.css"
+	if [ ! -e "$css" ] && mkdir -p "${css%/*}"; then
+		printf '/* buntOS 기본 모양. 지우면 GTK 기본 단추로 돌아간다 */\n@import url("file:///usr/share/buntos/gtk-%s/buntos.css");\n' \
+			"$version" >"$css"
+	fi
+done
+
 exec systemd-cat --identifier=bunt-comp bunt-comp

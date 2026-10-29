@@ -69,6 +69,9 @@ stage_components() {
 		"$out/stage/usr/share/applications/org.buntos.Settings.desktop"
 	install -D -m 0644 "$repo/shell/data/org.buntos.shell.gschema.xml" \
 		"$out/stage/usr/share/glib-2.0/schemas/org.buntos.shell.gschema.xml"
+	# 앱 창에 입히는 모양(창 단추 신호등). 세션 스크립트가 사용자 CSS에서 읽게 한다
+	install -D -m 0644 "$repo/theme/gtk4-apps.css" "$out/stage/usr/share/buntos/gtk-4.0/buntos.css"
+	install -D -m 0644 "$repo/theme/gtk3-apps.css" "$out/stage/usr/share/buntos/gtk-3.0/buntos.css"
 	# 기본 배경화면 (tools/wallpapers/generate.py). 만드는 데 몇 분 걸리므로 생성기가 바뀌었을 때만
 	# 다시 만든다
 	local wallpapers="$build_root/wallpapers" stamp

@@ -1,0 +1,101 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * buntOS가 모든 GTK4 앱(libadwaita 앱 포함)의 창에 입히는 모양: macOS 26의 창 단추(신호등).
+ * 이미지는 /usr/share/buntos/gtk-4.0/buntos.css에 두고, 세션 스크립트가 사용자 CSS
+ * (~/.config/gtk-4.0/gtk.css)가 없으면 이 파일을 읽는 사용자 CSS를 만든다. 사용자 CSS는 앱의 CSS보다
+ * 우선하므로 앱마다 다른 단추 모양을 덮는다. bunt-settings는 자기 CSS 앞에 이 파일을 함께 읽는다.
+ * 앱마다 읽으므로 디자인 토큰(tokens.css)의 변수를 쓰지 않고 값을 직접 쓴다. 규칙은 디자인 스펙 9장.
+ */
+
+/* 닫기, 최소화, 확대 차례로 14px 원을 8px 띄운다. 창 왼쪽 끝에서 16px쯤 안쪽에 둔다(제목 막대의 안쪽
+   여백 6px에 10px를 더한다) */
+windowcontrols {
+  border-spacing: 8px;
+}
+
+windowcontrols.start {
+  margin-left: 10px;
+}
+
+windowcontrols.end {
+  margin-right: 10px;
+}
+
+windowcontrols > button,
+windowcontrols > button:hover,
+windowcontrols > button:active {
+  min-width: 14px;
+  min-height: 14px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 100%;
+  background: none;
+  box-shadow: none;
+}
+
+/* 원은 단추 안의 그림이 그린다. 기호(×, −, +)는 단추 무리를 가리킬 때만 보인다 */
+windowcontrols > button > image {
+  min-width: 10px;
+  min-height: 10px;
+  padding: 2px;
+  -gtk-icon-size: 10px;
+  border-radius: 100%;
+  color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  transition: none;
+}
+
+windowcontrols > button.close > image {
+  background-color: #ff5f57;
+}
+
+windowcontrols > button.minimize > image {
+  background-color: #febc2e;
+}
+
+windowcontrols > button.maximize > image {
+  background-color: #28c840;
+}
+
+windowcontrols:hover > button > image {
+  color: rgba(0, 0, 0, 0.55);
+}
+
+windowcontrols > button.close:active > image {
+  background-color: #bf4942;
+}
+
+windowcontrols > button.minimize:active > image {
+  background-color: #bf8e22;
+}
+
+windowcontrols > button.maximize:active > image {
+  background-color: #1d9730;
+}
+
+/* 앞에 있지 않은 창: 회색 원. 가리키면 다시 색이 난다 */
+windowcontrols > button:backdrop > image {
+  background-color: rgba(0, 0, 0, 0.13);
+  box-shadow: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  windowcontrols > button:backdrop > image {
+    background-color: rgba(255, 255, 255, 0.2);
+  }
+}
+
+windowcontrols:hover > button.close:backdrop > image {
+  background-color: #ff5f57;
+}
+
+windowcontrols:hover > button.minimize:backdrop > image {
+  background-color: #febc2e;
+}
+
+windowcontrols:hover > button.maximize:backdrop > image {
+  background-color: #28c840;
+}

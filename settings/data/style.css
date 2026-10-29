@@ -23,9 +23,10 @@ window.sheet.background {
   border-right: 1px solid var(--separator);
 }
 
+/* 창 단추(신호등)는 macOS처럼 왼쪽 끝에서 18px 안쪽 (theme/gtk4-apps.css가 10px를 더한다) */
 .sidebar-top {
   min-height: 46px;
-  padding: 0 12px;
+  padding: 0 8px;
 }
 
 entry.sidebar-search {
@@ -322,20 +323,7 @@ row.hero-row {
   color: var(--label-tertiary);
 }
 
-/* 창 단추 (최대화, 닫기) */
-.settings-window windowcontrols > button {
-  min-width: 22px;
-  min-height: 22px;
-  padding: 0;
-  margin: 0 2px;
-  border-radius: var(--radius-capsule);
-  background: none;
-  color: var(--label-secondary);
-}
-
-.settings-window windowcontrols > button:hover {
-  background: var(--hover);
-}
+/* 창 단추(신호등)는 theme/gtk4-apps.css가 그린다. 사이드바 맨 위 왼쪽에 놓는다 */
 
 /* 원 안의 ⋯와 − 단추 */
 menubutton.more-button > button,
