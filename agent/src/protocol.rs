@@ -91,12 +91,24 @@ pub struct ActParams {
     /// 지난 스냅샷의 ref (예: "e12")
     #[serde(rename = "ref")]
     pub target: String,
-    /// click, fill, set, focus, select, press
+    /// click, fill, set, focus, select, press, type
     pub action: String,
-    /// fill의 글, set의 값, press의 키
+    /// fill의 글, set의 값, press의 키, type의 글
     pub value: Option<String>,
     /// click을 접근성 동작 대신 포인터로 한다 (동작이 엉뚱하게 구는 앱에서)
     pub pointer: bool,
+    /// click을 ref 대신 창 안의 이 점에 포인터로 한다. 창 스크린샷(`screenshot`)의 픽셀이고 창의 왼쪽
+    /// 위가 (0, 0)이다
+    pub at: Option<[f64; 2]>,
+    /// `at`으로 누를 창의 앱 (`snapshot`의 app과 같다). 없으면 키보드 포커스를 가진 창
+    pub app: Option<String>,
+    /// press·type에 ref가 있을 때 그 창만 앞으로 가져오고 키보드 포커스는 창 안에서 옮기지 않는다
+    pub keep_focus: bool,
+    /// type에서 키보드 포커스를 가진 앱이 글 입력을 켜지 않았으면 글자마다 키를 친다. 없으면 치지 않고
+    /// 오류다
+    pub keys: bool,
+    /// 동작 뒤 화면이 멈추기를 기다리는 시간의 상한(ms). 없으면 3000
+    pub settle_ms: Option<u64>,
 }
 
 /// `act`의 답
@@ -106,10 +118,45 @@ pub struct Acted {
     pub done: String,
     /// 동작 전과 화면이 멈춘 뒤의 그 창 트리의 차이
     pub diff: String,
-    /// 동작 뒤 화면이 멈출 때까지 걸린 시간
+    /// 동작 뒤 화면이 멈출 때까지 걸린 시간 (멈추지 않았으면 기다린 시간)
     pub settled_ms: u64,
+    /// 기다리는 동안 화면이 멈췄다. 거짓이면 상한까지 바뀌고 있었거나 바뀐 것을 아직 보지 못했다
+    #[serde(default = "yes")]
+    pub settled: bool,
+    /// 그 창의 접근성 트리를 읽어 diff를 만들었다. 거짓이면 트리가 없는 창이라 diff가 없다
+    #[serde(default = "yes")]
+    pub observed: bool,
     /// 동작 뒤 같은 앱에 새로 뜬 창의 제목
     pub new_windows: Vec<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `screenshot`의 인자
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScreenshotParams {
+    /// 찍을 창의 앱 (`snapshot`의 app과 같다). 없으면 키보드 포커스를 가진 창
+    pub app: Option<String>,
+    /// PNG를 쓸 절대 경로. 없으면 `$XDG_RUNTIME_DIR/buntos/screenshots` 아래에 새 파일
+    pub out: Option<String>,
+}
+
+/// `screenshot`의 답: 창 하나만 그린 PNG. 창 영역의 왼쪽 위가 (0, 0)이고 픽셀은 화면의 물리 픽셀이다
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Screenshot {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    /// 그 창이 있는 화면의 배율 (픽셀 = 논리 좌표 × 배율)
+    pub scale: f64,
+    /// 창 제목
+    pub window: String,
+    /// Wayland 앱 ID (= 데스크톱 ID)
+    pub app_id: String,
+    pub pid: u32,
 }
 
 /// `launch`의 인자
@@ -155,6 +202,17 @@ pub struct App {
 pub struct Window {
     pub title: String,
     pub active: bool,
+}
+
+/// `apps`의 답에서 접근성 트리를 내놓지 않는 창 (컴포지터에는 있다). 접근성을 켜기 전에 뜬 Chromium,
+/// Electron, Firefox, Qt 앱이 그렇다. screenshot과 click --at은 이 창에도 쓴다
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Untracked {
+    /// 설치된 앱의 이름. 모르면 앱 ID
+    pub name: String,
+    pub app_id: String,
+    pub pid: u32,
+    pub title: String,
 }
 
 /// 데몬에 요청 하나를 보내고 답을 기다린다

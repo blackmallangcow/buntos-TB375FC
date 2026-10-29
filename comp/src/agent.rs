@@ -20,6 +20,16 @@ use crate::{
     dbus::{AgentRequest, Chord, Refused, Typed, WindowInfo},
     state::BuntState,
 };
+// 창 스크린샷과 창 안의 점 누르기
+use crate::{
+    render::OutputRenderElements,
+    screenshot::{self, Image},
+};
+use smithay::{
+    backend::renderer::element::AsRenderElements,
+    output::Output,
+    utils::{Logical, Point, Scale},
+};
 
 /// evdev 키 코드 + 8 (xkb 키 코드)의 범위
 const KEYCODES: std::ops::RangeInclusive<u32> = 8..=255;
@@ -27,6 +37,8 @@ const KEYCODES: std::ops::RangeInclusive<u32> = 8..=255;
 const AUTH_NAMESPACE: &str = "bunt-polkit-agent";
 /// 글 입력에 한 번에 확정하는 바이트 수. Wayland 메시지 하나는 4KB를 넘지 못한다
 const COMMIT_BYTES: usize = 2048;
+/// 창 스크린샷에서 창의 비치는 부분(둥근 모서리 등) 뒤에 까는 색 (미리 곱한 RGBA)
+const BACKDROP: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 impl BuntState {
     pub fn agent_request(&mut self, request: AgentRequest) {
@@ -73,6 +85,29 @@ impl BuntState {
                         self.agent_click(x, y, button);
                         Ok(())
                     }
+                });
+            }
+            AgentRequest::Commit { text, reply } => {
+                let _ = reply.send(match refused {
+                    Some(why) => Err(why),
+                    None => Ok(self.commit_text(&text)),
+                });
+            }
+            // 그 창만 그리므로 인증 창은 들지 않는다. 읽기라 인증 창이 떠 있어도 막지 않는다
+            AgentRequest::Capture { pid, title, reply } => {
+                let _ = reply.send(self.agent_capture(pid, &title));
+            }
+            AgentRequest::ClickWindow {
+                pid,
+                title,
+                x,
+                y,
+                button,
+                reply,
+            } => {
+                let _ = reply.send(match refused {
+                    Some(why) => Err(why),
+                    None => self.agent_click_window(pid, &title, (x, y), button),
                 });
             }
         }
@@ -294,6 +329,128 @@ impl BuntState {
         self.press_button(button, ButtonState::Pressed, time);
         self.press_button(button, ButtonState::Released, time.saturating_add(1));
     }
+
+    /// 그 pid의 창 가운데 제목이 같은 창, 없으면 맨 위 창 (agent_activate와 같은 차례). 최소화하거나
+    /// 가린 창도 고른다
+    fn agent_window(&self, pid: u32, title: &str) -> Option<Window> {
+        let windows: Vec<&Window> = self
+            .space
+            .elements()
+            .rev()
+            .chain(self.hidden.iter().map(|hidden| &hidden.window))
+            .filter(|window| self.client_pid(window) == pid)
+            .collect();
+        windows
+            .iter()
+            .find(|window| window_title(window).as_deref() == Some(title))
+            .or(windows.first())
+            .map(|window| (*window).clone())
+    }
+
+    /// 창을 그리는 출력: 창 가운데가 있는 출력, 없으면 창이 걸친 출력, 공간에서 내린 창이면 첫 출력.
+    /// 창 스크린샷과 그 픽셀 좌표의 배율이 이 출력의 것이다
+    fn window_output(&self, window: &Window) -> Option<Output> {
+        let center = self.space.element_geometry(window).map(|geometry| {
+            Point::<f64, Logical>::from((
+                f64::from(geometry.loc.x) + f64::from(geometry.size.w) / 2.0,
+                f64::from(geometry.loc.y) + f64::from(geometry.size.h) / 2.0,
+            ))
+        });
+        center
+            .and_then(|center| self.space.output_under(center).next().cloned())
+            .or_else(|| self.space.outputs_for_element(window).into_iter().next())
+            .or_else(|| self.space.outputs().next().cloned())
+    }
+
+    fn agent_capture(&mut self, pid: u32, title: &str) -> Result<(Image, f64), Refused> {
+        let window = self.agent_window(pid, title).ok_or(Refused::NoWindow)?;
+        self.capture_window(&window).map_err(|err| {
+            tracing::warn!("agent: cannot draw the window of pid {pid}: {err}");
+            Refused::CaptureFailed
+        })
+    }
+
+    /// 창 하나만 따로 그려 읽는다 (screenshot.rs의 capture_scene). 다른 창, 셸, 커서는 넣지 않으므로 가려진
+    /// 부분도 보이고 막은 앱이나 인증 창이 섞이지 않는다. 창 영역(xdg 창 영역)의 왼쪽 위가 그림의 (0, 0)이고
+    /// 그 밖으로 나온 그림자와 팝업은 잘린다. 비치는 부분은 흰 바탕 위에 그린다
+    fn capture_window(&mut self, window: &Window) -> Result<(Image, f64), String> {
+        let output = self.window_output(window).ok_or("there is no output")?;
+        let scale = output.current_scale().fractional_scale();
+        let geometry = window.geometry();
+        // 표면의 원점은 창 영역보다 그림자만큼 왼쪽 위에 있다
+        let origin = Point::<i32, Logical>::from((-geometry.loc.x, -geometry.loc.y))
+            .to_physical_precise_round(scale);
+        let renderer = self.backend.renderer();
+        let elements: Vec<OutputRenderElements> =
+            window.render_elements(renderer, origin, Scale::from(scale), 1.0);
+        let scene: Vec<&OutputRenderElements> = elements.iter().collect();
+        let area = Rectangle::from_size(geometry.size);
+        let image = screenshot::capture_scene(renderer, &scene, &output, Some(area), BACKDROP)?;
+        Ok((image, scale))
+    }
+
+    /// 창 안의 한 점을 포인터로 누른다. (x, y)는 창 스크린샷(capture_window)의 픽셀이다. 창이 앞에
+    /// 없으면 먼저 가져온다. 키보드 포커스가 이미 이 창에 있으면 열린 메뉴가 닫히지 않게 그대로 둔다.
+    /// 그 점이 창 밖이거나 그 위에 다른 것(이 창의 대화 상자, 다른 창, Dock·메뉴 막대·알림)이 있으면
+    /// 누르지 않는다: 스크린샷에 보인 것과 다른 것을 누르게 된다
+    fn agent_click_window(
+        &mut self,
+        pid: u32,
+        title: &str,
+        (x, y): (f64, f64),
+        button: u32,
+    ) -> Result<(f64, f64), Refused> {
+        let window = self.agent_window(pid, title).ok_or(Refused::NoWindow)?;
+        let surface = window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone());
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .map(|focus| self.root_surface(&focus));
+        if focused.is_none() || focused != surface || self.space.element_geometry(&window).is_none()
+        {
+            self.focus_window(&window, SERIAL_COUNTER.next_serial());
+        }
+        let geometry = self
+            .space
+            .element_geometry(&window)
+            .ok_or(Refused::NoWindow)?;
+        let scale = self
+            .window_output(&window)
+            .map_or(1.0, |output| output.current_scale().fractional_scale());
+        let size = geometry.size.to_f64();
+        let local = Point::<f64, Logical>::from((x / scale, y / scale));
+        if local.x >= size.w || local.y >= size.h || local.x < 0.0 || local.y < 0.0 {
+            let pixels = size.to_physical(scale);
+            return Err(Refused::Outside {
+                width: pixels.w.round() as u32,
+                height: pixels.h.round() as u32,
+            });
+        }
+        let pos = geometry.loc.to_f64() + local;
+        let on_top = self
+            .space
+            .element_under(pos)
+            .is_some_and(|(under, _)| *under == window);
+        if !on_top || self.is_over_top_layer(pos) {
+            return Err(Refused::Covered);
+        }
+        self.agent_click(pos.x, pos.y, button);
+        Ok((pos.x, pos.y))
+    }
+}
+
+/// 창 제목 (xdg_toplevel)
+fn window_title(window: &Window) -> Option<String> {
+    let toplevel = window.toplevel()?;
+    with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().unwrap().title.clone())
+    })
 }
 
 /// 글자 경계에서 자른, 하나가 `limit` 바이트 이하인 조각들

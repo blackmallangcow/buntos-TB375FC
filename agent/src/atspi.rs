@@ -48,6 +48,8 @@ const ROUNDS: usize = 8;
 const MAX_ITEMS: usize = 20_000;
 /// 앱이 호출 하나에 답하기를 기다리는 시간
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
+/// 컴포지터가 창을 그려 PNG로 만들기를 기다리는 시간 (소프트웨어 렌더링 VM에서 큰 창)
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// (버스 이름, 객체 경로)
 type ObjectRef = (String, OwnedObjectPath);
@@ -96,12 +98,41 @@ pub struct Placed {
     pub focused: bool,
 }
 
+/// 컴포지터가 키보드 포커스를 준 곳 (GetFocus)
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Focus {
+    pub pid: u32,
+    /// 창이면 앱 ID, 레이어 표면이면 그 이름
+    pub app_id: String,
+    /// 창 제목. 레이어 표면은 빈 문자열
+    pub title: String,
+    /// 셸의 레이어 표면(메뉴, 모든 앱, 인증 창 등)이다
+    pub layer: bool,
+}
+
 #[derive(Clone)]
 pub struct A11y {
     /// 접근성 버스
     bus: Connection,
     /// 세션 버스 (컴포지터 API)
     session: Connection,
+}
+
+/// 보조 기술이 있다고 알린다 (org.a11y.Status.IsEnabled). Chromium·Electron·Firefox·Qt 앱은 이것을
+/// 보고서야 트리를 내놓는다(GTK4는 늘 내놓는다). Chromium·Electron은 뜰 때 한 번만 읽고 바뀌어도 듣지
+/// 않으므로, 이미 떠 있던 앱은 다시 띄워야 따른다. at-spi-bus-launcher는 이 값을 GSettings의
+/// toolkit-accessibility에 적어 다음 로그인에도 켜 둔다
+pub async fn enable_accessibility(session: &Connection) -> zbus::Result<()> {
+    session
+        .call_method(
+            Some("org.a11y.Bus"),
+            "/org/a11y/bus",
+            Some(PROPERTIES),
+            "Set",
+            &("org.a11y.Status", "IsEnabled", Value::from(true)),
+        )
+        .await?;
+    Ok(())
 }
 
 impl A11y {
@@ -118,18 +149,7 @@ impl A11y {
             )
             .await?;
         let address: String = reply.body().deserialize()?;
-        // 보조 기술이 있다고 알린다. Firefox·Chromium·Qt 앱은 이것을 보고서야 트리를 내놓는다
-        // (GTK4는 늘 내놓는다). 이미 떠 있던 앱은 다시 띄워야 따를 수 있다
-        if let Err(err) = session
-            .call_method(
-                Some("org.a11y.Bus"),
-                "/org/a11y/bus",
-                Some(PROPERTIES),
-                "Set",
-                &("org.a11y.Status", "IsEnabled", Value::from(true)),
-            )
-            .await
-        {
+        if let Err(err) = enable_accessibility(&session).await {
             tracing::warn!("cannot turn on accessibility for other toolkits: {err}");
         }
         let bus = zbus::connection::Builder::address(address.as_str())?
@@ -138,11 +158,17 @@ impl A11y {
         Ok(Self { bus, session })
     }
 
-    /// 컴포지터가 키보드 포커스를 준 클라이언트의 pid (org.buntos.Compositor1.GetFocus).
-    /// 컴포지터 API가 없거나 포커스가 없으면 None
-    pub async fn focused_pid(&self) -> Option<u32> {
-        let (pid, ..): (u32, String, String, bool) = self.compositor("GetFocus", &()).await.ok()?;
-        (pid != 0).then_some(pid)
+    /// 컴포지터가 키보드 포커스를 준 곳 (org.buntos.Compositor1.GetFocus). 컴포지터 API가 없거나
+    /// 포커스가 없으면 None
+    pub async fn focus(&self) -> Option<Focus> {
+        let (pid, app_id, title, layer): (u32, String, String, bool) =
+            self.compositor("GetFocus", &()).await.ok()?;
+        (pid != 0).then_some(Focus {
+            pid,
+            app_id,
+            title,
+            layer,
+        })
     }
 
     /// 키보드 포커스가 셸의 관리자 인증 창(레이어 `bunt-polkit-agent`)에 있는지
@@ -212,9 +238,45 @@ impl A11y {
         self.compositor("TypeText", &(text,)).await
     }
 
+    /// 켜진 글 입력에만 글을 확정한다. 켜진 글 입력이 없으면 아무것도 치지 않고 false다
+    pub async fn commit_text(&self, text: &str) -> zbus::Result<bool> {
+        self.compositor("CommitText", &(text,)).await
+    }
+
     /// 화면의 논리 좌표를 왼쪽 단추로 누른다
     pub async fn click(&self, x: f64, y: f64) -> zbus::Result<()> {
         self.compositor("Click", &(x, y, BUTTON_LEFT)).await
+    }
+
+    /// 그 pid의 창(제목이 같은 것 먼저) 안의 (x, y)를 왼쪽 단추로 누른다. x, y는 그 창 스크린샷의
+    /// 픽셀이다. 누른 화면의 논리 좌표를 돌려준다. 창 밖이거나 그 점 위에 다른 것이 있으면 오류다
+    pub async fn click_window(
+        &self,
+        pid: u32,
+        title: &str,
+        x: f64,
+        y: f64,
+    ) -> zbus::Result<(f64, f64)> {
+        self.compositor("ClickWindow", &(pid, title, x, y, BUTTON_LEFT))
+            .await
+    }
+
+    /// 그 pid의 창(제목이 같은 것 먼저)만 그린 PNG: (너비, 높이, 배율, PNG 바이트)
+    pub async fn capture_window(
+        &self,
+        pid: u32,
+        title: &str,
+    ) -> zbus::Result<(u32, u32, f64, Vec<u8>)> {
+        call_on(
+            &self.session,
+            CAPTURE_TIMEOUT,
+            "org.buntos.Compositor",
+            "/org/buntos/Compositor",
+            "org.buntos.Compositor1",
+            "CaptureWindow",
+            &(pid, title),
+        )
+        .await
     }
 
     /// D-Bus로 뜨는 앱(DBusActivatable)에 창을 열라고 한다 (org.freedesktop.Application.Activate).
@@ -577,7 +639,8 @@ impl A11y {
         })
     }
 
-    async fn text(&self, bus: &str, path: &str) -> Option<String> {
+    /// 글자 칸이나 글의 내용 (Text.GetText). 읽을 수 없으면 None
+    pub async fn text(&self, bus: &str, path: &str) -> Option<String> {
         self.call(bus, path, "org.a11y.atspi.Text", "GetText", &(0i32, -1i32))
             .await
             .ok()

@@ -136,6 +136,11 @@ impl UdevData {
     pub fn seat_name(&self) -> String {
         self.session.seat()
     }
+
+    /// 화면 밖에 따로 그릴 때 (에이전트의 창 스크린샷)
+    pub fn renderer(&mut self) -> &mut GlesRenderer {
+        &mut self.renderer
+    }
 }
 
 /// 뒤에 있는 창에 마지막으로 프레임 알림을 보낸 때 (BACKGROUND_FRAME)

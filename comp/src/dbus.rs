@@ -23,6 +23,8 @@ use crate::{
     prefs::PointerPrefs,
     shortcuts::{self, Category, ShortcutInfo},
 };
+// 에이전트의 창 스크린샷
+use crate::screenshot::{Image, write_png};
 use zbus::{
     Message, blocking, fdo, interface,
     message::Header,
@@ -44,6 +46,8 @@ const AGENT_PATH: &str = "/usr/bin/buntd-agent";
 /// 이벤트 루프가 에이전트 요청에 답하기를 기다리는 시간. 소프트웨어 렌더링으로 바쁜 VM에서는 프레임
 /// 하나에 수백 ms가 걸려, 500ms로는 창 목록의 답을 놓쳤다
 const AGENT_REPLY: Duration = Duration::from_secs(2);
+/// 창을 따로 그려 읽기를 기다리는 시간 (소프트웨어 렌더링 VM의 큰 창)
+const CAPTURE_REPLY: Duration = Duration::from_secs(5);
 
 /// 시스템 설정에 보이는 출력 하나
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -130,11 +134,23 @@ pub enum Refused {
     AuthDialog,
     /// 키 배열에 없는 글자 (글 입력을 켜지 않은 앱에 글을 칠 때)
     NotOnLayout(char),
+    /// 그 pid의 창이 없다
+    NoWindow,
+    /// 누를 점이 창 밖이다 (창 스크린샷의 픽셀 크기)
+    Outside { width: u32, height: u32 },
+    /// 누를 점 위에 다른 것(그 창의 대화 상자, 다른 창, 셸의 막대·알림)이 있다
+    Covered,
+    /// 창을 그려 읽지 못했다
+    CaptureFailed,
 }
 
 /// 에이전트 입력 요청의 답을 기다린다
 fn answer<T>(answer: mpsc::Receiver<Result<T, Refused>>) -> fdo::Result<T> {
-    match answer.recv_timeout(AGENT_REPLY) {
+    answer_within(answer, AGENT_REPLY)
+}
+
+fn answer_within<T>(answer: mpsc::Receiver<Result<T, Refused>>, wait: Duration) -> fdo::Result<T> {
+    match answer.recv_timeout(wait) {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(Refused::AuthDialog)) => Err(fdo::Error::AccessDenied(
             "an authentication dialog is open; only the user can answer it".into(),
@@ -142,6 +158,20 @@ fn answer<T>(answer: mpsc::Receiver<Result<T, Refused>>) -> fdo::Result<T> {
         Ok(Err(Refused::NotOnLayout(missing))) => Err(fdo::Error::InvalidArgs(format!(
             "{missing:?} is not on the keyboard layout; fill the field instead"
         ))),
+        Ok(Err(Refused::NoWindow)) => Err(fdo::Error::Failed(
+            "that window is gone; list the windows again".into(),
+        )),
+        Ok(Err(Refused::Outside { width, height })) => Err(fdo::Error::InvalidArgs(format!(
+            "the point is outside the window ({width}x{height} pixels in its screenshot)"
+        ))),
+        Ok(Err(Refused::Covered)) => Err(fdo::Error::Failed(
+            "something else is on top of that point (a dialog, another window, the Dock or the \
+             menu bar), so nothing was clicked; take a new screenshot"
+                .into(),
+        )),
+        Ok(Err(Refused::CaptureFailed)) => Err(fdo::Error::Failed(
+            "the compositor could not draw the window".into(),
+        )),
         Err(_) => Err(fdo::Error::Failed("the compositor did not answer".into())),
     }
 }
@@ -190,6 +220,26 @@ pub enum AgentRequest {
         y: f64,
         button: u32,
         reply: mpsc::Sender<Result<(), Refused>>,
+    },
+    /// 켜진 글 입력에만 글을 확정한다. 켜진 글 입력이 없으면 아무것도 치지 않고 false
+    Commit {
+        text: String,
+        reply: mpsc::Sender<Result<bool, Refused>>,
+    },
+    /// 그 pid의 창(제목이 같은 것 먼저)만 따로 그려 읽는다: 그림과 그 출력의 배율
+    Capture {
+        pid: u32,
+        title: String,
+        reply: mpsc::Sender<Result<(Image, f64), Refused>>,
+    },
+    /// 그 pid의 창 안의 점(창 스크린샷의 픽셀)을 누른다. 누른 화면의 논리 좌표를 돌려준다
+    ClickWindow {
+        pid: u32,
+        title: String,
+        x: f64,
+        y: f64,
+        button: u32,
+        reply: mpsc::Sender<Result<(f64, f64), Refused>>,
     },
 }
 
@@ -663,6 +713,71 @@ impl Api {
         answer(receiver)
     }
 
+    /// 에이전트 전용: 키보드 포커스를 가진 앱의 켜진 글 입력(text-input-v3)에 글을 확정한다. 켜진 글
+    /// 입력이 없으면 아무것도 치지 않고 false다. TypeText와 달리 키로 바꿔 치지 않으므로, 포커스가 글
+    /// 칸을 벗어났을 때 키가 문서로 가 단축키가 도는 일이 없다
+    async fn commit_text(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        text: String,
+    ) -> fdo::Result<bool> {
+        check_agent(connection, &header).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::Commit { text, reply }))?;
+        answer(receiver)
+    }
+
+    /// 에이전트 전용: 그 pid의 창(제목이 같은 것 먼저)만 따로 그린 PNG. (너비, 높이, 배율, PNG)이고
+    /// 창 영역의 왼쪽 위가 (0, 0), 픽셀은 그 창이 있는 출력의 물리 픽셀이다. 다른 창, 셸, 커서는 들지
+    /// 않는다. ClickWindow가 이 픽셀 좌표를 받는다
+    async fn capture_window(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        title: String,
+    ) -> fdo::Result<(u32, u32, f64, Vec<u8>)> {
+        check_agent(connection, &header).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::Capture { pid, title, reply }))?;
+        let (image, scale) = answer_within(receiver, CAPTURE_REPLY)?;
+        let mut png = Vec::new();
+        write_png(&image, &mut png)
+            .map_err(|err| fdo::Error::Failed(format!("cannot make the PNG: {err}")))?;
+        Ok((image.width, image.height, scale, png))
+    }
+
+    /// 에이전트 전용: 그 pid의 창(제목이 같은 것 먼저) 안의 (x, y)를 누른다. x, y는 CaptureWindow
+    /// 그림의 픽셀이다. 창이 앞에 없으면 먼저 가져온다. 창 밖이거나 그 점 위에 다른 것(그 창의 대화
+    /// 상자, 다른 창, Dock·메뉴 막대)이 있으면 누르지 않는다. 누른 화면의 논리 좌표를 돌려준다
+    #[allow(clippy::too_many_arguments)]
+    async fn click_window(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        title: String,
+        x: f64,
+        y: f64,
+        button: u32,
+    ) -> fdo::Result<(f64, f64)> {
+        check_agent(connection, &header).await?;
+        if !x.is_finite() || !y.is_finite() {
+            return Err(fdo::Error::InvalidArgs("x and y must be numbers".into()));
+        }
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::ClickWindow {
+            pid,
+            title,
+            x,
+            y,
+            button,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
     /// 키보드 포커스: (클라이언트 pid, 앱 ID나 레이어 이름, 창 제목, 레이어 표면인지).
     /// 포커스가 없으면 pid가 0이다
     fn get_focus(&self) -> (u32, String, String, bool) {
@@ -873,5 +988,37 @@ mod tests {
         );
         assert!(parse_chord("hyper+a").is_err());
         assert!(parse_chord("notakey").is_err());
+    }
+
+    #[test]
+    fn refusals_tell_the_agent_what_to_do() {
+        let refusal = |why: Refused| {
+            let (reply, receiver) = mpsc::channel::<Result<(), Refused>>();
+            reply.send(Err(why)).unwrap();
+            answer(receiver).unwrap_err()
+        };
+        match refusal(Refused::Outside {
+            width: 800,
+            height: 600,
+        }) {
+            fdo::Error::InvalidArgs(message) => assert!(message.contains("800x600"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        match refusal(Refused::Covered) {
+            fdo::Error::Failed(message) => {
+                assert!(message.contains("nothing was clicked"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            refusal(Refused::AuthDialog),
+            fdo::Error::AccessDenied(_)
+        ));
+        // 답이 없으면 기다린 뒤 실패한다
+        let (_reply, receiver) = mpsc::channel::<Result<(), Refused>>();
+        assert!(matches!(
+            answer_within(receiver, Duration::from_millis(1)),
+            Err(fdo::Error::Failed(_))
+        ));
     }
 }

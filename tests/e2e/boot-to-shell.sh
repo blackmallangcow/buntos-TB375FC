@@ -103,6 +103,10 @@ else
 	[[ "$uid" == 1000 ]] || fail "자격 증명으로 만든 시험 계정이 없다 (uid $uid)"
 	((greeter > 0)) || fail "로그인 화면이 뜨지 않았다"
 	echo "로그인 화면: ${SECONDS}초"
+	# 접근성: 사용자가 허용한 AI가 있으면 세션을 열 때 켠다(buntd-agent --prepare-session). Chromium·Electron
+	# 앱은 뜰 때만 보기 때문이다. 시험용 AI 하나를 정책에 넣고 들어간다(e2e의 에이전트 요청은 root라 늘 허용된다)
+	policy=$(printf 'version = 1\n\n[[client]]\nname = "e2e"\nexe = "/usr/bin/true"\n' | base64 -w 0)
+	echo "mkdir -p /etc/buntos && echo $policy | base64 -d >/etc/buntos/agent-access.toml" >&3
 	for attempt in 1 2 3; do
 		python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" keys:esc sleep:0.5 "type:$password" sleep:0.5 keys:ret ||
 			fail "QMP로 암호를 치지 못했다"
@@ -120,6 +124,13 @@ else
 	wait_for "^E2E_SUDO_[0-9]+$" || fail "sudo를 확인하지 못했다"
 	console | grep -a -q -E "^E2E_SUDO_1$" || fail "sudo가 암호를 묻지 않는다"
 	echo "sudo: 암호를 묻는다"
+
+	# 에이전트에 처음 묻기 전에 본다(데몬도 첫 요청 때 켠다). 접근성 버스는 로그인 중에 몇 초 늦게 뜬다
+	a11y="sudo -u $user DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl --user get-property org.a11y.Bus /org/a11y/bus org.a11y.Status IsEnabled"
+	echo "for i in \$(seq 30); do $a11y 2>/dev/null | grep -q true && break; sleep 1; done; echo \"E2E_A11Y_\$($a11y 2>/dev/null | tr -d ' ')\"" >&3
+	wait_for "^E2E_A11Y_" || fail "접근성 상태를 읽지 못했다"
+	console | grep -a -q -E "^E2E_A11Y_btrue$" || fail "허용한 AI가 있는데 세션을 열 때 접근성이 켜지지 않았다"
+	echo "접근성: 세션을 열 때 켰다"
 fi
 
 # 그래픽 셸: 에이전트가 접근성 트리에서 메뉴 막대 항목과 Dock 단추를 읽는다. 앱이 없으면 메뉴 막대에
@@ -139,7 +150,8 @@ else
 	fail "에이전트가 읽은 셸에 메뉴 막대 항목과 Dock이 없다 (요소 ${agent_refs}개)"
 fi
 
-# e2e 5번: 에이전트가 앱 A(계산기)의 값을 읽어 앱 B(텍스트 편집기)에 넣는다(tests/e2e/agent-apps.sh).
+# e2e 5번: 에이전트가 앱 A(계산기)의 값을 읽어 앱 B(텍스트 편집기)에 넣고, 창 스크린샷의 픽셀을 누르며,
+# fill이 실패를 성공으로 알리지 않는지 본다(tests/e2e/agent-apps.sh).
 # 스크립트를 직렬 콘솔로 넣어 root로 돌린다. 결과 줄은 입력 줄의 에코와 구분되도록 앞에 표시를 붙인다
 if [[ "$agent_refs" != NONE ]]; then
 	push tests/e2e/agent-apps.sh /tmp/e2e-agent-apps.sh
