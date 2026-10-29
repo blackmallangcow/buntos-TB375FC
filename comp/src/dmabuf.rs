@@ -437,12 +437,11 @@ mod tests {
             Flags::empty(),
         );
         server.pump(&mut client);
+        // 오류 코드만 본다. 작업 공간을 함께 빌드하면 시험 클라이언트가 libwayland(wayland-backend의
+        // client_system)로 돌고, libwayland는 이미 지운 객체(params)의 오류를 인터페이스 없이 @0으로 알린다
         assert_eq!(
-            client.protocol_error(),
-            Some((
-                zwp_linux_buffer_params_v1::Error::OutOfBounds as u32,
-                "zwp_linux_buffer_params_v1".into()
-            ))
+            client.protocol_error().map(|(code, _)| code),
+            Some(zwp_linux_buffer_params_v1::Error::OutOfBounds as u32)
         );
     }
 }
