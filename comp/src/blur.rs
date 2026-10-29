@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 셸 유리 뒤 흐림 (macOS의 머티리얼처럼). 특권 셸 클라이언트의 위층 레이어 표면과 그 팝업 아래를
-//! 흐리게 그린다. 셸 쪽 프로토콜은 쓰지 않는다.
+//! 셸 유리와 앱 창 뒤 흐림 (macOS의 머티리얼처럼). 두 가지를 흐린다.
+//! - 셸 유리: 특권 셸 클라이언트의 위층 레이어 표면과 그 팝업. 셸 쪽 프로토콜은 쓰지 않고, 표면의 알파가
+//!   0.5 이상인 곳(유리)에만 합성한다. 그림자처럼 옅은 곳과 투명한 곳은 그대로 둔다
+//! - 앱이 요청한 영역 (ext-background-effect-v1, background_effect.rs): 앱이 정한 곳이므로 알파와
+//!   상관없이 영역 전체에 합성한다. 표면 크기 밖은 자른다
 //!
 //! 표면 바로 아래에 흐림 요소(BlurElement)를 끼워 둔다. 화면을 아래 요소부터 그리므로 이 요소가 그려질
 //! 차례에 화면 버퍼의 그 자리에는 표면 아래 장면만 있다. 그 부분을 복사해 dual Kawase(축소 3번,
-//! 확대 2번)로 흐리고, 표면의 알파가 0.5 이상인 곳(유리)에만 합성한다. 그림자처럼 옅은 곳과 투명한
-//! 곳은 그대로 둔다.
+//! 확대 2번)로 흐려 합성한다.
 //!
 //! 아래 장면이 바뀐 프레임에만 다시 흐린다. 그때는 요소의 커밋을 올려 손상 추적이 영역 전체를 다시
 //! 그리게 하고(그래야 복사한 영역에 지난 프레임의 유리가 섞이지 않는다), 나머지 프레임은 흐려 둔 결과를
@@ -23,6 +25,7 @@ use std::{
     ffi::CStr,
     hash::{DefaultHasher, Hash, Hasher},
     rc::Rc,
+    sync::Arc,
 };
 
 use smithay::{
@@ -40,7 +43,7 @@ use smithay::{
         backend::ObjectId,
         protocol::{wl_buffer::WlBuffer, wl_shm, wl_surface::WlSurface},
     },
-    utils::{Buffer, Physical, Rectangle, Scale},
+    utils::{Buffer, Logical, Physical, Rectangle, Scale},
     wayland::{dmabuf::get_dmabuf, shm::with_buffer_contents},
 };
 
@@ -102,20 +105,25 @@ void main() {
 ";
 
 /// 흐린 배경을 표면 알파로 가려 합성한다. smithay는 화면 버퍼에 물리 좌표 그대로(위가 GL의 0) 그리므로
-/// 복사한 텍스처와 표면 텍스처 모두 v=0이 표면의 위다 (위아래가 뒤집힌 dmabuf는 mask_rect로 뒤집는다)
+/// 복사한 텍스처와 표면 텍스처 모두 v=0이 표면의 위다 (위아래가 뒤집힌 dmabuf는 mask_rect로 뒤집는다).
+/// 앱이 요청한 영역은 가리지 않는다(use_mask 0)
 const COMPOSITE: &str = "#version 100
 precision mediump float;
 uniform sampler2D tex;
 uniform sampler2D mask;
+uniform float use_mask;
 uniform float saturation;
 uniform vec2 edges;
 uniform vec4 mask_rect;
 varying vec2 v;
 void main() {
-    float alpha = texture2D(mask, mask_rect.xy + v * mask_rect.zw).a;
-    float m = smoothstep(edges.x, edges.y, alpha);
-    if (m <= 0.0) {
-        discard;
+    float m = 1.0;
+    if (use_mask > 0.5) {
+        float alpha = texture2D(mask, mask_rect.xy + v * mask_rect.zw).a;
+        m = smoothstep(edges.x, edges.y, alpha);
+        if (m <= 0.0) {
+            discard;
+        }
     }
     vec3 color = texture2D(tex, v).rgb;
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
@@ -142,6 +150,7 @@ struct Program {
     id: GLuint,
     tex: GLint,
     mask: GLint,
+    use_mask: GLint,
     halfpixel: GLint,
     offset: GLint,
     saturation: GLint,
@@ -205,6 +214,30 @@ enum Bounds {
 /// 유리 범위를 찾을 때 건너뛰는 픽셀 수 (가로세로). 찾은 범위는 이만큼 넓힌다
 const SCAN_STEP: usize = 4;
 
+/// 흐릴 표면과 흐릴 곳
+#[derive(Clone, Debug)]
+pub struct BlurTarget {
+    pub surface: WlSurface,
+    pub shape: BlurShape,
+}
+
+#[derive(Clone, Debug)]
+pub enum BlurShape {
+    /// 셸 유리: 표면의 알파가 MASK_LOW 이상인 곳
+    Glass,
+    /// 앱이 요청한 영역 (표면 기준 논리 좌표, 겹치지 않는 사각형). 알파와 상관없이 다 흐린다
+    Region(Arc<[Rectangle<i32, Logical>]>),
+}
+
+impl BlurTarget {
+    pub fn glass(surface: WlSurface) -> Self {
+        Self {
+            surface,
+            shape: BlurShape::Glass,
+        }
+    }
+}
+
 /// 흐림 상태. 출력마다가 아니라 표면마다 버퍼를 둔다
 #[derive(Default)]
 pub struct Blur {
@@ -213,65 +246,45 @@ pub struct Blur {
 }
 
 impl Blur {
-    /// 이번 프레임의 요소 목록(위에서 아래 순)에서 `surfaces` 각각의 바로 아래에 흐림 요소를 끼운다.
-    /// 하나라도 끼웠으면 true
+    /// 이번 프레임의 요소 목록(위에서 아래 순)에서 `targets` 각각의 표면 바로 아래에 흐림 요소를 끼운다.
+    /// 하나라도 끼웠으면 true. 전에는 셸 유리 표면만 받았다
     pub fn insert(
         &mut self,
         renderer: &mut GlesRenderer,
         elements: &mut Vec<OutputRenderElements>,
-        surfaces: &[WlSurface],
+        targets: &[BlurTarget],
         scale: Scale<f64>,
     ) -> bool {
-        self.collect_garbage(renderer, surfaces);
-        if surfaces.is_empty() || self.shared.borrow().broken {
+        self.collect_garbage(renderer, targets);
+        if targets.is_empty() || self.shared.borrow().broken {
             return false;
         }
         let mut inserted = false;
         let context = renderer.context_id();
         // 아래 표면부터 끼워, 위 표면의 지문에 아래 흐림 요소의 변화도 들어가게 한다
-        let mut targets: Vec<(usize, &WlSurface)> = surfaces
+        let mut targets: Vec<(usize, &BlurTarget)> = targets
             .iter()
-            .filter_map(|surface| {
-                let id = Id::from_wayland_resource(surface);
+            .filter_map(|target| {
+                let id = Id::from_wayland_resource(&target.surface);
                 elements
                     .iter()
                     .position(|element| element.id() == &id)
-                    .map(|index| (index, surface))
+                    .map(|index| (index, target))
             })
             .collect();
         targets.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
-        for (_, surface) in targets {
+        for (_, target) in targets {
+            let surface = &target.surface;
             let id = Id::from_wayland_resource(surface);
             let Some(index) = elements.iter().position(|element| element.id() == &id) else {
                 continue;
             };
-            let surface_geometry = elements[index].geometry(scale);
-            if surface_geometry.is_empty() {
+            // 앱이 커서 표면에 흐림을 요청해도 커서 아래는 흐리지 않는다 (커서는 커서 평면에 오른다)
+            if elements[index].kind() == Kind::Cursor {
                 continue;
             }
-            let Some((mask, buffer_commit, buffer)) =
-                with_renderer_surface_state(surface, |state| {
-                    state
-                        .texture::<GlesTexture>(context.clone())
-                        .cloned()
-                        .map(|mask| (mask, state.current_commit(), state.buffer().cloned()))
-                })
-                .flatten()
-            else {
-                continue;
-            };
-            // smithay는 렌더러가 그릴 수 있다고 알린 형식(render formats)이 아닌 dmabuf를 외부 텍스처로
-            // 가져온다. 가림 셰이더의 sampler2D로는 읽을 수 없다
-            if buffer
-                .as_ref()
-                .and_then(|buffer| get_dmabuf(buffer).ok())
-                .is_some_and(|dmabuf| {
-                    !renderer
-                        .egl_context()
-                        .dmabuf_render_formats()
-                        .contains(&dmabuf.format())
-                })
-            {
+            let surface_geometry = elements[index].geometry(scale);
+            if surface_geometry.is_empty() {
                 continue;
             }
             let entry = self
@@ -285,38 +298,78 @@ impl Blur {
                     targets: Rc::default(),
                     bounds: None,
                 });
-            // 모든 앱 패널처럼 화면 전체를 덮는 투명한 표면도 있으므로, 유리가 있는 범위만 흐린다.
-            // dmabuf는 CPU로 읽지 않으므로 표면 전체를 흐릴 범위로 둔다(가림은 그대로다)
-            let bounds = match entry.bounds {
-                Some((commit, bounds)) if commit == buffer_commit => bounds,
-                _ => {
-                    let bounds = buffer
+            let (geometry, mask, parts) = match &target.shape {
+                BlurShape::Glass => {
+                    let Some((mask, buffer_commit, buffer)) =
+                        with_renderer_surface_state(surface, |state| {
+                            state
+                                .texture::<GlesTexture>(context.clone())
+                                .cloned()
+                                .map(|mask| (mask, state.current_commit(), state.buffer().cloned()))
+                        })
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    // smithay는 렌더러가 그릴 수 있다고 알린 형식(render formats)이 아닌 dmabuf를 외부
+                    // 텍스처로 가져온다. 가림 셰이더의 sampler2D로는 읽을 수 없다
+                    if buffer
                         .as_ref()
-                        .map_or(Bounds::Unknown, |buffer| glass_bounds(buffer));
-                    entry.bounds = Some((buffer_commit, bounds));
-                    bounds
+                        .and_then(|buffer| get_dmabuf(buffer).ok())
+                        .is_some_and(|dmabuf| {
+                            !renderer
+                                .egl_context()
+                                .dmabuf_render_formats()
+                                .contains(&dmabuf.format())
+                        })
+                    {
+                        continue;
+                    }
+                    // 모든 앱 패널처럼 화면 전체를 덮는 투명한 표면도 있으므로, 유리가 있는 범위만
+                    // 흐린다. dmabuf는 CPU로 읽지 않으므로 표면 전체를 흐릴 범위로 둔다(가림은 그대로다)
+                    let bounds = match entry.bounds {
+                        Some((commit, bounds)) if commit == buffer_commit => bounds,
+                        _ => {
+                            let bounds = buffer
+                                .as_ref()
+                                .map_or(Bounds::Unknown, |buffer| glass_bounds(buffer));
+                            entry.bounds = Some((buffer_commit, bounds));
+                            bounds
+                        }
+                    };
+                    let geometry = match bounds {
+                        Bounds::Empty => continue,
+                        Bounds::Unknown => surface_geometry,
+                        Bounds::Area([left, top, right, bottom]) => {
+                            let size = surface_geometry.size.to_f64();
+                            let x0 = (left * size.w).floor() as i32;
+                            let y0 = (top * size.h).floor() as i32;
+                            let x1 = (right * size.w).ceil() as i32;
+                            let y1 = (bottom * size.h).ceil() as i32;
+                            Rectangle::new(
+                                (surface_geometry.loc.x + x0, surface_geometry.loc.y + y0).into(),
+                                ((x1 - x0).max(1), (y1 - y0).max(1)).into(),
+                            )
+                        }
+                    };
+                    (geometry, Some(mask), Vec::new())
                 }
-            };
-            let geometry = match bounds {
-                Bounds::Empty => continue,
-                Bounds::Unknown => surface_geometry,
-                Bounds::Area([left, top, right, bottom]) => {
-                    let size = surface_geometry.size.to_f64();
-                    let x0 = (left * size.w).floor() as i32;
-                    let y0 = (top * size.h).floor() as i32;
-                    let x1 = (right * size.w).ceil() as i32;
-                    let y1 = (bottom * size.h).ceil() as i32;
-                    Rectangle::new(
-                        (surface_geometry.loc.x + x0, surface_geometry.loc.y + y0).into(),
-                        ((x1 - x0).max(1), (y1 - y0).max(1)).into(),
-                    )
+                BlurShape::Region(rects) => {
+                    let parts = region_parts(rects, surface_geometry, scale);
+                    let Some(geometry) = parts.iter().copied().reduce(Rectangle::merge) else {
+                        continue;
+                    };
+                    (geometry, None, parts)
                 }
             };
             // 흐릴 범위 아래에서 겹치는 요소가 바뀌거나 움직였거나, 그 손상이 흐릴 범위에 닿으면
             // 다시 흐린다. 커밋만 보면 Dock 아래에 걸친 창이 멀리 떨어진 곳을 그릴 때마다(시스템
-            // 모니터의 그래프 등) Dock 전체를 다시 흐렸다
+            // 모니터의 그래프 등) Dock 전체를 다시 흐렸다. 앱 영역의 모양이 바뀌어도 다시 그린다
             let mut hasher = DefaultHasher::new();
             hash_rectangle(geometry, &mut hasher);
+            for part in &parts {
+                hash_rectangle(*part, &mut hasher);
+            }
             let mut damaged = false;
             let mut seen = HashMap::new();
             for element in &elements[index + 1..] {
@@ -354,6 +407,7 @@ impl Blur {
                     geometry,
                     surface: surface_geometry,
                     mask,
+                    parts,
                     targets: entry.targets.clone(),
                     shared: self.shared.clone(),
                 }),
@@ -363,9 +417,14 @@ impl Blur {
         inserted
     }
 
+    /// 흐림 셰이더를 만들지 못해 흐림을 껐다 (그 뒤로는 흐리지 않는다)
+    pub fn broken(&self) -> bool {
+        self.shared.borrow().broken
+    }
+
     /// 화면에서 사라진 표면의 버퍼를 지운다
-    fn collect_garbage(&mut self, renderer: &mut GlesRenderer, surfaces: &[WlSurface]) {
-        let alive: Vec<ObjectId> = surfaces.iter().map(Resource::id).collect();
+    fn collect_garbage(&mut self, renderer: &mut GlesRenderer, targets: &[BlurTarget]) {
+        let alive: Vec<ObjectId> = targets.iter().map(|target| target.surface.id()).collect();
         let gone: Vec<ObjectId> = self
             .surfaces
             .keys()
@@ -451,6 +510,51 @@ fn hash_rectangle(rectangle: Rectangle<i32, Physical>, hasher: &mut impl Hasher)
         .hash(hasher);
 }
 
+/// 앱이 준 흐림 영역(표면 기준 논리 좌표)을 출력의 물리 좌표로 옮기고 표면(`surface`) 안으로 자른다.
+/// 이웃한 사각형 사이에 틈이 생기지 않게 끝점을 따로 반올림한다. 앱이 보낸 아주 크거나 음수인 값도
+/// 실수로 계산한 뒤 표면 안으로 잘라 넘치지 않는다
+fn region_parts(
+    rects: &[Rectangle<i32, Logical>],
+    surface: Rectangle<i32, Physical>,
+    scale: Scale<f64>,
+) -> Vec<Rectangle<i32, Physical>> {
+    let (left, top) = (f64::from(surface.loc.x), f64::from(surface.loc.y));
+    let right = f64::from(surface.loc.x.saturating_add(surface.size.w));
+    let bottom = f64::from(surface.loc.y.saturating_add(surface.size.h));
+    let to_x = |x: f64| (left + x * scale.x).round().clamp(left, right) as i32;
+    let to_y = |y: f64| (top + y * scale.y).round().clamp(top, bottom) as i32;
+    rects
+        .iter()
+        .filter_map(|rect| {
+            let x0 = to_x(f64::from(rect.loc.x));
+            let y0 = to_y(f64::from(rect.loc.y));
+            let x1 = to_x(f64::from(rect.loc.x) + f64::from(rect.size.w));
+            let y1 = to_y(f64::from(rect.loc.y) + f64::from(rect.size.h));
+            (x1 > x0 && y1 > y0).then(|| Rectangle::from_extremities((x0, y0), (x1, y1)))
+        })
+        .collect()
+}
+
+/// 흐림을 합성할 사각형 (화면 버퍼의 물리 좌표). `damage`는 `dst` 기준이고, `parts`가 있으면(앱 영역)
+/// 그 안으로 자른다. 프레임마다 그리므로 모아 두지 않고 하나씩 낸다
+fn scissors<'a>(
+    dst: Rectangle<i32, Physical>,
+    damage: &'a [Rectangle<i32, Physical>],
+    parts: &'a [Rectangle<i32, Physical>],
+) -> impl Iterator<Item = Rectangle<i32, Physical>> + 'a {
+    damage
+        .iter()
+        .map(move |rect| Rectangle::new(rect.loc + dst.loc, rect.size))
+        .flat_map(move |rect| {
+            let whole = parts.is_empty().then_some(rect);
+            whole.into_iter().chain(
+                parts
+                    .iter()
+                    .filter_map(move |part| rect.intersection(*part)),
+            )
+        })
+}
+
 /// 가림 텍스처에서 읽을 범위: 시작 x, y, 너비, 높이 (0~1). `clip`은 흐리는 부분, `surface`는 표면
 /// 텍스처가 덮는 범위다. 위아래가 뒤집힌 텍스처(y_inverted dmabuf)는 아래에서 위로 읽는다
 fn mask_rect(
@@ -469,16 +573,18 @@ fn mask_rect(
     }
 }
 
-/// 셸 표면 바로 아래에 끼우는 흐림 요소
+/// 흐릴 표면 바로 아래에 끼우는 흐림 요소
 pub struct BlurElement {
     id: Id,
     commit: CommitCounter,
-    /// 흐릴 범위 (표면의 유리 부분)
+    /// 흐릴 범위 (셸 표면의 유리 부분, 앱 영역의 바깥 사각형)
     geometry: Rectangle<i32, Physical>,
     /// 표면 전체. 표면 텍스처가 덮는 범위다
     surface: Rectangle<i32, Physical>,
-    /// 표면의 텍스처. 알파로 흐릴 곳을 정한다
-    mask: GlesTexture,
+    /// 셸 유리: 표면의 텍스처. 알파로 흐릴 곳을 정한다. 앱 영역은 가리지 않는다(None)
+    mask: Option<GlesTexture>,
+    /// 앱 영역의 사각형들 (출력의 물리 좌표). 비었으면 흐릴 범위 전체에 합성한다
+    parts: Vec<Rectangle<i32, Physical>>,
     targets: Rc<RefCell<Targets>>,
     shared: Rc<RefCell<Shared>>,
 }
@@ -535,7 +641,10 @@ impl RenderElement<GlesRenderer> for BlurElement {
             return Ok(());
         }
         let mut targets = self.targets.borrow_mut();
-        let mask = (self.mask.tex_id(), self.mask.is_y_inverted());
+        let mask = self
+            .mask
+            .as_ref()
+            .map(|mask| (mask.tex_id(), mask.is_y_inverted()));
         frame.with_context(|gl| {
             // 안전: 컴포지터의 컨텍스트가 현재이고, 바꾼 GL 상태는 모두 되돌린다
             unsafe {
@@ -546,7 +655,7 @@ impl RenderElement<GlesRenderer> for BlurElement {
                     mask,
                     self.surface,
                     dst,
-                    damage,
+                    scissors(dst, damage, &self.parts),
                     self.commit,
                 )
             }
@@ -636,18 +745,19 @@ impl Saved {
     }
 }
 
-/// 흐림 요소 하나를 그린다. `dst`와 `damage`는 smithay의 물리 좌표다. smithay는 화면 버퍼에 물리 좌표를
+/// 흐림 요소 하나를 그린다. `dst`와 `scissors`는 smithay의 물리 좌표다. smithay는 화면 버퍼에 물리 좌표를
 /// 그대로 GL 좌표로 써서 그리므로(위아래를 투영 행렬로 뒤집는다) 바꾸지 않고 쓴다. `mask`는 가림 텍스처와
-/// 그 텍스처가 위아래로 뒤집혔는지다
+/// 그 텍스처가 위아래로 뒤집혔는지다. 없으면(앱 영역) 가리지 않는다. 전에는 손상(dst 기준)을 받아 여기서
+/// 옮겼고, 이제는 화면 버퍼 좌표로 옮기고 앱 영역으로 자른 사각형(scissors)을 받는다
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw(
     gl: &ffi::Gles2,
     shared: &mut Shared,
     targets: &mut Targets,
-    (mask, flipped): (GLuint, bool),
+    mask: Option<(GLuint, bool)>,
     surface: Rectangle<i32, Physical>,
     dst: Rectangle<i32, Physical>,
-    damage: &[Rectangle<i32, Physical>],
+    scissors: impl Iterator<Item = Rectangle<i32, Physical>>,
     commit: CommitCounter,
 ) {
     unsafe {
@@ -672,8 +782,6 @@ unsafe fn draw(
             return;
         };
         let (x, y, width, height) = (clip.loc.x, clip.loc.y, clip.size.w, clip.size.h);
-        // 전에는 여기서 바로 셈했다. 위아래가 뒤집힌 dmabuf 때문에 mask_rect로 옮겼다
-        let mask_rect = mask_rect(clip, surface, flipped);
 
         gl.Disable(ffi::SCISSOR_TEST);
         gl.Disable(ffi::BLEND);
@@ -716,25 +824,26 @@ unsafe fn draw(
         gl.ActiveTexture(ffi::TEXTURE0);
         gl.BindTexture(ffi::TEXTURE_2D, targets.levels[0].texture);
         gl.Uniform1i(program.tex, 0);
-        gl.ActiveTexture(ffi::TEXTURE1);
-        gl.BindTexture(ffi::TEXTURE_2D, mask);
-        // smithay는 표면 텍스처의 축소 필터를 그 텍스처를 그릴 때마다 정하고, 새로 만든 텍스처(표면 크기가
-        // 바뀐 첫 프레임, 처음 받은 dmabuf)에는 GL 기본값(밉맵)이 남아 있다. 밉맵이 없으면 불완전한
-        // 텍스처라 알파가 1로 읽혀 유리가 아닌 곳까지 흐림이 덮였고, 그 프레임의 화면 버퍼에만 남아 깜빡였다
-        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
-        gl.Uniform1i(program.mask, 1);
         gl.Uniform1f(program.saturation, SATURATION);
-        gl.Uniform2f(program.edges, MASK_LOW, MASK_HIGH);
-        let [mask_x, mask_y, mask_w, mask_h] = mask_rect;
-        gl.Uniform4f(program.mask_rect, mask_x, mask_y, mask_w, mask_h);
-        for rect in damage {
-            // damage는 dst 기준이다
-            gl.Scissor(
-                dst.loc.x + rect.loc.x,
-                dst.loc.y + rect.loc.y,
-                rect.size.w,
-                rect.size.h,
-            );
+        match mask {
+            Some((mask, flipped)) => {
+                gl.ActiveTexture(ffi::TEXTURE1);
+                gl.BindTexture(ffi::TEXTURE_2D, mask);
+                // smithay는 표면 텍스처의 축소 필터를 그 텍스처를 그릴 때마다 정하고, 새로 만든 텍스처
+                // (표면 크기가 바뀐 첫 프레임, 처음 받은 dmabuf)에는 GL 기본값(밉맵)이 남아 있다. 밉맵이
+                // 없으면 불완전한 텍스처라 알파가 1로 읽혀 유리가 아닌 곳까지 흐림이 덮였고, 그 프레임의
+                // 화면 버퍼에만 남아 깜빡였다
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+                gl.Uniform1i(program.mask, 1);
+                gl.Uniform1f(program.use_mask, 1.0);
+                gl.Uniform2f(program.edges, MASK_LOW, MASK_HIGH);
+                let [mask_x, mask_y, mask_w, mask_h] = mask_rect(clip, surface, flipped);
+                gl.Uniform4f(program.mask_rect, mask_x, mask_y, mask_w, mask_h);
+            }
+            None => gl.Uniform1f(program.use_mask, 0.0),
+        }
+        for rect in scissors {
+            gl.Scissor(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         }
 
@@ -893,6 +1002,7 @@ impl Program {
                 id,
                 tex: location(c"tex"),
                 mask: location(c"mask"),
+                use_mask: location(c"use_mask"),
                 halfpixel: location(c"halfpixel"),
                 offset: location(c"offset"),
                 saturation: location(c"saturation"),
@@ -948,7 +1058,7 @@ mod tests {
         utils::{Point, Transform},
     };
     use wayland_client::protocol::{
-        wl_buffer::WlBuffer as ClientBuffer, wl_compositor::WlCompositor,
+        wl_buffer::WlBuffer as ClientBuffer, wl_compositor::WlCompositor, wl_shm::WlShm,
     };
     use wayland_protocols::wp::linux_dmabuf::zv1::client::{
         zwp_linux_buffer_params_v1::Flags, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -956,12 +1066,77 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        Frames, Server, ServerOptions, TestClient, background, gl_lock, memfd, pixel,
+        Frames, Server, ServerOptions, TestClient, argb, background, gl_lock, memfd, pixel,
         software_renderer, stripes, texture_formats,
     };
 
     fn physical(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
         Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    fn logical(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    #[test]
+    fn region_parts_move_onto_the_surface_and_stay_inside_it() {
+        let surface = physical(100, 100, 200, 200);
+        let one = Scale::from(1.0);
+        assert_eq!(
+            region_parts(&[logical(10, 20, 30, 40)], surface, one),
+            vec![physical(110, 120, 30, 40)]
+        );
+        // 표면 밖은 자른다. 다 밖이면 없다
+        assert_eq!(
+            region_parts(&[logical(-50, -50, 100, 100)], surface, one),
+            vec![physical(100, 100, 50, 50)]
+        );
+        assert!(region_parts(&[logical(200, 0, 10, 10)], surface, one).is_empty());
+        // 앱이 보낸 아주 큰 값과 작은 값도 넘치지 않는다
+        assert_eq!(
+            region_parts(
+                &[logical(i32::MIN, i32::MIN, i32::MAX, i32::MAX)],
+                surface,
+                one
+            ),
+            Vec::new()
+        );
+        assert_eq!(
+            region_parts(&[logical(-10, -10, i32::MAX, i32::MAX)], surface, one),
+            vec![surface]
+        );
+    }
+
+    #[test]
+    fn neighboring_parts_keep_no_gap_at_fractional_scales() {
+        let surface = physical(0, 0, 100, 100);
+        let parts = region_parts(
+            &[logical(0, 0, 3, 10), logical(3, 0, 3, 10)],
+            surface,
+            Scale::from(1.25),
+        );
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].loc.x + parts[0].size.w, parts[1].loc.x);
+        // 3 × 1.25 = 3.75 → 4, 6 × 1.25 = 7.5 → 8
+        assert_eq!(parts[1], physical(4, 0, 4, 13));
+    }
+
+    #[test]
+    fn scissors_follow_the_damage_and_the_region() {
+        let dst = physical(10, 20, 100, 100);
+        let damage = [physical(0, 0, 50, 50), physical(60, 60, 40, 40)];
+        // 셸 유리: 손상 그대로 화면 버퍼 좌표로
+        assert_eq!(
+            scissors(dst, &damage, &[]).collect::<Vec<_>>(),
+            vec![physical(10, 20, 50, 50), physical(70, 80, 40, 40)]
+        );
+        // 앱 영역: 영역 안으로 자른다
+        let parts = [physical(40, 40, 30, 30), physical(90, 90, 20, 20)];
+        assert_eq!(
+            scissors(dst, &damage, &parts).collect::<Vec<_>>(),
+            vec![physical(40, 40, 20, 30), physical(90, 90, 20, 20)]
+        );
+        assert_eq!(scissors(dst, &[], &parts).count(), 0);
     }
 
     #[test]
@@ -974,20 +1149,22 @@ mod tests {
 
     const SIZE: i32 = 64;
 
-    /// dmabuf를 받는 시험 서버, 클라이언트와 전역들. GL이 없으면 None
-    fn gl_setup() -> Option<(Server, TestClient, WlCompositor, ZwpLinuxDmabufV1)> {
+    /// 흐림을 켠 시험 서버, 클라이언트와 전역들. GL이 없으면 None
+    fn gl_setup() -> Option<(Server, TestClient, WlCompositor, WlShm, ZwpLinuxDmabufV1)> {
         let renderer = software_renderer()?;
         let formats = texture_formats(&renderer);
         let mut server = Server::new(
             Some(renderer),
             ServerOptions {
                 dmabuf_formats: Some(formats),
+                blur: true,
             },
         );
         let client = server.connect();
         let compositor = client.bind("wl_compositor", 4).unwrap();
+        let shm = client.bind("wl_shm", 1).unwrap();
         let dmabuf = client.bind("zwp_linux_dmabuf_v1", 5).unwrap();
-        Some((server, client, compositor, dmabuf))
+        Some((server, client, compositor, shm, dmabuf))
     }
 
     /// 버퍼 하나를 붙여 커밋한 표면
@@ -1017,19 +1194,21 @@ mod tests {
         )
     }
 
-    /// 줄무늬 배경 위에 커밋한 첫 표면을 놓고 그 뒤를 셸 유리로 흐려 그린 화면 (RGBA)
+    /// 줄무늬 배경 위에 커밋한 첫 표면을 놓고 `shape`대로 흐려 그린 화면 (RGBA)
     fn draw(
         server: &mut Server,
         blur: &mut Blur,
         frames: &mut Frames,
         wallpaper: &MemoryRenderBuffer,
         location: Point<i32, Physical>,
+        shape: BlurShape,
     ) -> Vec<u8> {
         let scale = Scale::from(1.0);
         let surface = server.state.surfaces[0].clone();
         let mut elements = server.surface_elements(0, location, scale);
         elements.push(background(server.renderer(), wallpaper));
-        blur.insert(server.renderer(), &mut elements, &[surface], scale);
+        let target = BlurTarget { surface, shape };
+        blur.insert(server.renderer(), &mut elements, &[target], scale);
         frames.render(server.renderer(), &elements)
     }
 
@@ -1038,9 +1217,75 @@ mod tests {
         px[0] == 0 || px[0] == 255
     }
 
-    /// 줄무늬가 섞여 `middle` 근처의 회색인지
+    /// 줄무늬가 섞여 가운데 회색 근처인지
     fn blurred(px: [u8; 4], middle: u8) -> bool {
         px[0].abs_diff(middle) <= 25 && px[0].abs_diff(px[1]) <= 3 && px[1].abs_diff(px[2]) <= 3
+    }
+
+    #[test]
+    fn app_regions_blur_only_inside_the_region() {
+        let _gl = gl_lock();
+        let Some((mut server, mut client, compositor, shm, _)) = gl_setup() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        // 다 투명한 앱 창. 흐린 배경이 그대로 보인다
+        let buffer = client.shm_buffer(&shm, SIZE, SIZE, &argb(64, 64, [0, 0, 0, 0]));
+        commit(&mut server, &mut client, &compositor, &buffer);
+        let mut blur = Blur::default();
+        let mut frames = Frames::new(server.renderer(), (SIZE, SIZE).into(), 1.0);
+        let shape = BlurShape::Region(Arc::from(vec![logical(16, 16, 32, 32)]));
+        let pixels = draw(
+            &mut server,
+            &mut blur,
+            &mut frames,
+            &wallpaper(),
+            (0, 0).into(),
+            shape,
+        );
+        for y in 0..SIZE as usize {
+            for x in 0..SIZE as usize {
+                let px = pixel(&pixels, SIZE as usize, x, y);
+                if (16..48).contains(&x) && (16..48).contains(&y) {
+                    assert!(blurred(px, 128), "({x}, {y}) {px:?} is not blurred");
+                } else {
+                    assert!(sharp(px), "({x}, {y}) {px:?} is blurred");
+                }
+            }
+        }
+        assert!(!blur.broken());
+    }
+
+    #[test]
+    fn app_regions_are_clipped_to_the_surface() {
+        let _gl = gl_lock();
+        let Some((mut server, mut client, compositor, shm, _)) = gl_setup() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        let buffer = client.shm_buffer(&shm, 32, 32, &argb(32, 32, [0, 0, 0, 0]));
+        commit(&mut server, &mut client, &compositor, &buffer);
+        let mut blur = Blur::default();
+        let mut frames = Frames::new(server.renderer(), (SIZE, SIZE).into(), 1.0);
+        // 표면보다 훨씬 큰 영역
+        let shape = BlurShape::Region(Arc::from(vec![logical(-100, -100, 1000, 1000)]));
+        let pixels = draw(
+            &mut server,
+            &mut blur,
+            &mut frames,
+            &wallpaper(),
+            (16, 16).into(),
+            shape,
+        );
+        for (x, y) in [(15, 30), (48, 30), (30, 15), (30, 48), (0, 0), (63, 63)] {
+            assert!(sharp(pixel(&pixels, SIZE as usize, x, y)), "({x}, {y})");
+        }
+        for (x, y) in [(16, 16), (47, 47), (30, 30)] {
+            assert!(
+                blurred(pixel(&pixels, SIZE as usize, x, y), 128),
+                "({x}, {y})"
+            );
+        }
     }
 
     /// 왼쪽 절반만 유리(검정 60%)이고 오른쪽 절반은 투명한 그림 (위아래로 나누면 `rows`)
@@ -1076,11 +1321,10 @@ mod tests {
     #[test]
     fn shm_glass_blurs_where_the_surface_is_opaque_enough() {
         let _gl = gl_lock();
-        let Some((mut server, mut client, compositor, _)) = gl_setup() else {
+        let Some((mut server, mut client, compositor, shm, _)) = gl_setup() else {
             eprintln!("skipped: no software EGL device");
             return;
         };
-        let shm = client.bind("wl_shm", 1).unwrap();
         let buffer = client.shm_buffer(&shm, SIZE, SIZE, &half_glass(false));
         commit(&mut server, &mut client, &compositor, &buffer);
         let mut blur = Blur::default();
@@ -1091,6 +1335,7 @@ mod tests {
             &mut frames,
             &wallpaper(),
             (0, 0).into(),
+            BlurShape::Glass,
         );
         assert_left_glass(&pixels);
     }
@@ -1098,7 +1343,7 @@ mod tests {
     #[test]
     fn dmabuf_glass_masks_are_read_on_their_first_frame() {
         let _gl = gl_lock();
-        let Some((mut server, mut client, compositor, dmabuf)) = gl_setup() else {
+        let Some((mut server, mut client, compositor, _, dmabuf)) = gl_setup() else {
             eprintln!("skipped: no software EGL device");
             return;
         };
@@ -1121,6 +1366,7 @@ mod tests {
             &mut frames,
             &wallpaper(),
             (0, 0).into(),
+            BlurShape::Glass,
         );
         assert_left_glass(&pixels);
     }
@@ -1128,7 +1374,7 @@ mod tests {
     #[test]
     fn y_inverted_dmabuf_masks_follow_the_picture() {
         let _gl = gl_lock();
-        let Some((mut server, mut client, compositor, dmabuf)) = gl_setup() else {
+        let Some((mut server, mut client, compositor, _, dmabuf)) = gl_setup() else {
             eprintln!("skipped: no software EGL device");
             return;
         };
@@ -1150,6 +1396,7 @@ mod tests {
             &mut frames,
             &wallpaper(),
             (0, 0).into(),
+            BlurShape::Glass,
         );
         for (x, y) in [(10, 10), (40, 20), (63, 31)] {
             let px = pixel(&pixels, SIZE as usize, x, y);
@@ -1167,7 +1414,7 @@ mod tests {
     #[test]
     fn external_dmabufs_are_not_used_as_masks() {
         let _gl = gl_lock();
-        let Some((mut server, mut client, compositor, dmabuf)) = gl_setup() else {
+        let Some((mut server, mut client, compositor, _, dmabuf)) = gl_setup() else {
             eprintln!("skipped: no software EGL device");
             return;
         };
@@ -1206,6 +1453,65 @@ mod tests {
         let mut elements = server.surface_elements(0, (0, 0).into(), scale);
         assert_eq!(elements.len(), 1, "the NV12 buffer was imported");
         let mut blur = Blur::default();
-        assert!(!blur.insert(server.renderer(), &mut elements, &[surface], scale));
+        let glass = BlurTarget::glass(surface.clone());
+        assert!(!blur.insert(server.renderer(), &mut elements, &[glass], scale));
+        // 앱 영역은 가림을 쓰지 않으므로 외부 텍스처여도 흐린다
+        let region = BlurTarget {
+            surface,
+            shape: BlurShape::Region(Arc::from(vec![logical(0, 0, 8, 8)])),
+        };
+        assert!(blur.insert(server.renderer(), &mut elements, &[region], scale));
+    }
+
+    #[test]
+    fn the_region_shape_and_the_scene_below_trigger_a_new_blur() {
+        let _gl = gl_lock();
+        let Some((mut server, mut client, compositor, shm, _)) = gl_setup() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        let buffer = client.shm_buffer(&shm, SIZE, SIZE, &argb(64, 64, [0, 0, 0, 0]));
+        commit(&mut server, &mut client, &compositor, &buffer);
+        let mut blur = Blur::default();
+        let mut frames = Frames::new(server.renderer(), (SIZE, SIZE).into(), 1.0);
+        let region = |rects: Vec<Rectangle<i32, Logical>>| BlurShape::Region(Arc::from(rects));
+        let commit_of = |blur: &Blur| {
+            let entry = blur.surfaces.values().next().unwrap();
+            entry.commit
+        };
+        let wallpaper = wallpaper();
+        let square = || region(vec![logical(0, 0, 32, 32)]);
+        draw(
+            &mut server,
+            &mut blur,
+            &mut frames,
+            &wallpaper,
+            (0, 0).into(),
+            square(),
+        );
+        let first = commit_of(&blur);
+        // 같은 장면은 흐려 둔 것을 쓴다
+        draw(
+            &mut server,
+            &mut blur,
+            &mut frames,
+            &wallpaper,
+            (0, 0).into(),
+            square(),
+        );
+        assert_eq!(commit_of(&blur), first);
+        // 영역의 모양이 바뀌면(바깥 사각형이 같아도) 다시 흐린다
+        let pixels = draw(
+            &mut server,
+            &mut blur,
+            &mut frames,
+            &wallpaper,
+            (0, 0).into(),
+            region(vec![logical(0, 0, 32, 16), logical(0, 16, 16, 16)]),
+        );
+        assert_ne!(commit_of(&blur), first);
+        // 빠진 오른쪽 아래 조각은 다시 줄무늬다 (손상 추적이 그 자리를 다시 그렸다)
+        assert!(sharp(pixel(&pixels, SIZE as usize, 24, 24)));
+        assert!(blurred(pixel(&pixels, SIZE as usize, 8, 24), 128));
     }
 }

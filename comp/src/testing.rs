@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 시험 도우미. GPU 없이 dmabuf 가져오기와 흐림을 끝까지 시험한다.
+//! 시험 도우미. GPU 없이 dmabuf 가져오기, 흐림, 앱의 흐림 요청을 끝까지 시험한다.
 //! - 렌더러: Mesa의 소프트웨어 EGL 장치(llvmpipe). llvmpipe는 memfd를 dmabuf처럼 가져온다
-//! - 서버: 컴포지터와 같은 처리(커밋, linux-dmabuf)를 하는 작은 Wayland 서버
+//! - 서버: 컴포지터와 같은 처리(커밋, linux-dmabuf, ext-background-effect)를 하는 작은 Wayland 서버
 //! - 클라이언트: 같은 프로세스에서 소켓 쌍으로 붙는 wayland-client. 서버와 번갈아 돌린다(pump)
 //!
 //! 소프트웨어 EGL 장치가 없는 기계에서는 GL 시험이 알리고 건너뛴다
@@ -48,16 +48,22 @@ use smithay::{
     },
 };
 use wayland_client::{
-    Connection, Dispatch, EventQueue, QueueHandle,
+    Connection, Dispatch, EventQueue, QueueHandle, WEnum,
     backend::WaylandError,
     delegate_noop, event_created_child,
     protocol::{wl_buffer, wl_compositor, wl_region, wl_registry, wl_shm, wl_shm_pool, wl_surface},
 };
-use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
+use wayland_protocols::{
+    ext::background_effect::v1::client::{
+        ext_background_effect_manager_v1, ext_background_effect_surface_v1,
+    },
+    wp::linux_dmabuf::zv1::client::{
+        zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
+    },
 };
 
 use crate::{
+    background_effect::{self, BackgroundEffectHandler, BackgroundEffectState},
     dmabuf::{self, Dmabufs},
     render::OutputRenderElements,
     shmdiff,
@@ -121,6 +127,7 @@ pub struct ServerState {
     pub compositor: CompositorState,
     pub shm: ShmState,
     pub dmabufs: Dmabufs,
+    pub effects: BackgroundEffectState,
     /// dmabuf를 가져올 렌더러. 없으면 가져오기가 늘 실패한다
     pub renderer: Option<GlesRenderer>,
     /// 버퍼를 커밋한 표면 (처음 커밋한 차례)
@@ -186,14 +193,23 @@ impl DmabufHandler for ServerState {
     }
 }
 
+impl BackgroundEffectHandler for ServerState {
+    fn background_effect_state(&mut self) -> &mut BackgroundEffectState {
+        &mut self.effects
+    }
+}
+
 delegate_compositor!(ServerState);
 delegate_shm!(ServerState);
 delegate_dmabuf!(ServerState);
+background_effect::delegate_background_effect!(ServerState);
 
 /// 시험 서버를 만들 때 고르는 것
 pub struct ServerOptions {
     /// linux-dmabuf 전역을 열고 이 형식을 알린다. None이면 열지 않는다 (CPU 렌더러의 컴포지터)
     pub dmabuf_formats: Option<FormatSet>,
+    /// ext-background-effect 전역을 연다
+    pub blur: bool,
 }
 
 pub struct Server {
@@ -213,6 +229,7 @@ impl Server {
             compositor: CompositorState::new::<ServerState>(&dh),
             shm: ShmState::new::<ServerState>(&dh, vec![]),
             dmabufs,
+            effects: BackgroundEffectState::new::<ServerState>(&dh, options.blur),
             renderer,
             surfaces: Vec::new(),
         };
@@ -292,6 +309,7 @@ pub struct ClientEvents {
     pub feedback_done: bool,
     pub created: Vec<wl_buffer::WlBuffer>,
     pub failed: usize,
+    pub capabilities: Vec<u32>,
 }
 
 pub struct TestClient {
@@ -469,6 +487,24 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, ()> for Client
     ]);
 }
 
+impl Dispatch<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1, ()> for ClientEvents {
+    fn event(
+        state: &mut Self,
+        _manager: &ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+        event: ext_background_effect_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let ext_background_effect_manager_v1::Event::Capabilities { flags } = event {
+            state.capabilities.push(match flags {
+                WEnum::Value(flags) => flags.bits(),
+                WEnum::Unknown(bits) => bits,
+            });
+        }
+    }
+}
+
 delegate_noop!(ClientEvents: ignore wl_compositor::WlCompositor);
 delegate_noop!(ClientEvents: ignore wl_surface::WlSurface);
 delegate_noop!(ClientEvents: ignore wl_region::WlRegion);
@@ -476,6 +512,7 @@ delegate_noop!(ClientEvents: ignore wl_shm::WlShm);
 delegate_noop!(ClientEvents: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(ClientEvents: ignore wl_buffer::WlBuffer);
 delegate_noop!(ClientEvents: ignore zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1);
+delegate_noop!(ClientEvents: ignore ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1);
 
 /// 화면 하나를 흉내 낸 오프스크린 그리기. 같은 텍스처에 잇달아 그려(나이 1) 손상 추적을 시험한다
 pub struct Frames {

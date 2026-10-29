@@ -71,7 +71,8 @@ use smithay::{
 };
 
 use crate::{
-    blur::Blur,
+    background_effect::BackgroundEffectState,
+    blur::{Blur, BlurTarget},
     config::{Config, parse_hex_color},
     cursor::Cursor,
     dbus::{Command, OutputInfo, PointerDevice},
@@ -135,6 +136,8 @@ pub struct UdevData {
     client_env: Vec<(&'static str, &'static str)>,
     /// 앱이 GPU로 그린 버퍼 (dmabuf.rs)
     pub dmabufs: Dmabufs,
+    /// 앱 창 뒤 흐림 요청 (background_effect.rs)
+    pub background_effects: BackgroundEffectState,
 }
 
 impl UdevData {
@@ -256,6 +259,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         .filter(|_| rendering.gpu_clients)
         .map(|node| (node, renderer.dmabuf_formats()));
     let dmabufs = Dmabufs::new::<BuntState>(&display.handle(), dmabuf_device);
+    let background_effects =
+        BackgroundEffectState::new::<BuntState>(&display.handle(), config.effects.blur);
 
     let output_manager = DrmOutputManager::new(
         drm,
@@ -288,6 +293,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         rendering,
         client_env,
         dmabufs,
+        background_effects,
     };
     let mut state = BuntState::new(
         display,
@@ -927,15 +933,31 @@ impl BuntState {
             self.cursor_status = CursorImageStatus::default_named();
         }
 
-        // 뒤를 흐릴 셸 표면. 회전한 출력에서는 흐리지 않는다 (blur.rs는 회전하지 않은 화면만 안다)
-        let blur_surfaces = match self.backend.outputs.get(&crtc) {
-            Some(surface)
-                if self.config.effects.blur
-                    && surface.output.current_transform() == Transform::Normal =>
-            {
-                self.blur_surfaces(&surface.output)
+        // 뒤를 흐릴 표면: 셸 유리와, 앱이 요청한 영역(background_effect.rs. 셸 유리로 흐리는 표면은 뺀다).
+        // 회전한 출력에서는 흐리지 않는다 (blur.rs는 회전하지 않은 화면만 안다). 전에는 셸 표면만 모았다
+        let blur_output = self
+            .backend
+            .outputs
+            .get(&crtc)
+            .map(|surface| surface.output.clone())
+            .filter(|output| {
+                self.config.effects.blur && output.current_transform() == Transform::Normal
+            });
+        let blur_targets: Vec<BlurTarget> = match blur_output {
+            Some(output) => {
+                let glass = self.blur_surfaces(&output);
+                let apps = self.backend.background_effects.targets();
+                glass
+                    .iter()
+                    .cloned()
+                    .map(BlurTarget::glass)
+                    .chain(
+                        apps.into_iter()
+                            .filter(|target| !glass.contains(&target.surface)),
+                    )
+                    .collect()
             }
-            _ => Vec::new(),
+            None => Vec::new(),
         };
 
         // 막대를 숨길지 다시 보고(앞의 창이 최대화했을 수 있다), 다 보이지 않는 막대의 자리를 정한다.
@@ -954,6 +976,7 @@ impl BuntState {
             cursor_hotspot,
             cursor_key,
             blur,
+            background_effects,
             ..
         } = &mut self.backend;
         let Some(surface) = outputs.get_mut(&crtc) else {
@@ -1078,7 +1101,7 @@ impl BuntState {
         }
         // 흐림은 화면 버퍼에 먼저 그려진 아래 장면을 복사한다. 아래 창이 오버레이 평면에 따로 올라가면
         // 복사에서 빠지므로, 흐릴 때는 오버레이 평면에 내보내지 않는다
-        let flags = if blur.insert(renderer, &mut elements, &blur_surfaces, scale) {
+        let flags = if blur.insert(renderer, &mut elements, &blur_targets, scale) {
             FrameFlags::DEFAULT.difference(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT)
         } else {
             FrameFlags::DEFAULT
@@ -1110,6 +1133,10 @@ impl BuntState {
         let elapsed = started.elapsed();
         if elapsed > SLOW_FRAME {
             tracing::debug!("slow frame on {}: {elapsed:?}", output.name());
+        }
+        // 흐림 셰이더를 만들지 못했으면 앱에도 흐림이 없다고 알린다
+        if blur.broken() {
+            background_effects.set_blur(false);
         }
         let (queued, states) = match rendered {
             Ok(frame) => {

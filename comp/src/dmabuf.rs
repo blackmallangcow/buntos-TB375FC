@@ -201,6 +201,7 @@ mod tests {
             None,
             ServerOptions {
                 dmabuf_formats: None,
+                blur: true,
             },
         );
         let client = server.connect();
@@ -219,6 +220,7 @@ mod tests {
             None,
             ServerOptions {
                 dmabuf_formats: Some(offered.clone()),
+                blur: false,
             },
         );
         let mut client = server.connect();
@@ -270,6 +272,7 @@ mod tests {
             Some(renderer),
             ServerOptions {
                 dmabuf_formats: Some(offered),
+                blur: false,
             },
         );
         let mut client = server.connect();
@@ -321,6 +324,7 @@ mod tests {
             Some(renderer),
             ServerOptions {
                 dmabuf_formats: Some(offered),
+                blur: false,
             },
         );
         let mut client = server.connect();
@@ -361,6 +365,7 @@ mod tests {
             None,
             ServerOptions {
                 dmabuf_formats: Some(formats(&[(Fourcc::Argb8888, Modifier::Linear)])),
+                blur: false,
             },
         );
         let mut client = server.connect();
