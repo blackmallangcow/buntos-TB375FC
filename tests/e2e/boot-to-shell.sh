@@ -7,7 +7,8 @@
 # 직렬 콘솔의 root 자동 로그인 뒤 셸에서 명령이 실행되는지 보고, 로그인 화면(bunt-greeter)에 QMP로
 # 암호를 쳐 그 계정으로 들어간다. sudo가 암호를 묻는지 보고, 그래픽 셸(메뉴 막대, Dock)이 떴는지는
 # 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에
-# 넣는다, tests/e2e/agent-apps.sh)과 e2e 6번(키보드 단축키, tests/e2e/shortcuts.sh)을 돌린 뒤 끈다.
+# 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키, tests/e2e/shortcuts.sh), e2e 7번(화면 잠금,
+# tests/e2e/session-lock.sh)을 돌린 뒤 끈다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
 # 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 600)
 set -euo pipefail
@@ -267,6 +268,65 @@ if [[ "$agent_refs" != NONE ]]; then
 	guest chord-reset
 	((shortcut_failed == 0)) || fail "e2e 6번(키보드 단축키): ${shortcut_failed}개 실패"
 	echo "e2e 6번(키보드 단축키): ${SECONDS}초, ${shortcut_passed}개 통과"
+fi
+
+# e2e 7번: 화면 잠금(ARCHITECTURE 6.5). ⌃⌘Q로 잠그면 잠금 화면이 뜨고, 잠긴 동안 에이전트의 화면 읽기와 앱
+# 목록을 거절하며, 틀린 암호로는 풀리지 않고 사람이 잠금 화면에 친 암호(QMP 키)로만 풀리는지 본다. 상태는
+# 게스트 쪽 도우미(tests/e2e/session-lock.sh)가 컴포지터 API(GetLocked)와 저널로 읽는다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/session-lock.sh /tmp/e2e-session-lock.sh
+	lock_step=0
+	# 도우미를 돌려 마지막 줄을 lock_answer에 받는다 (e2e 6번의 guest와 같다)
+	lock_answer=
+	lock_guest() {
+		lock_step=$((lock_step + 1))
+		echo "bash /tmp/e2e-session-lock.sh $1 2>&1 | tail -1 | sed 's/^/E2E7_$lock_step=/'" >&3
+		wait_for "^E2E7_$lock_step=" || fail "e2e 7번: $1의 답을 받지 못했다"
+		lock_answer=$(console | grep -a "^E2E7_$lock_step=" | tail -1 | sed "s/^E2E7_$lock_step=//")
+	}
+	lock_keys() {
+		python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" "$@" || fail "e2e 7번: QMP로 키를 넣지 못했다"
+	}
+	lock_passed=0
+	lock_failed=0
+	lock_check() {
+		if [[ "$2" == "$3" ]]; then
+			echo "e2e 7번 통과: $1"
+			lock_passed=$((lock_passed + 1))
+		else
+			echo "e2e 7번 실패: $1 (받은 값 '$2', 바란 값 '$3')"
+			lock_failed=$((lock_failed + 1))
+		fi
+	}
+
+	lock_guest locked
+	lock_check "처음에는 잠기지 않았다" "$lock_answer" false
+	lock_keys keys:ctrl+meta_l+q sleep:2
+	lock_guest ready
+	lock_check "⌃⌘Q로 잠그면 잠금 화면이 뜬다" "$lock_answer" "true 1"
+	lock_guest agent
+	lock_check "잠긴 동안 에이전트의 화면 읽기와 앱 목록을 거절한다" "$lock_answer" 2
+	lock_keys keys:esc sleep:0.5 type:wrong1 sleep:0.5 keys:ret sleep:4
+	lock_guest locked
+	lock_check "틀린 암호로는 풀리지 않는다" "$lock_answer" true
+	# 키가 잠금 화면보다 먼저 가거나 VM이 바빠 몇 개가 빠지면 풀리지 않으므로 Esc(친 암호를 지운다)를 누르고
+	# 세 번까지 다시 친다 (로그인 화면과 같다)
+	for attempt in 1 2 3; do
+		lock_keys keys:esc sleep:0.5 "type:$password" sleep:0.5 keys:ret sleep:4
+		lock_guest locked
+		if [[ "$lock_answer" == false ]]; then
+			break
+		fi
+	done
+	lock_check "잠금 화면에 친 암호로 풀린다" "$lock_answer" false
+	lock_guest journal
+	# 틀린 암호는 한 번 넘게 남을 수 있다(다시 친 횟수만큼)
+	lock_check "잠금 화면이 틀린 암호와 잠금 해제를 남긴다" \
+		"$(awk '{print ($1 >= 1) " " $2}' <<<"$lock_answer")" "1 1"
+	lock_guest agent
+	lock_check "풀린 뒤에는 에이전트가 다시 읽는다" "$lock_answer" 0
+	((lock_failed == 0)) || fail "e2e 7번(화면 잠금): ${lock_failed}개 실패"
+	echo "e2e 7번(화면 잠금): ${SECONDS}초, ${lock_passed}개 통과"
 fi
 
 echo 'systemctl poweroff' >&3
