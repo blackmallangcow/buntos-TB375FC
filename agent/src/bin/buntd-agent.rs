@@ -1018,7 +1018,8 @@ impl Agent {
                 None,
             ),
             (_, Some(target)) => {
-                let done = match perform(&a11y, &bus, target, parent.as_ref(), web, &params).await? {
+                let done = match perform(&a11y, &bus, target, parent.as_ref(), web, &params).await?
+                {
                     Some(done) => done,
                     // 접근성 동작이 없는 요소는 사람처럼 포인터로 누른다
                     None => format!(
