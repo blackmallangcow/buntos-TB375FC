@@ -81,5 +81,33 @@ bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock",
       <default>[]</default>
       <summary>최근에 실행한 앱 (.desktop ID, 최근 것이 먼저). 모든 앱 패널의 첫 줄</summary>
     </key>
+    <key name="screenshot-mode" type="s">
+      <choices>
+        <choice value="screen"/>
+        <choice value="window"/>
+        <choice value="area"/>
+      </choices>
+      <default>"area"</default>
+      <summary>⇧⌘5 도구 막대에서 마지막으로 고른 찍기 방식 (전체 화면, 선택한 윈도우, 선택 부분)</summary>
+    </key>
+    <key name="screenshot-location" type="s">
+      <choices>
+        <choice value="desktop"/>
+        <choice value="documents"/>
+        <choice value="pictures"/>
+        <choice value="clipboard"/>
+      </choices>
+      <default>"pictures"</default>
+      <summary>스크린샷 저장 위치 (⇧⌘5 옵션). 단축키로 찍은 것에도 쓴다</summary>
+    </key>
+    <key name="screenshot-timer" type="i">
+      <range min="0" max="10"/>
+      <default>0</default>
+      <summary>⇧⌘5 도구 막대로 찍기 전에 기다리는 초 (없음, 5초, 10초)</summary>
+    </key>
+    <key name="screenshot-thumbnail" type="b">
+      <default>true</default>
+      <summary>스크린샷을 저장하면 화면 오른쪽 아래에 미리 보기를 띄운다 (플로팅 썸네일 보기)</summary>
+    </key>
   </schema>
 </schemalist>

@@ -21,6 +21,7 @@ mod notification_center;
 mod notifications;
 mod polkit_agent;
 mod power;
+mod screenshot;
 mod sound;
 mod status_items;
 mod switcher;
@@ -94,10 +95,14 @@ fn main() -> glib::ExitCode {
         let launcher = Launcher::new(app, &tr, toplevels.as_ref());
         let dock = dock::build(app, &config, &tr, toplevels.as_ref(), &launcher);
         let banner = notification_center::banner(app, &notifications, &tr);
+        // ⇧⌘5 스크린샷 도구 막대와 찍은 뒤 화면 모서리의 미리 보기
+        let screenshot_toolbar = screenshot::Toolbar::new(app, &tr);
+        let screenshot_preview = screenshot::Thumbnail::new(app, &tr);
         if let Some(settings) = shell_settings() {
             compositor::share_panel_settings(&settings);
+            screenshot::share_options(&settings);
         }
-        compositor::follow_shortcuts(&launcher, shell_settings());
+        compositor::follow_shortcuts(&launcher, shell_settings(), &screenshot_toolbar);
         // ⌘⇥ 앱 전환 창. 키는 컴포지터가 받고 이 창은 보이기만 한다
         let switcher = switcher::Switcher::start(app);
         follow_color_scheme(vec![
@@ -106,6 +111,8 @@ fn main() -> glib::ExitCode {
             banner,
             launcher.window().clone(),
             switcher.window().clone(),
+            screenshot_toolbar.window().clone(),
+            screenshot_preview.window().clone(),
         ]);
     });
     app.run()

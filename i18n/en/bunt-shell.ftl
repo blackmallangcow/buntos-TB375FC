@@ -144,3 +144,22 @@ agent-access-title = “{ $name }” would like to control this computer.
 agent-access-message = If you allow it, this AI can read what apps show, press buttons and type text. You can allow it in System Settings > AI Agents.
 agent-access-deny = Deny
 agent-access-open = Open System Settings
+
+# Screenshot toolbar (⇧⌘5) and the preview after taking one (macOS Screenshot)
+screenshot-close = Close
+screenshot-mode-screen = Capture Entire Screen
+screenshot-mode-window = Capture Selected Window
+screenshot-mode-area = Capture Selected Portion
+screenshot-options = Options
+screenshot-capture = Capture
+screenshot-save-to = Save to
+screenshot-location-desktop = Desktop
+screenshot-location-documents = Documents
+screenshot-location-pictures = Pictures
+screenshot-location-clipboard = Clipboard
+screenshot-timer = Timer
+screenshot-timer-none = None
+screenshot-timer-5 = 5 Seconds
+screenshot-timer-10 = 10 Seconds
+screenshot-show-thumbnail = Show Floating Thumbnail
+screenshot-preview = Screenshot preview

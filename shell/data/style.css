@@ -10,6 +10,10 @@ window.bunt-dock,
 window.bunt-dock.background,
 window.bunt-switcher,
 window.bunt-switcher.background,
+window.bunt-screenshot,
+window.bunt-screenshot.background,
+window.bunt-screenshot-preview,
+window.bunt-screenshot-preview.background,
 window.bunt-banner,
 window.bunt-banner.background,
 window.bunt-launcher,
@@ -192,6 +196,74 @@ image.dock-window {
 .switcher-name {
   font-size: var(--text-body);
   font-weight: 600;
+}
+
+/* ⇧⌘5 스크린샷 도구 막대 (macOS 26): 화면 아래 가운데의 유리 막대. 둘레는 --shadow-menu 그림자 자리다 */
+.screenshot-toolbar {
+  margin: 18px 28px 38px;
+  padding: 6px;
+  border-radius: var(--radius-xl);
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-highlight);
+  box-shadow: var(--shadow-menu), 0 0 0 1px var(--glass-outline);
+  color: var(--label);
+}
+
+.screenshot-toolbar button,
+.screenshot-toolbar menubutton > button {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: none;
+  box-shadow: none;
+}
+
+.screenshot-toolbar button:hover,
+.screenshot-toolbar menubutton > button:hover {
+  background: var(--hover);
+}
+
+/* 고른 찍기 방식 */
+.screenshot-toolbar button.screenshot-mode:checked {
+  background: var(--pressed);
+}
+
+.screenshot-toolbar button.screenshot-close {
+  min-width: 26px;
+  min-height: 26px;
+  margin: 4px;
+  padding: 0;
+  border-radius: var(--radius-capsule);
+  background: var(--hover);
+}
+
+.screenshot-toolbar button.screenshot-capture {
+  padding: 0 14px;
+  font-weight: 600;
+}
+
+.screenshot-separator {
+  margin: 6px 4px;
+  min-width: 1px;
+  background: var(--separator);
+}
+
+/* 찍은 뒤 화면 오른쪽 아래의 미리 보기 (플로팅 썸네일). 오른쪽에서 미끄러져 들어온다. 둘레는
+   --shadow-card 그림자 자리다(screenshot.rs의 THUMBNAIL_CHROME) */
+.screenshot-thumbnail {
+  margin: 8px 10px 12px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--glass-outline);
+  opacity: 0;
+  transform: translateX(24px);
+  transition: opacity 140ms ease-out, transform var(--duration) ease-out;
+}
+
+.screenshot-thumbnail.shown {
+  opacity: 1;
+  transform: none;
 }
 
 /* 모든 앱 (macOS 26 응용 프로그램 창): 화면을 덮는 투명한 창 가운데의 유리 패널 */

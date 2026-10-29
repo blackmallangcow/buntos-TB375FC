@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 선택한 윈도우 캡처: 제목 막대가 있는 창 테두리 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" fill-rule="evenodd" d="M2.5 2h11A1.5 1.5 0 0 1 15 3.5v9a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5v-9A1.5 1.5 0 0 1 2.5 2zm-.25 3.5v7.25h11.5V5.5z"/>
+</svg>

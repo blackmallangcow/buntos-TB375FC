@@ -144,3 +144,22 @@ agent-access-title = “{ $name }”이(가) 이 컴퓨터를 제어하려고 �
 agent-access-message = 허용하면 이 AI가 앱의 화면 내용을 읽고, 버튼을 누르고, 글을 입력할 수 있습니다. 시스템 설정의 AI 에이전트에서 허용할 수 있습니다.
 agent-access-deny = 거부
 agent-access-open = 시스템 설정 열기
+
+# ⇧⌘5 스크린샷 도구 막대와 찍은 뒤의 미리 보기 (macOS 스크린샷)
+screenshot-close = 닫기
+screenshot-mode-screen = 전체 화면 캡처
+screenshot-mode-window = 선택한 윈도우 캡처
+screenshot-mode-area = 선택 부분 캡처
+screenshot-options = 옵션
+screenshot-capture = 캡처
+screenshot-save-to = 저장 위치
+screenshot-location-desktop = 데스크탑
+screenshot-location-documents = 문서
+screenshot-location-pictures = 사진
+screenshot-location-clipboard = 클립보드
+screenshot-timer = 타이머
+screenshot-timer-none = 없음
+screenshot-timer-5 = 5초
+screenshot-timer-10 = 10초
+screenshot-show-thumbnail = 플로팅 썸네일 보기
+screenshot-preview = 스크린샷 미리 보기
