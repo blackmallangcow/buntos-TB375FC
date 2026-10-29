@@ -26,6 +26,10 @@ mod testing;
 mod toplevels;
 mod udev;
 mod windows;
+// 세션: 화면 잠금, 로그아웃, 강제 종료, logind
+mod logind;
+mod session;
+mod session_lock;
 
 fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

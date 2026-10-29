@@ -74,6 +74,13 @@ pub struct Session {
     #[serde(default)]
     pub startup: Vec<Vec<String>>,
     pub terminal: Vec<String>,
+    /// 잠금 화면(ext-session-lock 클라이언트). 잠금 프로토콜을 쓸 수 있는 클라이언트로 띄운다.
+    /// 비면 화면을 잠그지 않는다 (로그인 화면)
+    #[serde(default)]
+    pub lock: Vec<String>,
+    /// 셸이 끝나면 컴포지터도 끝낸다. 로그인 화면은 bunt-greeter가 끝나야 greetd가 사용자 세션을 연다
+    #[serde(default, rename = "exit-with-shell")]
+    pub exit_with_shell: bool,
 }
 
 impl Config {
@@ -119,6 +126,22 @@ mod tests {
         assert!(!config.session.terminal.is_empty());
         assert!(!config.session.input_method.is_empty());
         assert!(config.effects.blur);
+        // 사용자 세션은 화면을 잠그고, 셸이 끝나도 남는다
+        assert!(!config.session.lock.is_empty());
+        assert!(!config.session.exit_with_shell);
+    }
+
+    /// 로그인 화면의 설정(greeter/data/root/etc/buntos/greeter.toml): 잠그지 않고, bunt-greeter가 끝나면
+    /// 컴포지터도 끝나야 greetd가 사용자 세션을 연다
+    #[test]
+    fn greeter_config_exits_with_its_shell_and_never_locks() {
+        let config: Config = toml::from_str(include_str!(
+            "../../greeter/data/root/etc/buntos/greeter.toml"
+        ))
+        .unwrap();
+        assert!(config.session.exit_with_shell);
+        assert!(config.session.lock.is_empty());
+        assert_eq!(config.session.shell, ["bunt-greeter"]);
     }
 
     #[test]

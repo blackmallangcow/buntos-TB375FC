@@ -5,7 +5,8 @@
 //! 배율), 키 반복, 마우스, 키보드 단축키를 읽고 바꾸고 연결된 포인터 장치를 읽으며, 셸이 메뉴
 //! 막대·Dock 가리기 설정을 알리고 셸이 하는 단축키(모든 앱 보기, Dock 가리기, ⇧⌘5)를 받는다. 셸은
 //! Dock의 최소화 칸에 보일 창 그림을 받아 누른 창을 되돌리고, ⌘⇥ 앱 전환 창을 그리며, ⇧⌘5 도구
-//! 막대로 스크린샷을 찍고 그 옵션을 알린다.
+//! 막대로 스크린샷을 찍고 그 옵션을 알린다. 셸은 화면 잠금, 로그아웃, 응용 프로그램 강제
+//! 종료도 요청한다(session.rs, session_lock.rs).
 //! 버스 일은 따로 도는 스레드가 맡는다. 읽기는 컴포지터가 미리
 //! 적어 둔 사본(Snapshot)으로 답하고, 바꾸기는 값을 확인한 뒤 이벤트 루프로 넘긴다.
 //! 입력 소스 전환처럼 컴포지터가 다른 프로그램을 부르는 일도 이 스레드가 한다.
@@ -23,6 +24,7 @@ use crate::{
     cursor,
     panels::{Autohide, Panels},
     prefs::PointerPrefs,
+    session::SessionRequest,
     shortcuts::{self, Category, ShortcutInfo},
 };
 // 에이전트의 창 스크린샷, 셸의 ⇧⌘5 도구 막대
@@ -139,6 +141,10 @@ pub struct Snapshot {
     pub shortcuts: Vec<ShortcutInfo>,
     /// 먼저 최소화한 창이 앞
     pub minimized: Vec<MinimizedInfo>,
+    /// 화면이 잠겼다 (session_lock.rs)
+    pub locked: bool,
+    /// 컴포지터가 띄운 셸의 pid. 셸 전용 메서드(로그아웃, 앱 목록, 강제 종료)를 부를 수 있다. 셸이 없으면 0
+    pub shell_pid: u32,
 }
 
 /// 에이전트가 보는 창 하나 (GetWindows)
@@ -171,6 +177,8 @@ pub enum Refused {
     Covered,
     /// 창을 그려 읽지 못했다
     CaptureFailed,
+    /// 화면이 잠겼다. 잠긴 동안 에이전트는 아무것도 읽거나 하지 못한다. 사람이 암호를 쳐야만 풀린다
+    Locked,
 }
 
 /// 에이전트 입력 요청의 답을 기다린다
@@ -201,6 +209,9 @@ fn answer_within<T>(answer: mpsc::Receiver<Result<T, Refused>>, wait: Duration) 
         Ok(Err(Refused::CaptureFailed)) => Err(fdo::Error::Failed(
             "the compositor could not draw the window".into(),
         )),
+        Ok(Err(Refused::Locked)) => Err(fdo::Error::AccessDenied(
+            "the screen is locked; only the user can unlock it with their password".into(),
+        )),
         Err(_) => Err(fdo::Error::Failed("the compositor did not answer".into())),
     }
 }
@@ -224,9 +235,10 @@ pub struct Chord {
 /// 에이전트(buntd-agent)의 요청. 답이 있는 것은 이벤트 루프가 보낸다
 #[derive(Debug)]
 pub enum AgentRequest {
-    Windows(mpsc::Sender<Vec<WindowInfo>>),
+    // 잠긴 동안에는 창 목록과 글 입력 상태도 거절하므로 답에 까닭(Refused)을 싣는다
+    Windows(mpsc::Sender<Result<Vec<WindowInfo>, Refused>>),
     /// 키보드 포커스를 가진 앱이 글 입력(text-input-v3)을 켜 두었는지
-    TextInput(mpsc::Sender<bool>),
+    TextInput(mpsc::Sender<Result<bool, Refused>>),
     /// 그 pid의 창을 앞으로 가져와 키보드 포커스를 준다. 제목이 같은 창을 먼저 고른다
     Activate {
         pid: u32,
@@ -322,6 +334,8 @@ pub enum Request {
         delay: u32,
     },
     Agent(AgentRequest),
+    /// 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
+    Session(SessionRequest),
 }
 
 /// 컴포지터가 D-Bus 스레드에 시키는 일
@@ -345,6 +359,8 @@ pub enum Command {
     AppSwitcher { apps: Vec<String>, selected: i32 },
     /// ScreenshotSaved 신호를 보낸다: 저장한 스크린샷 파일의 경로 (셸이 미리 보기를 띄운다)
     ScreenshotSaved(String),
+    /// LockedChanged 신호를 보낸다: 화면을 잠갔거나 풀었다
+    LockedChanged(bool),
 }
 
 pub struct Service {
@@ -410,6 +426,7 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
                 emit(&connection, "AppSwitcherChanged", &(apps, selected))
             }
             Command::ScreenshotSaved(path) => emit(&connection, "ScreenshotSaved", &(path,)),
+            Command::LockedChanged(locked) => emit(&connection, "LockedChanged", &(locked,)),
         }
     }
 }
@@ -526,7 +543,10 @@ async fn check_agent(connection: &zbus::Connection, header: &Header<'_>) -> fdo:
 }
 
 /// 셸 전용 메서드는 bunt-shell만 부른다. 다른 앱 창의 그림이 들어 있기 때문이다
-async fn check_shell(connection: &zbus::Connection, header: &Header<'_>) -> fdo::Result<()> {
+async fn check_shell_program(
+    connection: &zbus::Connection,
+    header: &Header<'_>,
+) -> fdo::Result<()> {
     check_program(connection, header, SHELL_PATH).await
 }
 
@@ -553,6 +573,28 @@ async fn check_program(
             Ok(())
         }
         _ => Err(denied()),
+    }
+}
+
+/// 셸 전용 메서드(로그아웃, 앱 목록, 강제 종료)는 컴포지터가 띄운 셸 프로세스만 부른다. 같은 사용자의 다른
+/// 프로그램이 세션을 끝내거나 앱을 죽이는 데 쓰지 못하게 한다
+async fn check_shell(
+    connection: &zbus::Connection,
+    header: &Header<'_>,
+    shell_pid: u32,
+) -> fdo::Result<()> {
+    let denied = || {
+        fdo::Error::AccessDenied("only the shell started by the compositor may call this".into())
+    };
+    let sender = header.sender().ok_or_else(denied)?;
+    let pid = fdo::DBusProxy::new(connection)
+        .await?
+        .get_connection_unix_process_id(sender.clone().into())
+        .await?;
+    if shell_pid != 0 && pid == shell_pid {
+        Ok(())
+    } else {
+        Err(denied())
     }
 }
 
@@ -675,11 +717,9 @@ impl Api {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<bool> {
         check_agent(connection, &header).await?;
-        let (reply, answer) = mpsc::channel();
+        let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::TextInput(reply)))?;
-        answer
-            .recv_timeout(AGENT_REPLY)
-            .map_err(|_| fdo::Error::Failed("the compositor did not answer".into()))
+        answer(receiver)
     }
 
     /// 에이전트 전용: 창 목록 (pid, 앱 ID, 제목, x, y, 너비, 높이, 키보드 포커스). 쌓인 순서(아래부터)다
@@ -690,11 +730,9 @@ impl Api {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<Vec<(u32, String, String, i32, i32, i32, i32, bool)>> {
         check_agent(connection, &header).await?;
-        let (reply, answer) = mpsc::channel();
+        let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Windows(reply)))?;
-        let windows = answer
-            .recv_timeout(AGENT_REPLY)
-            .map_err(|_| fdo::Error::Failed("the compositor did not answer".into()))?;
+        let windows = answer(receiver)?;
         Ok(windows
             .into_iter()
             .map(|window| {
@@ -1007,7 +1045,7 @@ impl Api {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<Vec<(u32, String, String, u32, u32, Vec<u8>)>> {
-        check_shell(connection, &header).await?;
+        check_shell_program(connection, &header).await?;
         let minimized = self.snapshot.lock().unwrap().minimized.clone();
         Ok(minimized
             .into_iter()
@@ -1035,7 +1073,7 @@ impl Api {
         #[zbus(connection)] connection: &zbus::Connection,
         id: u32,
     ) -> fdo::Result<()> {
-        check_shell(connection, &header).await?;
+        check_shell_program(connection, &header).await?;
         self.request(Request::RestoreMinimized(id))
     }
 
@@ -1048,7 +1086,7 @@ impl Api {
         index: u32,
         activate: bool,
     ) -> fdo::Result<()> {
-        check_shell(connection, &header).await?;
+        check_shell_program(connection, &header).await?;
         self.request(Request::SelectSwitcher { index, activate })
     }
 
@@ -1062,7 +1100,7 @@ impl Api {
         location: &str,
         thumbnail: bool,
     ) -> fdo::Result<()> {
-        check_shell(connection, &header).await?;
+        check_shell_program(connection, &header).await?;
         let location = screenshot::Location::parse(location).ok_or_else(|| {
             fdo::Error::InvalidArgs(format!(
                 "location must be pictures, desktop, documents or clipboard (got {location})"
@@ -1083,7 +1121,7 @@ impl Api {
         mode: &str,
         delay: u32,
     ) -> fdo::Result<()> {
-        check_shell(connection, &header).await?;
+        check_shell_program(connection, &header).await?;
         let mode = screenshot::Mode::parse(mode).ok_or_else(|| {
             fdo::Error::InvalidArgs(format!("mode must be screen, area or window (got {mode})"))
         })?;
@@ -1146,6 +1184,69 @@ impl Api {
         }
         self.request(Request::ResetShortcuts(category.to_owned()))
     }
+
+    /// 화면을 잠근다 (macOS의 화면 잠금). 잠금은 잠금 화면에서 사람이 암호를 쳐야만 풀린다. 푸는 메서드는 없다
+    fn lock(&self) -> fdo::Result<()> {
+        self.request(Request::Session(SessionRequest::Lock))
+    }
+
+    /// 화면이 잠겼는지. 에이전트 데몬은 잠긴 동안 모든 요청을 거절한다
+    fn get_locked(&self) -> bool {
+        self.snapshot.lock().unwrap().locked
+    }
+
+    /// 셸 전용: 모든 앱 창에 닫기를 요청하고, 다 닫히면 세션을 끝낸다(로그인 화면으로 돌아간다). 10초 안에
+    /// 닫히지 않는 창이 있으면 그만두고 알림으로 알린다. 잠긴 동안에는 하지 않는다
+    async fn log_out(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<()> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        self.request(Request::Session(SessionRequest::LogOut))
+    }
+
+    /// 셸 전용: 창을 가진 앱 (pid, 앱 ID, 맨 위 창의 제목, 응답하는지). 맨 위 창의 앱이 앞이다. 부를 때마다 앱에
+    /// 핑을 보내, 3초 넘게 답하지 않은 앱을 응답 없음으로 알린다 (응용 프로그램 강제 종료 창)
+    async fn get_apps(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<Vec<(u32, String, String, bool)>> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Session(SessionRequest::Apps(reply)))?;
+        let apps = receiver
+            .recv_timeout(AGENT_REPLY)
+            .map_err(|_| fdo::Error::Failed("the compositor did not answer".into()))?;
+        Ok(apps
+            .into_iter()
+            .map(|app| (app.pid, app.app_id, app.title, app.responding))
+            .collect())
+    }
+
+    /// 셸 전용: 그 pid의 앱을 강제 종료한다(SIGKILL). GetApps가 알린, 창을 가진 앱만 된다
+    async fn force_quit(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+    ) -> fdo::Result<()> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Session(SessionRequest::ForceQuit { pid, reply }))?;
+        receiver
+            .recv_timeout(AGENT_REPLY)
+            .map_err(|_| fdo::Error::Failed("the compositor did not answer".into()))?
+            .map_err(fdo::Error::InvalidArgs)
+    }
+
+    /// 화면을 잠갔거나(true) 풀었다(false)
+    #[zbus(signal)]
+    async fn locked_changed(emitter: &SignalEmitter<'_>, locked: bool) -> zbus::Result<()>;
 
     /// 단축키를 바꾼 뒤 보낸다
     #[zbus(signal)]
@@ -1231,6 +1332,12 @@ mod tests {
             refusal(Refused::AuthDialog),
             fdo::Error::AccessDenied(_)
         ));
+        match refusal(Refused::Locked) {
+            fdo::Error::AccessDenied(message) => {
+                assert!(message.contains("screen is locked"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
         // 답이 없으면 기다린 뒤 실패한다
         let (_reply, receiver) = mpsc::channel::<Result<(), Refused>>();
         assert!(matches!(

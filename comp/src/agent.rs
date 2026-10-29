@@ -55,15 +55,24 @@ const ENTER_PAUSE: Duration = Duration::from_millis(100);
 
 impl BuntState {
     pub fn agent_request(&mut self, request: AgentRequest) {
+        // 화면이 잠긴 동안에는 에이전트가 아무것도 읽거나 하지 못한다(창 목록, 창 그림 포함). 잠금을 푸는 것은
+        // 사람이 잠금 화면에 친 암호뿐이다 (session_lock.rs)
+        let locked = self.session_lock.is_locked().then_some(Refused::Locked);
         // 인증 창이 떠 있는 동안에는 에이전트가 입력을 넣거나 포커스를 옮기지 못한다. 에이전트가 대신
         // 답하거나, 사람이 칠 암호가 다른 창으로 가는 일을 막는다
-        let refused = self.auth_dialog_open().then_some(Refused::AuthDialog);
+        let refused = locked.or_else(|| self.auth_dialog_open().then_some(Refused::AuthDialog));
         match request {
             AgentRequest::Windows(reply) => {
-                let _ = reply.send(self.agent_windows());
+                let _ = reply.send(match locked {
+                    Some(why) => Err(why),
+                    None => Ok(self.agent_windows()),
+                });
             }
             AgentRequest::TextInput(reply) => {
-                let _ = reply.send(self.text_input_active());
+                let _ = reply.send(match locked {
+                    Some(why) => Err(why),
+                    None => Ok(self.text_input_active()),
+                });
             }
             AgentRequest::Activate { pid, title, reply } => {
                 let _ = reply.send(match refused {
@@ -118,9 +127,12 @@ impl BuntState {
                     None => Ok(self.commit_text(&text)),
                 });
             }
-            // 그 창만 그리므로 인증 창은 들지 않는다. 읽기라 인증 창이 떠 있어도 막지 않는다
+            // 그 창만 그리므로 인증 창은 들지 않는다. 읽기라 인증 창이 떠 있어도 막지 않지만, 잠긴 동안에는 막는다
             AgentRequest::Capture { pid, title, reply } => {
-                let _ = reply.send(self.agent_capture(pid, &title));
+                let _ = reply.send(match locked {
+                    Some(why) => Err(why),
+                    None => self.agent_capture(pid, &title),
+                });
             }
             AgentRequest::ClickWindow {
                 pid,
@@ -381,8 +393,10 @@ impl BuntState {
         let timer = self.loop_handle.insert_source(
             Timer::from_duration(ENTER_PAUSE),
             move |_, _, state| {
-                // 기다리는 사이에 인증 창이 떴으면 돌리지 않는다
-                let _ = reply.send(if state.auth_dialog_open() {
+                // 기다리는 사이에 화면이 잠겼거나 인증 창이 떴으면 돌리지 않는다
+                let _ = reply.send(if state.session_lock.is_locked() {
+                    Err(Refused::Locked)
+                } else if state.auth_dialog_open() {
                     Err(Refused::AuthDialog)
                 } else {
                     let time = state.start_time.elapsed().as_millis() as u32;

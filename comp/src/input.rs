@@ -25,6 +25,7 @@ use smithay::{
 use crate::{
     dbus::Command,
     prefs::KeyRepeat,
+    session_lock,
     shortcuts::{self, Accel, Builtin, Hit, Key, Mods, Place, SwitcherKey},
     state::BuntState,
 };
@@ -163,7 +164,12 @@ impl BuntState {
                     let hit = Hit::Run(Builtin::Switcher(key));
                     return FilterResult::Intercept(Some((hit, code)));
                 }
-                match state.shortcut_for(modifiers, &handle) {
+                // 잠긴 동안에는 몇 가지 단축키만 하고, 나머지 키는 옮기지 않고 잠금 화면에 그대로 보낸다
+                // (session_lock.rs)
+                match state
+                    .shortcut_for(modifiers, &handle)
+                    .filter(|hit| state.allowed_while_locked(hit))
+                {
                     Some(hit) => {
                         state.suppressed_keys.push(code.raw());
                         FilterResult::Intercept(Some((hit, code)))
@@ -293,6 +299,10 @@ impl BuntState {
     }
 
     fn run(&mut self, builtin: Builtin) {
+        // 잠긴 동안에는 입력 소스 전환, 가상 터미널 전환, 세션 끝내기만 한다 (session_lock.rs)
+        if self.session_lock.is_locked() && !session_lock::runs_while_locked(builtin) {
+            return;
+        }
         match builtin {
             Builtin::ShowLauncher => self.dbus.send(Command::ShortcutActivated("launcher.show")),
             Builtin::ToggleDockAutohide => self
@@ -336,6 +346,15 @@ impl BuntState {
                     tracing::warn!("failed to switch to VT {vt}: {err}");
                 }
             }
+            Builtin::LockScreen => self.lock_screen("shortcut"),
+            // 확인 창(60초 뒤 자동 로그아웃)은 셸이 띄우고, 고르면 LogOut으로 알린다
+            Builtin::LogOut { confirm: true } => self
+                .dbus
+                .send(Command::ShortcutActivated("session.log-out")),
+            Builtin::LogOut { confirm: false } => self.log_out(),
+            Builtin::ForceQuit => self
+                .dbus
+                .send(Command::ShortcutActivated("windows.force-quit")),
         }
     }
 
@@ -518,6 +537,12 @@ impl BuntState {
             return;
         }
         let serial = SERIAL_COUNTER.next_serial();
+
+        // 잠긴 동안에는 누른 화면의 잠금 표면에 키보드를 준다. 아래의 창·레이어 포커스 바꾸기는 잠긴 동안
+        // 아무 일도 하지 않는다 (session_lock.rs)
+        if state == ButtonState::Pressed && self.session_lock.is_locked() {
+            self.focus_lock_surface_at(pointer.current_location());
+        }
 
         // 키보드를 받는 레이어 표면(on_demand)을 누르면 그 표면에 포커스를 준다.
         // 메뉴바·Dock처럼 키보드를 받지 않는 레이어를 누를 때는 창 포커스를 바꾸지 않는다

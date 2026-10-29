@@ -23,8 +23,11 @@ theme = "Adwaita"
 size = 24
 
 [session]
-# 로그인 화면. bunt-greeter가 끝나면 이 컴포지터도 끝낸다
-shell = ["/usr/libexec/buntos/greeter-shell"]
+# 로그인 화면. bunt-greeter가 끝나면(로그인했거나 죽었으면) 이 컴포지터도 끝난다(exit-with-shell). 그래야
+# greetd가 예약한 사용자 세션을 바로 열거나 로그인 화면을 다시 띄운다(기다리게 두면 greetd가 5초 뒤에 끝낸다).
+# 전에는 셸 스크립트(greeter-shell)가 부모인 컴포지터에 SIGTERM을 보냈다
+shell = ["bunt-greeter"]
+exit-with-shell = true
 # 계정을 만들 때 별칭을 한글로 쓸 수 있게 입력기를 띄운다 (Ctrl+Space, 한/영)
 input-method = ["fcitx5"]
 startup = []

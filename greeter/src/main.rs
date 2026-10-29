@@ -73,8 +73,8 @@ impl Shared {
         self.login.replace(Some(view));
     }
 
-    /// 로그인에 성공하면 끝난다. 로그인 화면의 셸 스크립트(greeter-shell)가 컴포지터를 끝내고,
-    /// greetd가 예약한 사용자 세션을 연다
+    /// 로그인에 성공하면 끝난다. 셸이 끝나면 로그인 화면의 컴포지터도 끝나고(greeter.toml의
+    /// exit-with-shell), greetd가 예약한 사용자 세션을 연다
     pub fn finish(&self) {
         eprintln!("bunt-greeter: session scheduled, exiting");
         if let Some(app) = self.window.application() {

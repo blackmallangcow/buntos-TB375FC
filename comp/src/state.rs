@@ -108,6 +108,8 @@ use crate::{
     prefs::{KeyRepeat, PointerPrefs, Prefs},
     render,
     screenshot::{self as screenshots, AreaSelection, Capture, Image},
+    session::Session,
+    session_lock::SessionLock,
     shmdiff,
     shortcuts::{self, Builtin, Shortcuts},
     toplevels::ForeignToplevelState,
@@ -195,6 +197,10 @@ pub struct BuntState {
     pub input_method_exited: channel::Sender<()>,
 
     pub backend: UdevData,
+    /// 화면 잠금 (session_lock.rs)
+    pub session_lock: SessionLock,
+    /// 셸 프로세스, 로그아웃, logind (session.rs)
+    pub session: Session,
 }
 
 impl BuntState {
@@ -305,6 +311,10 @@ impl BuntState {
             )
             .map_err(|err| err.error)?;
 
+        // 화면 잠금(ext-session-lock)과 세션(셸, 로그아웃, logind)
+        let session_lock = SessionLock::new(&dh);
+        let session = Session::new(&loop_handle, &config)?;
+
         Ok(Self {
             config,
             start_time: Instant::now(),
@@ -346,6 +356,8 @@ impl BuntState {
             input_method_process: InputMethodProcess::default(),
             input_method_exited,
             backend,
+            session_lock,
+            session,
         })
     }
 
@@ -365,19 +377,6 @@ impl BuntState {
             Ok(status) if !status.success() => tracing::warn!("{program} failed: {status}"),
             Ok(_) => {}
             Err(err) => tracing::warn!("failed to run {program}: {err}"),
-        }
-    }
-
-    /// 셸을 특권 클라이언트로 실행한다. 이 연결에만 창 목록·창 조작 프로토콜이 보인다 (toplevels.rs).
-    pub fn spawn_privileged(&mut self, command: &[String]) {
-        let client = ClientState {
-            privileged: true,
-            ..ClientState::default()
-        };
-        if let Some(mut child) = self.spawn_trusted(command, client) {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
         }
     }
 
@@ -459,6 +458,10 @@ impl BuntState {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        // 잠긴 동안 포인터는 잠금 표면에만 간다 (session_lock.rs)
+        if self.session_lock.is_locked() {
+            return self.lock_surface_under(pos);
+        }
         let output = self.space.output_under(pos).next()?;
         let output_geo = self.space.output_geometry(output)?;
         let relative = pos - output_geo.loc.to_f64();
@@ -500,6 +503,10 @@ impl BuntState {
     /// 않는 것처럼 보였다. 키보드를 독점하는 레이어 표면(모든 앱 패널 등)이 떠 있으면 키보드는 그
     /// 표면에 그대로 두고, 표면이 사라질 때 이 창에 준다. 최소화하거나 가린 창은 제자리에 다시 놓는다
     pub fn focus_window(&mut self, window: &Window, serial: Serial) {
+        // 잠긴 동안에는 창이 키보드를 받지 않는다. 새 창이 떠도 포커스는 잠금 화면에 남는다 (session_lock.rs)
+        if self.session_lock.is_locked() {
+            return;
+        }
         self.restore_hidden(window);
         let target = self.raise_with_dialogs(window);
         self.note_focus(&target);
@@ -584,6 +591,10 @@ impl BuntState {
     }
 
     pub fn clear_focus(&mut self, serial: Serial) {
+        // 잠긴 동안 키보드 포커스는 잠금 화면이 정한다 (session_lock.rs)
+        if self.session_lock.is_locked() {
+            return;
+        }
         self.space.elements().for_each(|window| {
             window.set_activated(false);
             if let Some(toplevel) = window.toplevel() {
@@ -1134,6 +1145,8 @@ pub struct ClientState {
     pub privileged: bool,
     /// 컴포지터가 직접 띄운 입력기. 키보드를 잡고 글자와 키를 대신 보낼 수 있다
     pub input_method: bool,
+    /// 컴포지터가 직접 띄운 잠금 화면. 화면 잠금 프로토콜(ext-session-lock)을 쓸 수 있다 (session_lock.rs)
+    pub lock_screen: bool,
 }
 
 fn is_input_method_client(client: &Client) -> bool {
@@ -1420,6 +1433,11 @@ impl XdgShellHandler for BuntState {
 
     /// 메뉴 같은 팝업이 입력을 독점한다. 팝업 밖을 누르면 팝업이 닫힌다.
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        // 잠긴 동안에는 앱의 메뉴가 입력을 잡지 못한다. 메뉴를 닫는다 (session_lock.rs)
+        if self.session_lock.is_locked() {
+            surface.send_popup_done();
+            return;
+        }
         let Some(seat) = Seat::<Self>::from_resource(&seat) else {
             return;
         };
@@ -1701,6 +1719,11 @@ impl BuntState {
     /// 사라진 표면이나 키보드를 받지 않는 레이어 표면(팝업 메뉴를 닫은 메뉴바 포함)에 남았으면 활성 창
     /// (없으면 맨 위 창)에 돌려준다. 열려 있는 팝업 메뉴의 포커스는 건드리지 않는다
     pub fn refresh_layer_focus(&mut self) {
+        // 잠긴 동안에는 키보드를 잠금 표면에 둔다. 인증 창 같은 독점 레이어도 받지 않는다 (session_lock.rs)
+        if self.session_lock.is_locked() {
+            self.focus_lock_surface();
+            return;
+        }
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
@@ -1787,6 +1810,10 @@ impl BuntState {
 
     /// 레이어 표면에 키보드 포커스를 준다 (on_demand 레이어를 눌렀을 때)
     pub fn focus_layer(&mut self, surface: &WlSurface, serial: Serial) {
+        // 잠긴 동안에는 레이어 표면이 키보드를 받지 않는다 (session_lock.rs)
+        if self.session_lock.is_locked() {
+            return;
+        }
         if let Some(keyboard) = self.seat.get_keyboard()
             && keyboard
                 .current_focus()
@@ -1924,6 +1951,8 @@ impl BuntState {
             Request::ScreenshotOptions(options) => self.screenshot_options = options,
             Request::Screenshot { mode, delay } => self.start_screenshot(mode, false, delay),
             Request::Agent(request) => self.agent_request(request),
+            // 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
+            Request::Session(request) => self.session_request(request),
         }
     }
 

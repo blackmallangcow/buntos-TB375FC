@@ -381,8 +381,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     for command in state.config.session.prepare.clone() {
         state.run_and_wait(&command);
     }
-    let shell = state.config.session.shell.clone();
-    state.spawn_privileged(&shell);
+    // 셸이 끝나면 [session] exit-with-shell을 따른다 (session.rs)
+    state.spawn_shell();
     state.spawn_input_method();
     for command in state.config.session.startup.clone() {
         state.spawn(&command);
@@ -1077,12 +1077,19 @@ impl BuntState {
             }
         }
 
+        // 잠긴 동안에는 잠금 표면과 검은 바탕만 그린다. 창과 셸 막대는 넣지 않는다 (session_lock.rs)
+        let lock_scene = self
+            .session_lock
+            .scene(renderer, &output, output_geo.size, scale);
+        let locked = lock_scene.is_some();
+        elements.extend(lock_scene.into_iter().flatten());
         match space_render_elements::<_, smithay::desktop::Window, _>(
             renderer,
             [&self.space],
             &output,
             1.0,
         ) {
+            Ok(_) if locked => {}
             Ok(mut space_elements) => {
                 render::place_bars(renderer, &mut space_elements, &bar_places, scale);
                 elements.extend(space_elements.into_iter().map(OutputRenderElements::Space))
@@ -1166,6 +1173,8 @@ impl BuntState {
         if let Some(states) = &states {
             self.note_visible_surfaces(&output, states);
         }
+        // 잠긴 장면을 모든 화면에 낸 뒤에야 잠금 화면에 잠겼다고 알린다 (session_lock.rs)
+        self.lock_frame_done(&output, queued);
         if let Some((clipboard, image)) = screenshot {
             self.screenshot_taken(clipboard, image);
         }
@@ -1205,6 +1214,7 @@ impl BuntState {
                 surface_primary_scanout_output,
             );
         }
+        self.session_lock.send_frames(&output, elapsed);
         if let CursorImageStatus::Surface(cursor_surface) = &self.cursor_status {
             send_frames_surface_tree(
                 cursor_surface,

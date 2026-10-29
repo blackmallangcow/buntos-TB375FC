@@ -203,6 +203,14 @@ pub enum Builtin {
     Quit,
     /// Ctrl+Alt+F1..F12: 가상 터미널 전환 (표에 없는 고정 키)
     SwitchVt(i32),
+    /// 화면 잠금 (session_lock.rs)
+    LockScreen,
+    /// 로그아웃. `confirm`이면 셸이 확인 창을 띄우고, 아니면(⌥⇧⌘Q) 묻지 않고 한다 (session.rs)
+    LogOut {
+        confirm: bool,
+    },
+    /// 응용 프로그램 강제 종료 창. 셸이 띄운다
+    ForceQuit,
 }
 
 /// 앱 전환 창의 키 (macOS와 같다)
@@ -273,16 +281,19 @@ pub enum Category {
     Screenshots,
     Text,
     App,
+    /// 화면 잠금과 로그아웃
+    Session,
 }
 
 impl Category {
-    pub const ALL: [Category; 6] = [
+    pub const ALL: [Category; 7] = [
         Category::Launcher,
         Category::Windows,
         Category::Input,
         Category::Screenshots,
         Category::Text,
         Category::App,
+        Category::Session,
     ];
 
     pub fn id(self) -> &'static str {
@@ -293,6 +304,7 @@ impl Category {
             Category::Screenshots => "screenshots",
             Category::Text => "text",
             Category::App => "app",
+            Category::Session => "session",
         }
     }
 }
@@ -734,6 +746,32 @@ pub const DEFS: &[Def] = &[
         action: Action::OtherCommandKeys,
         repeat: false,
     },
+    // macOS의 로고 메뉴 단축키: 강제 종료…, 화면 잠금, 로그아웃…
+    run(
+        "windows.force-quit",
+        Category::Windows,
+        "<Alt><Super>Escape",
+        Builtin::ForceQuit,
+    ),
+    run(
+        "session.lock-screen",
+        Category::Session,
+        "<Control><Super>q",
+        Builtin::LockScreen,
+    ),
+    run(
+        "session.log-out",
+        Category::Session,
+        "<Shift><Super>q",
+        Builtin::LogOut { confirm: true },
+    ),
+    // macOS처럼 ⌥를 더하면 묻지 않고 로그아웃한다
+    run(
+        "session.log-out-now",
+        Category::Session,
+        "<Alt><Shift><Super>q",
+        Builtin::LogOut { confirm: false },
+    ),
 ];
 
 /// 터미널 앱의 앱 ID. 이 앱에는 ⌘ 단축키를 터미널 방식으로 보낸다
@@ -1205,6 +1243,41 @@ mod tests {
         assert_eq!(
             lookup("<Control>space"),
             Some(Hit::Run(Builtin::SwitchInputSource))
+        );
+    }
+
+    #[test]
+    fn logo_menu_shortcuts_lock_log_out_and_force_quit() {
+        let shortcuts = Shortcuts::new(&BTreeMap::new());
+        let lookup = |text: &str| shortcuts.lookup(accel(text), APP);
+        assert_eq!(
+            lookup("<Control><Super>q"),
+            Some(Hit::Run(Builtin::LockScreen))
+        );
+        assert_eq!(
+            lookup("<Shift><Super>q"),
+            Some(Hit::Run(Builtin::LogOut { confirm: true }))
+        );
+        assert_eq!(
+            lookup("<Alt><Shift><Super>q"),
+            Some(Hit::Run(Builtin::LogOut { confirm: false }))
+        );
+        assert_eq!(
+            lookup("<Alt><Super>Escape"),
+            Some(Hit::Run(Builtin::ForceQuit))
+        );
+        // ⌘Q는 그대로 앱 종료다. ⇧⌘Q는 전에는 앱에 Ctrl+Shift+Q로 갔다(Firefox의 종료)
+        assert_eq!(lookup("<Super>q"), Some(Hit::Run(Builtin::QuitApp)));
+        let info = shortcuts.info();
+        let lock = info
+            .iter()
+            .find(|info| info.id == "session.lock-screen")
+            .unwrap();
+        assert_eq!(lock.category, "session");
+        assert!(
+            Category::ALL
+                .iter()
+                .any(|category| category.id() == "session")
         );
     }
 

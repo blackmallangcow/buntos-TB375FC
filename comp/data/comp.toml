@@ -47,3 +47,10 @@ input-method = ["env", "XDG_CURRENT_DESKTOP=buntOS", "fcitx5"]
 startup = [["buntd-agent", "--prepare-session"]]
 # Alt+Enter로 여는 터미널
 terminal = ["foot"]
+# 잠금 화면. ⌃⌘Q, 로고 메뉴의 화면 잠금, loginctl lock-session, 잠자기 직전에 컴포지터가 먼저 화면을
+# 가리고 입력을 막은 뒤 이 프로그램을 띄운다. 잠금 프로토콜(ext-session-lock-v1)은 이 연결에만 연다.
+# 잠금은 이 프로그램이 사람이 친 암호를 PAM으로 확인해야만 풀린다. 이 프로그램이 죽어도 화면은 잠긴
+# 채로 남고 컴포지터가 다시 띄운다. 비우면 화면을 잠그지 않는다
+lock = ["bunt-lock"]
+# 셸이 끝나면 컴포지터도 끝낼지. 사용자 세션은 셸이 죽어도 앱 창이 남도록 끝내지 않는다
+exit-with-shell = false
