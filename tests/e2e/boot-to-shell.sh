@@ -11,11 +11,20 @@
 # tests/e2e/session-lock.sh)을 돌린 뒤 끈다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
 # 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 600)
+#            BUNTOS_IMAGE_DIR 띄울 이미지의 디렉터리 (tools/image/build.sh·vmctl.sh와 같다. 기본
+#            $BUNTOS_BUILD_DIR/<보드>, BUNTOS_BUILD_DIR의 기본은 ~/buntos-build)
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 board=${1:?"보드 이름이 필요하다 (bsp/ 아래 디렉터리 이름)"}
 deadline=$((SECONDS + ${E2E_TIMEOUT:-600}))
+# 다른 사람이 기본 이미지로 VM을 띄워 둔 동안 따로 빌드한 이미지를 시험할 수 있게 build.sh와 같은 디렉터리를 쓴다
+image_dir="${BUNTOS_IMAGE_DIR:-${BUNTOS_BUILD_DIR:-$HOME/buntos-build}/$board}"
+if [[ ! -f "$image_dir/buntos.raw" ]]; then
+	echo "실패($board): $image_dir/buntos.raw가 없다. 먼저 tools/image/build.sh $board로 빌드한다" >&2
+	exit 1
+fi
+echo "이미지: $image_dir/buntos.raw"
 # 시험 계정 (계정 이름:별칭:암호). 다른 시험과 개발 VM 도구(tools/image/vmctl.sh)도 같은 계정을 쓴다.
 # 암호는 QMP로 치므로 영문 소문자와 숫자만 쓴다
 user=buntos
@@ -63,7 +72,7 @@ push() {
 # 테스트가 빌드한 이미지를 바꾸지 않게, 멈춘 상태로 띄워 디스크에 임시 덮어쓰기를 씌운 뒤 실행한다.
 # mkosi는 이미지를 -blockdev로 붙여 QEMU의 -snapshot이 효과가 없고, --ephemeral은 이미지 전체를 복사한다
 # 그래픽 세션이 뜨도록 가상 GPU를 붙이고(화면은 내보내지 않는다), 로그인 화면에 암호를 치도록 가상 키보드를 붙인다
-"$repo/tools/image/build.sh" "$board" vm -- -S -qmp "unix:$work/qmp.sock,server=on,wait=off" \
+BUNTOS_IMAGE_DIR="$image_dir" "$repo/tools/image/build.sh" "$board" vm -- -S -qmp "unix:$work/qmp.sock,server=on,wait=off" \
 	-device virtio-gpu-pci -device virtio-keyboard-pci \
 	-smbios "type=11,value=io.systemd.credential:buntos.account=$account" \
 	<"$work/console.in" >"$log" 2>&1 &
