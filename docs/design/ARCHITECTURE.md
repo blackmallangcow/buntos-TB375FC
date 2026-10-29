@@ -493,6 +493,9 @@ v0 구현 (2026-10-29, 접근 정책):
   - polkit 128은 `polkit-agent-helper-1`을 setuid 없이 소켓 활성화(`/run/polkit/agent-helper.socket`)로 root로 띄운다. 인증 에이전트는 그 소켓에 사용자 이름과 쿠키를 쓰고 PAM 물음에 답한다.
   - 에이전트는 인증 창을 읽지도 조작하지도 못한다(6.3절).
   - 비밀 저장소(Secret Service)는 gnome-keyring이다. libpam-gnome-keyring이 pam-auth-update로 `common-auth`·`common-session`에 들어가므로, greetd 로그인의 암호로 login 키링을 열고 처음이면 만든다(macOS 로그인 키체인). 앱이 비밀을 저장할 때 따로 키링 암호를 묻거나 켤 때마다 잠금 해제 창이 뜨던 것이 없어졌다. 시스템 설정이 `passwd`로 암호를 바꾸면 키링 암호도 따라간다. Flatpak 앱은 Secret 포털(gnome-keyring 구현)로 같은 키링을 쓴다.
+  - 세션의 `XDG_CURRENT_DESKTOP`은 `buntOS:GNOME`이다(앞이 우선인 목록, 세션 스크립트 `/usr/libexec/buntos/session`이 정한다). Electron 앱(Claude 데스크톱 앱 등)의 safeStorage는 이 목록에 GNOME·KDE·XFCE처럼 아는 데스크톱이 있어야 비밀 저장소로 키링(libsecret)을 고르고, 없으면 키링이 있어도 평문(`basic_text`)에 저장한다. `buntOS`만 두었을 때 Claude 앱이 "시스템 키링을 사용할 수 없습니다"라고 알렸고 로그인 토큰을 남기지 못했다(2026-10-29, 앱 로그 `backend=basic_text`). 우분투의 `ubuntu:GNOME`과 같은 방식이다.
+    - Chromium 156(Debian)은 모르는 데스크톱이면 Secret 포털(우리 설정으로 gnome-keyring)을 써서 이미 키링에 저장했다(`Local State`의 `os_crypt.portal`). Electron의 safeStorage에는 이 길이 없다.
+    - buntOS가 먼저라 포털은 `buntos-portals.conf`(GTK 구현)를 그대로 쓴다. 세션이 XDG 자동 시작을 돌리지 않으므로 GNOME 전용 자동 시작 항목(gnome-keyring, localsearch)도 뜨지 않는다. 로그인 화면 세션은 `buntOS` 그대로다.
 - 한계와 다음 단계:
   - 데몬이 지키는 정책이다. 같은 사용자로 도는 AI가 접근성 버스에 직접 붙으면 막지 못한다.
   - 경로로 알아보므로, 허용한 프로그램을 실행할 수 있는 프로그램은 그 권한을 얻는다.
