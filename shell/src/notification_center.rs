@@ -16,6 +16,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use crate::{
     clip_input_to_child,
     control_center::do_not_disturb,
+    notification_policy::{self, Banners},
     notifications::{Change, Notification, Notifications},
 };
 
@@ -45,6 +46,19 @@ const TEXT_WIDTH: i32 = CARD_WIDTH - 2 * 12 - 32 - 10;
 /// 동작 단추가 있으면 펼침 단추가 보이고, 펼치면 글을 다 보이고 동작 단추를 꺼낸다(macOS와 같다)
 fn card(notification: &Notification, notifications: &Notifications, tr: &Translations) -> gtk::Box {
     let id = notification.id;
+    // 미리 보기 보기가 "안 함"이면 제목과 본문, 동작 단추 대신 "알림"만 보인다 (시스템 설정의 알림 페이지)
+    let previews = notification_policy::previews().shown();
+    let hidden_summary;
+    let (summary_text, body_text, actions) = if previews {
+        (
+            notification.summary.as_str(),
+            notification.body.as_str(),
+            notification.actions.as_slice(),
+        )
+    } else {
+        hidden_summary = tr.get("notifications-preview-hidden");
+        (hidden_summary.as_str(), "", &[][..])
+    };
     let icon = match &notification.icon {
         Some(icon) => gtk::Image::from_gicon(icon),
         None => gtk::Image::from_icon_name("dialog-information-symbolic"),
@@ -76,7 +90,7 @@ fn card(notification: &Notification, notifications: &Notifications, tr: &Transla
         .icon_name("pan-down-symbolic")
         .valign(gtk::Align::Center)
         .tooltip_text(&more)
-        .visible(!notification.actions.is_empty())
+        .visible(!actions.is_empty())
         .css_classes(["card-expand"])
         .build();
     expand.update_property(&[gtk::accessible::Property::Label(&more)]);
@@ -110,21 +124,20 @@ fn card(notification: &Notification, notifications: &Notifications, tr: &Transla
             .css_classes([class])
             .build()
     };
-    let summary = (!notification.summary.is_empty())
-        .then(|| line(&notification.summary, SUMMARY_LINES, "card-summary"));
-    let body =
-        (!notification.body.is_empty()).then(|| line(&notification.body, BODY_LINES, "card-body"));
+    let summary =
+        (!summary_text.is_empty()).then(|| line(summary_text, SUMMARY_LINES, "card-summary"));
+    let body = (!body_text.is_empty()).then(|| line(body_text, BODY_LINES, "card-body"));
     for label in summary.iter().chain(&body) {
         text.append(label);
     }
     // 동작 단추는 펼쳤을 때만 보인다
-    let buttons = (!notification.actions.is_empty()).then(|| {
+    let buttons = (!actions.is_empty()).then(|| {
         let buttons = gtk::Box::builder()
             .spacing(6)
             .margin_top(4)
             .visible(false)
             .build();
-        for (key, label) in &notification.actions {
+        for (key, label) in actions {
             let button = gtk::Button::with_label(label);
             let (invoke, key) = (notifications.clone(), key.clone());
             button.connect_clicked(move |_| invoke.invoke_action(id, &key));
@@ -393,8 +406,11 @@ pub fn banner(
         let Some(notification) = notifications.get(*id) else {
             return;
         };
-        // 방해 금지 중에는 배너 없이 알림 센터에만 쌓는다
-        if do_not_disturb() {
+        // 방해 금지 중에는 배너 없이 알림 센터에만 쌓는다. 알림 스타일이 "없음"인 앱도 같다
+        if do_not_disturb() || notification.banners == Banners::None {
+            // 알림 센터에도 두지 않는 알림이면 치운다. 알림을 알리는 이 처리기 밖에서 한다
+            let (notifications, id) = (notifications.clone(), *id);
+            glib::spawn_future_local(async move { notifications.banner_hidden(id) });
             return;
         }
         let content = card(&notification, notifications, &tr);
@@ -404,8 +420,18 @@ pub fn banner(
         // 새 배너는 포인터가 움직여 들어오기 전까지 가리키지 않은 것이다
         hovered.set(false);
         window.present();
-        shown.set(*id);
+        let replaced = shown.replace(*id);
+        if replaced != *id {
+            // 밀려난 배너의 알림이 알림 센터에 두지 않는 것이면 치운다. 이 처리기 밖에서 한다
+            let notifications = notifications.clone();
+            glib::spawn_future_local(async move { notifications.banner_hidden(replaced) });
+        }
+        // 알림 스타일이 "알림"이면 사람이 닫을 때까지 둔다
+        if notification.banners == Banners::Alert {
+            return;
+        }
         let (window, shown, hovered, id) = (window.clone(), shown.clone(), hovered.clone(), *id);
+        let notifications = notifications.clone();
         let left = Cell::new(BANNER_SECONDS);
         glib::timeout_add_seconds_local(1, move || {
             // 새 알림이 이 배너를 바꿨다
@@ -419,6 +445,7 @@ pub fn banner(
                 return glib::ControlFlow::Continue;
             }
             window.set_visible(false);
+            notifications.banner_hidden(id);
             glib::ControlFlow::Break
         });
     });

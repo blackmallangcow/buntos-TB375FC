@@ -239,3 +239,5 @@ bluetooth-nearby = 근처 기기
 
 ## 사운드 메뉴와 알림 (시스템 설정의 사운드·알림 페이지)
 sound-settings = 사운드 설정…
+# 미리 보기 보기가 "안 함"일 때 알림 카드의 제목 자리에 보인다 (macOS와 같다)
+notifications-preview-hidden = 알림

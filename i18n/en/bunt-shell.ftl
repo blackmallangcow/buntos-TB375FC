@@ -242,3 +242,5 @@ bluetooth-nearby = Nearby Devices
 
 ## Sound menu and notifications (the Sound and Notifications pages of System Settings)
 sound-settings = Sound Settings…
+# Shown in place of the title of a notification card when Show Previews is Never (like macOS)
+notifications-preview-hidden = Notification

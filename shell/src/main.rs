@@ -34,6 +34,8 @@ mod session;
 mod pairing_agent;
 mod secret_agent;
 mod service_dialog;
+// 시스템 설정의 알림 페이지가 정한 앱마다의 알림 설정
+mod notification_policy;
 
 use std::rc::Rc;
 

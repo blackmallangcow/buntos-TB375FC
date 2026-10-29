@@ -3,6 +3,8 @@
 
 //! 알림 서버 (freedesktop.org Desktop Notifications 1.2, org.freedesktop.Notifications).
 //! 앱과 포털이 보낸 알림을 받아 모아 두고, 배너와 알림 센터(notification_center.rs)가 보여 준다.
+//! 앱마다의 알림 설정(알림 허용, 알림 스타일, 소리, 알림 센터에 보기)은 시스템 설정의 알림 페이지가 정하고
+//! notification_policy.rs가 읽는다. 앱은 desktop-entry 힌트로 안다.
 
 use std::{
     cell::{Cell, RefCell},
@@ -11,6 +13,11 @@ use std::{
 };
 
 use gtk4::{gio, glib, prelude::*};
+
+use crate::{
+    control_center::do_not_disturb,
+    notification_policy::{self, Banners, Policies},
+};
 
 const BUS_NAME: &str = "org.freedesktop.Notifications";
 const OBJECT_PATH: &str = "/org/freedesktop/Notifications";
@@ -57,6 +64,8 @@ const DEFAULT_ACTION: &str = "default";
 /// NotificationClosed의 이유 값
 #[derive(Clone, Copy)]
 enum CloseReason {
+    /// 알림 센터에 두지 않는 알림의 배너가 사라졌다
+    Expired = 1,
     Dismissed = 2,
     Closed = 3,
 }
@@ -73,6 +82,10 @@ pub struct Notification {
     /// 단추로 보일 (키, 이름)
     pub actions: Vec<(String, String)>,
     pub time: glib::DateTime,
+    /// 앱의 알림 스타일 (없음, 배너, 알림)
+    pub banners: Banners,
+    /// 알림 센터에 보이는지. 아니면 배너가 사라질 때 치운다
+    pub in_center: bool,
 }
 
 pub enum Change {
@@ -92,6 +105,8 @@ struct Inner {
     next_id: Cell<u32>,
     connection: RefCell<Option<gio::DBusConnection>>,
     listeners: RefCell<Vec<Listener>>,
+    /// 앱마다의 알림 설정
+    policies: Policies,
 }
 
 impl Notifications {
@@ -102,6 +117,7 @@ impl Notifications {
             next_id: Cell::new(1),
             connection: RefCell::default(),
             listeners: RefCell::default(),
+            policies: Policies::default(),
         }));
         let server = notifications.clone();
         gio::bus_own_name(
@@ -182,9 +198,13 @@ impl Notifications {
         );
         let (app_name, replaces_id, app_icon, summary, body, actions, hints, _timeout): Args =
             params.get()?;
-        let desktop_entry = hints
-            .get("desktop-entry")
-            .and_then(|value| value.get::<String>())
+        let text_hint = |key: &str| hints.get(key).and_then(|value| value.get::<String>());
+        // 데스크톱 ID. 명세는 .desktop을 뗀 이름이지만 붙여 보내는 앱도 받는다
+        let app_id = text_hint("desktop-entry")
+            .map(|entry| entry.trim_end_matches(".desktop").to_owned())
+            .filter(|entry| !entry.is_empty());
+        let desktop_entry = app_id
+            .as_deref()
             .and_then(|entry| gio_unix::DesktopAppInfo::new(&format!("{entry}.desktop")));
         let image_path = hints
             .get("image-path")
@@ -219,6 +239,27 @@ impl Notifications {
             self.0.next_id.set(id.wrapping_add(1).max(1));
             id
         };
+        // 시스템 설정의 알림 페이지가 정한 이 앱의 설정. 허용하지 않은 앱의 알림은 받기만 한다
+        let policy = self.0.policies.for_app(app_id.as_deref());
+        if !policy.enabled {
+            return Some(id);
+        }
+        // 방해 금지 중에는 소리도 내지 않는다
+        if policy.sound && !do_not_disturb() {
+            let suppress = hints
+                .get("suppress-sound")
+                .and_then(|value| value.get::<bool>())
+                .unwrap_or(false);
+            notification_policy::play_sound(
+                text_hint("sound-file").as_deref(),
+                text_hint("sound-name").as_deref(),
+                suppress,
+            );
+        }
+        // 배너도 없고 알림 센터에도 두지 않으면 보일 곳이 없다
+        if policy.banners == Banners::None && !policy.in_center {
+            return Some(id);
+        }
         let notification = Notification {
             id,
             app_name,
@@ -231,6 +272,8 @@ impl Notifications {
                 .filter(|(key, _)| key != DEFAULT_ACTION)
                 .collect(),
             time: glib::DateTime::now_local().ok()?,
+            banners: policy.banners,
+            in_center: policy.in_center,
         };
         {
             let mut items = self.0.items.borrow_mut();
@@ -241,9 +284,16 @@ impl Notifications {
         Some(id)
     }
 
-    /// 새것부터
+    /// 알림 센터에 보일 알림, 새것부터. 알림 센터에 두지 않는 앱의 알림은 배너로만 보인다
     pub fn items(&self) -> Vec<Notification> {
-        self.0.items.borrow().iter().rev().cloned().collect()
+        self.0
+            .items
+            .borrow()
+            .iter()
+            .rev()
+            .filter(|item| item.in_center)
+            .cloned()
+            .collect()
     }
 
     pub fn get(&self, id: u32) -> Option<Notification> {
@@ -275,6 +325,13 @@ impl Notifications {
 
     pub fn dismiss(&self, id: u32) {
         self.close(id, CloseReason::Dismissed);
+    }
+
+    /// 배너가 사라졌다. 알림 센터에 두지 않는 알림이면 치운다
+    pub fn banner_hidden(&self, id: u32) {
+        if self.get(id).is_some_and(|item| !item.in_center) {
+            self.close(id, CloseReason::Expired);
+        }
     }
 
     pub fn clear(&self) {
