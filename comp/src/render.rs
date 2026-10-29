@@ -23,7 +23,7 @@ use smithay::{
     wayland::compositor::{TraversalAction, with_surface_tree_downward},
 };
 
-use crate::blur::BlurElement;
+use crate::blur::{BlurElement, Uncovered};
 
 smithay::backend::renderer::element::render_elements! {
     pub OutputRenderElements<=GlesRenderer>;
@@ -31,6 +31,8 @@ smithay::backend::renderer::element::render_elements! {
     Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
     Blur = BlurElement,
+    // 흐림 요소 위의 불투명한 요소 (blur.rs, 흐릴 범위에서 불투명 영역을 뺀다)
+    Uncovered = Uncovered,
     // 스크린샷 영역 고르기 (screenshot.rs)
     Solid = SolidColorRenderElement,
 }
@@ -42,6 +44,7 @@ impl std::fmt::Debug for OutputRenderElements {
             Self::Memory(element) => f.debug_tuple("Memory").field(element).finish(),
             Self::Surface(element) => f.debug_tuple("Surface").field(element).finish(),
             Self::Blur(element) => f.debug_tuple("Blur").field(element).finish(),
+            Self::Uncovered(element) => f.debug_tuple("Uncovered").field(element).finish(),
             Self::Solid(element) => f.debug_tuple("Solid").field(element).finish(),
             Self::_GenericCatcher(_) => f.write_str("GenericCatcher"),
         }
