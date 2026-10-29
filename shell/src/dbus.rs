@@ -58,13 +58,15 @@ pub fn is_running(proxy: &gio::DBusProxy) -> bool {
 
 /// 속성을 바꾼다 (org.freedesktop.DBus.Properties.Set). 바뀐 값은 속성 변경 알림으로 돌아온다
 pub fn set_property(proxy: &gio::DBusProxy, name: &str, value: glib::Variant) {
-    let args = (
-        proxy.interface_name().as_str(),
-        name,
-        glib::Variant::from_variant(&value),
-    )
-        .to_variant();
+    let args = set_property_args(proxy.interface_name().as_str(), name, value);
     call(proxy, "org.freedesktop.DBus.Properties.Set", Some(&args));
+}
+
+/// Properties.Set의 인자 (ssv). 튜플의 to_variant가 값을 v로 한 번 감싼다. 예전에는 값을 미리
+/// Variant::from_variant로 감싸 v 안에 v가 들어갔고, 서비스가 "Expected type 'b' but got 'v'"로
+/// 거절했다(Bluetooth 켜기, Wi-Fi 켜기, 전원 모드)
+fn set_property_args(interface: &str, name: &str, value: glib::Variant) -> glib::Variant {
+    (interface, name, value).to_variant()
 }
 
 /// 메서드를 부르고 결과는 기다리지 않는다. 실패하면 기록만 남긴다
@@ -82,4 +84,19 @@ pub fn call(proxy: &gio::DBusProxy, method: &str, args: Option<&glib::Variant>) 
             }
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn property_values_are_wrapped_once() {
+        let args = set_property_args("org.bluez.Adapter1", "Powered", true.to_variant());
+        assert_eq!(args.type_().as_str(), "(ssv)");
+        assert_eq!(
+            args.print(true),
+            "('org.bluez.Adapter1', 'Powered', <true>)"
+        );
+    }
 }
