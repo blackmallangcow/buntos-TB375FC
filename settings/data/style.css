@@ -246,6 +246,7 @@ row.hero-row {
 .tint-indigo { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--indigo) 75%, white), var(--indigo)); }
 .tint-gray { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--gray) 75%, white), var(--gray)); }
 .tint-graphite { background-image: linear-gradient(to bottom, rgb(88, 88, 92), rgb(40, 40, 44)); }
+.tint-red { background-image: linear-gradient(to bottom, color-mix(in srgb, var(--red) 75%, white), var(--red)); }
 
 /* 상태 점 */
 .status-dot {

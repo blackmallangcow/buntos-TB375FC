@@ -24,6 +24,7 @@ pub enum Tint {
     Indigo,
     Gray,
     Graphite,
+    Red,
 }
 
 impl Tint {
@@ -36,6 +37,7 @@ impl Tint {
             Self::Indigo => "tint-indigo",
             Self::Gray => "tint-gray",
             Self::Graphite => "tint-graphite",
+            Self::Red => "tint-red",
         }
     }
 }

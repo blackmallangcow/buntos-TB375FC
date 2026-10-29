@@ -23,6 +23,7 @@ mod users;
 mod wallpaper;
 mod wifi;
 // macOS처럼 디스플레이 다음 묶음에 놓는 페이지
+mod notifications;
 mod sound;
 
 use std::{cell::RefCell, rc::Rc};
@@ -57,11 +58,12 @@ pub enum Page {
     Users,
     About,
     Sound,
+    Notifications,
 }
 
 impl Page {
-    /// 왼쪽 목록에 놓는 순서. 사운드는 macOS처럼 디스플레이 다음 묶음이다
-    pub const ALL: [Page; 18] = [
+    /// 왼쪽 목록에 놓는 순서. 알림과 사운드는 macOS처럼 디스플레이 다음 묶음이다
+    pub const ALL: [Page; 19] = [
         Page::Wifi,
         Page::Bluetooth,
         Page::Network,
@@ -71,6 +73,7 @@ impl Page {
         Page::DesktopDock,
         Page::Wallpaper,
         Page::Display,
+        Page::Notifications,
         Page::Sound,
         Page::Keyboard,
         Page::Mouse,
@@ -103,6 +106,7 @@ impl Page {
             Self::Users => "users",
             Self::About => "about",
             Self::Sound => "sound",
+            Self::Notifications => "notifications",
         }
     }
 
@@ -131,6 +135,7 @@ impl Page {
             Self::Users => "page-users",
             Self::About => "page-about",
             Self::Sound => "page-sound",
+            Self::Notifications => "page-notifications",
         }
     }
 
@@ -161,6 +166,7 @@ impl Page {
             Self::Users => "system-users-symbolic",
             Self::About => "computer-symbolic",
             Self::Sound => "audio-volume-high-symbolic",
+            Self::Notifications => "preferences-system-notifications-symbolic",
         }
     }
 
@@ -175,6 +181,7 @@ impl Page {
             Self::Agent | Self::Sound => Tint::Pink,
             Self::Keyboard | Self::Mouse | Self::DateTime | Self::About => Tint::Gray,
             Self::Language => Tint::Indigo,
+            Self::Notifications => Tint::Red,
         }
     }
 
@@ -188,7 +195,7 @@ impl Page {
             | Self::Wallpaper
             | Self::Display => 1,
             // macOS의 알림·사운드 묶음. 뒤 묶음의 번호를 하나씩 밀었다
-            Self::Sound => 2,
+            Self::Notifications | Self::Sound => 2,
             Self::Keyboard | Self::Mouse | Self::Language | Self::DateTime | Self::DefaultApps => 3,
             Self::Agent | Self::Users => 4,
             Self::About => 5,
@@ -215,6 +222,7 @@ impl Page {
             Self::Users => users::build(context),
             Self::About => about::build(context),
             Self::Sound => sound::build(context),
+            Self::Notifications => notifications::build(context),
         }
     }
 }

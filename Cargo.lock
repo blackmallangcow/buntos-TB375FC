@@ -286,6 +286,7 @@ dependencies = [
  "bunt-access",
  "bunt-i18n",
  "bunt-sound",
+ "gio-unix",
  "gtk4",
 ]
 

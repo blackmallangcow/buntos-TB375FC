@@ -1,0 +1,25 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * 알림 페이지 (pages/notifications.rs). 앱 시트의 알림 스타일 그림: 화면 모드 미리보기(appearance-choice)와
+ * 같은 단추 안에 작은 화면을 그리고, 배너는 오른쪽 위의 흰 띠, 알림은 그 아래 단추 줄이 붙은 띠다
+ */
+
+.notification-style-preview {
+  padding: 6px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, rgb(110, 160, 250), rgb(240, 170, 200));
+}
+
+.preview-banner {
+  min-width: 40px;
+  min-height: 12px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.style-alerts .preview-banner {
+  min-height: 20px;
+  box-shadow: inset 0 -7px 0 -5px rgba(0, 0, 0, 0.12);
+}

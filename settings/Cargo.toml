@@ -16,4 +16,6 @@ bunt-access = { path = "../access" }
 bunt-i18n = { path = "../i18n" }
 # 사운드 페이지: 셸의 사운드 메뉴와 같은 장치 목록, 채널 음량(균형), 경고음, 입력 레벨
 bunt-sound = { path = "../sound" }
+# 알림 페이지: 데스크톱 항목의 X-GNOME-UsesNotifications와 데스크톱 ID로 앱 찾기 (셸이 쓰는 판과 같다)
+gio-unix = "0.22"
 gtk4 = { version = "0.11", features = ["v4_12"] }
