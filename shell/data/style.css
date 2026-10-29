@@ -906,3 +906,98 @@ passwordentry.auth-field:disabled {
 }
 
 /* 어둡게: 창에 dark 클래스가 붙으면 theme/tokens.css의 변수가 바뀐다. 메뉴바 글자는 늘 흰색이다 */
+
+/* 로그아웃 확인 창(session.rs): 인증 창과 같은 패널. 그림은 그래파이트 타일 위의 로고다 */
+.logout-panel {
+  min-width: 300px;
+}
+
+/* 응용 프로그램 강제 종료 창(session.rs, macOS의 강제 종료 창): 제목 줄, 설명, 앱 목록, 단축키 안내와 단추 */
+.force-quit-panel {
+  min-width: 380px;
+}
+
+.force-quit-header {
+  margin-bottom: var(--space-2);
+}
+
+button.force-quit-close {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--control-bg);
+  box-shadow: none;
+  color: var(--label-secondary);
+}
+
+button.force-quit-close:hover {
+  background: var(--hover);
+}
+
+.force-quit-message {
+  margin-bottom: var(--space-2);
+}
+
+.force-quit-scroll {
+  border-radius: var(--radius-md);
+  background: var(--glass-fill);
+  box-shadow: inset 0 0 0 1px var(--separator);
+}
+
+list.force-quit-list {
+  padding: var(--space-1);
+  background: none;
+}
+
+list.force-quit-list > row {
+  min-height: 30px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--label);
+}
+
+list.force-quit-list > row:selected {
+  background: var(--selection);
+  color: var(--accent-fg);
+}
+
+.force-quit-row {
+  font-size: var(--text-body);
+}
+
+/* 응답 없는 앱 (macOS처럼 빨간 글) */
+.force-quit-hung {
+  color: var(--red);
+}
+
+list.force-quit-list > row:selected .force-quit-hung {
+  color: var(--accent-fg);
+}
+
+.force-quit-empty {
+  padding: var(--space-6) var(--space-3);
+  color: var(--label-secondary);
+}
+
+.force-quit-footer {
+  margin-top: var(--space-3);
+}
+
+.force-quit-hint {
+  font-size: var(--text-footnote);
+  color: var(--label-secondary);
+}
+
+.force-quit-footer .auth-buttons {
+  margin-top: 0;
+}
+
+.force-quit-confirm {
+  padding: var(--space-3) var(--space-2);
+}
+
+.force-quit-confirm-icon {
+  margin-bottom: var(--space-2);
+}

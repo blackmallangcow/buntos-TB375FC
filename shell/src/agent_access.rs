@@ -224,8 +224,9 @@ fn label(text: &str, class: &str, width: i32) -> gtk::Label {
 }
 
 /// 띄어 쓴 낱말마다 줄 바꿈을 막은 Pango 마크업 (CSS의 word-break: keep-all). Pango는 한글 음절
-/// 사이마다 줄을 바꿀 수 있다고 보아 "입력|할"처럼 낱말 가운데에서 줄을 바꾸기 때문이다
-fn keep_words(text: &str) -> String {
+/// 사이마다 줄을 바꿀 수 있다고 보아 "입력|할"처럼 낱말 가운데에서 줄을 바꾸기 때문이다.
+/// 로그아웃 확인 창과 강제 종료 창(session.rs)도 쓰므로 크레이트 안에 연다
+pub(crate) fn keep_words(text: &str) -> String {
     text.split(' ')
         .map(|word| {
             format!(

@@ -163,3 +163,32 @@ screenshot-timer-5 = 5 Seconds
 screenshot-timer-10 = 10 Seconds
 screenshot-show-thumbnail = Show Floating Thumbnail
 screenshot-preview = Screenshot preview
+
+## Session items in the logo menu (like the Apple menu on macOS)
+menu-force-quit = Force Quit…
+menu-sleep = Sleep
+menu-lock-screen = Lock Screen
+# $name: the user's full name (or the account name)
+menu-log-out = Log Out { $name }…
+## Logout confirmation (⇧⌘Q). Logs out by itself if nothing is chosen
+logout-title = Are you sure you want to quit all applications and log out now?
+# $seconds: seconds left before logging out by itself
+logout-countdown = { $seconds ->
+    [one] If you do nothing, the system will log out automatically in 1 second.
+   *[other] If you do nothing, the system will log out automatically in { $seconds } seconds.
+}
+logout-confirm = Log Out
+## Force Quit Applications window (⌥⌘⎋)
+force-quit-title = Force Quit Applications
+force-quit-message = If an app doesn’t respond for a while, select its name and click Force Quit.
+force-quit-hint = You can open this window by pressing ⌥⌘⎋.
+force-quit-button = Force Quit
+force-quit-close = Close
+force-quit-not-responding = (Not Responding)
+force-quit-empty = No apps are running.
+force-quit-unavailable = Couldn’t get the list of apps from the compositor.
+# $app: the app's name
+force-quit-confirm-title = Do you want to force “{ $app }” to quit?
+force-quit-confirm-message = You will lose any unsaved changes.
+# $error: the reason
+force-quit-failed = Couldn’t force the app to quit: { $error }

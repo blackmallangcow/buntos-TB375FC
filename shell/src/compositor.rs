@@ -4,12 +4,12 @@
 //! 컴포지터에 메뉴 막대·Dock 설정을 알린다 (org.buntos.Compositor1.SetPanels). 컴포지터가 이 값으로
 //! 막대를 숨기고 꺼내며(macOS의 WindowServer처럼), 최대화·전체 화면 창이 막대 자리까지 채울지와
 //! 메뉴 막대 뒤를 흐릴지 정한다. 컴포지터의 D-Bus 서비스가 (다시) 뜰 때와 값이 바뀔 때마다 보낸다.
-//! 컴포지터가 받은 단축키 가운데 셸이 하는 것(ShortcutActivated: 모든 앱, Dock 가리기, ⇧⌘5)도
-//! 여기서 받는다.
+//! 컴포지터가 받은 단축키 가운데 셸이 하는 것(ShortcutActivated)도 여기서 받는다: 모든 앱, Dock 가리기,
+//! 스크린샷 도구 막대(⇧⌘5), 로그아웃 확인 창(⇧⌘Q), 응용 프로그램 강제 종료 창(⌥⌘⎋)
 
 use gtk4::{gio, prelude::*};
 
-use crate::{dbus, launcher::Launcher, screenshot};
+use crate::{dbus, launcher::Launcher, screenshot, session::Session};
 
 const NAME: &str = "org.buntos.Compositor";
 const PATH: &str = "/org/buntos/Compositor";
@@ -53,13 +53,15 @@ pub fn share_panel_settings(settings: &gio::Settings) {
 
 /// 컴포지터가 알린 단축키를 한다: 모든 앱 보기(⌘스페이스, 검색 칸에 포커스), Dock 가리기
 /// 켜기/끄기(⌥⌘D), 스크린샷 도구 막대(⇧⌘5). 끈 Dock 가리기는 기본값처럼 "전체 화면일 때"만
-/// 숨긴다 (macOS의 끈 상태)
+/// 숨긴다 (macOS의 끈 상태). 로그아웃 확인 창(⇧⌘Q)과 응용 프로그램 강제 종료 창(⌥⌘⎋)도 띄운다
 pub fn follow_shortcuts(
     launcher: &Launcher,
+    session: &Session,
     settings: Option<gio::Settings>,
     screenshot_toolbar: &screenshot::Toolbar,
 ) {
     let (launcher, screenshot_toolbar) = (launcher.clone(), screenshot_toolbar.clone());
+    let session = session.clone();
     gio::bus_get(
         gio::BusType::Session,
         gio::Cancellable::NONE,
@@ -85,6 +87,8 @@ pub fn follow_shortcuts(
                     match id.as_str() {
                         "launcher.show" => launcher.toggle(),
                         "screenshot.toolbar" => screenshot_toolbar.toggle(),
+                        "session.log-out" => session.confirm_log_out(),
+                        "windows.force-quit" => session.show_force_quit(),
                         "launcher.dock-autohide" => {
                             if let Some(settings) = &settings {
                                 let next = match settings.string(KEYS[1]).as_str() {

@@ -163,3 +163,29 @@ screenshot-timer-5 = 5초
 screenshot-timer-10 = 10초
 screenshot-show-thumbnail = 플로팅 썸네일 보기
 screenshot-preview = 스크린샷 미리 보기
+
+## 로고 메뉴의 세션 항목 (macOS의 Apple 메뉴)
+menu-force-quit = 강제 종료…
+menu-sleep = 잠자기
+menu-lock-screen = 화면 잠금
+# $name: 사용자의 별칭 (없으면 계정 이름)
+menu-log-out = { $name } 로그아웃…
+## 로그아웃 확인 창 (⇧⌘Q). 아무것도 하지 않으면 스스로 로그아웃한다
+logout-title = 모든 응용 프로그램을 종료하고 지금 로그아웃하겠습니까?
+# $seconds: 스스로 로그아웃하기까지 남은 초
+logout-countdown = 아무것도 하지 않으면 { $seconds }초 후에 자동으로 로그아웃됩니다.
+logout-confirm = 로그아웃
+## 응용 프로그램 강제 종료 창 (⌥⌘⎋)
+force-quit-title = 응용 프로그램 강제 종료
+force-quit-message = 응용 프로그램이 응답하지 않으면 이름을 선택하고 ‘강제 종료’를 클릭하십시오.
+force-quit-hint = ⌥⌘⎋를 눌러 이 윈도우를 열 수 있습니다.
+force-quit-button = 강제 종료
+force-quit-close = 닫기
+force-quit-not-responding = (응답 없음)
+force-quit-empty = 실행 중인 응용 프로그램이 없습니다.
+force-quit-unavailable = 컴포지터에서 응용 프로그램 목록을 받지 못했습니다.
+# $app: 앱 이름
+force-quit-confirm-title = ‘{ $app }’을(를) 강제 종료하겠습니까?
+force-quit-confirm-message = 저장하지 않은 변경 사항은 손실됩니다.
+# $error: 까닭
+force-quit-failed = 강제 종료하지 못했습니다: { $error }

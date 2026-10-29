@@ -27,6 +27,8 @@ mod status_items;
 mod switcher;
 mod toplevels;
 mod wallpaper;
+// 로고 메뉴의 강제 종료, 잠자기, 화면 잠금, 로그아웃
+mod session;
 
 use std::rc::Rc;
 
@@ -84,6 +86,8 @@ fn main() -> glib::ExitCode {
             sound: Sound::start(),
         };
         let input_sources = InputSources::start();
+        // 로고 메뉴의 강제 종료…, 잠자기, 화면 잠금, 로그아웃… 동작. 메뉴 막대보다 먼저 단다
+        let session = session::Session::new(app, &tr);
         let menubar = menubar::build(
             app,
             &tr,
@@ -102,7 +106,7 @@ fn main() -> glib::ExitCode {
             compositor::share_panel_settings(&settings);
             screenshot::share_options(&settings);
         }
-        compositor::follow_shortcuts(&launcher, shell_settings(), &screenshot_toolbar);
+        compositor::follow_shortcuts(&launcher, &session, shell_settings(), &screenshot_toolbar);
         // ⌘⇥ 앱 전환 창. 키는 컴포지터가 받고 이 창은 보이기만 한다
         let switcher = switcher::Switcher::start(app);
         follow_color_scheme(vec![

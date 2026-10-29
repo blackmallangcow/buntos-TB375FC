@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 메뉴바: 왼쪽에 로고 메뉴(시스템 설정, 다시 시작, 시스템 종료)와 앞에 있는 앱의 메뉴,
+//! 메뉴바: 왼쪽에 로고 메뉴(macOS의 Apple 메뉴 순서: 이 시스템에 관하여, 시스템 설정, 강제 종료, 잠자기,
+//! 다시 시작, 시스템 종료, 화면 잠금, 로그아웃)와 앞에 있는 앱의 메뉴,
 //! 오른쪽에 메뉴 막대 항목(입력 소스, Bluetooth, 사운드, 배터리, Wi-Fi), 제어 센터,
 //! 날짜·시간(누르면 알림 센터). macOS처럼 평소에는 배경이 투명하고 글씨가 흰색이며,
 //! 앞에 있는 창이 화면을 채우면(최대화, 전체 화면) 배경이 검은색이 된다. "메뉴 막대 배경 보기"를
@@ -20,7 +21,7 @@ use crate::{
     input_source::{self, InputSources},
     interface_settings, layer_window, network, notification_center,
     notifications::Notifications,
-    power, shell_settings, sound, status_items,
+    power, session, shell_settings, sound, status_items,
     toplevels::Toplevels,
 };
 
@@ -107,16 +108,40 @@ fn follow_background(settings: &gio::Settings, bar: &gtk::CenterBox) {
     apply(settings, bar);
 }
 
-fn logo_menu(tr: &Translations) -> gtk::MenuButton {
-    let system = gio::Menu::new();
-    system.append(Some(&tr.get("menu-about")), Some("app.about"));
-    system.append(Some(&tr.get("menu-settings")), Some("app.settings"));
-    let power = gio::Menu::new();
-    power.append(Some(&tr.get("menu-restart")), Some("app.restart"));
-    power.append(Some(&tr.get("menu-power-off")), Some("app.power-off"));
+/// 로고 메뉴의 묶음과 항목(메시지 ID, 동작). macOS 26의 Apple 메뉴 순서와 묶음이다. 마지막 묶음 끝에
+/// "<별칭> 로그아웃…"(LOG_OUT_ACTION)이 붙는다. 강제 종료, 잠자기, 화면 잠금, 로그아웃 동작은 session.rs가 단다
+const LOGO_MENU: [&[(&str, &str)]; 5] = [
+    &[("menu-about", "app.about")],
+    &[("menu-settings", "app.settings")],
+    &[("menu-force-quit", "app.force-quit")],
+    &[
+        ("menu-sleep", "app.sleep"),
+        ("menu-restart", "app.restart"),
+        ("menu-power-off", "app.power-off"),
+    ],
+    &[("menu-lock-screen", "app.lock-screen")],
+];
+const LOG_OUT_ACTION: &str = "app.log-out";
+
+/// 로고 메뉴의 모델과, 로그아웃 항목이 든 마지막 묶음
+fn logo_menu_model(tr: &Translations, log_out: &str) -> (gio::Menu, gio::Menu) {
     let menu = gio::Menu::new();
-    menu.append_section(None, &system);
-    menu.append_section(None, &power);
+    let mut account = gio::Menu::new();
+    for items in LOGO_MENU {
+        account = gio::Menu::new();
+        for (id, action) in items {
+            account.append(Some(&tr.get(id)), Some(action));
+        }
+        menu.append_section(None, &account);
+    }
+    account.append(Some(log_out), Some(LOG_OUT_ACTION));
+    (menu, account)
+}
+
+/// 로고 메뉴 단추
+fn logo_menu(tr: &Rc<Translations>) -> gtk::MenuButton {
+    let log_out = session::log_out_label(tr);
+    let (menu, account) = logo_menu_model(tr, &log_out);
 
     // 아이콘이나 레이블을 자식으로 두면 펼침 화살표가 붙지 않는다
     let has_logo = gtk::gdk::Display::default()
@@ -126,12 +151,27 @@ fn logo_menu(tr: &Translations) -> gtk::MenuButton {
     } else {
         gtk::Label::new(Some(&tr.get("menubar-logo"))).upcast()
     };
-    gtk::MenuButton::builder()
+    let button = gtk::MenuButton::builder()
         .child(&child)
         .menu_model(&menu)
         .tooltip_text(tr.get("menubar-logo"))
         .css_classes(["logo"])
-        .build()
+        .build();
+    // 메뉴를 열 때마다 "<별칭> 로그아웃…"의 별칭을 다시 읽는다 (시스템 설정의 사용자 및 그룹에서 바뀐다)
+    let tr = tr.clone();
+    let shown = std::cell::RefCell::new(log_out);
+    button.connect_active_notify(move |button| {
+        if !button.is_active() {
+            return;
+        }
+        let label = session::log_out_label(&tr);
+        if *shown.borrow() != label {
+            account.remove(account.n_items() - 1);
+            account.append(Some(&label), Some(LOG_OUT_ACTION));
+            shown.replace(label);
+        }
+    });
+    button
 }
 
 fn add_actions(app: &gtk::Application, tr: &Rc<Translations>) {
@@ -277,4 +317,66 @@ fn clock(tr: &Rc<Translations>, notifications: &Notifications) -> gtk::MenuButto
         .popover(&notification_center::popover(notifications, tr))
         .css_classes(["clock"])
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 메뉴 모델의 묶음마다 (레이블, 동작)
+    fn sections(menu: &gio::Menu) -> Vec<Vec<(String, String)>> {
+        let text = |model: &gio::MenuModel, item, attribute| {
+            model
+                .item_attribute_value(item, attribute, Some(glib::VariantTy::STRING))
+                .and_then(|value| value.get::<String>())
+                .unwrap_or_default()
+        };
+        (0..menu.n_items())
+            .filter_map(|index| menu.item_link(index, gio::MENU_LINK_SECTION))
+            .map(|section| {
+                (0..section.n_items())
+                    .map(|item| {
+                        (
+                            text(&section, item, gio::MENU_ATTRIBUTE_LABEL),
+                            text(&section, item, gio::MENU_ATTRIBUTE_ACTION),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_logo_menu_follows_the_apple_menu() {
+        let (language, source) = crate::TRANSLATIONS[0];
+        assert_eq!(language, "ko");
+        let tr = Translations::from_source(language, source);
+        let (menu, account) = logo_menu_model(&tr, "버니 로그아웃…");
+        let expected: Vec<Vec<(&str, &str)>> = vec![
+            vec![("이 시스템에 관하여", "app.about")],
+            vec![("시스템 설정…", "app.settings")],
+            vec![("강제 종료…", "app.force-quit")],
+            vec![
+                ("잠자기", "app.sleep"),
+                ("다시 시작…", "app.restart"),
+                ("시스템 종료…", "app.power-off"),
+            ],
+            vec![
+                ("화면 잠금", "app.lock-screen"),
+                ("버니 로그아웃…", "app.log-out"),
+            ],
+        ];
+        let expected: Vec<Vec<(String, String)>> = expected
+            .into_iter()
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|(label, action)| (label.to_owned(), action.to_owned()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(sections(&menu), expected);
+        // 별칭이 바뀌면 고치는 묶음은 마지막 묶음이다
+        assert_eq!(account.n_items(), 2);
+    }
 }
