@@ -11,13 +11,20 @@ use gtk4::{self as gtk, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::{
+    clip_input_to_child,
     control_center::do_not_disturb,
     notifications::{Change, Notification, Notifications},
 };
 
 /// 배너가 보이는 시간 (초)
 const BANNER_SECONDS: u32 = 5;
-const PANEL_WIDTH: i32 = 360;
+/// 알림 카드의 너비. 배너와 알림 센터에서 같다
+const CARD_WIDTH: i32 = 348;
+/// 알림 센터 판의 너비: 카드와 좌우 안쪽 여백(style.css .notification-center의 10px, 카드 그림자 자리)
+const PANEL_WIDTH: i32 = CARD_WIDTH + 2 * 10;
+/// 배너 카드의 좌우 바깥 여백(style.css .notification-card.banner, 그림자 자리). GTK의 크기 요청은
+/// 바깥 여백을 포함한다
+const BANNER_MARGIN: i32 = 10;
 /// 알림 목록이 이보다 길면 스크롤한다
 const LIST_MAX_HEIGHT: i32 = 440;
 
@@ -270,9 +277,11 @@ pub fn banner(
     window.set_keyboard_mode(KeyboardMode::None);
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Right, true);
-    // 메뉴바 바로 아래
-    window.set_margin(Edge::Top, 36);
-    window.set_margin(Edge::Right, 8);
+    // 창을 카드에 맞춘다. 크기를 바꿀 수 있는 창이면 gtk4-layer-shell이 처음 받은 크기를 계속 써서
+    // 배너가 화면 너비만큼 늘어났다. 카드 둘레의 여백(style.css .banner)이 그림자 자리이자 메뉴 막대
+    // 아래 8px의 틈이다. 레이어 여백은 메뉴 막대의 배타 영역 다음부터 재므로 두지 않는다
+    window.set_resizable(false);
+    clip_input_to_child(&window);
 
     // 배너마다 번호를 매겨 마지막 배너만 숨긴다
     let shown = Rc::new(std::cell::Cell::new(0u32));
@@ -294,7 +303,8 @@ pub fn banner(
             return;
         }
         let content = card(&notification, notifications, &tr);
-        content.set_width_request(PANEL_WIDTH);
+        content.set_width_request(CARD_WIDTH + 2 * BANNER_MARGIN);
+        content.add_css_class("banner");
         window.set_child(Some(&content));
         window.present();
         shown.set(*id);

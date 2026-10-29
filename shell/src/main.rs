@@ -127,6 +127,38 @@ fn layer_window(app: &gtk::Application, name: &str) -> gtk::ApplicationWindow {
     window
 }
 
+/// 레이어 창이 입력을 받는 곳을 그 창의 자식 위젯이 그리는 자리로 줄인다. 그림자를 그리려고 둔 둘레의
+/// 투명한 여백이 뒤 창의 클릭을 가로채지 않게 한다(macOS의 그림자는 클릭을 받지 않는다). 창 크기가 바뀔
+/// 때마다 다시 잰다. 크기를 바꿀 수 없는 창은 내용이 바뀌면 크기가 바뀐다
+pub fn clip_input_to_child(window: &gtk::ApplicationWindow) {
+    window.connect_realize(|window| {
+        let Some(surface) = window.surface() else {
+            return;
+        };
+        let window = window.downgrade();
+        // GTK가 같은 신호에서 창을 먼저 배치하므로 자식의 자리는 새 크기의 것이다
+        surface.connect_layout(move |surface, _, _| {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let Some(bounds) = window
+                .child()
+                .and_then(|child| child.compute_bounds(&window))
+            else {
+                return;
+            };
+            let (dx, dy) = window.surface_transform();
+            let area = gtk::cairo::RectangleInt::new(
+                (f64::from(bounds.x()) + dx).floor() as i32,
+                (f64::from(bounds.y()) + dy).floor() as i32,
+                f64::from(bounds.width()).ceil() as i32,
+                f64::from(bounds.height()).ceil() as i32,
+            );
+            surface.set_input_region(Some(&gtk::cairo::Region::create_rectangle(&area)));
+        });
+    });
+}
+
 /// 공용 데스크톱 설정. 스키마가 설치되지 않았으면 None이고, 이때는 기본값을 쓴다.
 fn interface_settings() -> Option<gio::Settings> {
     gio::SettingsSchemaSource::default()?.lookup(INTERFACE_SCHEMA, true)?;
