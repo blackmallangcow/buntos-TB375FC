@@ -312,7 +312,7 @@ fn nav_button(icon: &str, tooltip: &str) -> gtk::Button {
 /// 사이드바 맨 위 계정 카드의 사진 크기
 const ACCOUNT_AVATAR_SIZE: i32 = 36;
 
-/// 사이드바 맨 위의 사용자 (macOS의 계정 자리). 사진과 전체 이름(없으면 사용자 이름)을
+/// 사이드바 맨 위의 사용자 (macOS의 계정 자리). 사진과 별칭(없으면 사용자 이름)을
 /// AccountsService에서 읽고, 시스템 설정이나 다른 곳에서 바꾸면 따라간다. 누르면 사용자 및 그룹을 연다
 fn account_header(tr: &Translations, navigator: &Rc<Navigator>) -> gtk::Button {
     let real_name = glib::real_name().to_string_lossy().into_owned();

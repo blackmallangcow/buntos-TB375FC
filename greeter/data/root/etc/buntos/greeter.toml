@@ -25,7 +25,7 @@ size = 24
 [session]
 # 로그인 화면. bunt-greeter가 끝나면 이 컴포지터도 끝낸다
 shell = ["/usr/libexec/buntos/greeter-shell"]
-# 계정을 만들 때 전체 이름을 한글로 쓸 수 있게 입력기를 띄운다 (Ctrl+Space, 한/영)
+# 계정을 만들 때 별칭을 한글로 쓸 수 있게 입력기를 띄운다 (Ctrl+Space, 한/영)
 input-method = ["fcitx5"]
 startup = []
 # 로그인 화면에서는 터미널(Alt+Enter)을 열지 않는다

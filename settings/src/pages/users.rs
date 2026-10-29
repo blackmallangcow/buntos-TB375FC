@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 사용자 및 그룹: 이 기기의 계정. macOS의 사용자 및 그룹과 계정 상세처럼 맨 위에 큰 사진(편집)과
-//! 이름, 그 아래 전체 이름, 계정 이름, 계정 종류, 홈 폴더, 로그인 암호, 다른 사용자를 보인다.
+//! 이름, 그 아래 별칭, 계정 이름, 계정 종류, 홈 폴더, 로그인 암호, 다른 사용자를 보인다.
 //! 이름과 사진은 AccountsService로 바꾼다. 암호는 passwd를 가상 터미널(script)에서 돌려 바꾸므로
 //! 시스템 설정은 root 권한을 받지 않는다 (passwd가 지금 암호를 확인한다)
 
@@ -163,7 +163,7 @@ impl UsersPage {
                 page.open_picture_sheet();
             }
         });
-        // 전체 이름은 Enter를 누르거나 칸을 떠날 때 바꾼다 (macOS)
+        // 별칭은 Enter를 누르거나 칸을 떠날 때 바꾼다 (macOS)
         let weak = Rc::downgrade(self);
         self.full_name.connect_activate(move |_| {
             if let Some(page) = weak.upgrade() {

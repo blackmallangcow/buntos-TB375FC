@@ -22,7 +22,7 @@ setup-title = Create a Computer Account
 setup-description =
     Choose the name and password you’ll use to log in to this computer and change its settings.
     This account will be an administrator of this computer.
-setup-full-name = Full Name
+setup-full-name = Nickname
 setup-account-name = Account Name
 setup-account-name-hint = This will be the name of your home folder and can’t be changed later.
 setup-password = Password
@@ -34,7 +34,7 @@ setup-continue = Continue
 setup-creating = Creating account…
 setup-signing-in = Logging in…
 setup-preview = The preview doesn’t create accounts.
-setup-error-full-name = Enter your full name. Colons (:) and commas (,) aren’t allowed.
+setup-error-full-name = Enter a nickname. Colons (:) and commas (,) aren’t allowed.
 setup-error-account-name = The account name must start with a lowercase letter and contain only lowercase letters, digits, - and _ (up to 32 characters).
 setup-error-account-taken = That name is already in use. Enter a different account name.
 setup-error-password-short = The password must be at least { $min } characters.

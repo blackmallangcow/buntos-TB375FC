@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # 시험·개발용 계정을 systemd 자격 증명 buntos.account로 미리 만든다. 정규 계정이 이미 있으면 아무것도
-# 하지 않는다. 형식은 한 줄 "계정 이름:전체 이름:암호"다 (예: buntos:buntOS:buntos). VM에는 SMBIOS로
+# 하지 않는다. 형식은 한 줄 "계정 이름:별칭:암호"다 (예: buntos:buntOS:buntos). VM에는 SMBIOS로
 # 넘긴다: -smbios type=11,value=io.systemd.credential:buntos.account=buntos:buntOS:buntos
 
 [Unit]

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 이 기기의 계정 (AccountsService). 사이드바 맨 위 계정 카드와 사용자 및 그룹 페이지가 함께 쓴다:
-//! 전체 이름, 계정 이름, 사진, 계정 종류를 읽고 전체 이름과 사진을 바꾼다. 자기 계정의 이름과 사진은
+//! 별칭, 계정 이름, 사진, 계정 종류를 읽고 별칭과 사진을 바꾼다. 자기 계정의 이름과 사진은
 //! polkit이 인증 없이 허락한다 (org.freedesktop.accounts.change-own-user-data). 사진 모양은 로그인
 //! 화면(greeter/src/avatar.rs)과 같다
 
@@ -71,7 +71,7 @@ impl Account {
         Self::load(self.remote.clone()).await
     }
 
-    /// 보일 이름: 전체 이름, 없으면 계정 이름
+    /// 보일 이름: 별칭, 없으면 계정 이름
     pub fn display_name(&self) -> &str {
         if self.real_name.trim().is_empty() {
             &self.user_name

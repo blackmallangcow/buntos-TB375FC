@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 계정 규칙: 사람이 쓰는 정규 계정, 이름과 암호 검사, 전체 이름에서 계정 이름 제안,
+//! 계정 규칙: 사람이 쓰는 정규 계정, 이름과 암호 검사, 별칭에서 계정 이름 제안,
 //! 시험·개발용 자격 증명(buntos.account)
 
 use std::{fmt, io};
@@ -23,14 +23,14 @@ const FULL_NAME_MAX: usize = 128;
 pub struct User {
     pub name: String,
     pub uid: u32,
-    /// GECOS의 첫 칸(전체 이름). 없으면 빈 문자열
+    /// GECOS의 첫 칸(별칭, macOS의 전체 이름). 없으면 빈 문자열
     pub real_name: String,
     pub home: String,
     pub shell: String,
 }
 
 impl User {
-    /// 보일 이름: 전체 이름, 없으면 계정 이름
+    /// 보일 이름: 별칭, 없으면 계정 이름
     pub fn display_name(&self) -> &str {
         if self.real_name.trim().is_empty() {
             &self.name
@@ -150,7 +150,7 @@ impl fmt::Display for Invalid {
 
 impl std::error::Error for Invalid {}
 
-/// 전체 이름을 다듬어 돌려준다. GECOS 칸에 들어가므로 ':'와 ','(칸 구분자), 제어 문자를 받지 않는다
+/// 별칭을 다듬어 돌려준다. GECOS 칸에 들어가므로 ':'와 ','(칸 구분자), 제어 문자를 받지 않는다
 pub fn check_full_name(name: &str) -> Result<String, Invalid> {
     let name = name.trim();
     let bad = |c: char| c == ':' || c == ',' || c.is_control();
@@ -245,7 +245,7 @@ fn is_hangul_syllable(c: char) -> bool {
     ('가'..='힣').contains(&c)
 }
 
-/// 전체 이름에서 계정 이름을 제안한다 (macOS 설정 지원처럼). 한글은 로마자로 옮기고 영문은
+/// 별칭에서 계정 이름을 제안한다 (macOS 설정 지원처럼). 한글은 로마자로 옮기고 영문은
 /// 소문자로 바꾸며, 그 밖의 글자와 띄어쓰기는 뺀다. 예: "홍길동" → "honggildong",
 /// "John Appleseed" → "johnappleseed"
 pub fn suggest_account_name(full_name: &str) -> String {
@@ -290,7 +290,7 @@ impl fmt::Debug for NewAccount {
 }
 
 /// 시험·개발용 systemd 자격 증명 buntos.account를 읽는다. 형식은 한 줄
-/// "계정 이름:전체 이름:암호"다. 전체 이름이 비면 계정 이름을 쓰고, 암호는 두 번째 ':' 뒤 전부라
+/// "계정 이름:별칭:암호"다. 별칭이 비면 계정 이름을 쓰고, 암호는 두 번째 ':' 뒤 전부라
 /// ':'를 넣을 수 있다. 끝의 줄바꿈은 뗀다. 예: "buntos:buntOS:buntos"
 pub fn parse_credential(text: &str) -> Result<NewAccount, Invalid> {
     let line = text.trim_end_matches(['\n', '\r']);
@@ -430,7 +430,7 @@ broken line
         assert_eq!(account.account_name, "buntos");
         assert_eq!(account.full_name, "buntOS");
         assert_eq!(account.password, "buntos");
-        // 전체 이름이 비면 계정 이름, 암호에는 ':'를 쓸 수 있다
+        // 별칭이 비면 계정 이름, 암호에는 ':'를 쓸 수 있다
         let account = parse_credential("dev::pass:word").unwrap();
         assert_eq!(account.full_name, "dev");
         assert_eq!(account.password, "pass:word");

@@ -3,7 +3,7 @@
 
 # 사용자 및 그룹 (macOS의 사용자 및 그룹, 계정 상세)
 users-edit-picture = 편집
-users-full-name = 전체 이름
+users-full-name = 별칭
 users-account-name = 계정 이름
 users-account-type = 계정 종류
 users-type-admin = 관리자
@@ -14,7 +14,7 @@ users-password-row-description = 로그인 화면과 관리자 인증(sudo, 시�
 users-change-password = 암호 변경…
 users-others = 다른 사용자
 users-unavailable = 계정 서비스(AccountsService)를 쓸 수 없어 이름과 사진을 바꿀 수 없습니다.
-users-name-invalid = 전체 이름은 비워 둘 수 없고 쌍점(:)과 쉼표(,)를 쓸 수 없습니다.
+users-name-invalid = 별칭은 비워 둘 수 없고 쌍점(:)과 쉼표(,)를 쓸 수 없습니다.
 users-name-error = 이름을 바꾸지 못했습니다: { $error }
 
 # 사진 고르기

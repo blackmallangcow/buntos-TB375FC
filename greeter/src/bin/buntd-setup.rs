@@ -228,8 +228,8 @@ fn from_credential() -> ExitCode {
     }
 }
 
-/// 계정을 만든다: useradd(홈 폴더, 같은 이름의 그룹, 관리자·장치 그룹, 전체 이름), chpasswd(암호).
-/// AccountsService는 전체 이름(GECOS)과 계정을 /etc/passwd에서 스스로 읽는다
+/// 계정을 만든다: useradd(홈 폴더, 같은 이름의 그룹, 관리자·장치 그룹, 별칭), chpasswd(암호).
+/// AccountsService는 별칭(GECOS)과 계정을 /etc/passwd에서 스스로 읽는다
 fn create(new: &NewAccount) -> Result<u32, Error> {
     let lock = fs::File::options()
         .create(true)

@@ -3,7 +3,7 @@
 
 # Users & Groups (macOS Users & Groups and account details)
 users-edit-picture = Edit
-users-full-name = Full Name
+users-full-name = Nickname
 users-account-name = Account Name
 users-account-type = Account Type
 users-type-admin = Administrator
@@ -14,7 +14,7 @@ users-password-row-description = Used at the login window and for administrator 
 users-change-password = Change Password…
 users-others = Other Users
 users-unavailable = The account service (AccountsService) isn’t available, so the name and picture can’t be changed.
-users-name-invalid = The full name can’t be empty or contain colons (:) or commas (,).
+users-name-invalid = The nickname can’t be empty or contain colons (:) or commas (,).
 users-name-error = Couldn’t change the name: { $error }
 
 # Picture picker

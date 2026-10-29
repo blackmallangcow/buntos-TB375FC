@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 처음 켤 때의 계정 만들기 (macOS 설정 지원의 "컴퓨터 계정 생성"): 전체 이름, 계정 이름(전체
-//! 이름에서 제안하고 고칠 수 있다), 암호, 확인. [계속]을 누르면 buntd-setup이 관리자 계정을 만들고,
+//! 처음 켤 때의 계정 만들기 (macOS 설정 지원의 "컴퓨터 계정 생성"): 별칭, 계정 이름(별칭에서
+//! 제안하고 고칠 수 있다), 암호, 확인. [계속]을 누르면 buntd-setup이 관리자 계정을 만들고,
 //! 같은 암호로 바로 로그인한다
 
 use std::{cell::Cell, rc::Rc, time::Duration};
@@ -206,7 +206,7 @@ pub fn build(shared: &Rc<Shared>) -> gtk::Widget {
 
 impl Form {
     fn connect(self: &Rc<Self>) {
-        // 계정 이름은 사용자가 고치기 전까지 전체 이름을 따라간다
+        // 계정 이름은 사용자가 고치기 전까지 별칭을 따라간다
         let weak = Rc::downgrade(self);
         self.full_name.connect_changed(move |entry| {
             let Some(form) = weak.upgrade() else {

@@ -35,7 +35,7 @@ struct Login {
     selected: Cell<usize>,
     /// 사용자마다 (사진 틀, 이름 표, 고르는 단추)
     tiles: RefCell<Vec<(gtk::Box, gtk::Label, Option<gtk::Button>)>>,
-    /// AccountsService에서 읽은 사용자마다의 (전체 이름, 사진)
+    /// AccountsService에서 읽은 사용자마다의 (별칭, 사진)
     details: RefCell<Vec<(String, Option<PathBuf>)>>,
     entry: gtk::PasswordEntry,
     field: gtk::Box,
@@ -342,7 +342,7 @@ impl Login {
         self.message.set_text("");
     }
 
-    /// 전체 이름과 사진을 AccountsService에서 읽어 바꾼다. 서비스가 없으면 /etc/passwd의 이름을 둔다
+    /// 별칭과 사진을 AccountsService에서 읽어 바꾼다. 서비스가 없으면 /etc/passwd의 이름을 둔다
     fn load_details(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
         let names: Vec<String> = self.users.iter().map(|user| user.name.clone()).collect();
