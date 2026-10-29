@@ -249,8 +249,9 @@ impl InputMethodHandler for BuntState {
     }
 }
 
-// 앱 쪽(text-input-v3)과 입력기 쪽(input-method-v2)은 smithay에 맡기되, 조합 글자를 기억하려고
-// 입력기와 글 입력 객체의 요청은 먼저 본다 (smithay의 delegate 매크로가 하는 일을 나눠 적었다)
+// 앱 쪽(text-input-v3)과 입력기 쪽(input-method-v2)은 smithay에 맡기되, 조합 글자를 기억하고 입력기의
+// commit을 앱에 그대로 적용하려고 입력기와 글 입력 객체의 요청은 먼저 본다 (smithay의 delegate 매크로가
+// 하는 일을 나눠 적었다)
 delegate_global_dispatch!(BuntState: [ZwpTextInputManagerV3: ()] => TextInputManagerState);
 delegate_dispatch!(BuntState: [ZwpTextInputManagerV3: ()] => TextInputManagerState);
 delegate_global_dispatch!(BuntState: [ZwpInputMethodManagerV2: InputMethodManagerGlobalData] => InputMethodManagerState);
@@ -279,7 +280,15 @@ impl Dispatch<ZwpInputMethodV2, InputMethodUserData<BuntState>> for BuntState {
                     return;
                 }
             }
-            zwp_input_method_v2::Request::Commit { .. } => state.preedit.commit(),
+            zwp_input_method_v2::Request::Commit { .. } => {
+                // 입력기의 serial이 그사이 보낸 done 수와 다르면 smithay는 앱에 done(0)을 보내 상태를
+                // 버리게 한다. foot은 serial이 다른 done을 버리고 확정 글자를 다음 done까지 미뤄, 조합 중
+                // Enter에서 "요"가 줄바꿈 뒤에 들어갔다. 명세(input-method-v2 commit)대로 serial이 달라도
+                // 바뀐 것을 그대로 적용하도록 앱에는 늘 그 글 입력의 serial로 done을 보낸다
+                state.preedit.commit();
+                state.seat.text_input().done(false);
+                return;
+            }
             _ => {}
         }
         <InputMethodManagerState as Dispatch<ZwpInputMethodV2, InputMethodUserData<Self>, Self>>::request(
