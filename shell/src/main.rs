@@ -23,6 +23,7 @@ mod polkit_agent;
 mod power;
 mod sound;
 mod status_items;
+mod switcher;
 mod toplevels;
 mod wallpaper;
 
@@ -97,7 +98,15 @@ fn main() -> glib::ExitCode {
             compositor::share_panel_settings(&settings);
         }
         compositor::follow_shortcuts(&launcher, shell_settings());
-        follow_color_scheme(vec![menubar, dock, banner, launcher.window().clone()]);
+        // ⌘⇥ 앱 전환 창. 키는 컴포지터가 받고 이 창은 보이기만 한다
+        let switcher = switcher::Switcher::start(app);
+        follow_color_scheme(vec![
+            menubar,
+            dock,
+            banner,
+            launcher.window().clone(),
+            switcher.window().clone(),
+        ]);
     });
     app.run()
 }

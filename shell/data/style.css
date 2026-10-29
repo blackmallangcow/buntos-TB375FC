@@ -8,6 +8,8 @@ window.bunt-menubar,
 window.bunt-menubar.background,
 window.bunt-dock,
 window.bunt-dock.background,
+window.bunt-switcher,
+window.bunt-switcher.background,
 window.bunt-banner,
 window.bunt-banner.background,
 window.bunt-launcher,
@@ -163,6 +165,33 @@ menubutton.dock-item > button:checked {
    모서리째 떠서 보낸다. 흰 창이 유리 판에 묻히지 않게 창 모양을 따라 옅은 그림자를 둔다 */
 image.dock-window {
   -gtk-icon-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* ⌘⇥ 앱 전환 창 (macOS 26 앱 전환기): 화면 가운데의 유리 판에 앱 아이콘을 늘어놓는다. 고른 앱은 칸을
+   칠하고 아래에 이름을 보인다. 그림자(--shadow-menu, 0 10px 28px)가 창 경계에서 잘리지 않게 둘레에
+   옆 28px, 위 18px, 아래 38px를 비운다(switcher.rs의 PANEL_CHROME) */
+.switcher-panel {
+  margin: 18px 28px 38px;
+  padding: 16px;
+  border-radius: var(--radius-2xl);
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-highlight);
+  box-shadow: var(--shadow-menu), 0 0 0 1px var(--glass-outline);
+  color: var(--label);
+}
+
+.switcher-tile {
+  padding: 12px 12px 8px;
+  border-radius: var(--radius-lg);
+}
+
+.switcher-tile.selected {
+  background: var(--pressed);
+}
+
+.switcher-name {
+  font-size: var(--text-body);
+  font-weight: 600;
 }
 
 /* 모든 앱 (macOS 26 응용 프로그램 창): 화면을 덮는 투명한 창 가운데의 유리 패널 */
