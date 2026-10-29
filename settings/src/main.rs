@@ -20,15 +20,16 @@ use gtk4::{self as gtk, gio, glib, prelude::*};
 use crate::{pages::Page, window::SettingsWindow};
 
 const APP_ID: &str = "org.buntos.Settings";
-/// 공통 디자인 토큰(theme/tokens.css) 다음에 이 앱의 CSS. 사용자 및 그룹, AI 에이전트 페이지의
-/// CSS는 따로 둔다
+/// 공통 디자인 토큰(theme/tokens.css) 다음에 이 앱의 CSS. 사용자 및 그룹, AI 에이전트 페이지와
+/// 키보드 단축키 시트의 CSS는 따로 둔다
 const STYLE: &str = concat!(
     include_str!("../../theme/tokens.css"),
     include_str!("../data/style.css"),
     include_str!("../data/users.css"),
-    include_str!("../data/agent.css")
+    include_str!("../data/agent.css"),
+    include_str!("../data/shortcuts.css")
 );
-/// 페이지가 많은 문자열은 따로 둔다 (사용자 및 그룹, AI 에이전트)
+/// 페이지가 많은 문자열은 따로 둔다 (사용자 및 그룹, AI 에이전트, 키보드 단축키)
 const TRANSLATIONS: &Sources = &[
     (
         "ko",
@@ -36,6 +37,7 @@ const TRANSLATIONS: &Sources = &[
             include_str!("../../i18n/ko/bunt-settings.ftl"),
             include_str!("../../i18n/ko/bunt-settings-users.ftl"),
             include_str!("../../i18n/ko/bunt-settings-agent.ftl"),
+            include_str!("../../i18n/ko/bunt-settings-shortcuts.ftl"),
         ),
     ),
     (
@@ -44,6 +46,7 @@ const TRANSLATIONS: &Sources = &[
             include_str!("../../i18n/en/bunt-settings.ftl"),
             include_str!("../../i18n/en/bunt-settings-users.ftl"),
             include_str!("../../i18n/en/bunt-settings-agent.ftl"),
+            include_str!("../../i18n/en/bunt-settings-shortcuts.ftl"),
         ),
     ),
 ];

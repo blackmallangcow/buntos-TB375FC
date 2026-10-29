@@ -467,6 +467,31 @@ pub fn placeholder(icon: &str, tint: Tint, title: &str, description: &str) -> gt
 }
 
 /// 작은 모달 창 (macOS의 시트). 배지와 제목·설명 아래에 내용, 맨 아래에 취소·확인 단추를 둔다.
+/// 시트가 부모 창의 어둡게(dark 클래스)를 따른다. 시트를 연 채 화면 모드를 바꿔도 함께 바뀐다
+pub fn follow_dark(window: &gtk::Window, parent: &gtk::Window) {
+    let sync = |window: &gtk::Window, parent: &gtk::Window| {
+        if parent.has_css_class("dark") {
+            window.add_css_class("dark");
+        } else {
+            window.remove_css_class("dark");
+        }
+    };
+    sync(window, parent);
+    let handler = parent.connect_css_classes_notify(glib::clone!(
+        #[weak]
+        window,
+        move |parent| sync(&window, parent)
+    ));
+    // 시트가 닫히면 부모 창에 단 처리기를 뗀다
+    let parent = parent.clone();
+    let handler = Cell::new(Some(handler));
+    window.connect_destroy(move |_| {
+        if let Some(handler) = handler.take() {
+            parent.disconnect(handler);
+        }
+    });
+}
+
 /// 확인 단추가 기본 단추라 입력 칸에서 Enter를 누르면 눌린다
 pub struct Sheet {
     pub window: gtk::Window,
@@ -497,9 +522,7 @@ impl Sheet {
             window.set_transient_for(Some(parent));
             // 앱에 묶어야 창 목록에 앱 ID(org.buntos.Settings)로 보인다 (메뉴바 앱 이름, Dock)
             window.set_application(parent.application().as_ref());
-            if parent.has_css_class("dark") {
-                window.add_css_class("dark");
-            }
+            follow_dark(&window, parent);
         }
 
         let body = gtk::Box::builder()

@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 키보드: 키 반복 속도와 지연 시간(컴포지터 API), 입력 소스 목록·추가·지우기(fcitx5 D-Bus),
-//! 입력 소스 전환 단축키 안내, 메뉴 막대의 입력 메뉴
+//! 입력 소스 전환 단축키 안내, 메뉴 막대의 입력 메뉴, 키보드 단축키 시트(컴포지터 API)
+
+mod accelerator;
+mod shortcuts;
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
-use bunt_i18n::Translations;
-use gtk4::{self as gtk, glib, prelude::*};
+use bunt_i18n::{FluentArgs, Translations};
+use gtk4::{self as gtk, gio, glib, prelude::*};
 
 use super::{Context, bind_switch, shell_settings};
 use crate::{
@@ -68,6 +71,10 @@ struct KeyboardPage {
     available: RefCell<HashMap<String, InputMethod>>,
     group: RefCell<Group>,
     debounce: Debounce,
+    /// "입력 소스 바꾸기" 행의 값 (지금 단축키)
+    switch_keys: Option<gtk::Label>,
+    /// 컴포지터의 ShortcutsChanged 신호
+    shortcuts_changed: RefCell<Option<gio::SignalSubscription>>,
 }
 
 /// 가장 가까운 눈금
@@ -136,15 +143,27 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
     footer.append(&add_source);
 
     let shortcuts = widgets::group(&column, Some(&tr.get("keyboard-shortcuts")), None);
-    shortcuts.append(&widgets::info_row(
+    let switch_row = widgets::info_row(
         &tr.get("keyboard-switch-source"),
         &tr.get("keyboard-switch-keys"),
-    ));
+    );
+    // 값은 컴포지터의 지금 단축키로 바꾼다 (refresh_switch_keys)
+    let switch_keys = switch_row
+        .child()
+        .and_then(|content| content.last_child())
+        .and_downcast::<gtk::Label>();
+    shortcuts.append(&switch_row);
     if let Some(settings) = shell_settings() {
         let (row, switch) = widgets::switch_row(&tr.get("keyboard-show-input-menu"), None);
         bind_switch(&settings, "show-input-source", &switch);
         shortcuts.append(&row);
     }
+    // macOS처럼 묶음 아래 오른쪽 단추가 키보드 단축키 시트를 연다
+    let footer = widgets::footer(&column);
+    let edit_shortcuts = gtk::Button::with_label(&tr.get("keyboard-shortcuts-button"));
+    let shortcuts_context = context.clone();
+    edit_shortcuts.connect_clicked(move |_| shortcuts::present(&shortcuts_context));
+    footer.append(&edit_shortcuts);
 
     let page = Rc::new(KeyboardPage {
         context: context.clone(),
@@ -158,6 +177,8 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
         available: RefCell::default(),
         group: RefCell::default(),
         debounce: Debounce::default(),
+        switch_keys,
+        shortcuts_changed: RefCell::new(None),
     });
 
     for scale in [&rate, &delay] {
@@ -201,8 +222,58 @@ impl KeyboardPage {
         let fcitx = Remote::new(&bus, FCITX, FCITX_PATH);
         self.compositor.replace(Some(compositor.clone()));
         self.fcitx.replace(Some(fcitx.clone()));
+        if self.shortcuts_changed.borrow().is_none() {
+            // 키보드 단축키 시트나 다른 곳에서 단축키를 바꾸면 입력 소스 바꾸기 행을 고친다
+            let weak = Rc::downgrade(self);
+            let subscription = dbus::subscribe(
+                &bus,
+                Some(COMPOSITOR),
+                Some(COMPOSITOR_INTERFACE),
+                Some("ShortcutsChanged"),
+                Some(COMPOSITOR_PATH),
+                move |_| {
+                    let Some(page) = weak.upgrade() else {
+                        return;
+                    };
+                    glib::spawn_future_local(async move {
+                        let compositor = page.compositor.borrow().clone();
+                        if let Some(compositor) = compositor {
+                            page.refresh_switch_keys(&compositor).await;
+                        }
+                    });
+                },
+            );
+            self.shortcuts_changed.replace(Some(subscription));
+        }
         self.refresh_repeat(&compositor).await;
+        self.refresh_switch_keys(&compositor).await;
         self.refresh_sources(&fcitx).await;
+    }
+
+    /// 입력 소스 바꾸기 행: 컴포지터의 지금 단축키와 한/영 키. 단축키 API가 없는 컴포지터는 정해진
+    /// 키(Ctrl+Space, 한/영)를 쓰므로 원래 글을 둔다
+    async fn refresh_switch_keys(&self, compositor: &Remote) {
+        let Some(label) = &self.switch_keys else {
+            return;
+        };
+        let tr = &self.context.tr;
+        let switch = shortcuts::fetch(compositor).await.ok().and_then(|list| {
+            list.into_iter()
+                .find(|shortcut| shortcut.id == shortcuts::SWITCH_SOURCE)
+        });
+        let text = match switch {
+            Some(switch) if switch.enabled && !switch.accelerator.is_empty() => {
+                let mut args = FluentArgs::new();
+                args.set(
+                    "shortcut",
+                    accelerator::display(&switch.accelerator, &shortcuts::key_names(tr)),
+                );
+                tr.get_with("keyboard-switch-keys-with", &args)
+            }
+            Some(_) => tr.get("keyboard-switch-keys-hangul"),
+            None => tr.get("keyboard-switch-keys"),
+        };
+        label.set_text(&text);
     }
 
     async fn refresh_repeat(&self, compositor: &Remote) {
