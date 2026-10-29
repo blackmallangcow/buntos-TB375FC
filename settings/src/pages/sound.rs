@@ -98,8 +98,8 @@ struct SoundPage {
     input_pending: Pending,
     visible: Cell<bool>,
     poll: RefCell<Option<glib::SourceId>>,
-    /// 입력 레벨 녹음의 세대. 바뀌면 돌던 녹음이 멈춘다
-    meter: Cell<u32>,
+    /// 입력 레벨을 재는 녹음. 입력 쪽이 보이는 동안만 있다
+    meter: RefCell<Option<Rc<run::Meter>>>,
 }
 
 pub fn build(context: &Rc<Context>) -> gtk::Widget {
@@ -218,7 +218,7 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
         input_pending: Pending::default(),
         visible: Cell::new(false),
         poll: RefCell::new(None),
-        meter: Cell::new(0),
+        meter: RefCell::new(None),
     });
 
     let weak = Rc::downgrade(&page);
@@ -498,9 +498,7 @@ impl SoundPage {
         if let Some(source) = self.poll.take() {
             source.remove();
         }
-        // 녹음을 멈춘다
-        self.meter.set(self.meter.get().wrapping_add(1));
-        self.level.set_value(0.0);
+        self.stop_meter();
     }
 
     /// 장치 목록과 기본 장치의 음량을 다시 읽는다
@@ -690,28 +688,41 @@ impl SoundPage {
 
     /// 입력 쪽이 보이는 동안만 기본 입력 장치를 녹음해 레벨을 잰다
     fn update_meter(self: &Rc<Self>) {
-        let generation = self.meter.get().wrapping_add(1);
-        self.meter.set(generation);
-        self.level.set_value(0.0);
+        self.stop_meter();
         if !self.visible.get() || self.direction.get() != Direction::Input {
             return;
         }
+        let Some(meter) = run::Meter::start().map(Rc::new) else {
+            return;
+        };
+        self.meter.replace(Some(meter.clone()));
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let Some(meter) = run::Meter::start() else {
-                return;
-            };
+            // 녹음을 끝내면(stop_meter) 기다리던 읽기가 끝나 이 일도 끝난다
             while let Some(level) = meter.next().await {
                 let Some(page) = weak.upgrade() else {
                     break;
                 };
-                if page.meter.get() != generation {
+                // 끝낸 녹음에 남아 있던 소리로 막대를 옮기지 않는다
+                let current = page
+                    .meter
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|shown| Rc::ptr_eq(shown, &meter));
+                if !current {
                     break;
                 }
                 page.level.set_value((level * LEVEL_BLOCKS).round());
             }
-            // meter를 버리면 녹음이 끝난다
         });
+    }
+
+    /// 입력 레벨 녹음을 끝낸다. 예전에는 다음 소리 조각이 올 때까지 녹음이 남았다
+    fn stop_meter(&self) {
+        if let Some(meter) = self.meter.take() {
+            meter.stop();
+        }
+        self.level.set_value(0.0);
     }
 }
 

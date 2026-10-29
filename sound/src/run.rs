@@ -194,8 +194,15 @@ impl Meter {
     }
 }
 
+impl Meter {
+    /// 녹음을 끝낸다. 기다리던 next()는 None을 돌려준다
+    pub fn stop(&self) {
+        self.process.force_exit();
+    }
+}
+
 impl Drop for Meter {
     fn drop(&mut self) {
-        self.process.force_exit();
+        self.stop();
     }
 }
