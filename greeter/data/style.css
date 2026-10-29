@@ -258,3 +258,9 @@ button.greeter-power:hover {
 .setup-card button:disabled {
   opacity: 0.5;
 }
+
+/* 잠금 화면(bunt-lock): 로그인 화면과 같은 모양이고 맨 아래의 다시 시작·시스템 종료가 없다(macOS의 화면 잠금).
+ * 그 자리만큼 사진과 암호 칸을 올린다 */
+.lock-screen .greeter-account {
+  margin-bottom: 128px;
+}

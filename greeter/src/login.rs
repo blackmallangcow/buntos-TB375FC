@@ -15,19 +15,17 @@ use bunt_greeter::{
     account::User,
     greetd::{self, LoginError},
 };
-use bunt_i18n::{FluentArgs, Translations};
+use bunt_i18n::FluentArgs;
 use gtk4::{self as gtk, gio, glib, prelude::*};
 
-use crate::{Shared, avatar};
+// 날짜·시각과 AccountsService 읽기는 잠금 화면(bunt-lock)과 함께 쓰려고 clock.rs, accounts.rs로 옮겼다
+use crate::{Shared, accounts::account_details, avatar, clock::clock};
 
 const AVATAR_SIZE: i32 = 96;
 /// 계정이 여럿일 때 늘어놓는 사진
 const TILE_AVATAR_SIZE: i32 = 72;
 /// 흔들기 애니메이션 길이 (data/style.css의 @keyframes shake와 같다)
 const SHAKE: Duration = Duration::from_millis(450);
-const ACCOUNTS: &str = "org.freedesktop.Accounts";
-const ACCOUNTS_PATH: &str = "/org/freedesktop/Accounts";
-const ACCOUNTS_USER: &str = "org.freedesktop.Accounts.User";
 
 struct Login {
     shared: Rc<Shared>,
@@ -396,98 +394,6 @@ impl Login {
             }
         }
     }
-}
-
-/// AccountsService의 (RealName, IconFile)
-async fn account_details(
-    bus: &gio::DBusConnection,
-    name: &str,
-) -> Option<(String, Option<PathBuf>)> {
-    let reply = bus
-        .call_future(
-            Some(ACCOUNTS),
-            ACCOUNTS_PATH,
-            ACCOUNTS,
-            "FindUserByName",
-            Some(&(name,).to_variant()),
-            Some(glib::VariantTy::new("(o)").ok()?),
-            gio::DBusCallFlags::NONE,
-            5000,
-        )
-        .await
-        .ok()?;
-    let path = reply.child_value(0).str()?.to_owned();
-    let property = async |property: &str| {
-        let reply = bus
-            .call_future(
-                Some(ACCOUNTS),
-                &path,
-                "org.freedesktop.DBus.Properties",
-                "Get",
-                Some(&(ACCOUNTS_USER, property).to_variant()),
-                Some(glib::VariantTy::new("(v)").ok()?),
-                gio::DBusCallFlags::NONE,
-                5000,
-            )
-            .await
-            .ok()?;
-        reply.child_value(0).as_variant()?.str().map(str::to_owned)
-    };
-    let real_name = property("RealName").await.unwrap_or_default();
-    let icon = property("IconFile")
-        .await
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
-    Some((real_name, icon))
-}
-
-/// 날짜와 큰 시각. 분이 바뀔 때마다 고친다
-fn clock(tr: &Rc<Translations>) -> gtk::Box {
-    let date = gtk::Label::builder().css_classes(["greeter-date"]).build();
-    let time = gtk::Label::builder().css_classes(["greeter-time"]).build();
-    let clock = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .halign(gtk::Align::Center)
-        .css_classes(["greeter-clock"])
-        .build();
-    clock.append(&date);
-    clock.append(&time);
-    let twelve_hour = gio::SettingsSchemaSource::default()
-        .and_then(|source| source.lookup("org.gnome.desktop.interface", true))
-        .is_none_or(|_| {
-            gio::Settings::new("org.gnome.desktop.interface").string("clock-format") != "24h"
-        });
-    let formats = Rc::new((
-        tr.get("clock-date-format"),
-        tr.get(if twelve_hour {
-            "clock-time-format-12h"
-        } else {
-            "clock-time-format-24h"
-        }),
-    ));
-    tick(date.downgrade(), time.downgrade(), formats);
-    clock
-}
-
-fn tick(
-    date: glib::WeakRef<gtk::Label>,
-    time: glib::WeakRef<gtk::Label>,
-    formats: Rc<(String, String)>,
-) {
-    let (Some(date_label), Some(time_label)) = (date.upgrade(), time.upgrade()) else {
-        return;
-    };
-    let Ok(now) = glib::DateTime::now_local() else {
-        return;
-    };
-    if let Ok(text) = now.format(&formats.0) {
-        date_label.set_text(&text);
-    }
-    if let Ok(text) = now.format(&formats.1) {
-        time_label.set_text(&text);
-    }
-    let delay = 60u32.saturating_sub(now.second() as u32).max(1);
-    glib::timeout_add_seconds_local_once(delay, move || tick(date, time, formats));
 }
 
 /// 맨 아래의 다시 시작·시스템 종료 (logind. 로그인 화면은 활성 세션이라 polkit이 허락한다)

@@ -41,3 +41,10 @@ setup-error-password-short = 암호는 { $min }자 이상이어야 합니다.
 setup-error-password-invalid = 암호에는 줄바꿈을 넣을 수 없고, 너무 길어도 안 됩니다.
 setup-error-password-mismatch = 암호가 일치하지 않습니다. 다시 입력하십시오.
 setup-error-failed = 계정을 만들지 못했습니다: { $error }
+
+# 잠금 화면 (bunt-lock, macOS의 화면 잠금). 시각, 암호 칸, 틀린 암호 안내는 위의 로그인 화면 문구를 함께 쓴다
+# 여러 번 틀려 기다려야 할 때. $count: 남은 초나 분
+lock-retry-seconds = { $count }초 후에 다시 시도하십시오.
+lock-retry-minutes = { $count }분 후에 다시 시도하십시오.
+# 암호를 확인하지 못했을 때 (PAM 설정 오류 등). $error: 까닭
+lock-failed = 암호를 확인하지 못했습니다: { $error }

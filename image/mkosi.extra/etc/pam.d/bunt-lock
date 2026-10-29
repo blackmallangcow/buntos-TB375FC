@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 잠금 화면(bunt-lock, greeter/src/lock/pam.rs)의 암호 확인. 로그인과 같은 암호를 쓴다(common-auth).
+# 잠금 화면은 그 사용자로 돌므로 pam_unix가 setgid 도우미(unix_chkpwd)로 그 사용자의 암호만 확인한다.
+# common-auth에 든 pam_gnome_keyring도 이 암호로 login 키링이 잠겨 있으면 연다. 계정·세션 단계는 없다:
+# 잠금을 풀 뿐 새 세션을 열지 않는다
+
+#%PAM-1.0
+@include common-auth

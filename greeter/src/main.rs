@@ -8,8 +8,10 @@
 //!
 //! 개발할 때는 `bunt-greeter --preview login|create`로 greetd 없이 화면만 볼 수 있다
 
+mod accounts;
 mod avatar;
 mod background;
+mod clock;
 mod create;
 mod login;
 

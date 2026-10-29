@@ -263,6 +263,8 @@ version = "0.1.0"
 dependencies = [
  "bunt-i18n",
  "gtk4",
+ "gtk4-layer-shell",
+ "libc",
  "serde",
  "serde_json",
  "zbus",

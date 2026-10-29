@@ -32,8 +32,8 @@ if [[ $# -gt 0 ]]; then
 	extra+=(--machine="buntos-$(basename "$out")")
 fi
 
-# 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, buntd-agent와 bunt)를 빌드해 이미지에 넣을
-# 트리로 모은다.
+# 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, buntd-agent와 bunt, bunt-greeter와 bunt-lock)를 빌드해
+# 이미지에 넣을 트리로 모은다.
 # 지금은 빌드 VM과 아키텍처가 같은 보드만 지원한다. 다른 아키텍처는 CI에서 빌드한다.
 stage_components() {
 	local arch host
@@ -59,6 +59,8 @@ stage_components() {
 		install -D -m 0644 "$repo/agent/data/$unit" "$out/stage/usr/lib/systemd/user/$unit"
 	done
 	install -D -m 0755 "$target/release/bunt-greeter" "$out/stage/usr/bin/bunt-greeter"
+	# 잠금 화면 (컴포지터가 화면을 잠그면 띄운다. PAM 서비스는 image/mkosi.extra/etc/pam.d/bunt-lock)
+	install -D -m 0755 "$target/release/bunt-lock" "$out/stage/usr/bin/bunt-lock"
 	install -D -m 0755 "$target/release/buntd-setup" "$out/stage/usr/libexec/buntos/buntd-setup"
 	install -D -m 0755 "$target/release/bunt-access-helper" \
 		"$out/stage/usr/libexec/buntos/bunt-access-helper"

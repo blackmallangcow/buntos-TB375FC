@@ -21,6 +21,8 @@ packages=(
 	build-essential pkg-config rustup
 	libudev-dev libinput-dev libgbm-dev libseat-dev libxkbcommon-dev libegl-dev libgles-dev libdrm-dev
 	libwayland-dev libpixman-1-dev libgtk-4-dev libgtk4-layer-shell-dev
+	# 잠금 화면(bunt-lock)의 암호 확인
+	libpam0g-dev
 )
 
 sudo apt-get update

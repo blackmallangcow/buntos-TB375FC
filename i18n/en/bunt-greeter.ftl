@@ -41,3 +41,16 @@ setup-error-password-short = The password must be at least { $min } characters.
 setup-error-password-invalid = The password can’t contain line breaks or be too long.
 setup-error-password-mismatch = The passwords don’t match. Enter them again.
 setup-error-failed = Couldn’t create the account: { $error }
+
+# Lock screen (bunt-lock, like Lock Screen on macOS). The clock, password field and wrong-password text above are shared
+# After several wrong passwords. $count: seconds or minutes left
+lock-retry-seconds = { $count ->
+    [one] Try again in 1 second.
+   *[other] Try again in { $count } seconds.
+}
+lock-retry-minutes = { $count ->
+    [one] Try again in 1 minute.
+   *[other] Try again in { $count } minutes.
+}
+# The password could not be checked (PAM misconfigured, etc.). $error: the reason
+lock-failed = Couldn’t check the password: { $error }

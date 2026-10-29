@@ -11,6 +11,8 @@ use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
 /// 시스템 기본 배경화면 (image/mkosi.extra/usr/share/glib-2.0/schemas/90_buntos.gschema.override)
 const DEFAULT_WALLPAPER: &str = "/usr/share/backgrounds/buntos/buntos-dawn.png";
 const BACKGROUND_SCHEMA: &str = "org.gnome.desktop.background";
+/// 밝게·어둡게 (color-scheme)
+const INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 /// 줄인 그림의 너비. 1280px 화면에서 흐림 반지름이 약 30px이 된다
 const SMALL_WIDTH: usize = 160;
 const BLUR_RADIUS: usize = 4;
@@ -32,11 +34,25 @@ pub fn picture() -> gtk::Picture {
 }
 
 /// 로그인 화면 사용자의 GSettings에는 사용자 값이 없으므로 시스템 기본값이 나온다.
-/// 사용자 세션의 배경화면은 그 사용자의 홈에 있어 읽을 수 없다
+/// 사용자 세션의 배경화면은 그 사용자의 홈에 있어 읽을 수 없다. 사용자로 도는 잠금 화면(bunt-lock)은 그
+/// 사용자의 배경화면을 읽고, 데스크톱처럼(shell/src/wallpaper.rs) 어둡게 모드면 picture-uri-dark를 쓴다
 fn wallpaper() -> Option<PathBuf> {
-    let from_settings = gio::SettingsSchemaSource::default()
+    let source = gio::SettingsSchemaSource::default();
+    let dark = source
+        .as_ref()
+        .and_then(|source| source.lookup(INTERFACE_SCHEMA, true))
+        .is_some_and(|_| {
+            gio::Settings::new(INTERFACE_SCHEMA).string("color-scheme") == "prefer-dark"
+        });
+    let from_settings = source
         .and_then(|source| source.lookup(BACKGROUND_SCHEMA, true))
-        .map(|_| gio::Settings::new(BACKGROUND_SCHEMA).string("picture-uri"))
+        .map(|_| {
+            gio::Settings::new(BACKGROUND_SCHEMA).string(if dark {
+                "picture-uri-dark"
+            } else {
+                "picture-uri"
+            })
+        })
         .and_then(|uri| gio::File::for_uri(&uri).path());
     from_settings
         .filter(|path| path.is_file())
