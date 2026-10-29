@@ -354,9 +354,12 @@ impl BuntState {
         let Some((program, args)) = command.split_first() else {
             return;
         };
+        // 앱의 그리기 방식(gpu.rs)도 준다. prepare의 dbus-update-activation-environment가 이 값을
+        // D-Bus 활성화 환경에 옮긴다
         match std::process::Command::new(program)
             .args(args)
             .env("WAYLAND_DISPLAY", &self.socket_name)
+            .envs(self.backend.client_env().iter().copied())
             .status()
         {
             Ok(status) if !status.success() => tracing::warn!("{program} failed: {status}"),
@@ -402,10 +405,12 @@ impl BuntState {
             tracing::warn!("failed to pass the socket to {program}: {err}");
             return None;
         }
+        // 앱의 그리기 방식(gpu.rs)도 준다. 셸이 여는 앱은 셸의 환경을 물려받는다
         match std::process::Command::new(program)
             .args(args)
             .env("WAYLAND_DISPLAY", &self.socket_name)
             .env("WAYLAND_SOCKET", theirs.as_raw_fd().to_string())
+            .envs(self.backend.client_env().iter().copied())
             .spawn()
         {
             Ok(child) => Some(child),
@@ -421,9 +426,11 @@ impl BuntState {
         let Some((program, args)) = command.split_first() else {
             return;
         };
+        // 앱의 그리기 방식(gpu.rs)도 준다
         match std::process::Command::new(program)
             .args(args)
             .env("WAYLAND_DISPLAY", &self.socket_name)
+            .envs(self.backend.client_env().iter().copied())
             .spawn()
         {
             Ok(mut child) => {

@@ -9,7 +9,6 @@ use std::{
     cmp::Reverse,
     collections::HashMap,
     error::Error,
-    ffi::CStr,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -38,7 +37,7 @@ use smithay::{
                 solid::SolidColorRenderElement,
                 surface::render_elements_from_surface_tree,
             },
-            gles::{GlesRenderer, ffi},
+            gles::GlesRenderer,
         },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
@@ -76,6 +75,7 @@ use crate::{
     config::{Config, parse_hex_color},
     cursor::Cursor,
     dbus::{Command, OutputInfo, PointerDevice},
+    gpu::{GSK_RENDERER, Rendering, renderer_name},
     prefs::{ModePref, PointerPrefs},
     render::{self, OutputRenderElements},
     screenshot::{self, AreaSelection},
@@ -128,8 +128,10 @@ pub struct UdevData {
     pointer_devices: Vec<InputDevice>,
     /// 셸 유리 뒤 흐림 (blur.rs)
     blur: Blur,
-    /// GPU 없이 CPU로 그린다 (llvmpipe 등)
-    software: bool,
+    /// 렌더러로 정한 그리기 방식 (gpu.rs). 전에는 CPU로 그리는지만 적었다(software)
+    rendering: Rendering,
+    /// 컴포지터가 띄우는 프로그램에 더할 환경 변수 (gpu.rs)
+    client_env: Vec<(&'static str, &'static str)>,
 }
 
 impl UdevData {
@@ -140,6 +142,11 @@ impl UdevData {
     /// 화면 밖에 따로 그릴 때 (에이전트의 창 스크린샷)
     pub fn renderer(&mut self) -> &mut GlesRenderer {
         &mut self.renderer
+    }
+
+    /// 컴포지터가 띄우는 프로그램에 더할 환경 변수 (앱의 그리기 방식)
+    pub fn client_env(&self) -> &[(&'static str, &'static str)] {
+        &self.client_env
     }
 }
 
@@ -222,7 +229,19 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
     let egl_context = EGLContext::new(&egl_display)?;
     let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
-    let software = is_software(&mut renderer);
+    // 렌더러가 CPU로 그리는지만 보던 것을, 앱이 GPU로 그릴 수 있는지까지 정하게 바꿨다 (gpu.rs)
+    let renderer_name = renderer_name(&mut renderer);
+    let rendering = Rendering::from_renderer_name(&renderer_name);
+    let inherited = std::env::var(GSK_RENDERER)
+        .ok()
+        .filter(|value| !value.is_empty());
+    let client_env = rendering.client_env(inherited.as_deref());
+    tracing::info!("renderer: {renderer_name}");
+    match (&inherited, rendering.gpu_clients) {
+        (Some(value), _) => tracing::info!("apps: {GSK_RENDERER}={value} from the session"),
+        (None, true) => tracing::info!("apps: GTK picks its GPU renderer"),
+        (None, false) => tracing::info!("apps: drawn with the CPU ({GSK_RENDERER}=cairo)"),
+    }
     let render_formats: FormatSet = renderer.egl_context().dmabuf_render_formats().clone();
     let shm_formats: Vec<_> = renderer.shm_formats().collect();
 
@@ -252,7 +271,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         cursor_key: None,
         pointer_devices: Vec::new(),
         blur: Blur::default(),
-        software,
+        rendering,
+        client_env,
     };
     let mut state = BuntState::new(
         display,
@@ -768,7 +788,7 @@ impl BuntState {
         // 그린다. 프레임마다 CPU로 합성하므로 그보다 자주 그리면 CPU만 쓴다. 앱도 프레임 알림을
         // 그만큼 받으므로 애니메이션을 60Hz로 그린다
         let since = surface.rendered_at.map(|at| at.elapsed());
-        if self.backend.software
+        if self.backend.rendering.cpu_composited
             && let Some(since) = since.filter(|since| *since < SOFTWARE_FRAME)
         {
             self.schedule_redraw_after(crtc, SOFTWARE_FRAME - since);
@@ -1111,7 +1131,7 @@ impl BuntState {
         for window in self.space.elements() {
             // 소프트웨어 렌더러에서는 앞에 있지 않은 창(시스템 모니터의 그래프 등)이 애니메이션을
             // 30Hz로 그리게 한다. 뒤의 창이 60Hz로 그리면 그 합성만으로 CPU 한 코어의 절반을 썼다
-            if self.backend.software
+            if self.backend.rendering.cpu_composited
                 && !window.toplevel().is_some_and(|toplevel| {
                     Self::has_state(toplevel, xdg_toplevel::State::Activated)
                 })
@@ -1361,22 +1381,6 @@ fn device_info(device: &InputDevice) -> PointerDevice {
         bus,
         touchpad: device.config_tap_finger_count() > 0,
     }
-}
-
-/// GPU 없이 CPU로 그리는 Mesa 렌더러인지 (GL_RENDERER: "llvmpipe (LLVM …)", "softpipe")
-fn is_software(renderer: &mut GlesRenderer) -> bool {
-    let name = renderer
-        .with_context(|gl| unsafe {
-            let name = gl.GetString(ffi::RENDERER);
-            (!name.is_null()).then(|| CStr::from_ptr(name.cast()).to_string_lossy().into_owned())
-        })
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    tracing::info!("renderer: {name}");
-    ["llvmpipe", "softpipe", "SwiftShader"]
-        .iter()
-        .any(|software| name.contains(software))
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ mod blur;
 mod config;
 mod cursor;
 mod dbus;
+mod gpu;
 mod grabs;
 mod ime;
 mod input;

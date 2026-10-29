@@ -14,8 +14,8 @@ export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=buntOS:GNOME
 export XCURSOR_THEME=Adwaita
 export XCURSOR_SIZE=24
-# 컴포지터가 아직 dmabuf를 지원하지 않아 GTK는 CPU로 그린다
-export GSK_RENDERER=cairo
+# GTK의 렌더러(GSK_RENDERER)는 컴포지터가 자기 렌더러를 보고 정한다. CPU로 그리면 cairo를 주고, GPU가
+# 있으면 GTK가 고르게 둔다 (comp/src/gpu.rs). 여기서 정하면 컴포지터는 그 값을 그대로 물려준다
 
 # 앱의 창 단추를 macOS의 신호등으로 그린다. GTK는 시스템 전체에 입힐 CSS를 따로 읽지 않으므로,
 # 사용자 CSS가 없을 때만 buntOS 모양을 읽는 사용자 CSS를 만든다. 사용자가 만든 파일은 건드리지 않는다

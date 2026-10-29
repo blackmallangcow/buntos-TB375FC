@@ -27,8 +27,7 @@ export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=buntOS
 export XCURSOR_THEME=Adwaita
 export XCURSOR_SIZE=24
-# 컴포지터가 아직 dmabuf를 지원하지 않아 GTK는 CPU로 그린다
-export GSK_RENDERER=cairo
+# GTK의 렌더러(GSK_RENDERER)는 컴포지터가 자기 렌더러를 보고 정한다 (comp/src/gpu.rs, 사용자 세션과 같다)
 # 로그인 화면에는 데스크톱 포털이 없다. GTK가 포털을 기다리지 않게 한다 (기다리면 25초씩 두 번)
 export GDK_DEBUG=no-portals
 export BUNT_COMP_CONFIG=/etc/buntos/greeter.toml
