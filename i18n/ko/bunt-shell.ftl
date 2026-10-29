@@ -189,3 +189,25 @@ force-quit-confirm-title = ‘{ $app }’을(를) 강제 종료하겠습니까?
 force-quit-confirm-message = 저장하지 않은 변경 사항은 손실됩니다.
 # $error: 까닭
 force-quit-failed = 강제 종료하지 못했습니다: { $error }
+
+## Wi-Fi 암호 창 (secret_agent.rs, NetworkManager 비밀 에이전트). macOS의 Wi-Fi 암호 창을 따른다.
+## $name은 네트워크 이름(Wi-Fi는 SSID, 아니면 연결 이름), $security는 wpa2, wpa3, wep, leap
+secret-wifi-title = Wi-Fi 네트워크 “{ $name }”에 { $security ->
+        [wpa3] WPA3
+        [wep] WEP
+        [leap] LEAP
+       *[wpa2] WPA2
+    } 암호가 필요합니다.
+secret-wifi-enterprise-title = Wi-Fi 네트워크 “{ $name }”에 WPA2 엔터프라이즈 자격 증명이 필요합니다.
+secret-wired-title = 네트워크 “{ $name }”에 연결하려면 암호가 필요합니다.
+secret-private-key-title = 네트워크 “{ $name }”에 연결하려면 인증서 개인 키의 암호가 필요합니다.
+# NetworkManager가 틀린 암호를 다시 물을 때(REQUEST_NEW)
+secret-retry = 암호가 올바르지 않습니다.
+secret-user-name = 사용자 이름
+secret-password = 암호
+secret-private-key-password = 개인 키 암호
+secret-show-password = 암호 보기
+secret-cancel = 취소
+secret-join = 연결
+# 관리자 인증 창의 설명(auth-action-…). Wi-Fi 암호를 시스템 연결에 저장할 때 NetworkManager가 묻는다
+auth-action-org-freedesktop-NetworkManager-settings-modify-system = 모든 사용자의 네트워크 설정을 바꾸려고 합니다.

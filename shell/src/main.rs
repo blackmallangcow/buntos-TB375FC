@@ -29,6 +29,9 @@ mod toplevels;
 mod wallpaper;
 // 로고 메뉴의 강제 종료, 잠자기, 화면 잠금, 로그아웃
 mod session;
+// 시스템 서비스가 사람에게 묻는 창: Wi-Fi 암호(NetworkManager 비밀 에이전트)와 그 틀
+mod secret_agent;
+mod service_dialog;
 
 use std::rc::Rc;
 
@@ -79,6 +82,8 @@ fn main() -> glib::ExitCode {
         polkit_agent::start(app, &tr);
         // 허용하지 않은 AI가 이 컴퓨터를 제어하려 하면 묻고 시스템 설정으로 바로 보내는 창
         agent_access::start(app, &tr);
+        // 저장된 Wi-Fi의 암호가 바뀌었거나 새 네트워크에 암호가 필요할 때 NetworkManager가 묻는 창
+        secret_agent::start(app, &tr);
         let services = Services {
             network: Network::start(),
             bluetooth: Bluetooth::start(),

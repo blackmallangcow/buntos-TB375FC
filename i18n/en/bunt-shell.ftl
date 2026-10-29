@@ -192,3 +192,25 @@ force-quit-confirm-title = Do you want to force “{ $app }” to quit?
 force-quit-confirm-message = You will lose any unsaved changes.
 # $error: the reason
 force-quit-failed = Couldn’t force the app to quit: { $error }
+
+## Wi-Fi password dialog (secret_agent.rs, NetworkManager secret agent), like the macOS Wi-Fi password dialog.
+## $name is the network name (the SSID for Wi-Fi, otherwise the connection name), $security is wpa2, wpa3, wep or leap
+secret-wifi-title = The Wi-Fi network “{ $name }” requires a { $security ->
+        [wpa3] WPA3
+        [wep] WEP
+        [leap] LEAP
+       *[wpa2] WPA2
+    } password.
+secret-wifi-enterprise-title = The Wi-Fi network “{ $name }” requires WPA2 enterprise credentials.
+secret-wired-title = The network “{ $name }” requires a password.
+secret-private-key-title = The network “{ $name }” requires the password of your certificate’s private key.
+# When NetworkManager asks again after a wrong password (REQUEST_NEW)
+secret-retry = The password is incorrect.
+secret-user-name = User Name
+secret-password = Password
+secret-private-key-password = Private Key Password
+secret-show-password = Show password
+secret-cancel = Cancel
+secret-join = Join
+# Administrator authentication message (auth-action-…). NetworkManager asks when it saves a Wi-Fi password in a system connection
+auth-action-org-freedesktop-NetworkManager-settings-modify-system = { $app } wants to change network settings for all users.

@@ -3,7 +3,9 @@
 
 //! Wi-Fi: 켜고 끄기, 연결된 네트워크, 알고 있는 네트워크, 다른 네트워크, 숨은 네트워크.
 //! NetworkManager D-Bus를 쓰고, 페이지가 보이는 동안 주기적으로 주변 네트워크를 다시 찾는다.
-//! 암호가 틀려 연결하지 못하면 방금 저장한 연결을 지운다 (암호를 다시 묻는 비밀 에이전트는 아직 없다)
+//! 새 네트워크의 첫 암호는 이 페이지의 시트가 받는다. 암호가 틀리거나 저장된 네트워크의 암호가
+//! 바뀌면 NetworkManager가 셸의 비밀 에이전트(Wi-Fi 암호 창)에게 다시 묻는다. 그 창에서 취소해
+//! 연결하지 못하면 방금 만든 연결을 지운다
 
 use std::{
     cell::{Cell, RefCell},
@@ -649,7 +651,8 @@ impl WifiPage {
                 .await
             {
                 Ok((connection, active)) => {
-                    if !manager.wait_for_activation(&active).await {
+                    // 연결 중(Pending)이면 비밀 에이전트가 아직 암호를 묻고 있을 수 있어 지우지 않는다
+                    if manager.wait_for_activation(&active).await == nm::Activation::Failed {
                         // 틀린 암호로 저장된 연결을 남기지 않는다
                         let _ = manager.delete(&connection).await;
                         page.notify_join_failed(&name);
@@ -688,7 +691,7 @@ impl WifiPage {
             };
             match manager.activate(Some(&connection), &device, None).await {
                 Ok(active) => {
-                    if !manager.wait_for_activation(&active).await {
+                    if manager.wait_for_activation(&active).await == nm::Activation::Failed {
                         page.notify_join_failed(&name);
                     }
                 }

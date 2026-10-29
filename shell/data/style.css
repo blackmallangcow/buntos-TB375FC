@@ -1001,3 +1001,16 @@ list.force-quit-list > row:selected .force-quit-hung {
 .force-quit-confirm-icon {
   margin-bottom: var(--space-2);
 }
+
+/* 시스템 서비스가 묻는 창(service_dialog.rs): Wi-Fi 암호 창, Bluetooth 페어링 창. 판과 칸, 단추는 관리자
+ * 인증 창의 auth-* 클래스를 같이 쓴다. 타일은 시스템 설정의 Wi-Fi·Bluetooth 배지와 같은 파랑이다 */
+.service-tile {
+  background-image: linear-gradient(to bottom, color-mix(in srgb, var(--blue) 75%, white), var(--blue));
+}
+
+/* "암호 보기" 체크 상자 */
+checkbutton.auth-check {
+  margin-top: calc(var(--space-1) * -1);
+  font-size: var(--text-footnote);
+  color: var(--label);
+}

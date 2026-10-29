@@ -4,10 +4,11 @@
 //! 메뉴 막대의 네트워크(Wi-Fi) 항목. NetworkManager가 알려 주는 연결 방식(유선, Wi-Fi)과 상태를
 //! 아이콘으로 보인다. Wi-Fi 장치가 있으면 누를 때 macOS의 Wi-Fi 메뉴처럼 켜고 끄는 스위치,
 //! 연결된 네트워크, 알고 있는 네트워크, 기타 네트워크가 나오고, 없으면 연결 상태를 글로 보인다.
-//! 암호가 필요한 새 네트워크는 시스템 설정의 Wi-Fi 페이지에서 암호를 받는다.
-//! NetworkManager가 없으면 항목을 숨긴다.
+//! 암호가 필요한 새 네트워크는 연결을 만들어 켜고, 암호는 NetworkManager가 셸의 비밀 에이전트
+//! (secret_agent.rs)에게 묻는다. 사용자 이름이 필요한 회사·학교 네트워크(802.1X)나 에이전트가 없을 때는
+//! 시스템 설정의 Wi-Fi 페이지를 연다. NetworkManager가 없으면 항목을 숨긴다.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use bunt_i18n::{FluentArgs, Translations};
 use gtk4::{self as gtk, gio, glib, prelude::*};
@@ -16,6 +17,7 @@ use crate::{
     dbus,
     extras::{self, Listeners, Menu, Row, Visibility},
     menubar::open_settings,
+    secret_agent,
 };
 
 const NM_NAME: &str = "org.freedesktop.NetworkManager";
@@ -31,6 +33,16 @@ const CONNECTION_INTERFACE: &str = "org.freedesktop.NetworkManager.Settings.Conn
 const WIRELESS: &str = "802-11-wireless";
 /// NMDeviceType: Wi-Fi
 const DEVICE_TYPE_WIFI: u32 = 2;
+/// NM80211ApSecurityFlags: 802.1X 키 관리 (회사·학교 네트워크)
+const KEY_MGMT_802_1X: u32 = 0x200;
+
+/// NMActiveConnectionState
+const ACTIVE_ACTIVATED: u32 = 2;
+const ACTIVE_DEACTIVATED: u32 = 4;
+/// 새로 만든 연결이 끝나기를 지켜보는 최대 시간. NetworkManager는 비밀 에이전트에게 한 번에 120초까지
+/// 묻고 틀린 암호면 다시 묻는다. 이 시간이 지나도 끝나지 않으면 연결을 지우지 않고 그대로 둔다
+const JOIN_WATCH: Duration = Duration::from_secs(600);
+const JOIN_POLL: Duration = Duration::from_millis(500);
 
 /// NetworkManager의 NMState 값
 const CONNECTING: u32 = 40;
@@ -89,6 +101,39 @@ pub struct AccessPoint {
     pub ssid: String,
     pub strength: u8,
     pub secure: bool,
+    /// 회사·학교 네트워크(802.1X). 사용자 이름이 있어야 연결을 만들 수 있다
+    pub enterprise: bool,
+}
+
+/// 메뉴에서 네트워크를 눌렀을 때 할 일
+#[derive(Debug, PartialEq, Eq)]
+enum Join {
+    /// 저장된 연결을 켠다
+    Saved,
+    /// 새 연결을 만들어 켠다. 암호가 필요하면 NetworkManager가 비밀 에이전트에게 묻는다
+    New,
+    /// 시스템 설정의 Wi-Fi 페이지를 연다
+    Settings,
+}
+
+fn join_kind(access_point: &AccessPoint, saved: bool, agent_registered: bool) -> Join {
+    if saved {
+        Join::Saved
+    } else if access_point.enterprise || (access_point.secure && !agent_registered) {
+        Join::Settings
+    } else {
+        Join::New
+    }
+}
+
+/// 활성 연결의 상태(NMActiveConnectionState)로 본 연결 결과. 사라진 활성 연결(None)은 실패한 것이다.
+/// 아직 연결 중이면 None
+fn join_result(state: Option<u32>) -> Option<bool> {
+    match state {
+        Some(ACTIVE_ACTIVATED) => Some(true),
+        Some(ACTIVE_DEACTIVATED) | None => Some(false),
+        Some(_) => None,
+    }
 }
 
 /// 네트워크 상태. 복제해도 같은 상태를 가리킨다. 제어 센터의 Wi-Fi 칸도 같은 것을 쓴다
@@ -334,9 +379,9 @@ impl Network {
                 .and_then(|value| value.get::<u8>())
                 .unwrap_or(0);
             // 암호화 플래그(WPA, RSN)나 개인정보 플래그가 있으면 암호가 필요하다
-            let secure = get_u32("WpaFlags").unwrap_or(0) != 0
-                || get_u32("RsnFlags").unwrap_or(0) != 0
-                || get_u32("Flags").unwrap_or(0) & 1 != 0;
+            let security = get_u32("WpaFlags").unwrap_or(0) | get_u32("RsnFlags").unwrap_or(0);
+            let secure = security != 0 || get_u32("Flags").unwrap_or(0) & 1 != 0;
+            let enterprise = security & KEY_MGMT_802_1X != 0;
             match found.iter_mut().find(|ap| ap.ssid == ssid) {
                 Some(existing) if existing.strength >= strength => {}
                 Some(existing) => {
@@ -345,6 +390,7 @@ impl Network {
                         ssid,
                         strength,
                         secure,
+                        enterprise,
                     }
                 }
                 None => found.push(AccessPoint {
@@ -352,6 +398,7 @@ impl Network {
                     ssid,
                     strength,
                     secure,
+                    enterprise,
                 }),
             }
         }
@@ -414,8 +461,10 @@ impl Network {
         saved
     }
 
-    /// 네트워크에 연결한다. 저장된 연결이 있거나 암호가 없는 네트워크만 바로 연결하고,
-    /// 암호가 필요한 새 네트워크는 시스템 설정의 Wi-Fi 페이지를 연다
+    /// 네트워크에 연결한다. 저장된 연결은 그대로 켜고(암호가 바뀌었으면 NetworkManager가 비밀
+    /// 에이전트에게 다시 묻는다), 새 네트워크는 연결을 만들어 켠다. 사용자 이름이 필요한 회사·학교
+    /// 네트워크나, 비밀 에이전트가 없는데 암호가 필요한 네트워크는 시스템 설정의 Wi-Fi 페이지를 연다.
+    /// 예전에는 암호가 필요한 새 네트워크를 모두 시스템 설정으로 보냈다
     pub fn join(&self, access_point: &AccessPoint, saved: Option<&str>) {
         let (Some(manager), Some(device)) = (self.manager(), self.0.wifi_device.borrow().clone())
         else {
@@ -426,9 +475,11 @@ impl Network {
         let (Some(device), Some(ap)) = (device, ap) else {
             return;
         };
-        match saved {
-            Some(saved) => {
-                let Ok(saved) = glib::variant::ObjectPath::try_from(saved.to_owned()) else {
+        match join_kind(access_point, saved.is_some(), secret_agent::registered()) {
+            Join::Saved => {
+                let Some(Ok(saved)) =
+                    saved.map(|saved| glib::variant::ObjectPath::try_from(saved.to_owned()))
+                else {
                     return;
                 };
                 dbus::call(
@@ -437,17 +488,84 @@ impl Network {
                     Some(&(saved, device, ap).to_variant()),
                 );
             }
-            None if !access_point.secure => {
-                let settings: HashMap<String, HashMap<String, glib::Variant>> = HashMap::new();
-                dbus::call(
-                    &manager,
-                    "AddAndActivateConnection",
-                    Some(&(settings, device, ap).to_variant()),
-                );
+            Join::New => {
+                glib::spawn_future_local(add_and_join(manager.connection(), device, ap));
             }
-            None => open_settings(Some("wifi")),
+            Join::Settings => open_settings(Some("wifi")),
         }
     }
+}
+
+/// 새 연결을 저장하고 켠다. 연결하지 못하면(암호 창에서 취소, 시간 초과) 만든 연결을 지워
+/// 알고 있는 네트워크에 남기지 않는다. 틀린 암호는 NetworkManager가 비밀 에이전트에게 다시 묻는다
+async fn add_and_join(
+    connection: gio::DBusConnection,
+    device: glib::variant::ObjectPath,
+    ap: glib::variant::ObjectPath,
+) {
+    // 빈 설정을 주면 NetworkManager가 접속 지점에 맞춰 보안 방식까지 채운다
+    let settings: HashMap<String, HashMap<String, glib::Variant>> = HashMap::new();
+    let reply = connection
+        .call_future(
+            Some(NM_NAME),
+            NM_PATH,
+            NM_INTERFACE,
+            "AddAndActivateConnection",
+            Some(&(settings, device, ap).to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            -1,
+        )
+        .await;
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(err) => {
+            eprintln!("bunt-shell: Wi-Fi: {err}");
+            return;
+        }
+    };
+    let path = |index| {
+        reply
+            .child_value(index)
+            .get::<glib::variant::ObjectPath>()
+            .map(|path| path.as_str().to_owned())
+    };
+    let (Some(saved), Some(active)) = (path(0), path(1)) else {
+        return;
+    };
+    if wait_for_join(&connection, &active).await != Some(false) {
+        return;
+    }
+    let deleted = connection
+        .call_future(
+            Some(NM_NAME),
+            &saved,
+            CONNECTION_INTERFACE,
+            "Delete",
+            None,
+            None,
+            gio::DBusCallFlags::NONE,
+            -1,
+        )
+        .await;
+    if let Err(err) = deleted {
+        eprintln!("bunt-shell: Wi-Fi: {err}");
+    }
+}
+
+/// 활성 연결이 켜지거나 꺼질 때까지 기다린다. JOIN_WATCH가 지나도 연결 중이면 None
+async fn wait_for_join(connection: &gio::DBusConnection, active: &str) -> Option<bool> {
+    let started = std::time::Instant::now();
+    while started.elapsed() < JOIN_WATCH {
+        let state = property_value(connection, active, ACTIVE_INTERFACE, "State")
+            .await
+            .and_then(|value| value.get::<u32>());
+        if let Some(joined) = join_result(state) {
+            return Some(joined);
+        }
+        glib::timeout_future(JOIN_POLL).await;
+    }
+    None
 }
 
 /// 객체 하나의 속성 값 (org.freedesktop.DBus.Properties.Get)
@@ -673,6 +791,38 @@ mod tests {
             describe(70, WIRELESS, Some(40)).icon,
             "network-wireless-signal-ok-symbolic"
         );
+    }
+
+    fn point(secure: bool, enterprise: bool) -> AccessPoint {
+        AccessPoint {
+            path: "/org/freedesktop/NetworkManager/AccessPoint/1".into(),
+            ssid: "Lab".into(),
+            strength: 70,
+            secure,
+            enterprise,
+        }
+    }
+
+    #[test]
+    fn new_secure_networks_ask_through_the_secret_agent() {
+        assert_eq!(join_kind(&point(true, false), true, true), Join::Saved);
+        assert_eq!(join_kind(&point(true, true), true, false), Join::Saved);
+        assert_eq!(join_kind(&point(false, false), false, false), Join::New);
+        assert_eq!(join_kind(&point(true, false), false, true), Join::New);
+        // 에이전트가 없으면 예전처럼 시스템 설정에서 암호를 받는다
+        assert_eq!(join_kind(&point(true, false), false, false), Join::Settings);
+        // 802.1X는 사용자 이름이 있어야 연결을 만들 수 있다
+        assert_eq!(join_kind(&point(true, true), false, true), Join::Settings);
+    }
+
+    #[test]
+    fn joins_end_when_the_active_connection_settles() {
+        assert_eq!(join_result(Some(ACTIVE_ACTIVATED)), Some(true));
+        assert_eq!(join_result(Some(ACTIVE_DEACTIVATED)), Some(false));
+        assert_eq!(join_result(None), Some(false));
+        // 활성화 중(1)과 끄는 중(3)은 더 기다린다
+        assert_eq!(join_result(Some(1)), None);
+        assert_eq!(join_result(Some(3)), None);
     }
 
     #[test]

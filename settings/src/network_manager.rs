@@ -36,8 +36,30 @@ pub const STATE_ACTIVATED: u32 = 100;
 const ACTIVE_ACTIVATED: u32 = 2;
 const ACTIVE_DEACTIVATED: u32 = 4;
 
-/// 연결을 기다리는 최대 시간
-const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(45);
+/// 연결을 기다리는 최대 시간. 암호가 틀리면 NetworkManager가 셸의 비밀 에이전트에게 다시 묻고(한 번에
+/// 120초까지) 사용자가 고쳐 넣는 동안에도 연결 중이다. 예전 45초는 그 사이에 끝나 연결을 지웠다
+const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// 켠 연결을 기다린 결과
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation {
+    Activated,
+    /// 연결하지 못했다 (암호를 다시 묻는 창에서 취소했거나 NetworkManager가 포기했다)
+    Failed,
+    /// 기다리는 시간이 지났는데 아직 연결 중이다
+    Pending,
+}
+
+impl Activation {
+    /// 활성 연결의 상태(NMActiveConnectionState)로 정한다. 실패한 활성 연결은 곧바로 사라진다(None)
+    fn of(state: Option<u32>) -> Self {
+        match state {
+            Some(ACTIVE_ACTIVATED) => Self::Activated,
+            Some(ACTIVE_DEACTIVATED) | None => Self::Failed,
+            Some(_) => Self::Pending,
+        }
+    }
+}
 
 /// 장치 상태를 사람이 읽는 말로 나눈 것
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,23 +467,25 @@ impl Manager {
         Ok((path(0), path(1)))
     }
 
-    /// 켠 연결이 다 켜질 때까지 기다린다. 실패하거나 시간이 지나면 false
-    pub async fn wait_for_activation(&self, active: &str) -> bool {
+    /// 켠 연결이 다 켜지거나 꺼질 때까지 기다린다. 예전에는 시간이 지나면 실패(false)로 보아
+    /// 연결 중인 새 연결을 지웠다. 이제 시간이 지나면 Pending을 돌려주고 지우지 않는다
+    pub async fn wait_for_activation(&self, active: &str) -> Activation {
         let object = self.remote.at(active);
         let started = std::time::Instant::now();
         while started.elapsed() < ACTIVATION_TIMEOUT {
-            match object.get(ACTIVE, "State").await {
-                Ok(value) => match value.get::<u32>() {
-                    Some(ACTIVE_ACTIVATED) => return true,
-                    Some(ACTIVE_DEACTIVATED) => return false,
-                    _ => {}
-                },
-                // 실패한 활성 연결은 곧바로 사라진다
-                Err(_) => return false,
+            let state = object
+                .get(ACTIVE, "State")
+                .await
+                .ok()
+                .and_then(|value| value.get::<u32>());
+            match Activation::of(state) {
+                Activation::Pending => {
+                    glib::timeout_future(Duration::from_millis(500)).await;
+                }
+                settled => return settled,
             }
-            glib::timeout_future(Duration::from_millis(500)).await;
         }
-        false
+        Activation::Pending
     }
 
     pub async fn delete(&self, connection: &str) -> Result<(), glib::Error> {
@@ -539,6 +563,15 @@ mod tests {
         assert_eq!(Security::from_flags(1, 0, 0x588), Security::Personal);
         assert_eq!(Security::from_flags(1, 0, 0x488), Security::Wpa3);
         assert_eq!(Security::from_flags(1, 0, 0x288), Security::Enterprise);
+    }
+
+    #[test]
+    fn activation_waits_until_the_connection_settles() {
+        assert_eq!(Activation::of(Some(2)), Activation::Activated);
+        assert_eq!(Activation::of(Some(4)), Activation::Failed);
+        assert_eq!(Activation::of(None), Activation::Failed);
+        // 켜는 중(1)에는 비밀 에이전트가 암호를 다시 묻고 있을 수 있다
+        assert_eq!(Activation::of(Some(1)), Activation::Pending);
     }
 
     #[test]
