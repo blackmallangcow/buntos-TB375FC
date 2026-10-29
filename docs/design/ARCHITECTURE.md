@@ -1,8 +1,9 @@
-# buntOS 설계안 v0.5.3
+# buntOS 설계안 v0.5.4
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
 - 개정 이력
+  - v0.5.4 (2026-10-29): 6.5절에 입력기(fcitx5)에만 데스크톱 이름을 `buntOS`로 주는 까닭(GNOME이 보이면 GNOME 셸 확장을 깔라고 알린다)과 fcitx5의 Wayland 진단 알림을 감추는 기본 설정을 적었다
   - v0.5.3 (2026-10-29): 6.5절에 세션 데스크톱 이름(`buntOS:GNOME`)과 Electron 앱의 비밀 저장소를, 6.1·6.3·6.4·6.6절과 9.2절, 11장에 에이전트 2차 사용 후기의 반영(스크롤 동작, 화면 밖 웹 요소의 ref와 자동 스크롤, 웹 페이지 글, 불러오는 동안 기다리기, 앱을 끝내는 동작, 숨긴 GTK4 페이지, ref와 `--app`)을 적었다
   - v0.5.2 (2026-10-29): 6.5절과 11장에 AI 접근 요청 창(허용하지 않은 AI가 붙으면 셸이 묻고 시스템 설정의 추가 시트를 그 AI를 고른 채로 연다)과 업데이트해도 풀리지 않는 허용 목록(판 번호·빌드 해시 패턴)을 반영했다. 6.2~6.6절과 9.2절에 에이전트 사용 후기의 반영(입력 결과 확인, `--keep-focus`·`--keys`·`--settle`, 세션을 열 때 접근성 켜기, 시각 경로 v0)을, 6.1·6.5절과 10장에 login 키링(gnome-keyring)과 처음 켤 때 루트 늘리기를 적었다
   - v0.5.1 (2026-10-29): 5.3절에 키보드 단축키(macOS식 ⌘ 단축키를 앱의 키로 옮겨 보내기, 컴포지터가 하는 앱 전환·최소화·가리기·스크린샷, 단축키 API와 시스템 설정의 단축키 시트)를, 9.2절에 e2e 6번을, 11장에 진행 상황과 다음 작업 순서를 반영했다. 계정의 "전체 이름"을 "별칭"으로 부른다
@@ -511,6 +512,8 @@ v0 구현 (2026-10-29, 접근 정책):
   - 세션의 `XDG_CURRENT_DESKTOP`은 `buntOS:GNOME`이다(앞이 우선인 목록, 세션 스크립트 `/usr/libexec/buntos/session`이 정한다). Electron 앱(Claude 데스크톱 앱 등)의 safeStorage는 이 목록에 GNOME·KDE·XFCE처럼 아는 데스크톱이 있어야 비밀 저장소로 키링(libsecret)을 고르고, 없으면 키링이 있어도 평문(`basic_text`)에 저장한다. `buntOS`만 두었을 때 Claude 앱이 "시스템 키링을 사용할 수 없습니다"라고 알렸고 로그인 토큰을 남기지 못했다(2026-10-29, 앱 로그 `backend=basic_text`). 우분투의 `ubuntu:GNOME`과 같은 방식이다.
     - Chromium 156(Debian)은 모르는 데스크톱이면 Secret 포털(우리 설정으로 gnome-keyring)을 써서 이미 키링에 저장했다(`Local State`의 `os_crypt.portal`). Electron의 safeStorage에는 이 길이 없다.
     - buntOS가 먼저라 포털은 `buntos-portals.conf`(GTK 구현)를 그대로 쓴다. 세션이 XDG 자동 시작을 돌리지 않으므로 GNOME 전용 자동 시작 항목(gnome-keyring, localsearch)도 뜨지 않는다. 로그인 화면 세션은 `buntOS` 그대로다.
+    - 입력기(fcitx5)에는 `buntOS`만 준다(`comp.toml`의 `[session] input-method`). fcitx5는 이 목록에 GNOME이 있으면 GNOME 셸로 알고, 입력기 팝업을 보이려면 셸 확장(kimpanel)을 깔라고 알림을 띄웠다. GNOME 셸은 입력기 프로토콜을 열지 않아 그 확장이 팝업을 그려야 하지만, buntOS는 컴포지터가 input-method-v2로 팝업을 글자 커서 아래에 띄우므로 맞지 않는 안내였다.
+    - fcitx5가 다른 환경으로 떠도(터미널에서 띄우기 등) 그 안내가 사용자를 헷갈리게 하지 않도록, fcitx5의 Wayland 진단 알림(GNOME 셸 확장, KWin, 입력 모듈 환경 변수 안내) 셋을 기본 설정 `/etc/xdg/fcitx5/conf/notifications.conf`의 `HiddenNotifications`로 감춘다. 알림의 "다시 표시 안함"이 쓰는 목록과 같다. 사용자의 `~/.config/fcitx5`에 같은 파일이 생기면 그쪽이 앞선다.
 - 한계와 다음 단계:
   - 데몬이 지키는 정책이다. 같은 사용자로 도는 AI가 접근성 버스에 직접 붙으면 막지 못한다.
   - 경로로 알아보므로, 허용한 프로그램을 실행할 수 있는 프로그램은 그 권한을 얻는다.
