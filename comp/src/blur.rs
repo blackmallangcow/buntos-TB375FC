@@ -681,6 +681,10 @@ unsafe fn draw(
         gl.Uniform1i(program.tex, 0);
         gl.ActiveTexture(ffi::TEXTURE1);
         gl.BindTexture(ffi::TEXTURE_2D, mask);
+        // smithay는 표면 텍스처의 축소 필터를 그 텍스처를 그릴 때마다 정하고, 새로 만든 텍스처(표면 크기가
+        // 바뀐 첫 프레임)에는 GL 기본값(밉맵)이 남아 있다. 밉맵이 없으면 불완전한 텍스처라 알파가 1로
+        // 읽혀 유리가 아닌 곳까지 흐림이 덮였고, 그 프레임의 화면 버퍼에만 남아 깜빡였다
+        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
         gl.Uniform1i(program.mask, 1);
         gl.Uniform1f(program.saturation, SATURATION);
         gl.Uniform2f(program.edges, MASK_LOW, MASK_HIGH);
