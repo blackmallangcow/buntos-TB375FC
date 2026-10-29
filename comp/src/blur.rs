@@ -1231,7 +1231,7 @@ mod tests {
 
     use smithay::{
         backend::{
-            allocator::{Fourcc, Modifier},
+            allocator::{Format, Fourcc, Modifier},
             renderer::element::memory::MemoryRenderBuffer,
         },
         utils::{Point, Transform},
@@ -1344,6 +1344,20 @@ mod tests {
         let shm = client.bind("wl_shm", 1).unwrap();
         let dmabuf = client.bind("zwp_linux_dmabuf_v1", 5).unwrap();
         Some((server, client, compositor, shm, dmabuf))
+    }
+
+    /// 렌더러가 선형 Argb8888 dmabuf를 보통 텍스처로 가져오는지. Mesa 25.0의 llvmpipe는 선형 dmabuf를
+    /// 모두 외부 텍스처로만 가져와 가림으로 쓰지 않는다(25.2는 보통 텍스처)
+    fn argb_dmabufs_are_textures(server: &mut Server) -> bool {
+        let linear = Format {
+            code: Fourcc::Argb8888,
+            modifier: Modifier::Linear,
+        };
+        server
+            .renderer()
+            .egl_context()
+            .dmabuf_render_formats()
+            .contains(&linear)
     }
 
     /// 버퍼 하나를 붙여 커밋한 표면
@@ -1532,6 +1546,10 @@ mod tests {
             eprintln!("skipped: no software EGL device");
             return;
         };
+        if !argb_dmabufs_are_textures(&mut server) {
+            eprintln!("skipped: the renderer imports Argb8888 dmabufs only as external textures");
+            return;
+        }
         let buffer = client.dmabuf_buffer(
             &dmabuf,
             (SIZE, SIZE),
@@ -1563,6 +1581,10 @@ mod tests {
             eprintln!("skipped: no software EGL device");
             return;
         };
+        if !argb_dmabufs_are_textures(&mut server) {
+            eprintln!("skipped: the renderer imports Argb8888 dmabufs only as external textures");
+            return;
+        }
         // 메모리의 위쪽 절반이 유리다. 위아래가 뒤집힌 버퍼이므로 화면에서는 아래쪽 절반이 유리다
         let buffer = client.dmabuf_buffer(
             &dmabuf,
@@ -1632,6 +1654,12 @@ mod tests {
             &client.qh,
             (),
         );
+        // Mesa 25.0의 llvmpipe는 NV12를 알리기만 하고 가져오지 못한다(25.2는 가져온다)
+        server.pump(&mut client);
+        if client.protocol_error().is_some() {
+            eprintln!("skipped: the renderer could not import NV12");
+            return;
+        }
         commit(&mut server, &mut client, &compositor, &buffer);
         let surface = server.state.surfaces[0].clone();
         let scale = Scale::from(1.0);
