@@ -17,6 +17,7 @@ use gtk4::{self as gtk, gdk, gio, prelude::*};
 use gtk4_layer_shell::{Edge, LayerShell};
 
 use crate::{
+    clip_input_to_child,
     config::{Builtin, Config, DockItem},
     launcher::{self, Launcher},
     layer_window, shell_settings,
@@ -75,8 +76,8 @@ pub fn app_button_content(image: &gtk::Image) -> (gtk::Box, gtk::Box) {
     (content, dot)
 }
 
-/// Dock 판의 가로 바깥 여백(--space-4), 안쪽 여백(10px), 테두리를 양쪽 더한 것 (style.css)
-const DOCK_CHROME: i32 = 2 * 16 + 2 * 10 + 2;
+/// Dock 판의 가로 바깥 여백(그림자 자리 28px), 안쪽 여백(10px), 테두리를 양쪽 더한 것 (style.css)
+const DOCK_CHROME: i32 = 2 * 28 + 2 * 10 + 2;
 /// 단추 안에서 아이콘 밖의 너비(좌우 4px)와 단추 사이 간격 (style.css, build의 spacing)
 const ITEM_PADDING: i32 = 8;
 const ITEM_SPACING: i32 = 6;
@@ -148,6 +149,8 @@ pub fn build(
     window.set_anchor(Edge::Bottom, true);
     window.set_margin(Edge::Bottom, config.dock.margin_bottom);
     window.auto_exclusive_zone_enable();
+    // 판 둘레의 그림자 여백은 클릭을 받지 않는다
+    clip_input_to_child(&window);
     // gtk4-layer-shell은 표면 크기를 전체 화면 창의 크기처럼 GTK에 알리고, GTK는 다음 알림이 올
     // 때까지 그 크기를 쓴다. 크기를 바꿀 수 있는 창이면 최소 크기보다 작을 때만 늘려서, 아이콘이
     // 작아져도 Dock은 줄지 않는다. 크기를 바꿀 수 없는 창은 그 크기를 내용의 크기로 맞춘다
@@ -406,8 +409,8 @@ mod tests {
         // 1024×640처럼 보이는 화면에는 기본 Dock(앱 10개)이 그대로 들어간다
         assert_eq!(icon_size_for(1024, 10, false, 48), 48);
         // 좁은 화면이나 실행 중인 앱이 많으면 줄인다
-        assert_eq!(icon_size_for(640, 10, false, 48), 43);
-        assert_eq!(icon_size_for(1024, 16, true, 48), 45);
+        assert_eq!(icon_size_for(640, 10, false, 48), 41);
+        assert_eq!(icon_size_for(1024, 16, true, 48), 43);
         // 그래도 24보다 작게는 줄이지 않는다
         assert_eq!(icon_size_for(400, 20, true, 48), 24);
         assert_eq!(icon_size_for(1024, 0, false, 48), 48);

@@ -115,8 +115,9 @@ window.bunt-wallpaper.background {
 
 /* Dock: 유리 판. 바탕의 투명도는 시스템 설정을 따라 셸이 덮어쓴다(dock.rs) */
 .dock {
-  /* 그림자가 창 경계에서 잘리지 않도록 창 안쪽에 여백을 둔다 */
-  margin: var(--space-4);
+  /* 그림자(--shadow-menu, 0 10px 28px)가 창 경계에서 잘리지 않도록 창 안쪽에 여백을 둔다. 아래는 화면
+     가장자리에 닿으므로 짧다. 셸이 입력 영역을 판으로 줄이므로 여백은 뒤 창의 클릭을 막지 않는다 */
+  margin: 18px 28px 16px;
   padding: 6px 10px 4px;
   border-radius: var(--radius-xl);
   background: var(--glass);
