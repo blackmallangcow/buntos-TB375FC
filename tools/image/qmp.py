@@ -13,6 +13,7 @@
   press, release   왼쪽 단추를 누른 채로 두거나 뗀다 (끌기 중간에 화면을 찍을 때 move와 함께 쓴다)
   keys:A+B         키를 함께 누른다 (QEMU qcode 이름, 예: alt+ret)
   type:TEXT        영문 소문자·숫자를 한 글자씩 입력한다
+  wheel:DIR,N      포인터 자리에서 휠을 N눈금 돌린다 (DIR: up, down, left, right)
   sleep:SECONDS    기다린다
   screen:PATH      화면을 PNG로 저장한다 (경로는 QEMU가 보는 경로)
 """
@@ -110,6 +111,13 @@ class Qmp:
     def keys(self, names):
         self.command("send-key", keys=[{"type": "qcode", "data": name} for name in names])
 
+    def wheel(self, direction, count):
+        # 휠 눈금 하나는 wheel-up/down 단추를 눌렀다 떼는 것이다 (QEMU 가상 태블릿의 REL_WHEEL)
+        for _ in range(count):
+            for down in (True, False):
+                self.command("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": f"wheel-{direction}"}}])
+            time.sleep(0.03)
+
 
 def main():
     qmp = Qmp(sys.argv[1])
@@ -134,6 +142,9 @@ def main():
             qmp.button(kind == "press")
         elif kind == "keys":
             qmp.keys(argument.split("+"))
+        elif kind == "wheel":
+            direction, _, count = argument.partition(",")
+            qmp.wheel(direction, int(count or 1))
         elif kind == "type":
             for character in argument:
                 qmp.keys(["spc" if character == " " else character])
