@@ -4,7 +4,10 @@
 //! 알림 센터와 알림 배너. 알림 센터는 메뉴바의 날짜와 시간을 누르면 열리며, 받은 알림과
 //! 달력 위젯을 보인다. 새 알림은 화면 오른쪽 위에 배너로 잠깐 보인다.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use bunt_i18n::{FluentArgs, Translations};
 use gtk4::{self as gtk, glib, prelude::*};
@@ -27,9 +30,19 @@ const PANEL_WIDTH: i32 = CARD_WIDTH + 2 * 10;
 const BANNER_MARGIN: i32 = 10;
 /// 알림 목록이 이보다 길면 스크롤한다
 const LIST_MAX_HEIGHT: i32 = 440;
+/// 접은 카드에 보이는 제목과 본문의 줄 수. macOS처럼 넘치면 "…"로 자른다
+const SUMMARY_LINES: i32 = 1;
+const BODY_LINES: i32 = 2;
+/// 펼친 카드의 제목과 본문의 줄 수 상한. 아주 긴 본문도 카드가 화면을 넘지 않는다. 줄 수를 두지 않으면
+/// (-1) Pango가 말줄임하는 글을 한 줄로 자르므로 늘 줄 수를 준다
+const EXPANDED_SUMMARY_LINES: i32 = 4;
+const EXPANDED_BODY_LINES: i32 = 12;
+/// 카드 안 글 칸의 너비: 카드에서 안쪽 여백(style.css의 --space-3, 양쪽), 아이콘(32px), 간격(10px)을 뺀 것
+const TEXT_WIDTH: i32 = CARD_WIDTH - 2 * 12 - 32 - 10;
 
-/// 알림 카드: 아이콘, 앱 이름, 시간, 제목, 본문, 동작 단추, 닫기 단추.
-/// 카드를 누르면 앱에 알리고 치운다.
+/// 알림 카드: 아이콘, 앱 이름, 시간, 제목, 본문, 동작 단추, 펼침·닫기 단추. 카드를 누르면 앱에 알리고
+/// 치운다. 접은 카드는 제목 한 줄과 본문 두 줄까지라 긴 알림도 카드가 길어지지 않는다. 글이 넘치거나
+/// 동작 단추가 있으면 펼침 단추가 보이고, 펼치면 글을 다 보이고 동작 단추를 꺼낸다(macOS와 같다)
 fn card(notification: &Notification, notifications: &Notifications, tr: &Translations) -> gtk::Box {
     let id = notification.id;
     let icon = match &notification.icon {
@@ -55,6 +68,19 @@ fn card(notification: &Notification, notifications: &Notifications, tr: &Transla
             .css_classes(["card-time"])
             .build(),
     );
+    let (more, less) = (
+        tr.get("notifications-expand"),
+        tr.get("notifications-collapse"),
+    );
+    let expand = gtk::Button::builder()
+        .icon_name("pan-down-symbolic")
+        .valign(gtk::Align::Center)
+        .tooltip_text(&more)
+        .visible(!notification.actions.is_empty())
+        .css_classes(["card-expand"])
+        .build();
+    expand.update_property(&[gtk::accessible::Property::Label(&more)]);
+    header.append(&expand);
     let close = gtk::Button::builder()
         .icon_name("window-close-symbolic")
         .valign(gtk::Align::Center)
@@ -70,32 +96,34 @@ fn card(notification: &Notification, notifications: &Notifications, tr: &Transla
         .hexpand(true)
         .build();
     text.append(&header);
-    if !notification.summary.is_empty() {
-        text.append(
-            &gtk::Label::builder()
-                .label(&notification.summary)
-                .xalign(0.0)
-                .wrap(true)
-                .wrap_mode(gtk::pango::WrapMode::WordChar)
-                .css_classes(["card-summary"])
-                .build(),
-        );
+    let line = |label: &str, lines: i32, class: &str| {
+        gtk::Label::builder()
+            .label(label)
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .lines(lines)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            // 줄바꿈하는 글의 자연 너비는 한 줄로 쓴 너비라, 내용에 크기를 맞추는 배너가 옆으로 늘었다.
+            // 너비는 카드가 정한다
+            .max_width_chars(1)
+            .css_classes([class])
+            .build()
+    };
+    let summary = (!notification.summary.is_empty())
+        .then(|| line(&notification.summary, SUMMARY_LINES, "card-summary"));
+    let body =
+        (!notification.body.is_empty()).then(|| line(&notification.body, BODY_LINES, "card-body"));
+    for label in summary.iter().chain(&body) {
+        text.append(label);
     }
-    if !notification.body.is_empty() {
-        text.append(
-            &gtk::Label::builder()
-                .label(&notification.body)
-                .xalign(0.0)
-                .wrap(true)
-                .wrap_mode(gtk::pango::WrapMode::WordChar)
-                .lines(4)
-                .ellipsize(gtk::pango::EllipsizeMode::End)
-                .css_classes(["card-body"])
-                .build(),
-        );
-    }
-    if !notification.actions.is_empty() {
-        let buttons = gtk::Box::builder().spacing(6).margin_top(4).build();
+    // 동작 단추는 펼쳤을 때만 보인다
+    let buttons = (!notification.actions.is_empty()).then(|| {
+        let buttons = gtk::Box::builder()
+            .spacing(6)
+            .margin_top(4)
+            .visible(false)
+            .build();
         for (key, label) in &notification.actions {
             let button = gtk::Button::with_label(label);
             let (invoke, key) = (notifications.clone(), key.clone());
@@ -103,6 +131,41 @@ fn card(notification: &Notification, notifications: &Notifications, tr: &Transla
             buttons.append(&button);
         }
         text.append(&buttons);
+        buttons
+    });
+
+    let expanded = Cell::new(false);
+    {
+        let (summary, body, buttons) = (summary.clone(), body.clone(), buttons.clone());
+        expand.connect_clicked(move |expand| {
+            let open = !expanded.get();
+            expanded.set(open);
+            if let Some(summary) = &summary {
+                summary.set_lines(if open {
+                    EXPANDED_SUMMARY_LINES
+                } else {
+                    SUMMARY_LINES
+                });
+            }
+            if let Some(body) = &body {
+                body.set_lines(if open {
+                    EXPANDED_BODY_LINES
+                } else {
+                    BODY_LINES
+                });
+            }
+            if let Some(buttons) = &buttons {
+                buttons.set_visible(open);
+            }
+            let name = if open { &less } else { &more };
+            expand.set_icon_name(if open {
+                "pan-up-symbolic"
+            } else {
+                "pan-down-symbolic"
+            });
+            expand.set_tooltip_text(Some(name));
+            expand.update_property(&[gtk::accessible::Property::Label(name)]);
+        });
     }
 
     let card = gtk::Box::builder()
@@ -115,7 +178,25 @@ fn card(notification: &Notification, notifications: &Notifications, tr: &Transla
     let activate = notifications.clone();
     click.connect_released(move |_, _, _, _| activate.activate(id));
     card.add_controller(click);
+    // 글이 넘치는지는 카드가 창에 들어가 글꼴(CSS)이 정해진 뒤에 잰다
+    card.connect_realize(move |_| {
+        let cut = [(&summary, SUMMARY_LINES), (&body, BODY_LINES)]
+            .into_iter()
+            .any(|(label, lines)| label.as_ref().is_some_and(|label| overflows(label, lines)));
+        if cut {
+            expand.set_visible(true);
+        }
+    });
     card
+}
+
+/// 글이 `lines`줄에서 잘리는가: 펼친 줄 수로 잰 높이가 더 크다
+fn overflows(label: &gtk::Label, lines: i32) -> bool {
+    let height = |label: &gtk::Label| label.measure(gtk::Orientation::Vertical, TEXT_WIDTH).1;
+    label.set_lines(EXPANDED_BODY_LINES);
+    let full = height(label);
+    label.set_lines(lines);
+    full > height(label)
 }
 
 /// "지금", "5분 전", "3시간 전", 하루가 지나면 날짜

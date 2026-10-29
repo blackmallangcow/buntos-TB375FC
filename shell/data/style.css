@@ -618,7 +618,8 @@ button.center-clear {
   font-weight: 700;
 }
 
-button.card-close {
+button.card-close,
+button.card-expand {
   min-width: 18px;
   min-height: 18px;
   padding: 0;
