@@ -47,8 +47,6 @@ const FCITX_INTERFACE: &str = "org.fcitx.Fcitx.Controller1";
 
 /// 에이전트 전용 메서드(창 목록, 창 활성화, 키·포인터 입력)를 부를 수 있는 프로그램
 const AGENT_PATH: &str = "/usr/bin/buntd-agent";
-/// 셸 전용 메서드(최소화한 창의 그림, 앱 전환 창, 스크린샷)를 부를 수 있는 프로그램
-const SHELL_PATH: &str = "/usr/bin/bunt-shell";
 /// 이벤트 루프가 에이전트 요청에 답하기를 기다리는 시간. 소프트웨어 렌더링으로 바쁜 VM에서는 프레임
 /// 하나에 수백 ms가 걸려, 500ms로는 창 목록의 답을 놓쳤다
 const AGENT_REPLY: Duration = Duration::from_secs(2);
@@ -542,14 +540,6 @@ async fn check_agent(connection: &zbus::Connection, header: &Header<'_>) -> fdo:
     check_program(connection, header, AGENT_PATH).await
 }
 
-/// 셸 전용 메서드는 bunt-shell만 부른다. 다른 앱 창의 그림이 들어 있기 때문이다
-async fn check_shell_program(
-    connection: &zbus::Connection,
-    header: &Header<'_>,
-) -> fdo::Result<()> {
-    check_program(connection, header, SHELL_PATH).await
-}
-
 /// 부른 프로그램이 `path`인지 본다. 경로가 아니라 파일(장치·inode)을 견준다: 사용자 이름공간에서
 /// 다른 파일을 그 경로에 bind mount하면 /proc/<pid>/exe의 경로는 같게 보인다
 async fn check_program(
@@ -576,8 +566,9 @@ async fn check_program(
     }
 }
 
-/// 셸 전용 메서드(로그아웃, 앱 목록, 강제 종료)는 컴포지터가 띄운 셸 프로세스만 부른다. 같은 사용자의 다른
-/// 프로그램이 세션을 끝내거나 앱을 죽이는 데 쓰지 못하게 한다
+/// 셸 전용 메서드(최소화한 창의 그림, 앱 전환 창, 스크린샷, 로그아웃, 앱 목록, 강제 종료)는 컴포지터가 띄운
+/// 셸 프로세스만 부른다. 같은 사용자의 다른 프로그램이 다른 앱 창의 그림을 읽거나 세션을 끝내거나 앱을 죽이는
+/// 데 쓰지 못하게 한다. 실행 파일만 견주면 같은 사용자가 LD_PRELOAD를 주고 띄운 bunt-shell도 통과한다
 async fn check_shell(
     connection: &zbus::Connection,
     header: &Header<'_>,
@@ -1045,7 +1036,8 @@ impl Api {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<Vec<(u32, String, String, u32, u32, Vec<u8>)>> {
-        check_shell_program(connection, &header).await?;
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
         let minimized = self.snapshot.lock().unwrap().minimized.clone();
         Ok(minimized
             .into_iter()
@@ -1073,7 +1065,8 @@ impl Api {
         #[zbus(connection)] connection: &zbus::Connection,
         id: u32,
     ) -> fdo::Result<()> {
-        check_shell_program(connection, &header).await?;
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
         self.request(Request::RestoreMinimized(id))
     }
 
@@ -1086,7 +1079,8 @@ impl Api {
         index: u32,
         activate: bool,
     ) -> fdo::Result<()> {
-        check_shell_program(connection, &header).await?;
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
         self.request(Request::SelectSwitcher { index, activate })
     }
 
@@ -1100,7 +1094,8 @@ impl Api {
         location: &str,
         thumbnail: bool,
     ) -> fdo::Result<()> {
-        check_shell_program(connection, &header).await?;
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
         let location = screenshot::Location::parse(location).ok_or_else(|| {
             fdo::Error::InvalidArgs(format!(
                 "location must be pictures, desktop, documents or clipboard (got {location})"
@@ -1121,7 +1116,8 @@ impl Api {
         mode: &str,
         delay: u32,
     ) -> fdo::Result<()> {
-        check_shell_program(connection, &header).await?;
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
         let mode = screenshot::Mode::parse(mode).ok_or_else(|| {
             fdo::Error::InvalidArgs(format!("mode must be screen, area or window (got {mode})"))
         })?;
