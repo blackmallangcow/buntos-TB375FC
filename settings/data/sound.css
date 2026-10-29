@@ -1,0 +1,38 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * 사운드 페이지 (pages/sound.rs). macOS 26의 시스템 설정 > 사운드를 따른다: 출력·입력을 고르는 분할 단추(회색
+ * 바탕 위에 고른 쪽만 흰 판), 양 끝에 작은·큰 기호가 붙은 음량 막대. 입력 레벨 막대는 style.css의 levelbar다
+ */
+
+row.segmented-row {
+  padding: 4px 0 8px;
+}
+
+.segmented {
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--control-bg);
+}
+
+.segmented > button {
+  min-height: 0;
+  padding: 2px 18px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  box-shadow: none;
+  color: var(--label);
+  font-weight: 400;
+}
+
+.segmented > button:checked {
+  background: var(--knob);
+  box-shadow: var(--shadow-control);
+}
+
+.icon-slider > scale {
+  padding-left: 0;
+  padding-right: 0;
+}

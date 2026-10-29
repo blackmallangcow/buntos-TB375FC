@@ -285,6 +285,7 @@ version = "0.1.0"
 dependencies = [
  "bunt-access",
  "bunt-i18n",
+ "bunt-sound",
  "gtk4",
 ]
 

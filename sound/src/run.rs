@@ -8,6 +8,7 @@ use std::{ffi::OsStr, path::Path};
 use gio::{glib, prelude::*};
 
 use crate::{
+    devices::{self, Kind},
     mixer::{self, Channel, Target, Volume},
     theme,
     wpctl::{self, Node, Section},
@@ -37,6 +38,23 @@ pub async fn nodes(section: Section) -> Vec<Node> {
     output(&["wpctl", "status"])
         .await
         .map(|status| wpctl::parse_nodes(&status, section))
+        .unwrap_or_default()
+}
+
+/// 출력 장치와 입력 장치 목록. wpctl status를 한 번만 부른다
+pub async fn devices() -> (Vec<Node>, Vec<Node>) {
+    let status = output(&["wpctl", "status"]).await.unwrap_or_default();
+    (
+        wpctl::parse_nodes(&status, Section::Sinks),
+        wpctl::parse_nodes(&status, Section::Sources),
+    )
+}
+
+/// 오디오 장치마다의 연결 방식. pw-dump로 그래프 전체를 읽으므로 새 장치가 보일 때만 부른다
+pub async fn kinds() -> Vec<(u32, Kind)> {
+    output(&["pw-dump"])
+        .await
+        .map(|dump| devices::kinds(&dump))
         .unwrap_or_default()
 }
 

@@ -11,7 +11,9 @@
 //!   WirePlumber의 mixer-api와 같은 길(카드의 경로 Route나 노드의 Props)로 채널 음량을 바꾼다([`mixer`])
 //! - pw-play, pw-record: 경고음 재생, 입력 레벨
 //! - XDG 사운드 테마: 소리 이름(message-new-instant 등)의 파일([`theme`])
+//! - pw-dump의 노드 속성: 장치의 연결 방식(내장, HDMI, USB, Bluetooth, [`devices`])
 
+pub mod devices;
 pub mod mixer;
 pub mod run;
 pub mod theme;

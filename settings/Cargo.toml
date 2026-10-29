@@ -14,4 +14,6 @@ publish.workspace = true
 # AI 에이전트 페이지: 접근 정책과 요청 기록을 읽는다 (바꾸는 것은 pkexec로 실행하는 bunt-access-helper)
 bunt-access = { path = "../access" }
 bunt-i18n = { path = "../i18n" }
+# 사운드 페이지: 셸의 사운드 메뉴와 같은 장치 목록, 채널 음량(균형), 경고음, 입력 레벨
+bunt-sound = { path = "../sound" }
 gtk4 = { version = "0.11", features = ["v4_12"] }

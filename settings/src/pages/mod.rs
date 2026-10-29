@@ -22,6 +22,8 @@ mod network;
 mod users;
 mod wallpaper;
 mod wifi;
+// macOS처럼 디스플레이 다음 묶음에 놓는 페이지
+mod sound;
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -54,11 +56,12 @@ pub enum Page {
     Agent,
     Users,
     About,
+    Sound,
 }
 
 impl Page {
-    /// 왼쪽 목록에 놓는 순서
-    pub const ALL: [Page; 17] = [
+    /// 왼쪽 목록에 놓는 순서. 사운드는 macOS처럼 디스플레이 다음 묶음이다
+    pub const ALL: [Page; 18] = [
         Page::Wifi,
         Page::Bluetooth,
         Page::Network,
@@ -68,6 +71,7 @@ impl Page {
         Page::DesktopDock,
         Page::Wallpaper,
         Page::Display,
+        Page::Sound,
         Page::Keyboard,
         Page::Mouse,
         Page::Language,
@@ -98,6 +102,7 @@ impl Page {
             Self::Agent => "agent",
             Self::Users => "users",
             Self::About => "about",
+            Self::Sound => "sound",
         }
     }
 
@@ -125,6 +130,7 @@ impl Page {
             Self::Agent => "page-agent",
             Self::Users => "page-users",
             Self::About => "page-about",
+            Self::Sound => "page-sound",
         }
     }
 
@@ -154,6 +160,7 @@ impl Page {
             Self::Agent => "org.buntos.Agent-symbolic",
             Self::Users => "system-users-symbolic",
             Self::About => "computer-symbolic",
+            Self::Sound => "audio-volume-high-symbolic",
         }
     }
 
@@ -165,7 +172,7 @@ impl Page {
             Self::Appearance | Self::MenuBar | Self::DesktopDock => Tint::Graphite,
             Self::Wallpaper => Tint::Cyan,
             Self::DefaultApps | Self::Users => Tint::Blue,
-            Self::Agent => Tint::Pink,
+            Self::Agent | Self::Sound => Tint::Pink,
             Self::Keyboard | Self::Mouse | Self::DateTime | Self::About => Tint::Gray,
             Self::Language => Tint::Indigo,
         }
@@ -180,9 +187,11 @@ impl Page {
             | Self::DesktopDock
             | Self::Wallpaper
             | Self::Display => 1,
-            Self::Keyboard | Self::Mouse | Self::Language | Self::DateTime | Self::DefaultApps => 2,
-            Self::Agent | Self::Users => 3,
-            Self::About => 4,
+            // macOS의 알림·사운드 묶음. 뒤 묶음의 번호를 하나씩 밀었다
+            Self::Sound => 2,
+            Self::Keyboard | Self::Mouse | Self::Language | Self::DateTime | Self::DefaultApps => 3,
+            Self::Agent | Self::Users => 4,
+            Self::About => 5,
         }
     }
 
@@ -205,6 +214,7 @@ impl Page {
             Self::Agent => agent::build(context),
             Self::Users => users::build(context),
             Self::About => about::build(context),
+            Self::Sound => sound::build(context),
         }
     }
 }
@@ -387,6 +397,7 @@ mod tests {
             "language",
             "datetime",
             "about",
+            "sound",
         ] {
             assert!(Page::from_name(name).is_some(), "{name}");
         }
