@@ -8,6 +8,7 @@ mod blur;
 mod config;
 mod cursor;
 mod dbus;
+mod dmabuf;
 mod gpu;
 mod grabs;
 mod ime;
@@ -19,6 +20,8 @@ mod screenshot;
 mod shmdiff;
 mod shortcuts;
 mod state;
+#[cfg(test)]
+mod testing;
 mod toplevels;
 mod udev;
 mod windows;

@@ -250,6 +250,8 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
  "xcursor",
  "zbus",
 ]

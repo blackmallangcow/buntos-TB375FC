@@ -12,6 +12,10 @@
 //! 아래 장면이 바뀐 프레임에만 다시 흐린다. 그때는 요소의 커밋을 올려 손상 추적이 영역 전체를 다시
 //! 그리게 하고(그래야 복사한 영역에 지난 프레임의 유리가 섞이지 않는다), 나머지 프레임은 흐려 둔 결과를
 //! 손상된 부분에만 합성한다. 흐릴 표면이 없으면 하는 일이 없다.
+//!
+//! 셸 유리는 표면 텍스처를 그리기 밖에서 가림(mask)으로 읽는다. smithay는 텍스처의 필터를 그릴 때 정하므로
+//! 여기서도 정한다. SHM 텍스처와 dmabuf 텍스처가 같다. dmabuf가 외부 텍스처(GL_TEXTURE_EXTERNAL_OES, YUV
+//! 같은 형식)면 sampler2D로 읽을 수 없어 흐리지 않는다
 
 use std::{
     cell::RefCell,
@@ -22,11 +26,14 @@ use std::{
 };
 
 use smithay::{
-    backend::renderer::{
-        Renderer,
-        element::{Element, Id, Kind, RenderElement},
-        gles::{GlesError, GlesFrame, GlesRenderer, GlesTexture, ffi},
-        utils::{CommitCounter, with_renderer_surface_state},
+    backend::{
+        allocator::Buffer as _,
+        renderer::{
+            Renderer,
+            element::{Element, Id, Kind, RenderElement},
+            gles::{GlesError, GlesFrame, GlesRenderer, GlesTexture, ffi},
+            utils::{CommitCounter, with_renderer_surface_state},
+        },
     },
     reexports::wayland_server::{
         Resource,
@@ -34,7 +41,7 @@ use smithay::{
         protocol::{wl_buffer::WlBuffer, wl_shm, wl_surface::WlSurface},
     },
     utils::{Buffer, Physical, Rectangle, Scale},
-    wayland::shm::with_buffer_contents,
+    wayland::{dmabuf::get_dmabuf, shm::with_buffer_contents},
 };
 
 use crate::render::OutputRenderElements;
@@ -95,7 +102,7 @@ void main() {
 ";
 
 /// 흐린 배경을 표면 알파로 가려 합성한다. smithay는 화면 버퍼에 물리 좌표 그대로(위가 GL의 0) 그리므로
-/// 복사한 텍스처와 표면 텍스처 모두 v=0이 표면의 위다
+/// 복사한 텍스처와 표면 텍스처 모두 v=0이 표면의 위다 (위아래가 뒤집힌 dmabuf는 mask_rect로 뒤집는다)
 const COMPOSITE: &str = "#version 100
 precision mediump float;
 uniform sampler2D tex;
@@ -253,6 +260,20 @@ impl Blur {
             else {
                 continue;
             };
+            // smithay는 렌더러가 그릴 수 있다고 알린 형식(render formats)이 아닌 dmabuf를 외부 텍스처로
+            // 가져온다. 가림 셰이더의 sampler2D로는 읽을 수 없다
+            if buffer
+                .as_ref()
+                .and_then(|buffer| get_dmabuf(buffer).ok())
+                .is_some_and(|dmabuf| {
+                    !renderer
+                        .egl_context()
+                        .dmabuf_render_formats()
+                        .contains(&dmabuf.format())
+                })
+            {
+                continue;
+            }
             let entry = self
                 .surfaces
                 .entry(surface.id())
@@ -264,7 +285,8 @@ impl Blur {
                     targets: Rc::default(),
                     bounds: None,
                 });
-            // 모든 앱 패널처럼 화면 전체를 덮는 투명한 표면도 있으므로, 유리가 있는 범위만 흐린다
+            // 모든 앱 패널처럼 화면 전체를 덮는 투명한 표면도 있으므로, 유리가 있는 범위만 흐린다.
+            // dmabuf는 CPU로 읽지 않으므로 표면 전체를 흐릴 범위로 둔다(가림은 그대로다)
             let bounds = match entry.bounds {
                 Some((commit, bounds)) if commit == buffer_commit => bounds,
                 _ => {
@@ -429,6 +451,24 @@ fn hash_rectangle(rectangle: Rectangle<i32, Physical>, hasher: &mut impl Hasher)
         .hash(hasher);
 }
 
+/// 가림 텍스처에서 읽을 범위: 시작 x, y, 너비, 높이 (0~1). `clip`은 흐리는 부분, `surface`는 표면
+/// 텍스처가 덮는 범위다. 위아래가 뒤집힌 텍스처(y_inverted dmabuf)는 아래에서 위로 읽는다
+fn mask_rect(
+    clip: Rectangle<i32, Physical>,
+    surface: Rectangle<i32, Physical>,
+    flipped: bool,
+) -> [f32; 4] {
+    let x = (clip.loc.x - surface.loc.x) as f32 / surface.size.w as f32;
+    let y = (clip.loc.y - surface.loc.y) as f32 / surface.size.h as f32;
+    let w = clip.size.w as f32 / surface.size.w as f32;
+    let h = clip.size.h as f32 / surface.size.h as f32;
+    if flipped {
+        [x, 1.0 - y, w, -h]
+    } else {
+        [x, y, w, h]
+    }
+}
+
 /// 셸 표면 바로 아래에 끼우는 흐림 요소
 pub struct BlurElement {
     id: Id,
@@ -495,7 +535,7 @@ impl RenderElement<GlesRenderer> for BlurElement {
             return Ok(());
         }
         let mut targets = self.targets.borrow_mut();
-        let mask = self.mask.tex_id();
+        let mask = (self.mask.tex_id(), self.mask.is_y_inverted());
         frame.with_context(|gl| {
             // 안전: 컴포지터의 컨텍스트가 현재이고, 바꾼 GL 상태는 모두 되돌린다
             unsafe {
@@ -597,13 +637,14 @@ impl Saved {
 }
 
 /// 흐림 요소 하나를 그린다. `dst`와 `damage`는 smithay의 물리 좌표다. smithay는 화면 버퍼에 물리 좌표를
-/// 그대로 GL 좌표로 써서 그리므로(위아래를 투영 행렬로 뒤집는다) 바꾸지 않고 쓴다
+/// 그대로 GL 좌표로 써서 그리므로(위아래를 투영 행렬로 뒤집는다) 바꾸지 않고 쓴다. `mask`는 가림 텍스처와
+/// 그 텍스처가 위아래로 뒤집혔는지다
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw(
     gl: &ffi::Gles2,
     shared: &mut Shared,
     targets: &mut Targets,
-    mask: GLuint,
+    (mask, flipped): (GLuint, bool),
     surface: Rectangle<i32, Physical>,
     dst: Rectangle<i32, Physical>,
     damage: &[Rectangle<i32, Physical>],
@@ -631,12 +672,8 @@ unsafe fn draw(
             return;
         };
         let (x, y, width, height) = (clip.loc.x, clip.loc.y, clip.size.w, clip.size.h);
-        let mask_rect = [
-            (clip.loc.x - surface.loc.x) as f32 / surface.size.w as f32,
-            (clip.loc.y - surface.loc.y) as f32 / surface.size.h as f32,
-            clip.size.w as f32 / surface.size.w as f32,
-            clip.size.h as f32 / surface.size.h as f32,
-        ];
+        // 전에는 여기서 바로 셈했다. 위아래가 뒤집힌 dmabuf 때문에 mask_rect로 옮겼다
+        let mask_rect = mask_rect(clip, surface, flipped);
 
         gl.Disable(ffi::SCISSOR_TEST);
         gl.Disable(ffi::BLEND);
@@ -682,8 +719,8 @@ unsafe fn draw(
         gl.ActiveTexture(ffi::TEXTURE1);
         gl.BindTexture(ffi::TEXTURE_2D, mask);
         // smithay는 표면 텍스처의 축소 필터를 그 텍스처를 그릴 때마다 정하고, 새로 만든 텍스처(표면 크기가
-        // 바뀐 첫 프레임)에는 GL 기본값(밉맵)이 남아 있다. 밉맵이 없으면 불완전한 텍스처라 알파가 1로
-        // 읽혀 유리가 아닌 곳까지 흐림이 덮였고, 그 프레임의 화면 버퍼에만 남아 깜빡였다
+        // 바뀐 첫 프레임, 처음 받은 dmabuf)에는 GL 기본값(밉맵)이 남아 있다. 밉맵이 없으면 불완전한
+        // 텍스처라 알파가 1로 읽혀 유리가 아닌 곳까지 흐림이 덮였고, 그 프레임의 화면 버퍼에만 남아 깜빡였다
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
         gl.Uniform1i(program.mask, 1);
         gl.Uniform1f(program.saturation, SATURATION);
@@ -896,5 +933,279 @@ unsafe fn compile(
             ));
         }
         Ok(shader)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsFd;
+
+    use smithay::{
+        backend::{
+            allocator::{Fourcc, Modifier},
+            renderer::element::memory::MemoryRenderBuffer,
+        },
+        utils::{Point, Transform},
+    };
+    use wayland_client::protocol::{
+        wl_buffer::WlBuffer as ClientBuffer, wl_compositor::WlCompositor,
+    };
+    use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+        zwp_linux_buffer_params_v1::Flags, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    };
+
+    use super::*;
+    use crate::testing::{
+        Frames, Server, ServerOptions, TestClient, background, gl_lock, memfd, pixel,
+        software_renderer, stripes, texture_formats,
+    };
+
+    fn physical(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    #[test]
+    fn mask_rect_reads_flipped_textures_from_the_bottom() {
+        let surface = physical(0, 0, 200, 100);
+        let clip = physical(50, 25, 100, 50);
+        assert_eq!(mask_rect(clip, surface, false), [0.25, 0.25, 0.5, 0.5]);
+        assert_eq!(mask_rect(clip, surface, true), [0.25, 0.75, 0.5, -0.5]);
+    }
+
+    const SIZE: i32 = 64;
+
+    /// dmabuf를 받는 시험 서버, 클라이언트와 전역들. GL이 없으면 None
+    fn gl_setup() -> Option<(Server, TestClient, WlCompositor, ZwpLinuxDmabufV1)> {
+        let renderer = software_renderer()?;
+        let formats = texture_formats(&renderer);
+        let mut server = Server::new(
+            Some(renderer),
+            ServerOptions {
+                dmabuf_formats: Some(formats),
+            },
+        );
+        let client = server.connect();
+        let compositor = client.bind("wl_compositor", 4).unwrap();
+        let dmabuf = client.bind("zwp_linux_dmabuf_v1", 5).unwrap();
+        Some((server, client, compositor, dmabuf))
+    }
+
+    /// 버퍼 하나를 붙여 커밋한 표면
+    fn commit(
+        server: &mut Server,
+        client: &mut TestClient,
+        compositor: &WlCompositor,
+        buffer: &ClientBuffer,
+    ) {
+        let surface = compositor.create_surface(&client.qh, ());
+        surface.attach(Some(buffer), 0, 0);
+        surface.damage_buffer(0, 0, SIZE, SIZE);
+        surface.commit();
+        server.pump(client);
+        assert_eq!(client.protocol_error(), None);
+    }
+
+    /// 줄무늬 배경. 컴포지터의 배경화면처럼 한 번 만들어 계속 쓴다(요소 ID가 같아야 흐린 것을 다시 쓴다)
+    fn wallpaper() -> MemoryRenderBuffer {
+        MemoryRenderBuffer::from_slice(
+            &stripes(SIZE as usize, SIZE as usize, 1),
+            Fourcc::Argb8888,
+            (SIZE, SIZE),
+            1,
+            Transform::Normal,
+            None,
+        )
+    }
+
+    /// 줄무늬 배경 위에 커밋한 첫 표면을 놓고 그 뒤를 셸 유리로 흐려 그린 화면 (RGBA)
+    fn draw(
+        server: &mut Server,
+        blur: &mut Blur,
+        frames: &mut Frames,
+        wallpaper: &MemoryRenderBuffer,
+        location: Point<i32, Physical>,
+    ) -> Vec<u8> {
+        let scale = Scale::from(1.0);
+        let surface = server.state.surfaces[0].clone();
+        let mut elements = server.surface_elements(0, location, scale);
+        elements.push(background(server.renderer(), wallpaper));
+        blur.insert(server.renderer(), &mut elements, &[surface], scale);
+        frames.render(server.renderer(), &elements)
+    }
+
+    /// 흐리지 않은 줄무늬 그대로인지 (검정이나 흰색)
+    fn sharp(px: [u8; 4]) -> bool {
+        px[0] == 0 || px[0] == 255
+    }
+
+    /// 줄무늬가 섞여 `middle` 근처의 회색인지
+    fn blurred(px: [u8; 4], middle: u8) -> bool {
+        px[0].abs_diff(middle) <= 25 && px[0].abs_diff(px[1]) <= 3 && px[1].abs_diff(px[2]) <= 3
+    }
+
+    /// 왼쪽 절반만 유리(검정 60%)이고 오른쪽 절반은 투명한 그림 (위아래로 나누면 `rows`)
+    fn half_glass(rows: bool) -> Vec<u8> {
+        let mut pixels = Vec::new();
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let glass = if rows { y < SIZE / 2 } else { x < SIZE / 2 };
+                // 미리 곱한 알파(premultiplied): 검정이므로 색은 0이다
+                pixels.extend_from_slice(&[0, 0, 0, if glass { 153 } else { 0 }]);
+            }
+        }
+        pixels
+    }
+
+    /// 왼쪽 절반만 흐렸는지. 유리 아래는 흐린 회색에 검정 60%가 덮여 0.4배다
+    fn assert_left_glass(pixels: &[u8]) {
+        for y in 0..SIZE as usize {
+            for x in 0..SIZE as usize {
+                let px = pixel(pixels, SIZE as usize, x, y);
+                if x < SIZE as usize / 2 {
+                    assert!(
+                        blurred(px, 51),
+                        "({x}, {y}) {px:?} under the glass is not blurred"
+                    );
+                } else {
+                    assert!(sharp(px), "({x}, {y}) {px:?} beside the glass is blurred");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shm_glass_blurs_where_the_surface_is_opaque_enough() {
+        let _gl = gl_lock();
+        let Some((mut server, mut client, compositor, _)) = gl_setup() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        let shm = client.bind("wl_shm", 1).unwrap();
+        let buffer = client.shm_buffer(&shm, SIZE, SIZE, &half_glass(false));
+        commit(&mut server, &mut client, &compositor, &buffer);
+        let mut blur = Blur::default();
+        let mut frames = Frames::new(server.renderer(), (SIZE, SIZE).into(), 1.0);
+        let pixels = draw(
+            &mut server,
+            &mut blur,
+            &mut frames,
+            &wallpaper(),
+            (0, 0).into(),
+        );
+        assert_left_glass(&pixels);
+    }
+
+    #[test]
+    fn dmabuf_glass_masks_are_read_on_their_first_frame() {
+        let _gl = gl_lock();
+        let Some((mut server, mut client, compositor, dmabuf)) = gl_setup() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        let buffer = client.dmabuf_buffer(
+            &dmabuf,
+            (SIZE, SIZE),
+            Fourcc::Argb8888,
+            Modifier::Linear.into(),
+            &half_glass(false),
+            Flags::empty(),
+        );
+        commit(&mut server, &mut client, &compositor, &buffer);
+        let mut blur = Blur::default();
+        let mut frames = Frames::new(server.renderer(), (SIZE, SIZE).into(), 1.0);
+        // dmabuf는 CPU로 읽지 않으므로 표면 전체를 흐릴 범위로 두고, 가림이 오른쪽을 지킨다.
+        // 처음 그리는 프레임에는 smithay가 아직 텍스처의 필터를 정하지 않았다
+        let pixels = draw(
+            &mut server,
+            &mut blur,
+            &mut frames,
+            &wallpaper(),
+            (0, 0).into(),
+        );
+        assert_left_glass(&pixels);
+    }
+
+    #[test]
+    fn y_inverted_dmabuf_masks_follow_the_picture() {
+        let _gl = gl_lock();
+        let Some((mut server, mut client, compositor, dmabuf)) = gl_setup() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        // 메모리의 위쪽 절반이 유리다. 위아래가 뒤집힌 버퍼이므로 화면에서는 아래쪽 절반이 유리다
+        let buffer = client.dmabuf_buffer(
+            &dmabuf,
+            (SIZE, SIZE),
+            Fourcc::Argb8888,
+            Modifier::Linear.into(),
+            &half_glass(true),
+            Flags::YInvert,
+        );
+        commit(&mut server, &mut client, &compositor, &buffer);
+        let mut blur = Blur::default();
+        let mut frames = Frames::new(server.renderer(), (SIZE, SIZE).into(), 1.0);
+        let pixels = draw(
+            &mut server,
+            &mut blur,
+            &mut frames,
+            &wallpaper(),
+            (0, 0).into(),
+        );
+        for (x, y) in [(10, 10), (40, 20), (63, 31)] {
+            let px = pixel(&pixels, SIZE as usize, x, y);
+            assert!(sharp(px), "({x}, {y}) {px:?} above the glass is blurred");
+        }
+        for (x, y) in [(10, 40), (40, 50), (63, 63)] {
+            let px = pixel(&pixels, SIZE as usize, x, y);
+            assert!(
+                blurred(px, 51),
+                "({x}, {y}) {px:?} under the glass is not blurred"
+            );
+        }
+    }
+
+    #[test]
+    fn external_dmabufs_are_not_used_as_masks() {
+        let _gl = gl_lock();
+        let Some((mut server, mut client, compositor, dmabuf)) = gl_setup() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        // NV12(YUV 두 평면)은 외부 텍스처로만 가져온다
+        let (width, height) = (SIZE as u32, SIZE as u32);
+        let fd = memfd(&vec![128; (width * height * 3 / 2) as usize]);
+        let params = dmabuf.create_params(&client.qh, ());
+        let linear = u64::from(Modifier::Linear);
+        params.add(
+            fd.as_fd(),
+            0,
+            0,
+            width,
+            (linear >> 32) as u32,
+            linear as u32,
+        );
+        params.add(
+            fd.as_fd(),
+            1,
+            width * height,
+            width,
+            (linear >> 32) as u32,
+            linear as u32,
+        );
+        let buffer = params.create_immed(
+            SIZE,
+            SIZE,
+            Fourcc::Nv12 as u32,
+            Flags::empty(),
+            &client.qh,
+            (),
+        );
+        commit(&mut server, &mut client, &compositor, &buffer);
+        let surface = server.state.surfaces[0].clone();
+        let scale = Scale::from(1.0);
+        let mut elements = server.surface_elements(0, (0, 0).into(), scale);
+        assert_eq!(elements.len(), 1, "the NV12 buffer was imported");
+        let mut blur = Blur::default();
+        assert!(!blur.insert(server.renderer(), &mut elements, &[surface], scale));
     }
 }

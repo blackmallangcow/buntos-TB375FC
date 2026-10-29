@@ -30,7 +30,7 @@ use smithay::{
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            ImportMemWl,
+            ImportDma, ImportMemWl,
             element::{
                 Element, Id, Kind, RenderElementStates, default_primary_scanout_output_compare,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
@@ -75,6 +75,7 @@ use crate::{
     config::{Config, parse_hex_color},
     cursor::Cursor,
     dbus::{Command, OutputInfo, PointerDevice},
+    dmabuf::Dmabufs,
     gpu::{GSK_RENDERER, Rendering, renderer_name},
     prefs::{ModePref, PointerPrefs},
     render::{self, OutputRenderElements},
@@ -132,6 +133,8 @@ pub struct UdevData {
     rendering: Rendering,
     /// 컴포지터가 띄우는 프로그램에 더할 환경 변수 (gpu.rs)
     client_env: Vec<(&'static str, &'static str)>,
+    /// 앱이 GPU로 그린 버퍼 (dmabuf.rs)
+    pub dmabufs: Dmabufs,
 }
 
 impl UdevData {
@@ -139,7 +142,7 @@ impl UdevData {
         self.session.seat()
     }
 
-    /// 화면 밖에 따로 그릴 때 (에이전트의 창 스크린샷)
+    /// 화면 밖에 따로 그릴 때 (에이전트의 창 스크린샷), 앱의 dmabuf를 가져올 때
     pub fn renderer(&mut self) -> &mut GlesRenderer {
         &mut self.renderer
     }
@@ -244,6 +247,15 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     }
     let render_formats: FormatSet = renderer.egl_context().dmabuf_render_formats().clone();
     let shm_formats: Vec<_> = renderer.shm_formats().collect();
+    // 앱이 GPU로 그릴 수 있으면 화면 GPU의 렌더 노드로 linux-dmabuf를 연다
+    let render_node = gpu.node_with_type(NodeType::Render).and_then(Result::ok);
+    if rendering.gpu_clients && render_node.is_none() {
+        tracing::info!("linux-dmabuf disabled: {gpu} has no render node");
+    }
+    let dmabuf_device = render_node
+        .filter(|_| rendering.gpu_clients)
+        .map(|node| (node, renderer.dmabuf_formats()));
+    let dmabufs = Dmabufs::new::<BuntState>(&display.handle(), dmabuf_device);
 
     let output_manager = DrmOutputManager::new(
         drm,
@@ -251,7 +263,9 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             gbm.clone(),
             GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
         ),
-        GbmFramebufferExporter::new(gbm.clone(), Some(primary)),
+        // 앱 버퍼(dmabuf)를 화면 평면에 바로 올리지 않는다 (dmabuf.rs). 전에는 카드 노드를 주었지만
+        // 앱 버퍼가 없어 쓰이지 않았다
+        GbmFramebufferExporter::new(gbm.clone(), None),
         Some(gbm),
         [Fourcc::Abgr8888, Fourcc::Argb8888],
         render_formats,
@@ -273,6 +287,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         blur: Blur::default(),
         rendering,
         client_env,
+        dmabufs,
     };
     let mut state = BuntState::new(
         display,

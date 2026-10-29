@@ -100,8 +100,15 @@ pub fn narrow_damage(surface: &WlSurface) {
             }
             rects
         });
-        if let Ok(Some(rects)) = narrowed {
-            attributes.damage = rects.into_iter().map(Damage::Buffer).collect();
+        match narrowed {
+            Ok(Some(rects)) => {
+                attributes.damage = rects.into_iter().map(Damage::Buffer).collect();
+            }
+            Ok(None) => {}
+            // dmabuf가 생겨 추가했다: SHM이 아닌 버퍼가 오면 사본은 더는 화면에 보이는 내용이 아니므로
+            // 버린다. 그대로 두면 다시 SHM으로 돌아온 첫 커밋을 그 앞의 SHM 사본과 견주어, 그사이
+            // dmabuf가 그린 자리를 고치지 않고 남길 수 있다(SHM 텍스처는 그동안 그대로다)
+            Err(_) => *shadow.borrow_mut() = None,
         }
     });
 }
