@@ -417,8 +417,8 @@ impl Agent {
         result
     }
 
-    /// 화면이 잠겼는지 컴포지터에 묻는다 (atspi::screen_locked). 세션 버스에 붙지 못하면 잠기지 않은 것으로 본다:
-    /// 컴포지터의 에이전트 입력도 세션 버스로 가므로 그때는 키와 포인터도 넣지 못한다
+    /// 화면이 잠겼는지 컴포지터에 묻는다 (atspi::screen_locked). 세션 버스에 붙지 못하면 잠긴 것으로 본다:
+    /// 앱의 트리는 접근성 버스로 읽으므로 세션 버스 없이도 읽힐 수 있다
     async fn screen_locked(&mut self) -> bool {
         if self.session.is_none() {
             self.session = zbus::Connection::session()
@@ -428,7 +428,8 @@ impl Agent {
         }
         match &self.session {
             Some(session) => atspi::screen_locked(session).await,
-            None => false,
+            // 잠겼는지 모르면 거절한다
+            None => true,
         }
     }
 

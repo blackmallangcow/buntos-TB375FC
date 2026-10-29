@@ -129,8 +129,9 @@ pub struct A11y {
     session: Connection,
 }
 
-/// 화면이 잠겼는지 (org.buntos.Compositor1.GetLocked). 컴포지터가 버스에 없거나 이 메서드를 모르면(화면 잠금이
-/// 없는 옛 컴포지터) 잠기지 않은 것으로 본다. 답이 늦는 것 같은 그 밖의 오류는 잠긴 것으로 본다
+/// 화면이 잠겼는지 (org.buntos.Compositor1.GetLocked). 컴포지터가 이 메서드를 모르면(화면 잠금이 없는 옛
+/// 컴포지터) 잠기지 않은 것으로 본다. 컴포지터가 버스에 없거나 답이 늦는 것 같은 그 밖의 오류는 잠긴 것으로
+/// 본다: 컴포지터의 D-Bus만 멈추고 화면은 잠겨 있을 수 있다
 pub async fn screen_locked(session: &Connection) -> bool {
     let reply = call_on::<_, bool>(
         session,
@@ -145,6 +146,7 @@ pub async fn screen_locked(session: &Connection) -> bool {
     match reply {
         Ok(locked) => locked,
         Err(zbus::Error::MethodError(name, ..)) if no_lock_api(name.as_str()) => false,
+        // 컴포지터가 버스에 없을 때(ServiceUnknown, NameHasNoOwner)도 여기로 온다
         Err(err) => {
             tracing::warn!(
                 "cannot tell whether the screen is locked; treating it as locked: {err}"
@@ -154,14 +156,9 @@ pub async fn screen_locked(session: &Connection) -> bool {
     }
 }
 
-/// 화면 잠금을 모르는 곳의 오류: 컴포지터가 버스에 없거나(세션 밖) GetLocked가 없다(옛 컴포지터)
+/// 화면 잠금을 모르는 컴포지터의 오류: GetLocked가 없다(옛 컴포지터)
 fn no_lock_api(error: &str) -> bool {
-    matches!(
-        error,
-        "org.freedesktop.DBus.Error.ServiceUnknown"
-            | "org.freedesktop.DBus.Error.NameHasNoOwner"
-            | "org.freedesktop.DBus.Error.UnknownMethod"
-    )
+    error == "org.freedesktop.DBus.Error.UnknownMethod"
 }
 
 /// 보조 기술이 있다고 알린다 (org.a11y.Status.IsEnabled). Chromium·Electron·Firefox·Qt 앱은 이것을
@@ -876,8 +873,10 @@ mod tests {
 
     #[test]
     fn only_a_missing_lock_api_counts_as_unlocked() {
-        assert!(no_lock_api("org.freedesktop.DBus.Error.ServiceUnknown"));
         assert!(no_lock_api("org.freedesktop.DBus.Error.UnknownMethod"));
+        // 컴포지터의 D-Bus만 사라져도 화면은 잠겨 있을 수 있으므로 잠긴 것으로 본다
+        assert!(!no_lock_api("org.freedesktop.DBus.Error.ServiceUnknown"));
+        assert!(!no_lock_api("org.freedesktop.DBus.Error.NameHasNoOwner"));
         assert!(!no_lock_api("org.freedesktop.DBus.Error.AccessDenied"));
         assert!(!no_lock_api("org.freedesktop.DBus.Error.NoReply"));
     }
