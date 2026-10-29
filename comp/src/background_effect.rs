@@ -8,8 +8,9 @@
 //! 알파와 상관없이 다 흐린다.
 //! - 영역은 표면 기준 논리 좌표이고 wl_surface.commit에 함께 바뀐다(smithay의 cached_state). 표면 크기
 //!   밖은 그릴 때 자른다
-//! - 영역은 받을 때 겹치지 않는 사각형으로 펴 둔다. 사각형이 MAX_RECTS보다 많으면 더하는 사각형 전체를
-//!   감싸는 사각형 하나로 흐린다(그리는 횟수와 펴는 계산이 사각형 수를 따라 늘기 때문이다)
+//! - 영역은 받을 때 겹치지 않는 사각형으로 펴 둔다. 연산이나 펴는 도중의 조각이 MAX_RECTS보다 많으면 더하는
+//!   사각형 전체를 감싸는 사각형 하나로 흐린다(그리는 횟수와 펴는 계산이 사각형 수를 따라 늘고, 앱이 보내는
+//!   작은 요청 하나가 컴포지터를 오래 붙잡지 못하게 한다)
 //! - 셸 유리로 흐리는 셸 표면(udev.rs)은 셸 유리가 먼저다
 //! - 흐림을 끈 설정(로그인 화면, `[effects] blur = false`)에서는 전역을 열지 않는다. 흐림 셰이더를
 //!   만들지 못하면 흐림 기능이 없어졌다고 알린다(capabilities 0)
@@ -40,6 +41,8 @@ use crate::{blur::BlurTarget, state::BuntState};
 
 /// 펴서 둘 사각형의 최대 수. 넘으면 감싸는 사각형 하나로 흐린다
 const MAX_RECTS: usize = 64;
+/// 표면 목록이 이만큼 차기 전에는 사라진 표면을 빼지 않는다 (track)
+const PRUNE_MIN: usize = 16;
 
 /// 표면의 흐림 영역 (커밋으로 바뀌는 상태)
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -58,9 +61,14 @@ impl Cacheable for BlurRegionState {
     }
 }
 
-/// 표면에 효과 객체가 있다 (한 표면에 하나만 만들 수 있다)
+/// 표면의 효과 객체 표시
 #[derive(Default)]
-struct HasEffect(AtomicBool);
+struct EffectFlags {
+    /// 효과 객체가 있다 (한 표면에 하나만 만들 수 있다)
+    attached: AtomicBool,
+    /// BackgroundEffectState의 표면 목록에 있다. 목록을 훑지 않고 안다
+    tracked: AtomicBool,
+}
 
 /// 효과 객체의 데이터: 그 표면
 pub struct EffectData {
@@ -79,6 +87,8 @@ pub struct BackgroundEffectState {
     managers: Vec<Weak<ExtBackgroundEffectManagerV1>>,
     /// 효과 객체를 만든 적이 있는 표면. 그릴 때 이 표면들만 본다
     surfaces: Vec<Weak<WlSurface>>,
+    /// 표면 목록이 이만큼 차면 사라진 표면을 뺀다 (track)
+    prune_at: usize,
 }
 
 impl BackgroundEffectState {
@@ -97,6 +107,7 @@ impl BackgroundEffectState {
             blur: enabled,
             managers: Vec::new(),
             surfaces: Vec::new(),
+            prune_at: PRUNE_MIN,
         }
     }
 
@@ -130,38 +141,43 @@ impl BackgroundEffectState {
             let Ok(surface) = surface.upgrade() else {
                 return false;
             };
-            let (rects, attached) = with_states(&surface, |states| {
+            let (rects, keep) = with_states(&surface, |states| {
                 let rects = states
                     .cached_state
                     .get::<BlurRegionState>()
                     .current()
                     .rects
-                    .clone();
-                let attached = states
-                    .data_map
-                    .get::<HasEffect>()
-                    .is_some_and(|has| has.0.load(Ordering::Relaxed));
-                (rects, attached)
+                    .clone()
+                    .filter(|rects| !rects.is_empty());
+                let flags = states.data_map.get::<EffectFlags>();
+                let keep = rects.is_some()
+                    || flags.is_some_and(|flags| flags.attached.load(Ordering::Relaxed));
+                if !keep && let Some(flags) = flags {
+                    // 목록에서 빠진다. 효과 객체를 다시 만들면 다시 넣는다
+                    flags.tracked.store(false, Ordering::Relaxed);
+                }
+                (rects, keep)
             });
-            if let Some(rects) = rects.filter(|rects| !rects.is_empty()) {
+            if let Some(rects) = rects {
                 targets.push(BlurTarget {
                     surface,
                     shape: crate::blur::BlurShape::Region(rects),
                 });
-                return true;
             }
-            attached
+            keep
         });
         targets
     }
 
+    /// 목록에 없던 표면(표면의 tracked 표시로 안다)을 넣는다
     fn track(&mut self, surface: &WlSurface) {
         // 사라진 표면은 targets()가 그릴 때 빼지만, 그리지 않는 동안(화면이 쉬거나 흐림이 꺼짐) 앱이 표면을
-        // 만들고 없애기를 되풀이하면 목록이 끝없이 커지고 아래 찾기도 그만큼 느려졌다. 여기서도 뺀다
-        self.surfaces.retain(|known| known.upgrade().is_ok());
-        if !self.surfaces.iter().any(|known| known == surface) {
-            self.surfaces.push(surface.downgrade());
+        // 만들고 없애기를 되풀이하면 목록이 끝없이 커졌다. 목록이 지난번의 두 배가 되면 여기서도 뺀다
+        if self.surfaces.len() >= self.prune_at {
+            self.surfaces.retain(|known| known.upgrade().is_ok());
+            self.prune_at = (self.surfaces.len() * 2).max(PRUNE_MIN);
         }
+        self.surfaces.push(surface.downgrade());
     }
 }
 
@@ -174,19 +190,25 @@ fn capabilities(blur: bool) -> Capability {
 }
 
 /// wl_region을 겹치지 않는 사각형으로 편다. 빼는 사각형은 앞에서 더한 곳에서만 뺀다(wl_region의 뜻).
-/// 너비나 높이가 0 이하인 사각형은 빈 곳이다
+/// 너비나 높이가 0 이하인 사각형은 빈 곳이다. 연산이나 조각이 MAX_RECTS보다 많아지면 더하는 사각형 전체를
+/// 감싸는 사각형 하나로 흐린다
 pub fn flatten_region(region: &RegionAttributes) -> Vec<Rectangle<i32, Logical>> {
     let valid = |rect: &Rectangle<i32, Logical>| rect.size.w > 0 && rect.size.h > 0;
-    if region.rects.len() > MAX_RECTS {
-        return region
+    let bounding_box = || {
+        region
             .rects
             .iter()
             .filter(|(kind, rect)| matches!(kind, RectangleKind::Add) && valid(rect))
             .map(|(_, rect)| *rect)
             .reduce(Rectangle::merge)
             .into_iter()
-            .collect();
+            .collect()
+    };
+    if region.rects.len() > MAX_RECTS {
+        return bounding_box();
     }
+    // 조각 수는 연산마다 본다. 다 펴고 나서 보던 것을 바꿨다: 가는 막대를 엇갈려 빼 격자를 만든 뒤 크게
+    // 더하면 조각이 수천 개로 불어, 연산 64개짜리 영역 하나에 요청마다 수십 ms가 들었다(릴리스 빌드)
     let mut rects: Vec<Rectangle<i32, Logical>> = Vec::new();
     for (kind, rect) in &region.rects {
         if !valid(rect) {
@@ -194,21 +216,23 @@ pub fn flatten_region(region: &RegionAttributes) -> Vec<Rectangle<i32, Logical>>
         }
         match kind {
             RectangleKind::Add => {
-                let new = rect.subtract_rects(rects.iter().copied());
+                // 있는 사각형을 하나씩 빼며 조각 수를 본다
+                let mut new = vec![*rect];
+                for existing in &rects {
+                    new = Rectangle::subtract_rects_many_in_place(new, [*existing]);
+                    if rects.len() + new.len() > MAX_RECTS {
+                        return bounding_box();
+                    }
+                }
                 rects.extend(new);
             }
             RectangleKind::Subtract => {
                 rects = Rectangle::subtract_rects_many_in_place(rects, [*rect]);
             }
         }
-    }
-    if rects.len() > MAX_RECTS {
-        // 빼기로 조각이 많아졌다
-        return rects
-            .into_iter()
-            .reduce(Rectangle::merge)
-            .into_iter()
-            .collect();
+        if rects.len() > MAX_RECTS {
+            return bounding_box();
+        }
     }
     rects
 }
@@ -256,14 +280,15 @@ where
     ) {
         match request {
             ext_background_effect_manager_v1::Request::GetBackgroundEffect { id, surface } => {
-                let exists = with_states(&surface, |states| {
-                    states
+                let (exists, tracked) = with_states(&surface, |states| {
+                    let flags = states
                         .data_map
-                        .insert_if_missing_threadsafe(HasEffect::default);
-                    states
-                        .data_map
-                        .get::<HasEffect>()
-                        .is_some_and(|has| has.0.swap(true, Ordering::Relaxed))
+                        .get_or_insert_threadsafe(EffectFlags::default);
+                    let exists = flags.attached.swap(true, Ordering::Relaxed);
+                    (
+                        exists,
+                        exists || flags.tracked.swap(true, Ordering::Relaxed),
+                    )
                 });
                 // 오류를 보낸 앱은 끊기므로 새 객체를 만들지 않아도 된다 (wayland-backend가 허용한다)
                 if exists {
@@ -279,7 +304,9 @@ where
                         surface: surface.downgrade(),
                     },
                 );
-                state.background_effect_state().track(&surface);
+                if !tracked {
+                    state.background_effect_state().track(&surface);
+                }
             }
             ext_background_effect_manager_v1::Request::Destroy => {}
             _ => unreachable!(),
@@ -320,8 +347,8 @@ where
                 if let Ok(surface) = data.surface.upgrade() {
                     with_states(&surface, |states| {
                         states.cached_state.get::<BlurRegionState>().pending().rects = None;
-                        if let Some(has) = states.data_map.get::<HasEffect>() {
-                            has.0.store(false, Ordering::Relaxed);
+                        if let Some(flags) = states.data_map.get::<EffectFlags>() {
+                            flags.attached.store(false, Ordering::Relaxed);
                         }
                     });
                 }
@@ -368,7 +395,7 @@ mod tests {
 
     use std::{
         path::{Path, PathBuf},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use smithay::backend::renderer::utils::with_renderer_surface_state;
@@ -509,6 +536,35 @@ mod tests {
         assert_eq!(rects, vec![rect(0, 0, 1000, 1000)]);
     }
 
+    #[test]
+    fn fragments_are_counted_at_every_step() {
+        use RectangleKind::{Add, Subtract};
+        // 연산 64개: 큰 사각형에서 가는 막대 20개씩을 세로·가로로 빼 격자를 만들고 크게 23번 더한다. 다 펴고 나서
+        // 세면 조각이 수천 개로 불었다(요청 하나에 수십 ms). 넘는 즉시 감싸는 사각형으로 바꾼다
+        let mut ops = vec![(Add, rect(0, 0, 10000, 10000))];
+        ops.extend((0..20).map(|j| (Subtract, rect(10 + j * 20, 0, 10, 10000))));
+        ops.extend((0..20).map(|i| (Subtract, rect(0, 10 + i * 20, 10000, 10))));
+        ops.extend((0..23).map(|a| (Add, rect(-a, -a, 10001 + 2 * a, 10001 + 2 * a))));
+        assert_eq!(ops.len(), MAX_RECTS);
+        let started = Instant::now();
+        let rects = flatten_region(&region(&ops));
+        // 고치기 전에는 디버그 빌드에서 150ms, 릴리스 빌드에서 28ms가 넘었다. 지금은 0.1ms 아래다
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_millis(20), "took {elapsed:?}");
+        assert_eq!(rects, vec![rect(-22, -22, 10045, 10045)]);
+        // 떨어진 점 63개를 덮는 사각형 하나를 더할 때도 조각을 하나씩 센다
+        let mut ops: Vec<_> = (0..63)
+            .map(|index| (Add, rect((index % 8) * 20, (index / 8) * 20, 5, 5)))
+            .collect();
+        ops.push((Add, rect(2, 2, 150, 150)));
+        assert_eq!(flatten_region(&region(&ops)), vec![rect(0, 0, 152, 152)]);
+        // 상한 안이면 그대로 편다
+        let ops = [(Add, rect(0, 0, 30, 30)), (Subtract, rect(10, 10, 10, 10))];
+        let rects = flatten_region(&region(&ops));
+        assert!(rects.len() <= MAX_RECTS && disjoint(&rects));
+        assert_eq!(area(&rects), 900 - 100);
+    }
+
     /// 흐림을 켠 시험 서버, 클라이언트, 그 클라이언트의 표면 하나와 효과 객체
     fn effect_setup() -> (
         Server,
@@ -621,6 +677,8 @@ mod tests {
         let _again = manager.get_background_effect(&surface, &client.qh, ());
         server.pump(&mut client);
         assert_eq!(client.protocol_error(), None);
+        // 목록에서 빠졌던 표면은 다시 넣는다
+        assert_eq!(server.state.effects.surfaces.len(), 1);
     }
 
     #[test]
@@ -668,7 +726,21 @@ mod tests {
             surface.destroy();
         }
         server.pump(&mut client);
-        // 마지막 표면만 다음 효과 객체를 만들 때까지 남는다
+        // 목록이 찰 때마다 사라진 표면을 뺀다 (고치기 전에는 101개)
+        assert!(server.state.effects.surfaces.len() <= PRUNE_MIN);
+        assert_eq!(client.protocol_error(), None);
+    }
+
+    #[test]
+    fn a_surface_is_listed_once_however_often_its_effect_is_remade() {
+        let (mut server, mut client, surface, manager, effect) = effect_setup();
+        effect.destroy();
+        for _ in 0..10 {
+            let effect = manager.get_background_effect(&surface, &client.qh, ());
+            effect.destroy();
+        }
+        let _effect = manager.get_background_effect(&surface, &client.qh, ());
+        server.pump(&mut client);
         assert_eq!(server.state.effects.surfaces.len(), 1);
         assert_eq!(client.protocol_error(), None);
     }
