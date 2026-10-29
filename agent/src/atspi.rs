@@ -457,6 +457,7 @@ impl A11y {
             self.realize(bus, missing, known).await;
             items = self.items(bus).await?;
         }
+        crate::tree::hide_detached(&mut items);
         Ok(items)
     }
 

@@ -188,11 +188,19 @@ impl Item {
         self.interfaces & iface::VALUE != 0
     }
 
-    /// 내용을 따로 읽을 객체인가. 암호 칸은 읽지 않는다
+    /// 내용을 따로 읽을 객체인가. 암호 칸은 읽지 않는다. 글 요소 말고도 그릇(문단 밖의 div, 목록
+    /// 항목, 칸)의 글을 읽는다: Firefox는 그릇에 바로 든 글을 자식으로 내놓지 않고 그릇의 Text에
+    /// 넣으며, 자식 요소가 든 자리는 U+FFFC로 둔다
     pub fn wants_text(&self) -> bool {
         self.interfaces & iface::TEXT != 0
             && self.role != role::PASSWORD_TEXT
-            && (self.is_editable() || (matches!(kind(self), Kind::Text) && self.name.is_empty()))
+            && (self.is_editable()
+                || match kind(self) {
+                    Kind::Text => self.name.is_empty(),
+                    Kind::Pass => true,
+                    Kind::Line(role) => !control(role) && role != "window",
+                    Kind::Skip => false,
+                })
     }
 
     /// 속성(안내 글, 제목 단계)을 따로 읽을 객체인가
@@ -200,9 +208,10 @@ impl Item {
         self.is_editable() || matches!(kind(self), Kind::Line(name) if name == "heading")
     }
 
-    /// 글을 고칠 수 있는 칸: 글자 칸, 그리고 Firefox 주소 막대처럼 글을 쓰는 콤보 상자 등
+    /// 글을 고칠 수 있는 칸: 글자 칸, 그리고 Firefox 주소 막대처럼 글을 쓰는 콤보 상자 등. Firefox는
+    /// 창과 문서에도 EditableText를 붙이므로 EDITABLE 상태도 본다
     fn is_editable(&self) -> bool {
-        self.interfaces & iface::EDITABLE_TEXT != 0
+        (self.interfaces & iface::EDITABLE_TEXT != 0 && self.has(state::EDITABLE))
             || matches!(kind(self), Kind::Line(name) if name == "textbox")
     }
 }
@@ -217,6 +226,10 @@ pub struct Options {
 
 /// 한 번에 내는 줄 수 상한. 넘으면 자르고 범위를 좁히라고 적는다
 const MAX_LINES: usize = 2000;
+/// 조상을 따라 올라가는 단계의 상한 (부모가 고리를 이루는 잘못된 목록에서 멈춘다)
+const MAX_DEPTH: usize = 512;
+/// 글 속에서 자식 요소가 든 자리 (U+FFFC OBJECT REPLACEMENT CHARACTER, Firefox의 하이퍼텍스트)
+const OBJECT: char = '\u{FFFC}';
 const MAX_NAME: usize = 120;
 const MAX_TEXT: usize = 200;
 
@@ -409,6 +422,38 @@ impl<'a> Tree<'a> {
     }
 }
 
+/// GTK4는 더 내놓지 않는 객체(다른 페이지로 넘긴 GtkStack 페이지의 내용 등)를 목록(캐시)에 VISIBLE,
+/// SHOWING인 채 남긴다. 그 부모는 자식 수를 줄여 알리므로, 번호가 음수이거나 부모의 자식 수를 넘는
+/// 객체와 그 아래를 숨은 것으로 고친다. 루트는 창이 있어도 자식 수를 0으로 알리므로 창은 그대로 둔다
+pub fn hide_detached(items: &mut [Item]) {
+    let index: HashMap<&str, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(at, item)| (item.path.as_str(), at))
+        .collect();
+    let detached = |start: usize| {
+        let mut item = &items[start];
+        for _ in 0..MAX_DEPTH {
+            let Some(&at) = index.get(item.parent.as_str()) else {
+                return false;
+            };
+            let parent = &items[at];
+            if parent.path == crate::atspi::ROOT {
+                return false;
+            }
+            if item.index < 0 || item.index >= parent.child_count {
+                return true;
+            }
+            item = parent;
+        }
+        false
+    };
+    let hidden: Vec<usize> = (0..items.len()).filter(|&at| detached(at)).collect();
+    for at in hidden {
+        items[at].states &= !(state::VISIBLE | state::SHOWING);
+    }
+}
+
 /// 렌더 중의 상태
 struct Render<'a, 'r> {
     tree: &'a Tree<'a>,
@@ -469,14 +514,47 @@ impl Render<'_, '_> {
         }
         match kind(item) {
             Kind::Skip => {}
-            Kind::Pass => self.children(item, depth, parent),
+            Kind::Pass => self.contents(item, depth, parent),
+            // Firefox의 문단은 글 사이에 링크 같은 자식을 둔다
+            Kind::Text if item.name.is_empty() && !self.tree.children(&item.path).is_empty() => {
+                self.contents(item, depth, parent)
+            }
             Kind::Text => {
                 let text = text_of(item);
                 if !self.options.interactive && !text.is_empty() && text != parent.name {
-                    self.push(depth, format!("- text: {}", quote(text, MAX_TEXT)), text);
+                    self.push(depth, format!("- text: {}", quote(&text, MAX_TEXT)), &text);
                 }
             }
             Kind::Line(role) => self.line_node(item, role, depth, parent),
+        }
+    }
+
+    /// 자식과, 요소의 Text에 바로 든 글. Firefox는 자식 요소가 든 자리를 U+FFFC로 두므로 그 자리에
+    /// 자식을 끼워 읽는 차례를 지킨다. 자리 수가 자식 수와 다르면 글을 먼저 낸다
+    fn contents(&mut self, item: &Item, depth: usize, parent: Parent) {
+        let Some(text) = item.text.as_deref().filter(|_| !item.is_editable()) else {
+            return self.children(item, depth, parent);
+        };
+        let children = self.tree.children(&item.path);
+        let chunks: Vec<&str> = text.split(OBJECT).collect();
+        if chunks.len() == children.len() + 1 {
+            for (index, chunk) in chunks.iter().enumerate() {
+                self.own_text(chunk, depth, parent);
+                if let Some(child) = children.get(index) {
+                    self.node(child, depth, parent);
+                }
+            }
+        } else {
+            self.own_text(&text.replace(OBJECT, " "), depth, parent);
+            self.children(item, depth, parent);
+        }
+    }
+
+    /// 그릇에 바로 든 글 한 조각. 위 줄의 이름을 되풀이하면 뺀다
+    fn own_text(&mut self, chunk: &str, depth: usize, parent: Parent) {
+        let text = collapse(chunk);
+        if !self.options.interactive && !text.is_empty() && text != parent.name {
+            self.push(depth, format!("- text: {}", quote(&text, MAX_TEXT)), &text);
         }
     }
 
@@ -514,7 +592,11 @@ impl Render<'_, '_> {
         if self.lines.len() == at {
             return;
         }
-        self.children(item, depth + 1, Parent { role, name });
+        if control(role) {
+            self.children(item, depth + 1, Parent { role, name });
+        } else {
+            self.contents(item, depth + 1, Parent { role, name });
+        }
         let below = self.lines.len() - at - 1;
         if entry(role)
             && !is_interactive
@@ -580,7 +662,7 @@ impl Render<'_, '_> {
             match kind(child) {
                 Kind::Text => {
                     let text = text_of(child);
-                    if !text.is_empty() && found.replace(text.to_string()).is_some() {
+                    if !text.is_empty() && found.replace(text).is_some() {
                         return None;
                     }
                 }
@@ -601,7 +683,7 @@ impl Render<'_, '_> {
                 Kind::Text => {
                     let text = text_of(child);
                     if !text.is_empty() {
-                        return Some(text.to_string());
+                        return Some(text);
                     }
                 }
                 Kind::Line(role) if control(role) => continue,
@@ -639,13 +721,19 @@ impl Render<'_, '_> {
     }
 }
 
-/// 글 요소의 내용: 이름, 없으면 Text 인터페이스로 읽은 글
-fn text_of(item: &Item) -> &str {
-    if item.name.is_empty() {
-        item.text.as_deref().unwrap_or("").trim()
+/// 글 요소의 내용: 이름, 없으면 Text 인터페이스로 읽은 글 (자식 자리 U+FFFC는 뺀다)
+fn text_of(item: &Item) -> String {
+    let text = if item.name.is_empty() {
+        item.text.as_deref().unwrap_or("")
     } else {
-        item.name.trim()
-    }
+        &item.name
+    };
+    collapse(&text.replace(OBJECT, " "))
+}
+
+/// 공백을 하나로 줄이고 앞뒤 공백을 뗀다
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 줄 끝에 붙는 상태와 값. `name`은 줄에 쓴 이름이다
@@ -710,8 +798,13 @@ fn attributes(item: &Item, role: &str, name: &str, is_interactive: bool) -> Vec<
         ));
     }
     if item.is_editable() && item.role != role::PASSWORD_TEXT {
-        if let Some(text) = item.text.as_deref().filter(|text| !text.is_empty()) {
-            out.push(format!("value={}", quote(text, MAX_TEXT)));
+        if let Some(text) = item
+            .text
+            .as_deref()
+            .map(|text| text.replace(OBJECT, ""))
+            .filter(|text| !text.is_empty())
+        {
+            out.push(format!("value={}", quote(&text, MAX_TEXT)));
         }
         if let Some(placeholder) = item
             .placeholder
@@ -812,6 +905,74 @@ mod tests {
             });
             format!("e{}", at + 1)
         }
+    }
+
+    #[test]
+    fn web_text_is_read_in_order_around_its_links() {
+        // Firefox: 문서와 div는 이름 없이 바로 든 글을 Text에 두고, 자식 자리에 U+FFFC를 둔다. 창과
+        // 문서에도 EditableText가 붙지만 EDITABLE이 아니면 값이 아니다
+        let mut window = item("/w", "", 0, role::FRAME, "Mozilla Firefox");
+        window.interfaces = iface::TEXT | iface::EDITABLE_TEXT;
+        window.text = Some("\u{fffc}".into());
+        let mut document = item("/d", "/w", 0, role::DOCUMENT_WEB, "날씨");
+        document.interfaces = iface::TEXT | iface::EDITABLE_TEXT;
+        document.text = Some("\u{fffc}\u{fffc}".into());
+        let mut overview = item("/s", "/d", 0, role::PANEL, "");
+        overview.interfaces = iface::TEXT;
+        overview.text = Some("오늘 서울은  \u{fffc} 이고\n밤부터 비가 옵니다".into());
+        let mut link = item("/a", "/s", 0, role::LINK, "흐림");
+        link.states |= state::FOCUSABLE;
+        link.interfaces = iface::TEXT | iface::ACTION;
+        let mut paragraph = item("/p", "/d", 1, role::PARAGRAPH, "");
+        paragraph.interfaces = iface::TEXT;
+        paragraph.text = Some("기온 12°C".into());
+        let items = vec![window, document, overview, link, paragraph];
+        let tree = Tree::new(&items);
+        let options = Options {
+            interactive: false,
+            hidden: false,
+        };
+        let lines = render(&tree, &["/w"], &options, &mut refs());
+        assert_eq!(
+            lines,
+            [
+                "- window \"Mozilla Firefox\" [ref=e1]:",
+                "  - document \"날씨\" [ref=e2]:",
+                "    - text: \"오늘 서울은\"",
+                "    - link \"흐림\" [ref=e3]",
+                "    - text: \"이고 밤부터 비가 옵니다\"",
+                "    - text: \"기온 12°C\"",
+            ]
+        );
+        assert!(items[2].wants_text() && items[4].wants_text());
+        assert!(
+            !items[3].wants_text(),
+            "links read their name, not their text"
+        );
+    }
+
+    #[test]
+    fn pages_gtk4_stopped_presenting_are_hidden() {
+        // 시스템 정보: 파일시스템 탭으로 넘기면 "자원" 페이지는 자식 수를 0으로 알리지만 목록에는 그
+        // 아래가 VISIBLE, SHOWING인 채 남는다. 루트는 창이 있어도 자식 수가 0이다
+        let mut root = item(crate::atspi::ROOT, "", 0, role::APPLICATION, "앱");
+        root.child_count = 0;
+        let mut window = item("/w", crate::atspi::ROOT, 0, role::FRAME, "시스템 정보");
+        window.child_count = 2;
+        let resources = item("/r", "/w", 0, role::PANEL, "자원");
+        let graph = item("/g", "/r", 0, role::BUTTON, "CPU");
+        let label = item("/l", "/g", 0, role::LABEL, "CPU1");
+        let mut files = item("/f", "/w", 1, role::PANEL, "파일시스템");
+        files.child_count = 1;
+        let table = item("/t", "/f", 0, role::TABLE, "");
+        let mut items = vec![root, window, resources, graph, label, files, table];
+        hide_detached(&mut items);
+        let shown: Vec<&str> = items
+            .iter()
+            .filter(|item| item.shown())
+            .map(|item| item.path.as_str())
+            .collect();
+        assert_eq!(shown, [crate::atspi::ROOT, "/w", "/r", "/f", "/t"]);
     }
 
     #[test]
