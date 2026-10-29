@@ -135,3 +135,10 @@ auth-action-org-freedesktop-hostname1-set-static-hostname = 기기 이름을 바
 auth-action-org-freedesktop-hostname1-set-hostname = 기기 이름을 바꾸려고 합니다.
 auth-action-org-freedesktop-hostname1-set-machine-info = 기기 정보를 바꾸려고 합니다.
 auth-action-org-freedesktop-policykit-exec = { $program } 프로그램을 관리자 권한으로 실행하려고 합니다.
+
+## AI 접근 요청 창 (agent_access.rs). 허용하지 않은 AI가 이 컴퓨터를 제어하려 할 때 묻는다. macOS가 손쉬운 사용
+## 권한을 묻는 경고를 따른다. $name은 AI 프로그램 이름
+agent-access-title = “{ $name }”이(가) 이 컴퓨터를 제어하려고 합니다.
+agent-access-message = 허용하면 이 AI가 앱의 화면 내용을 읽고, 버튼을 누르고, 글을 입력할 수 있습니다. 시스템 설정의 AI 에이전트에서 허용할 수 있습니다.
+agent-access-deny = 거부
+agent-access-open = 시스템 설정 열기

@@ -3,6 +3,7 @@
 
 //! bunt-shell: 메뉴바, Dock, 알림 (wlr-layer-shell 클라이언트, ARCHITECTURE 5.2)
 
+mod agent_access;
 mod appmenu;
 mod bluetooth;
 mod compositor;
@@ -71,6 +72,8 @@ fn main() -> glib::ExitCode {
         let notifications = Notifications::start();
         // 세션의 관리자 인증(pkexec, 시간대, 기기 이름, AI 에이전트 권한)을 묻는 창
         polkit_agent::start(app, &tr);
+        // 허용하지 않은 AI가 이 컴퓨터를 제어하려 하면 묻고 시스템 설정으로 바로 보내는 창
+        agent_access::start(app, &tr);
         let services = Services {
             network: Network::start(),
             bluetooth: Bluetooth::start(),

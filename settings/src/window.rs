@@ -17,7 +17,7 @@ use bunt_i18n::Translations;
 use gtk4::{self as gtk, gio, glib, prelude::*};
 
 use crate::{
-    pages::{Context, Page, interface_settings},
+    pages::{ClientChoice, Context, Page, interface_settings},
     widgets::{BadgeSize, Notice, badge, keep_alive},
 };
 
@@ -202,6 +202,12 @@ impl SettingsWindow {
         add_shortcuts(&window, &search, &navigator);
         follow_color_scheme(&window);
         Self { window, navigator }
+    }
+
+    /// AI 에이전트 페이지를 열고 이 AI를 고른다: 목록에 있으면 그 줄을, 없으면 추가 시트에서 고른다
+    pub fn choose_client(&self, choice: ClientChoice) {
+        self.show(Some(Page::Agent));
+        self.navigator.context.choose_client(choice);
     }
 
     /// 창을 앞으로 가져온다. 페이지를 주면 그 페이지로, 없으면 처음이면 Wi-Fi로 간다

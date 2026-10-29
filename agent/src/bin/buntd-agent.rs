@@ -253,20 +253,56 @@ fn admit(client: Option<&Client>, policy: &Policy) -> Result<(), Failure> {
     if policy.allows(client) {
         return Ok(());
     }
-    bunt_access::record_request(client);
     tracing::warn!(
         client = %client.name,
         exe = %client.exe.display(),
         "refused a client the user has not allowed"
     );
-    Err((
-        protocol::NOT_ALLOWED,
-        format!(
-            "{} is not allowed to control this computer; the user can allow it in \
-             System Settings > AI Agents",
-            client.name
-        ),
-    ))
+    let script = client.script.as_deref();
+    let refusal = if policy.find(&client.exe, script).is_some() {
+        Refusal::TurnedOff
+    } else {
+        // 처음 거절한 AI는 셸의 AI 접근 요청 창이 사용자에게 묻는다 (shell/src/agent_access.rs)
+        let asked = bunt_access::was_asked(&client.exe, script);
+        bunt_access::record_request(client);
+        if asked {
+            Refusal::Asked
+        } else {
+            Refusal::Asking
+        }
+    };
+    Err((protocol::NOT_ALLOWED, refusal.message(&client.name)))
+}
+
+/// 허용하지 않은 AI에게 알리는 것. AI가 사용자에게 무엇을 해 달라고 할지 알 수 있게 쓴다
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// 목록에 있지만 사용자가 꺼 두었다
+    TurnedOff,
+    /// 셸이 지금 사용자에게 묻는다
+    Asking,
+    /// 사용자가 이미 물음을 받았다
+    Asked,
+}
+
+impl Refusal {
+    fn message(self, name: &str) -> String {
+        match self {
+            Self::TurnedOff => format!(
+                "{name} is turned off in System Settings > AI Agents; only the user can turn it \
+                 back on"
+            ),
+            Self::Asking => format!(
+                "{name} is not allowed to control this computer. buntOS is asking the user now: \
+                 ask them to choose \"Open System Settings\" in the alert and then \"Add\" \
+                 (System Settings > AI Agents)"
+            ),
+            Self::Asked => format!(
+                "{name} is not allowed to control this computer. The user was already asked; \
+                 they can allow it in System Settings > AI Agents"
+            ),
+        }
+    }
 }
 
 fn auth_dialog() -> Failure {
@@ -1850,6 +1886,16 @@ async fn pointer_click(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refusals_tell_the_ai_what_the_user_can_do() {
+        // 처음에는 셸이 묻고 있다고 알려, AI가 사용자에게 요청 창에서 허용해 달라고 할 수 있게 한다
+        let asking = Refusal::Asking.message("claude");
+        assert!(asking.starts_with("claude is not allowed to control this computer."));
+        assert!(asking.contains("\"Open System Settings\""));
+        assert!(Refusal::Asked.message("claude").contains("already asked"));
+        assert!(Refusal::TurnedOff.message("claude").contains("turned off"));
+    }
 
     fn app(pid: u32, name: &str, windows: &[(&str, bool)]) -> AppRef {
         AppRef {

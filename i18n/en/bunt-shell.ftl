@@ -135,3 +135,10 @@ auth-action-org-freedesktop-hostname1-set-static-hostname = { $app } wants to ch
 auth-action-org-freedesktop-hostname1-set-hostname = { $app } wants to change the computer name.
 auth-action-org-freedesktop-hostname1-set-machine-info = { $app } wants to change the computer information.
 auth-action-org-freedesktop-policykit-exec = { $app } wants to run { $program } as an administrator.
+
+## AI access request (agent_access.rs). Asks when an AI that is not allowed tries to control this computer, like the
+## macOS prompt for accessibility access. $name is the AI program's name
+agent-access-title = “{ $name }” would like to control this computer.
+agent-access-message = If you allow it, this AI can read what apps show, press buttons and type text. You can allow it in System Settings > AI Agents.
+agent-access-deny = Deny
+agent-access-open = Open System Settings

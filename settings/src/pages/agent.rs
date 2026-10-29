@@ -37,6 +37,13 @@ const APP_ICON: &str = "application-x-executable-symbolic";
 /// 줄의 아이콘 크기 (macOS 목록의 작은 앱 아이콘)
 const ROW_ICON: i32 = 20;
 
+/// 셸의 AI 접근 요청 창이 명령줄로 넘긴, 고를 AI (실행 파일과 스크립트)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientChoice {
+    pub exe: PathBuf,
+    pub script: Option<PathBuf>,
+}
+
 pub fn build(context: &Rc<Context>) -> gtk::Widget {
     let tr = &context.tr;
     let (scroller, column) = widgets::page();
@@ -69,8 +76,15 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
         apps,
         busy: Cell::new(false),
         policy: RefCell::default(),
+        client_sheet: RefCell::default(),
     });
     page.connect();
+    let chooser = Rc::downgrade(&page);
+    context.on_choose_client(move |choice| {
+        if let Some(page) = chooser.upgrade() {
+            page.choose(choice);
+        }
+    });
     // 다른 곳(다른 창, 명령줄)에서 바꾼 정책과 새 요청이 보이도록 페이지가 보일 때마다 읽는다
     let shown = page.clone();
     widgets::while_mapped(&scroller, move || shown.reload(), || {});
@@ -185,6 +199,8 @@ struct AgentPage {
     busy: Cell<bool>,
     /// 지금 보이는 정책. 줄 번호가 clients·blocked_apps의 번호다
     policy: RefCell<Policy>,
+    /// 열려 있는 AI 추가 시트. 요청 창이 다시 열 때 겹쳐 뜨지 않게 닫는다
+    client_sheet: RefCell<Option<glib::WeakRef<gtk::Window>>>,
 }
 
 impl AgentPage {
@@ -200,7 +216,7 @@ impl AgentPage {
         let page = Rc::downgrade(self);
         self.clients.add.connect_clicked(move |_| {
             if let Some(page) = page.upgrade() {
-                page.show_add_client();
+                page.show_add_client(None);
             }
         });
         let page = Rc::downgrade(self);
@@ -380,7 +396,41 @@ impl AgentPage {
     }
 
     /// [+] AI: 접근을 요청했던 AI 가운데 하나를 고르거나 다른 프로그램을 고른다
-    fn show_add_client(self: &Rc<Self>) {
+    /// 셸의 AI 접근 요청 창이 보낸 AI를 고른다. 목록에 있으면(켠 것, 끈 것) 그 줄을 고르고, 없으면 추가
+    /// 시트를 그 AI를 고른 채로 연다. 사용자가 [추가]를 눌러야 인증 창이 암호를 묻는다
+    fn choose(self: &Rc<Self>, choice: ClientChoice) {
+        // 인증 창이 떠 있는 동안에는 페이지만 보인다
+        if self.busy.get() {
+            return;
+        }
+        self.reload();
+        let listed = {
+            let policy = self.policy.borrow();
+            policy
+                .find(&choice.exe, choice.script.as_deref())
+                .and_then(|found| {
+                    policy
+                        .clients
+                        .iter()
+                        .position(|client| std::ptr::eq(client, found))
+                })
+        };
+        if let Some(index) = listed {
+            self.clients.select(Some(index));
+            return;
+        }
+        let Some(window) = self.context.window() else {
+            return;
+        };
+        // 시스템 설정을 막 띄웠으면 창이 자리를 잡은 뒤에 시트를 연다
+        let page = self.clone();
+        widgets::after_first_frame(&window, move || page.show_add_client(Some(&choice)));
+    }
+
+    fn show_add_client(self: &Rc<Self>, choice: Option<&ClientChoice>) {
+        if let Some(open) = self.client_sheet.take().and_then(|sheet| sheet.upgrade()) {
+            open.close();
+        }
         let tr = &self.context.tr;
         let sheet = Sheet::new(
             self.context.window().as_ref(),
@@ -431,6 +481,17 @@ impl AgentPage {
         list.connect_selected_rows_changed(move |list| {
             confirm.set_sensitive(list.selected_row().is_some());
         });
+        // 요청 창에서 왔으면 그 AI를 골라 둔다. macOS가 권한을 물은 앱을 목록에 올려 두는 것과 같다
+        let chosen = choice
+            .and_then(|choice| {
+                requests.iter().position(|request| {
+                    request.exe == choice.exe && request.script == choice.script
+                })
+            })
+            .and_then(|index| list.row_at_index(i32::try_from(index).ok()?));
+        if let Some(row) = &chosen {
+            list.select_row(Some(row));
+        }
         let requests = Rc::new(requests);
         let add = {
             let page = Rc::downgrade(self);
@@ -466,6 +527,10 @@ impl AgentPage {
             }
         });
         sheet.present();
+        if chosen.is_some() {
+            sheet.confirm.grab_focus();
+        }
+        self.client_sheet.replace(Some(sheet.window.downgrade()));
     }
 
     /// "다른 프로그램…": 실행 파일이나 스크립트를 골라 더한다

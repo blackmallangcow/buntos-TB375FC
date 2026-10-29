@@ -28,7 +28,10 @@ use bunt_i18n::{FluentArgs, Translations};
 use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
 use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 
-const NAMESPACE: &str = "bunt-polkit-agent";
+/// 인증 창의 레이어 이름이자 접근성 이름. 컴포지터(comp/src/agent.rs)와 에이전트 데몬
+/// (agent/src/atspi.rs)이 이 이름의 창을 에이전트가 건드리지 못하게 막는다. 사용자만 답해야 하는 AI
+/// 접근 요청 창(agent_access.rs)도 이 이름을 쓴다
+pub(crate) const NAMESPACE: &str = "bunt-polkit-agent";
 const AGENT_PATH: &str = "/org/buntos/PolicyKit1/AuthenticationAgent";
 const AGENT_INTERFACE: &str = "org.freedesktop.PolicyKit1.AuthenticationAgent";
 const AUTHORITY_NAME: &str = "org.freedesktop.PolicyKit1";
@@ -1015,7 +1018,10 @@ impl Dialog {
 }
 
 /// 요청한 앱의 아이콘에 작은 자물쇠를 붙인다. 앱을 모르면 polkit 동작의 아이콘이나 자물쇠를 그린다
-fn requester_icon(app: Option<&(String, Option<gio::Icon>)>, icon_name: &str) -> gtk::Widget {
+pub(crate) fn requester_icon(
+    app: Option<&(String, Option<gio::Icon>)>,
+    icon_name: &str,
+) -> gtk::Widget {
     let overlay = gtk::Overlay::builder()
         .halign(gtk::Align::Center)
         .css_classes(["auth-icon"])

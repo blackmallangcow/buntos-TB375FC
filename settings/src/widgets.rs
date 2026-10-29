@@ -4,7 +4,10 @@
 //! 설정 화면의 틀: 페이지, 묶음, 행, 아이콘 배지, 대화상자, 알림.
 //! 모양은 macOS 26 시스템 설정을 따르며 data/style.css와 theme/tokens.css에 있다
 
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use gtk4::{self as gtk, gio, glib, prelude::*};
 
@@ -657,6 +660,24 @@ pub fn while_mapped(
 ) {
     widget.as_ref().connect_map(move |_| start());
     widget.as_ref().connect_unmap(move |_| stop());
+}
+
+/// 창이 첫 화면을 그린 뒤 한 번 부른다. 막 띄운 창 위에 시트를 열 때 쓴다: 컴포지터는 부모 창의 첫
+/// 버퍼가 온 뒤에야 부모 자리를 알고 시트를 그 가운데에 놓는다. 두 번째 프레임이면 첫 프레임은 이미
+/// 컴포지터에 갔다
+pub fn after_first_frame(window: &impl IsA<gtk::Widget>, run: impl FnOnce() + 'static) {
+    let run = RefCell::new(Some(run));
+    let frames = Cell::new(0);
+    window.as_ref().add_tick_callback(move |_, _| {
+        frames.set(frames.get() + 1);
+        if frames.get() < 2 {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(run) = run.take() {
+            run();
+        }
+        glib::ControlFlow::Break
+    });
 }
 
 /// 창 아래쪽에 잠깐 보이는 알림

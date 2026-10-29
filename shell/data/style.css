@@ -670,6 +670,11 @@ window.bunt-polkit-agent.background {
   color: #ffffff;
 }
 
+/* AI 접근 요청 창(agent_access.rs)의 타일: 시스템 설정 AI 에이전트 페이지 아이콘과 같은 분홍 */
+.agent-access-tile {
+  background-image: linear-gradient(to bottom, color-mix(in srgb, var(--pink) 75%, white), var(--pink));
+}
+
 .auth-lock-badge {
   margin: 0 -4px -4px 0;
   border-radius: var(--radius-capsule);

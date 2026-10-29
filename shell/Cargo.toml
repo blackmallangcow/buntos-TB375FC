@@ -11,6 +11,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# AI 접근 요청 창: 에이전트 데몬의 요청 기록과 접근 정책을 읽는다
+bunt-access = { path = "../access" }
 bunt-i18n = { path = "../i18n" }
 gdk4-wayland = { version = "0.11", features = ["wayland_crate"] }
 gio-unix = "0.22"

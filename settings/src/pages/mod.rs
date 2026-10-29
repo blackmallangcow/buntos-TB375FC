@@ -5,6 +5,8 @@
 
 mod about;
 mod agent;
+
+pub use agent::ClientChoice;
 mod appearance;
 mod battery;
 mod bluetooth;
@@ -208,6 +210,7 @@ impl Page {
 }
 
 type Navigate = Rc<dyn Fn(Page)>;
+type ChooseClient = Rc<dyn Fn(ClientChoice)>;
 
 /// 페이지들이 함께 쓰는 것
 pub struct Context {
@@ -215,6 +218,8 @@ pub struct Context {
     pub notice: Notice,
     window: glib::WeakRef<gtk::Window>,
     navigate: RefCell<Option<Navigate>>,
+    /// AI 에이전트 페이지가 명령줄로 받은 AI를 고르는 처리기
+    choose_client: RefCell<Option<ChooseClient>>,
 }
 
 impl Context {
@@ -224,6 +229,19 @@ impl Context {
             notice,
             window: window.downgrade(),
             navigate: RefCell::new(None),
+            choose_client: RefCell::new(None),
+        }
+    }
+
+    pub fn on_choose_client(&self, choose: impl Fn(ClientChoice) + 'static) {
+        self.choose_client.replace(Some(Rc::new(choose)));
+    }
+
+    /// AI 에이전트 페이지에서 이 AI를 고르게 한다 (셸의 AI 접근 요청 창). 페이지를 연 뒤에 부른다
+    pub fn choose_client(&self, choice: ClientChoice) {
+        let choose = self.choose_client.borrow().clone();
+        if let Some(choose) = choose {
+            choose(choice);
         }
     }
 

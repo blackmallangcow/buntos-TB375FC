@@ -8,7 +8,8 @@
 //!   바꿀 때마다 관리자 암호를 묻는다.
 //! - 에이전트 데몬(buntd-agent)은 소켓에 붙은 프로세스를 [`identify`]로 알아보고, [`Policy::allows`]로
 //!   받을지, [`Policy::blocks`]로 앱에 접근하게 할지 정한다. 받지 않은 클라이언트는 [`record_request`]로
-//!   남기고, 설정 페이지가 [`requests`]로 읽어 더할 AI로 보여 준다.
+//!   남긴다. 셸은 [`request_to_ask`]로 방금 붙은 AI를 한 번 묻고, 설정 페이지는 [`requests`]로 읽어 더할
+//!   AI로 보여 준다.
 //! - 허용 목록은 실행 파일 경로로 맞춘다. 사용자 홈 아래의 스스로 업데이트하는 AI(클로드 코드 등)는
 //!   판 번호·빌드 해시 자리를 `*`로 바꾼 패턴으로도 맞춰 업데이트해도 허용이 풀리지 않는다
 //!   ([`version_pattern`]).
@@ -33,7 +34,10 @@ pub use policy::{
     AllowedClient, POLICY_PATH, Policy, PolicyError, normalize_app_id, valid_app_id, valid_name,
     valid_path,
 };
-pub use requests::{REQUESTS_FILE, Request, record_request, requests, requests_path};
+pub use requests::{
+    REQUESTS_FILE, Request, mark_asked, record_request, request_to_ask, requests, requests_path,
+    was_asked,
+};
 
 /// 정책을 고치는 특권 도우미. polkit 동작의 exec.path 주석과 같은 경로다
 pub const HELPER_PATH: &str = "/usr/libexec/buntos/bunt-access-helper";
