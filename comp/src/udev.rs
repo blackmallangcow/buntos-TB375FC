@@ -237,17 +237,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
     // 렌더러가 CPU로 그리는지만 보던 것을, 앱이 GPU로 그릴 수 있는지까지 정하게 바꿨다 (gpu.rs)
     let renderer_name = renderer_name(&mut renderer);
-    let rendering = Rendering::from_renderer_name(&renderer_name);
-    let inherited = std::env::var(GSK_RENDERER)
-        .ok()
-        .filter(|value| !value.is_empty());
-    let client_env = rendering.client_env(inherited.as_deref());
+    let mut rendering = Rendering::from_renderer_name(&renderer_name);
     tracing::info!("renderer: {renderer_name}");
-    match (&inherited, rendering.gpu_clients) {
-        (Some(value), _) => tracing::info!("apps: {GSK_RENDERER}={value} from the session"),
-        (None, true) => tracing::info!("apps: GTK picks its GPU renderer"),
-        (None, false) => tracing::info!("apps: drawn with the CPU ({GSK_RENDERER}=cairo)"),
-    }
     let render_formats: FormatSet = renderer.egl_context().dmabuf_render_formats().clone();
     let shm_formats: Vec<_> = renderer.shm_formats().collect();
     // 앱이 GPU로 그릴 수 있으면 화면 GPU의 렌더 노드로 linux-dmabuf를 연다
@@ -259,6 +250,18 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         .filter(|_| rendering.gpu_clients)
         .map(|node| (node, renderer.dmabuf_formats()));
     let dmabufs = Dmabufs::new::<BuntState>(&display.handle(), dmabuf_device);
+    // linux-dmabuf를 열지 못했으면(렌더 노드나 형식이 없다) 앱이 GPU로 그린 버퍼를 보낼 곳이 없으므로
+    // GTK도 CPU로 그리게 한다
+    rendering.gpu_clients &= dmabufs.enabled();
+    let inherited = std::env::var(GSK_RENDERER)
+        .ok()
+        .filter(|value| !value.is_empty());
+    let client_env = rendering.client_env(inherited.as_deref());
+    match (&inherited, rendering.gpu_clients) {
+        (Some(value), _) => tracing::info!("apps: {GSK_RENDERER}={value} from the session"),
+        (None, true) => tracing::info!("apps: GTK picks its GPU renderer"),
+        (None, false) => tracing::info!("apps: drawn with the CPU ({GSK_RENDERER}=cairo)"),
+    }
     let background_effects =
         BackgroundEffectState::new::<BuntState>(&display.handle(), config.effects.blur);
 

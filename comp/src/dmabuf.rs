@@ -85,6 +85,12 @@ impl Dmabufs {
     {
         let mut dmabufs = Self::closed();
         let count = formats.iter().count();
+        // 형식이 없는 전역을 보면 앱(Mesa의 EGL)이 GPU로 그리려다 버퍼를 보내지 못한다. 열지 않으면
+        // wl_shm으로 보낸다
+        if count == 0 {
+            tracing::warn!("linux-dmabuf disabled: the renderer imports no dmabuf format");
+            return dmabufs;
+        }
         match DmabufFeedbackBuilder::new(main_device, formats).build() {
             Ok(feedback) => {
                 let global = dmabufs
@@ -105,6 +111,11 @@ impl Dmabufs {
             Err(err) => tracing::warn!("linux-dmabuf disabled: {err}"),
         }
         dmabufs
+    }
+
+    /// 앱이 linux-dmabuf를 볼 수 있다
+    pub fn enabled(&self) -> bool {
+        self.global.is_some()
     }
 
     pub fn state_mut(&mut self) -> &mut DmabufState {
@@ -207,6 +218,21 @@ mod tests {
         let client = server.connect();
         assert!(client.global_version("wl_shm").is_some());
         assert_eq!(client.global_version(DMABUF), None);
+    }
+
+    #[test]
+    fn a_renderer_without_dmabuf_formats_keeps_apps_on_wl_shm() {
+        let mut server = Server::new(
+            None,
+            ServerOptions {
+                dmabuf_formats: Some(FormatSet::default()),
+                blur: false,
+            },
+        );
+        let client = server.connect();
+        assert_eq!(client.global_version(DMABUF), None);
+        // 컴포지터는 이때 GTK도 CPU로 그리게 한다 (udev.rs)
+        assert!(!server.state.dmabufs.enabled());
     }
 
     #[test]

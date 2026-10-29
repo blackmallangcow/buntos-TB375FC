@@ -576,7 +576,7 @@ v0 구현 (2026-10-29, 접근 정책):
 - dmabuf 제로카피 경로 우선: 컴포지터가 GPU로 그리면 linux-dmabuf v5를 연다. 기본 피드백은 화면 GPU의 렌더 노드와 렌더러가 텍스처로 읽는 형식이다. 앱 버퍼는 만들 때 렌더러로 가져와 보고, 가져온 텍스처를 그릴 때 다시 쓴다(복사 없음)
 - 앱의 그리기 방식은 컴포지터가 자기 GL 렌더러를 보고 정한다(`comp/src/gpu.rs`). 렌더러는 화면 GPU에 EGL을 만들어 봐야 알기 때문이다
   - CPU 렌더러(llvmpipe, softpipe, SwiftShader): 띄우는 프로그램과 D-Bus 활성화·systemd 사용자 환경(prepare의 `dbus-update-activation-environment --systemd`)에 `GSK_RENDERER=cairo`를 주고 linux-dmabuf를 열지 않는다. GTK의 GL·Vulkan은 소프트웨어 래스터라이저에서 메모리를 몇 배 쓴다(시스템 설정이 GL로 475MB, cairo로 102~164MB, [개발 환경](../dev/environment.md) 7장)
-  - GPU: GTK가 Vulkan이나 GL을 골라 dmabuf로 보낸다
+  - GPU: GTK가 Vulkan이나 GL을 골라 dmabuf로 보낸다. linux-dmabuf를 열지 못하면(렌더 노드나 렌더러가 읽는 형식이 없다) CPU 렌더러처럼 다룬다
   - 가상 GPU(virgl): 앱이 virgl 드라이버로 그리므로 GPU로 다룬다. 호스트가 CPU로 그리면(`virgl (llvmpipe …)`) 프레임 수만 CPU 렌더러처럼 줄인다(60Hz, 뒤의 창 30Hz)
   - 세션이 정한 `GSK_RENDERER`는 그대로 물려준다(시험할 때)
 - 흐림(유리, [디자인 스펙](DESIGN-SPEC.md) 2.2절): 셸 유리와 앱이 ext-background-effect-v1로 요청한 영역만 흐리고, 아래 장면이 흐릴 곳에 닿게 바뀐 프레임에만 다시 흐린다

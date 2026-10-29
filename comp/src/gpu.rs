@@ -34,7 +34,8 @@ pub const GSK_RENDERER: &str = "GSK_RENDERER";
 pub struct Rendering {
     /// 화면을 CPU가 합성한다. 프레임 수를 줄인다 (udev.rs의 SOFTWARE_FRAME, BACKGROUND_FRAME)
     pub cpu_composited: bool,
-    /// 앱이 GPU로 그릴 수 있다. linux-dmabuf를 열고 GTK가 렌더러를 고르게 둔다
+    /// 앱이 GPU로 그릴 수 있다. linux-dmabuf를 열고 GTK가 렌더러를 고르게 둔다. linux-dmabuf를 열지
+    /// 못하면(렌더 노드나 형식이 없다) 컴포지터가 거짓으로 바꾼다 (udev.rs)
     pub gpu_clients: bool,
 }
 
