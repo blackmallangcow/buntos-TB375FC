@@ -212,7 +212,11 @@ impl BuntState {
     /// 찍고, 영역과 창은 고르기를 시작해 고른 뒤 `delay`초 기다려 찍는다. 저장 위치가 클립보드면
     /// 클립보드에 넣는다
     pub fn start_screenshot(&mut self, mode: Mode, clipboard: bool, delay: u32) {
-        if self.screenshot_area.is_some() || self.screenshot_capture.is_some() {
+        // 잠긴 동안에는 찍지 않는다. 잠글 때 고르던 영역과 찍을 일은 버린다 (session_lock.rs)
+        if self.session_lock.is_locked()
+            || self.screenshot_area.is_some()
+            || self.screenshot_capture.is_some()
+        {
             return;
         }
         let clipboard = clipboard || self.screenshot_options.location == Location::Clipboard;
@@ -269,16 +273,21 @@ impl BuntState {
         }
     }
 
-    /// `delay`초 뒤에 한다 (0이면 바로)
+    /// `delay`초 뒤에 한다 (0이면 바로). 그때 화면이 잠겨 있으면 하지 않는다: 창 찍기는 잠긴 장면이 아니라
+    /// 창을 따로 그린다
     fn after(&mut self, delay: u32, then: impl FnOnce(&mut BuntState) + 'static) {
         if delay == 0 {
-            then(self);
+            if !self.session_lock.is_locked() {
+                then(self);
+            }
             return;
         }
         let mut then = Some(then);
         let timer = Timer::from_duration(Duration::from_secs(delay.into()));
         if let Err(err) = self.loop_handle.insert_source(timer, move |_, _, state| {
-            if let Some(then) = then.take() {
+            if let Some(then) = then.take()
+                && !state.session_lock.is_locked()
+            {
                 then(state);
             }
             TimeoutAction::Drop
