@@ -363,6 +363,13 @@ mod tests {
         ext_background_effect_surface_v1::{self as effect, ExtBackgroundEffectSurfaceV1},
     };
 
+    use std::{
+        path::{Path, PathBuf},
+        time::Duration,
+    };
+
+    use smithay::backend::renderer::utils::with_renderer_surface_state;
+
     use super::*;
     use crate::{
         blur::BlurShape,
@@ -643,6 +650,67 @@ mod tests {
                 effect::Error::SurfaceDestroyed as u32,
                 "ext_background_effect_surface_v1".into()
             ))
+        );
+    }
+
+    /// cargo test가 함께 빌드한 예제 (target/<프로필>/examples/). 시험 바이너리는 target/<프로필>/deps에 있다.
+    /// 시험 이름을 주고 돌리면 cargo가 예제를 다시 빌드하지 않으므로, 소스보다 오래된 예제는 없는 것으로 본다
+    fn example(name: &str) -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let path = exe.parent()?.parent()?.join("examples").join(name);
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join(format!("{name}.rs"));
+        let built = path.metadata().ok()?.modified().ok()?;
+        let written = source.metadata().ok()?.modified().ok()?;
+        (built >= written).then_some(path)
+    }
+
+    #[test]
+    fn the_example_client_toggles_a_blurred_sidebar() {
+        let Some(program) = example("glass-window") else {
+            eprintln!("skipped: the glass-window example is not built or older than its source");
+            return;
+        };
+        let mut server = Server::new(
+            None,
+            ServerOptions {
+                dmabuf_formats: None,
+                blur: true,
+            },
+        );
+        let mut child = server.spawn(
+            &program,
+            &["--region=sidebar", "--toggle=0.2", "--seconds=1"],
+        );
+        let sidebar = vec![rect(0, 0, 160, 320)];
+        let limit = Duration::from_secs(10);
+        let region = |state: &mut crate::testing::ServerState| {
+            state
+                .effects
+                .targets()
+                .into_iter()
+                .next()
+                .map(|target| match target.shape {
+                    BlurShape::Region(rects) => rects.to_vec(),
+                    BlurShape::Glass => Vec::new(),
+                })
+        };
+        // 처음에는 사이드바를 흐리고, 0.2초마다 지웠다가 다시 준다
+        assert!(server.serve_while(&mut child, limit, |state| region(state)
+            == Some(sidebar.clone())));
+        let surface = server.state.surfaces[0].clone();
+        assert_eq!(
+            with_renderer_surface_state(&surface, |state| state.buffer_size()).flatten(),
+            Some((480, 320).into()),
+            "the window has its default size"
+        );
+        assert!(server.serve_while(&mut child, limit, |state| region(state).is_none()));
+        assert!(server.serve_while(&mut child, limit, |state| region(state)
+            == Some(sidebar.clone())));
+        assert!(
+            server.serve_until_exit(&mut child, limit),
+            "the example failed"
         );
     }
 }

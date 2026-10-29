@@ -243,6 +243,7 @@ name = "bunt-comp"
 version = "0.1.0"
 dependencies = [
  "bunt-i18n",
+ "gbm",
  "libc",
  "png",
  "serde",

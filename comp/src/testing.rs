@@ -4,17 +4,21 @@
 //! 시험 도우미. GPU 없이 dmabuf 가져오기, 흐림, 앱의 흐림 요청을 끝까지 시험한다.
 //! - 렌더러: Mesa의 소프트웨어 EGL 장치(llvmpipe). llvmpipe는 memfd를 dmabuf처럼 가져온다
 //! - 서버: 컴포지터와 같은 처리(커밋, linux-dmabuf, ext-background-effect)를 하는 작은 Wayland 서버
-//! - 클라이언트: 같은 프로세스에서 소켓 쌍으로 붙는 wayland-client. 서버와 번갈아 돌린다(pump)
+//! - 클라이언트: 같은 프로세스에서 소켓 쌍으로 붙는 wayland-client. 서버와 번갈아 돌린다(pump).
+//!   다른 프로세스(예제 클라이언트)도 WAYLAND_SOCKET으로 붙인다(spawn)
 //!
 //! 소프트웨어 EGL 장치가 없는 기계에서는 GL 시험이 알리고 건너뛴다
 
 use std::{
     io::Write,
     os::{
-        fd::{AsFd, FromRawFd, OwnedFd},
+        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
         unix::net::UnixStream,
     },
+    path::Path,
+    process::{Child, Command},
     sync::{Arc, Mutex, MutexGuard},
+    time::{Duration, Instant},
 };
 
 use smithay::{
@@ -33,17 +37,24 @@ use smithay::{
             utils::on_commit_buffer_handler,
         },
     },
-    delegate_compositor, delegate_dmabuf, delegate_shm,
-    reexports::wayland_server::{
-        Client, Display,
-        backend::{ClientData, ClientId, DisconnectReason},
-        protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+    delegate_compositor, delegate_dmabuf, delegate_shm, delegate_xdg_shell,
+    input::{SeatHandler, SeatState},
+    reexports::{
+        rustix::io::{FdFlags, fcntl_setfd},
+        wayland_server::{
+            Client, Display,
+            backend::{ClientData, ClientId, DisconnectReason},
+            protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
+        },
     },
-    utils::{Physical, Point, Scale, Size, Transform},
+    utils::{Physical, Point, Scale, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
         dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+        shell::xdg::{
+            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        },
         shm::{ShmHandler, ShmState},
     },
 };
@@ -125,6 +136,9 @@ pub fn stripes(width: usize, height: usize, period: usize) -> Vec<u8> {
 /// 시험 서버의 상태
 pub struct ServerState {
     pub compositor: CompositorState,
+    pub xdg_shell: XdgShellState,
+    /// xdg_shell의 팝업 그랩이 쓴다. 시험 서버는 wl_seat 전역을 열지 않는다
+    seat: SeatState<ServerState>,
     pub shm: ShmState,
     pub dmabufs: Dmabufs,
     pub effects: BackgroundEffectState,
@@ -153,13 +167,52 @@ impl CompositorHandler for ServerState {
         &client.get_data::<TestClientData>().unwrap().compositor
     }
 
-    /// 컴포지터(state.rs)와 같이 SHM 손상을 줄이고 버퍼를 받는다
+    /// 컴포지터(state.rs)와 같이 SHM 손상을 줄이고 버퍼를 받는다. 창은 첫 커밋에 configure를 보낸다
     fn commit(&mut self, surface: &WlSurface) {
         shmdiff::narrow_damage(surface);
         on_commit_buffer_handler::<Self>(surface);
+        if let Some(toplevel) = self
+            .xdg_shell
+            .toplevel_surfaces()
+            .iter()
+            .find(|toplevel| toplevel.wl_surface() == surface)
+            && !toplevel.is_initial_configure_sent()
+        {
+            toplevel.send_configure();
+        }
         if !self.surfaces.contains(surface) {
             self.surfaces.push(surface.clone());
         }
+    }
+}
+
+impl SeatHandler for ServerState {
+    type KeyboardFocus = WlSurface;
+    type PointerFocus = WlSurface;
+    type TouchFocus = WlSurface;
+
+    fn seat_state(&mut self) -> &mut SeatState<Self> {
+        &mut self.seat
+    }
+}
+
+impl XdgShellHandler for ServerState {
+    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
+        &mut self.xdg_shell
+    }
+
+    fn new_toplevel(&mut self, _surface: ToplevelSurface) {}
+
+    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+
+    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+
+    fn reposition_request(
+        &mut self,
+        _surface: PopupSurface,
+        _positioner: PositionerState,
+        _token: u32,
+    ) {
     }
 }
 
@@ -200,6 +253,7 @@ impl BackgroundEffectHandler for ServerState {
 }
 
 delegate_compositor!(ServerState);
+delegate_xdg_shell!(ServerState);
 delegate_shm!(ServerState);
 delegate_dmabuf!(ServerState);
 background_effect::delegate_background_effect!(ServerState);
@@ -227,6 +281,8 @@ impl Server {
         };
         let state = ServerState {
             compositor: CompositorState::new::<ServerState>(&dh),
+            xdg_shell: XdgShellState::new::<ServerState>(&dh),
+            seat: SeatState::new(),
             shm: ShmState::new::<ServerState>(&dh, vec![]),
             dmabufs,
             effects: BackgroundEffectState::new::<ServerState>(&dh, options.blur),
@@ -257,6 +313,65 @@ impl Server {
         };
         self.pump(&mut client);
         client
+    }
+
+    /// 다른 프로세스를 클라이언트로 붙여 띄운다 (WAYLAND_SOCKET)
+    pub fn spawn(&mut self, program: &Path, args: &[&str]) -> Child {
+        let (ours, theirs) = UnixStream::pair().expect("socket pair");
+        ours.set_nonblocking(true).unwrap();
+        self.display
+            .handle()
+            .insert_client(ours, Arc::new(TestClientData::default()))
+            .expect("insert client");
+        // 자식이 연결을 물려받도록 close-on-exec를 끈다 (state.rs의 spawn_trusted와 같다)
+        fcntl_setfd(&theirs, FdFlags::empty()).expect("pass the socket");
+        let child = Command::new(program)
+            .args(args)
+            .env("WAYLAND_SOCKET", theirs.as_raw_fd().to_string())
+            .env_remove("WAYLAND_DISPLAY")
+            .spawn()
+            .expect("spawn the client");
+        drop(theirs);
+        child
+    }
+
+    /// `done`이 참이 될 때까지 자식 클라이언트를 받으며 서버를 돌린다. 자식이 먼저 끝나거나 `limit`가
+    /// 지나면 거짓
+    pub fn serve_while(
+        &mut self,
+        child: &mut Child,
+        limit: Duration,
+        mut done: impl FnMut(&mut ServerState) -> bool,
+    ) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            self.display
+                .dispatch_clients(&mut self.state)
+                .expect("server dispatch");
+            self.display.flush_clients().expect("server flush");
+            if done(&mut self.state) {
+                return true;
+            }
+            if child.try_wait().expect("wait").is_some() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// 자식 클라이언트가 끝날 때까지 서버를 돌린다. 잘 끝났으면 참. `limit`가 지나면 자식을 끝낸다
+    pub fn serve_until_exit(&mut self, child: &mut Child, limit: Duration) -> bool {
+        let exited = self.serve_while(child, limit, |_| false);
+        debug_assert!(!exited);
+        match child.try_wait().expect("wait") {
+            Some(status) => status.success(),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                false
+            }
+        }
     }
 
     /// 서버와 클라이언트를 몇 번 번갈아 돌려 보낸 요청과 이벤트를 다 처리한다

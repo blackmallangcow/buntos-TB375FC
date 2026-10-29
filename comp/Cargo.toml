@@ -29,6 +29,8 @@ zbus = "5"
 # 시험(src/testing.rs)과 예제(examples/)의 Wayland 클라이언트
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+# 예제가 dmabuf를 만든다 (examples/glass-window.rs). smithay와 같은 기능만 켠다
+gbm = { version = "0.18", default-features = false, features = ["drm-support"] }
 
 [dependencies.smithay]
 version = "0.7.0"
