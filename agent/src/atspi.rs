@@ -29,6 +29,9 @@ pub const ROOT: &str = "/org/a11y/atspi/accessible/root";
 /// 셸의 관리자 인증 창: 레이어 이름이자 창의 접근성 이름. 사람만 답하는 창이라 에이전트는 읽지도
 /// 조작하지도 않는다
 pub const AUTH_WINDOW: &str = "bunt-polkit-agent";
+/// 잠금 화면(bunt-lock): 앱 이름이자 창의 접근성 이름. 사람만 암호를 치는 화면이라 에이전트는 읽지도 조작하지도
+/// 않는다. 잠긴 동안에는 데몬이 모든 요청을 거절하므로, 이 이름은 잠금을 푼 뒤 잠금 화면이 끝나기까지의 틈을 막는다
+pub const LOCK_WINDOW: &str = "bunt-lock";
 const CACHE: &str = "/org/a11y/atspi/cache";
 const ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
 const ACTION: &str = "org.a11y.atspi.Action";
@@ -124,6 +127,41 @@ pub struct A11y {
     bus: Connection,
     /// 세션 버스 (컴포지터 API)
     session: Connection,
+}
+
+/// 화면이 잠겼는지 (org.buntos.Compositor1.GetLocked). 컴포지터가 버스에 없거나 이 메서드를 모르면(화면 잠금이
+/// 없는 옛 컴포지터) 잠기지 않은 것으로 본다. 답이 늦는 것 같은 그 밖의 오류는 잠긴 것으로 본다
+pub async fn screen_locked(session: &Connection) -> bool {
+    let reply = call_on::<_, bool>(
+        session,
+        CALL_TIMEOUT,
+        "org.buntos.Compositor",
+        "/org/buntos/Compositor",
+        "org.buntos.Compositor1",
+        "GetLocked",
+        &(),
+    )
+    .await;
+    match reply {
+        Ok(locked) => locked,
+        Err(zbus::Error::MethodError(name, ..)) if no_lock_api(name.as_str()) => false,
+        Err(err) => {
+            tracing::warn!(
+                "cannot tell whether the screen is locked; treating it as locked: {err}"
+            );
+            true
+        }
+    }
+}
+
+/// 화면 잠금을 모르는 곳의 오류: 컴포지터가 버스에 없거나(세션 밖) GetLocked가 없다(옛 컴포지터)
+fn no_lock_api(error: &str) -> bool {
+    matches!(
+        error,
+        "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NameHasNoOwner"
+            | "org.freedesktop.DBus.Error.UnknownMethod"
+    )
 }
 
 /// 보조 기술이 있다고 알린다 (org.a11y.Status.IsEnabled). Chromium·Electron·Firefox·Qt 앱은 이것을
@@ -835,6 +873,14 @@ fn states(words: &[u32]) -> u64 {
 mod tests {
     use super::*;
     use crate::tree::state;
+
+    #[test]
+    fn only_a_missing_lock_api_counts_as_unlocked() {
+        assert!(no_lock_api("org.freedesktop.DBus.Error.ServiceUnknown"));
+        assert!(no_lock_api("org.freedesktop.DBus.Error.UnknownMethod"));
+        assert!(!no_lock_api("org.freedesktop.DBus.Error.AccessDenied"));
+        assert!(!no_lock_api("org.freedesktop.DBus.Error.NoReply"));
+    }
 
     #[test]
     fn state_words_make_one_set() {

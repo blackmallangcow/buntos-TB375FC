@@ -27,7 +27,7 @@ use std::{
 
 use bunt_access::{Client, Policy};
 use bunt_agent::{
-    atspi::{self, A11y, AUTH_WINDOW, AppRef, Focus, Placed, ROOT, WindowRef},
+    atspi::{self, A11y, AUTH_WINDOW, AppRef, Focus, LOCK_WINDOW, Placed, ROOT, WindowRef},
     desktop::{self, DesktopApp},
     diff,
     protocol::{
@@ -120,6 +120,8 @@ struct Rendered {
 #[derive(Default)]
 struct Agent {
     a11y: Option<A11y>,
+    /// 세션 버스. 요청마다 컴포지터에 화면이 잠겼는지 묻는다
+    session: Option<zbus::Connection>,
     sessions: Sessions,
     /// 지금 요청에 쓰는 접근 정책. 설정에서 바꾼 것이 바로 듣도록 요청마다 다시 읽는다
     policy: Policy,
@@ -335,6 +337,15 @@ fn auth_dialog() -> Failure {
     )
 }
 
+fn screen_locked() -> Failure {
+    (
+        protocol::SCREEN_LOCKED,
+        "the screen is locked; only the user can unlock it with their password. Try again after \
+         they unlock it"
+            .into(),
+    )
+}
+
 fn blocked_app() -> Failure {
     (
         protocol::BLOCKED_APP,
@@ -393,7 +404,35 @@ fn agent_error(message: impl Into<String>) -> Failure {
 }
 
 impl Agent {
+    /// 화면이 잠긴 동안에는 아무것도 읽거나 하지 않는다(ARCHITECTURE 6.5). 잠금을 푸는 것은 사람이 잠금 화면에 친
+    /// 암호뿐이다. 처리하는 사이에 잠겼으면 읽은 것(트리, diff, 스크린샷)을 돌려주지 않는다
     async fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, Failure> {
+        if self.screen_locked().await {
+            return Err(screen_locked());
+        }
+        let result = self.run_method(method, params).await;
+        if result.is_ok() && self.screen_locked().await {
+            return Err(screen_locked());
+        }
+        result
+    }
+
+    /// 화면이 잠겼는지 컴포지터에 묻는다 (atspi::screen_locked). 세션 버스에 붙지 못하면 잠기지 않은 것으로 본다:
+    /// 컴포지터의 에이전트 입력도 세션 버스로 가므로 그때는 키와 포인터도 넣지 못한다
+    async fn screen_locked(&mut self) -> bool {
+        if self.session.is_none() {
+            self.session = zbus::Connection::session()
+                .await
+                .inspect_err(|err| tracing::warn!("no session bus: {err}"))
+                .ok();
+        }
+        match &self.session {
+            Some(session) => atspi::screen_locked(session).await,
+            None => false,
+        }
+    }
+
+    async fn run_method(&mut self, method: &str, params: Value) -> Result<Value, Failure> {
         match method {
             "apps" => self.apps().await,
             "snapshot" => {
@@ -450,14 +489,16 @@ impl Agent {
         Ok(a11y)
     }
 
-    /// 앱 목록. 관리자 인증 창은 빼서 스냅샷 범위에도 들지 않는다
+    /// 앱 목록. 관리자 인증 창과 잠금 화면은 빼서 스냅샷 범위에도 들지 않는다
     async fn list(&mut self, a11y: &A11y) -> Result<Vec<AppRef>, Failure> {
         let mut apps = a11y.apps().await.map_err(|err| {
             self.a11y = None;
             agent_error(format!("cannot list apps: {err}"))
         })?;
+        apps.retain(|app| app.name != LOCK_WINDOW);
         for app in &mut apps {
-            app.windows.retain(|window| window.title != AUTH_WINDOW);
+            app.windows
+                .retain(|window| window.title != AUTH_WINDOW && window.title != LOCK_WINDOW);
         }
         Ok(apps)
     }
@@ -878,6 +919,9 @@ impl Agent {
             .map_or(String::new(), |item| item.name.clone());
         if window_title == AUTH_WINDOW {
             return Err(auth_dialog());
+        }
+        if window_title == LOCK_WINDOW {
+            return Err(screen_locked());
         }
         Ok(Target {
             bus,

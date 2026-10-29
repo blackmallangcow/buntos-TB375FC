@@ -55,6 +55,8 @@ pub const AGENT_ERROR: i64 = -32000;
 pub const NOT_ALLOWED: i64 = -32001;
 /// 사용자가 AI에게서 막은 앱
 pub const BLOCKED_APP: i64 = -32002;
+/// 화면이 잠겼다. 잠긴 동안 에이전트는 아무것도 읽거나 하지 못하고, 사람이 잠금 화면에 암호를 쳐야만 풀린다
+pub const SCREEN_LOCKED: i64 = -32003;
 
 /// `snapshot`의 인자
 #[derive(Debug, Default, Serialize, Deserialize)]
