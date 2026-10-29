@@ -9,7 +9,8 @@
 //! 옮기므로, D-Bus로 뜨는 앱과 에이전트가 여는 앱도 같은 방식으로 그린다.
 //!
 //! - CPU 렌더러(llvmpipe, softpipe, SwiftShader): 앱에도 GPU가 없다. GTK는 GPU 렌더러가 없으면 그
-//!   소프트웨어 래스터라이저로 GL·Vulkan을 쓰는데, 메모리를 3배 넘게 쓴다(시스템 설정 475MB 대 130MB).
+//!   소프트웨어 래스터라이저로 GL·Vulkan을 쓰는데, 메모리를 몇 배 쓴다(시스템 설정이 GL로 475MB, cairo로
+//!   102~164MB, 개발 환경 7장).
 //!   그래서 GTK가 cairo로 그리게 하고(`GSK_RENDERER=cairo`), linux-dmabuf도 열지 않는다(wl_shm만 받는다)
 //! - GPU: GTK가 렌더러를 고르게 둔다(Vulkan이나 GL). 앱은 dmabuf로 보내고 컴포지터는 복사 없이 그린다
 //! - 가상 GPU(virgl): 앱의 GL을 호스트가 그린다. 호스트가 CPU로 그려도 이 기기의 앱은 virgl 드라이버로

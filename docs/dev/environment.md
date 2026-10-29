@@ -96,6 +96,11 @@ VMCTL_ID=mine tools/image/vmctl.sh stop
 - `wait-login`은 직렬 콘솔의 자동 로그인을 기다린 뒤 로그인 화면에 QMP로 암호를 쳐 그래픽 세션까지 들어간다(`VMCTL_GREETER_LOGIN=0`이면 들어가지 않는다). `login`은 로그인 화면에서 다시 들어간다(로그아웃한 뒤 등).
 - `VMCTL_ACCOUNT="계정 이름:별칭:암호"`로 계정을 바꾸고, `VMCTL_ACCOUNT=`(빈 값)으로 계정 없이 띄워 처음 켤 때의 계정 만들기를 본다. QMP는 영문 소문자와 숫자만 치므로 암호도 그렇게 정한다.
 - 임시 덮어쓰기는 기본 16G(`VMCTL_DISK_SIZE`, 빈 값이면 이미지 크기 그대로)이고, buntOS가 처음 켤 때 루트를 디스크 끝까지 늘린다. 덮어쓰기는 쓴 만큼만 자리를 차지한다.
+- `push 파일 경로`는 빌드 VM의 파일을 직렬 콘솔로 게스트의 경로에 넣는다(실행 권한을 주고 sha256으로 견준다). 시험용 프로그램을 넣을 때 쓴다. 예: 예제 클라이언트 `comp/examples/glass-window`(앱 창 흐림과 dmabuf 시험)는 `cargo build --release -p bunt-comp --example glass-window`로 빌드해 `strip`한 뒤(약 0.9MB) 넣고, 세션 사용자로 띄운다: `sudo -u buntos env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 /tmp/glass-window --toggle --seconds=20`
+- `VMCTL_GPU=virgl`이면 3D 가상 GPU(virtio-gpu-gl, virglrenderer)로 띄워 GPU 경로(linux-dmabuf, GTK의 GL)를 본다. 게스트의 GL은 빌드 VM이 그린다(GPU가 없으면 llvmpipe라 빨라지지는 않는다). 화면은 egl-headless로 받으므로 QMP 화면 저장이 된다.
+  - 빌드 VM에 QEMU의 OpenGL 모듈(`qemu-system-modules-opengl`, `setup.sh`가 깐다)과 렌더 노드(`/dev/dri/renderD*`, `VMCTL_RENDERNODE`로 고른다)가 있어야 한다. 렌더 노드는 render 그룹이 연다.
+  - Lima VM에는 GPU가 없다. vgem 커널 모듈(`sudo modprobe vgem`)로 렌더 노드를 만든다. vgem이 없는 커널이면 `VMCTL_RENDERNODE=/dev/null`로 Mesa의 소프트웨어 GBM을 써 본다(QEMU 8.2·Mesa 25.2에서 EGL 초기화까지만 확인했다).
+  - Mac 창(`view-mac.sh`)으로는 볼 수 없다. QEMU의 cocoa 화면에 GL이 없고, Homebrew QEMU에는 virglrenderer가 없다.
 
 **동작 목록.** `qmp` 동작은 `tools/image/qmp.py` 머리말에 있다: 누르기, 끌기, 단추를 누른 채 두기와 떼기(`press`, `release`), 키, 글자 입력, 화면 저장. 단축키는 `keys:meta_l+c`처럼 QEMU 키 이름으로 넣는다(⌘는 `meta_l`, ⌥는 `alt`, ⌃는 `ctrl`, ⇧는 `shift`).
 
@@ -221,7 +226,8 @@ A press "ctrl+a BackSpace" --ref e5
 - 앱 띄우기:
   - root 콘솔에서 `sudo -u buntos`로 띄운 앱은 root의 콘솔 세션에 남아 polkit이 인증 창을 찾지 못한다.
   - 사용자 서비스로 띄운다:
-    `sudo -u buntos XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemd-run --user --setenv=WAYLAND_DISPLAY=wayland-1 --setenv=LANG=ko_KR.UTF-8 --setenv=GSK_RENDERER=cairo bunt-settings agent`
+    `sudo -u buntos XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemd-run --user --setenv=WAYLAND_DISPLAY=wayland-1 --setenv=LANG=ko_KR.UTF-8 bunt-settings agent`
+  - GTK의 렌더러(`GSK_RENDERER`)는 주지 않는다. 컴포지터가 정해 세션을 열 때 systemd 사용자 환경에 넣으므로(GPU가 없으면 `cairo`), 사용자 서비스는 그 값을 받는다
 - QMP `type:`은 영문 소문자·숫자만 되므로 시험 암호도 그렇게 고른다.
 - 도우미 바꿔 넣기:
   - 도우미는 `/usr/libexec/buntos/bunt-access-helper`, polkit 동작은 `/usr/share/polkit-1/actions/org.buntos.agent.access.policy`다.
@@ -302,7 +308,7 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 홈 디렉터리가 root 소유라 셸 설정을 읽지 못함 | 이미지를 비특권으로 빌드하면 파일 소유자를 바꿀 수 없다 | 2026-10-29부터 계정은 부팅한 시스템에서 useradd가 만들므로 홈 폴더 소유자가 맞다 (그전에는 tmpfiles로 만들었다) |
 | 시계가 UTC로 나옴 | `tzdata`도 Priority: required지만 Essential이 아니어서 설치되지 않았다 | 레시피 패키지 목록에 넣었다 |
 | 화면 장치가 없는 VM에서 `getty@tty1` 실패 | 그래픽 세션이 바로 끝나며 자동 로그인이 반복됐다 | 2026-10-29부터 tty1에는 텍스트 로그인 대신 greetd가 있다. 화면 장치가 없으면 로그인 화면의 컴포지터가 끝나고 greetd가 다시 띄운다 |
-| GTK 앱이 CPU로 그린다 | 컴포지터가 아직 dmabuf(linux-dmabuf)를 지원하지 않는다 | 세션에서 `GSK_RENDERER=cairo`. dmabuf 지원은 다음 단계 |
+| GTK 앱이 CPU로 그린다 (GPU가 없는 VM) | 컴포지터가 CPU 렌더러(llvmpipe)로 그린다. GTK는 GPU가 없어도 같은 소프트웨어 래스터라이저로 GL·Vulkan을 써 메모리를 몇 배 쓴다(아래 직렬 콘솔 행) | 컴포지터가 자기 렌더러를 보고 정한다(`comp/src/gpu.rs`). CPU 렌더러면 띄우는 프로그램과 D-Bus 활성화·systemd 사용자 환경에 `GSK_RENDERER=cairo`를 주고 linux-dmabuf를 열지 않는다. GPU(virgl 포함)면 linux-dmabuf v5를 열고 GTK가 GL이나 Vulkan으로 그려 dmabuf로 보낸다. 컴포지터 기록의 `renderer:`, `apps:`, `linux-dmabuf:` 줄로 본다. 세션이 정한 `GSK_RENDERER`는 그대로 둔다 |
 | 배율을 높이면 Firefox 본문이 한 번 더 확대돼 화면 밖으로 잘림 | Firefox는 본문을 하위 표면에 그리고 그 크기를 wp_viewporter로 알린다. 컴포지터에 viewporter가 없어 2배로 그린 본문을 1배 버퍼로 받아 다시 2배로 키웠다. 또 1280×800에서 200%를 허용해 논리 화면(640×400)이 Dock과 앱의 최소 크기보다 작았다 | wp_viewporter, wp_fractional_scale_v1, wl_compositor v6를 넣었다. 논리 화면이 1024×640보다 작아지는 배율은 두지 않는다. 배율이 바뀌면 창을 화면 안에 맞춘다([디자인 스펙](../design/DESIGN-SPEC.md) 3.1절) |
 | 창에 최소화 단추가 없음 | 컴포지터가 창 관리 기능(xdg_toplevel wm_capabilities)에 최소화를 알리지 않아 GTK가 단추를 숨겼고, 이미지의 창 단추 설정도 `appmenu:maximize,close`였다 | 2026-10-30부터 최소화를 알리고 앱의 최소화 요청을 받는다. 창 단추는 macOS처럼 왼쪽에 `close,minimize,maximize:`다. 최소화한 창은 Dock의 최소화 칸에 놓인다 |
 | QMP로 ⌘를 누른 채 ⇥를 거듭 누를 수 없음(앱 전환 창이 뜨지 않음) | QMP의 send-key(`keys:`)는 키를 함께 눌렀다 뗀다. input-send-event로 누른 ⌘ 다음에 send-key를 섞으면 컴포지터가 ⌘를 받지 못했다 | `qmp.py`의 `down:키`·`up:키`(input-send-event)로 ⌘와 ⇥를 모두 따로 누르고 뗀다 |
@@ -336,11 +342,12 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 시스템 설정에서 누르기가 먹지 않음(가리키면 칠해지기는 한다). Esc를 누르면 풀린다 | 시트(모달 창, 예: 입력 소스 추가)를 띄운 채 부모 창을 누르면 컴포지터가 부모를 시트 위로 올려 시트가 뒤에 숨었다. GTK는 모달 창이 떠 있는 동안 부모의 누르기를 버리고, Esc는 숨은 시트에 가서 시트를 닫았다(QMP로 재현) | 부모가 있는 창(대화 상자)은 부모와 함께 앞으로 와서 부모 위에 남는다. 모달 대화 상자(xdg-dialog-v1)가 있으면 그 대화 상자가 활성화되고 키보드를 받는다(`comp/src/state.rs`의 `focus_window`) |
 | 포인터를 움직이면 컴포지터가 CPU 한 코어 넘게 씀(시스템 모니터를 띄운 채 130%) | 커서 이미지를 Abgr8888로 만들어서, smithay가 커서를 커서 평면(크기 64×64, Argb8888)에 올리지 못하고 프레임마다 화면에 합성했다. virtio-gpu의 커서 큐 인터럽트가 0이었다 | 커서 버퍼를 xcursor 파일 바이트 그대로 Argb8888로 만든다(`comp/src/cursor.rs`). 빨강과 파랑이 바뀌어 보이던 문제도 함께 고쳐졌다(기본 화살표는 무채색이라 보이지 않았다) |
 | 보이지 않는 창이 CPU를 씀(다른 창 뒤의 시스템 모니터에 컴포지터 39%, 대부분 llvmpipe) | 모든 표면에 프레임마다 프레임 알림(frame callback)을 보내서, 가려진 창의 애니메이션도 화면 주사율(QEMU 창은 Mac 화면을 따라 120~144Hz)로 그려졌다. Dock 아래에 걸친 창은 멀리 떨어진 곳을 그려도 커밋할 때마다 Dock 흐림을 다시 했다 | 이번 프레임에 보인 표면에만 바로 알리고, 다 가려진 표면과 숨은 막대는 1초에 한 번 알린다(`comp/src/udev.rs`). 흐림은 아래 요소의 손상이 흐릴 범위에 닿을 때만 다시 한다(`comp/src/blur.rs`) |
-| 직렬 콘솔에서 띄운 GTK 앱이 메모리를 많이 씀(시스템 설정 475MB) | 세션 밖에서 띄우면 `GSK_RENDERER=cairo`가 없어 GTK가 GL(llvmpipe)로 그린다 | 콘솔에서 앱을 띄울 때 `GSK_RENDERER=cairo`를 함께 준다. 같은 조건에서 시스템 설정은 페이지를 처음 열 때만 늘고(102→164MB) 다시 돌아도 늘지 않았다 |
+| 직렬 콘솔에서 띄운 GTK 앱이 메모리를 많이 씀(시스템 설정 475MB) | 세션 밖에서 띄우면 컴포지터가 정한 `GSK_RENDERER=cairo`를 받지 못해 GTK가 GL(llvmpipe)로 그린다 | 콘솔에서 앱을 띄울 때 `GSK_RENDERER=cairo`를 함께 주거나, 사용자 서비스(`systemd-run --user`)로 띄워 세션의 환경을 받는다. 같은 조건에서 시스템 설정은 페이지를 처음 열 때만 늘고(102→164MB) 다시 돌아도 늘지 않았다 |
 | Dock 크기를 키운 뒤 줄이면 아이콘만 작아지고 Dock 판은 큰 채로 남고 아이콘이 왼쪽 위로 몰림 | gtk4-layer-shell은 표면 크기를 전체 화면 창의 크기처럼 GTK에 알리고, GTK는 그 크기를 계속 쓴다. 크기를 바꿀 수 있는 창은 내용이 최소 크기보다 클 때만 늘리므로 줄지 않았다. 96px에서 32px로 바꾸면 창이 1154×152로 남았다(맞는 크기 514×88) | Dock 창을 크기를 바꿀 수 없는 창으로 둔다(`shell/src/dock.rs`의 `set_resizable(false)`). GTK가 창 크기를 내용 크기로 맞춰, 96→32→48에서 1154×152 → 514×88 → 674×104가 됐다 |
 | 시스템 설정의 슬라이더 길이가 행마다 다름(크기가 투명도보다 김) | 슬라이더의 hexpand가 행까지 퍼져, 제목이 남긴 너비를 제목과 나눠 가졌다. 제목이 짧을수록 슬라이더가 길었다: 크기 390px, 투명도 384px, 키 반복 속도 370px, 반복 지연 시간 364px. 양 끝 이름도 트랙보다 12px씩 바깥에 있었다 | 슬라이더 행의 조작 너비를 260px로 고정하고 hexpand를 끈다(`settings/src/widgets.rs`의 `slider_row`). 네 트랙 모두 236px로 같은 자리에 있고, 양 끝 이름은 트랙 끝 아래에 온다 |
 | 하드웨어 커서 평면을 쓰지 않아 포인터를 움직일 때마다 화면을 다시 합성함 | 가상 GPU(virtio-gpu)의 커널은 커서 핫스폿을 알리겠다고 한(DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT) 클라이언트에게만 커서 평면을 보인다. smithay 0.7은 이 기능을 모른다(기록: `planes primary 1, cursor 0`). DrmDevice를 만든 뒤에 켜면 smithay의 원자적 모드 표면이 그 평면을 몰라 출력 설정이 `UnknownPlane`으로 실패하고 컴포지터가 꺼졌다 | DrmDevice보다 먼저 원자적 모드와 핫스폿 기능을 켠다(`comp/src/udev.rs`). 커서 버퍼는 Argb8888로 화면 픽셀 크기와 같게 만든다. 이제 커서가 커서 평면(plane-1)에 오른다(`/sys/kernel/debug/dri/0/state`). QMP 화면 캡처(screendump)에는 커서가 나오지 않는다 |
 | GTK 앱이 조금만 바뀌어도 컴포지터가 창 전체를 다시 그림(시스템 모니터 하나에 42~48%) | 세션은 `GSK_RENDERER=cairo`이고, GTK의 cairo 렌더러는 그릴 때마다 버퍼 전체를 손상으로 알린다(시스템 모니터는 초당 10번 `damage_buffer(0, 0, 850, 718)`, WAYLAND_DEBUG로 확인). 창 그림자 여백이 Dock 밑에 닿아 Dock 흐림도 매번 다시 했다. perf로 보면 컴포지터 시간의 84%가 llvmpipe의 그리기였다 | 버퍼 거의 전체를 손상으로 알리는 SHM 커밋은 앞 커밋의 사본과 64×32 타일로 견주어 바뀐 타일만 손상으로 남긴다(`comp/src/shmdiff.rs`). 시스템 모니터를 띄운 채 42~48% → 7%, 창 넷을 띄운 채 50% → 9% |
 | 여러 창 위에서 큰 창을 빠르게 옮기면 CPU가 크게 오름 | GPU가 없는 VM에서 컴포지터가 옮기는 창의 앞뒤 자리를 llvmpipe로 60Hz에 다시 합성한다(컴포지터 주 스레드는 3~4%). Mac의 Homebrew QEMU에는 GPU 가속(virtio-gpu-gl, virglrenderer)이 없다 | 손상 줄이기 뒤 700×520 창을 창 셋 위에서 원을 그리며 옮길 때 62%(전 72%). 소프트웨어 렌더러에서는 앞에 있지 않은 창의 프레임 알림을 30Hz로 줄인다. 더 줄이려면 QEMU의 GPU 가속이 필요하다 |
+| Mac 창(`view-mac.sh`)에서 GPU 경로(linux-dmabuf, GTK의 GL)를 볼 수 없음 | QEMU의 cocoa 화면에는 GL이 없고(QEMU 10.0), Homebrew QEMU에는 virglrenderer가 없어 3D 가상 GPU(virtio-gpu-gl)를 붙일 수 없다 | 빌드 VM에서 `VMCTL_GPU=virgl`로 띄워 QMP로 본다(4장). 게스트의 GL은 빌드 VM이 llvmpipe로 그리므로 성능은 견주지 않고 경로만 본다 |
 | 창 제목 막대를 메뉴 막대 밑으로 옮기면 다시 잡을 수 없음 | 컴포지터가 창을 어디로든 옮기게 했다 | macOS처럼 창의 위쪽 끝은 메뉴 막대 아래 끝을 넘지 못한다(옮기기와 위쪽 가장자리 크기 조절). Dock 쪽은 넘어가도 된다 |
 | 메뉴 막대 메뉴가 Esc로 닫히지 않음 | 글자 칸에 포커스가 있으면 입력기(fcitx5)가 키보드를 잡고 있는데, 컴포지터가 이것을 다른 그랩으로 보고 메뉴의 키보드 그랩을 거절했다. 레이어 포커스 정리가 열린 팝업의 포커스를 창으로 되돌리기도 했다 | 입력기 그랩은 팝업 그랩을 막지 않고, 열린 팝업의 포커스는 건드리지 않는다(`comp/src/state.rs`) |
