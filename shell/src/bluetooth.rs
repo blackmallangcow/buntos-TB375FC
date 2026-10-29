@@ -152,25 +152,35 @@ impl Bluetooth {
             adapter: RefCell::default(),
             listeners: RefCell::default(),
         }));
-        // bluetoothd가 나중에 켜지거나 다시 시작해도 따라간다
-        let (appeared, vanished) = (Rc::downgrade(&bluetooth.0), Rc::downgrade(&bluetooth.0));
-        // 셸이 끝날 때까지 지켜본다 (bus_unwatch_name을 부르지 않는다)
-        gio::bus_watch_name(
-            gio::BusType::System,
-            BLUEZ,
-            gio::BusNameWatcherFlags::NONE,
-            move |connection, _, _| {
-                if let Some(inner) = appeared.upgrade() {
-                    Bluetooth(inner).find_adapter(connection);
+        let weak = Rc::downgrade(&bluetooth.0);
+        glib::spawn_future_local(async move {
+            // 버스 연결을 먼저 얻는다. gio::bus_watch_name은 시스템 버스에 붙지 못하면(컨테이너, 이미지
+            // 밖에서 실행) 사라짐 처리기에 연결 대신 NULL을 주고, gio-rs가 그것을 unwrap해 셸이 죽었다
+            let bus = match gio::bus_get_future(gio::BusType::System).await {
+                Ok(bus) => bus,
+                Err(err) => {
+                    eprintln!("bunt-shell: no system bus, Bluetooth is unavailable: {err}");
+                    return;
                 }
-            },
-            move |_, _| {
-                if let Some(inner) = vanished.upgrade() {
-                    inner.adapter.replace(None);
-                    Bluetooth(inner).notify();
-                }
-            },
-        );
+            };
+            // bluetoothd가 나중에 켜지거나 다시 시작해도 따라간다
+            let (appeared, vanished) = (weak.clone(), weak);
+            dbus::watch_name(
+                &bus,
+                BLUEZ,
+                move |connection| {
+                    if let Some(inner) = appeared.upgrade() {
+                        Bluetooth(inner).find_adapter(connection);
+                    }
+                },
+                move || {
+                    if let Some(inner) = vanished.upgrade() {
+                        inner.adapter.replace(None);
+                        Bluetooth(inner).notify();
+                    }
+                },
+            );
+        });
         bluetooth
     }
 
