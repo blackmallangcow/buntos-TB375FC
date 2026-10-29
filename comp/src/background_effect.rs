@@ -156,6 +156,9 @@ impl BackgroundEffectState {
     }
 
     fn track(&mut self, surface: &WlSurface) {
+        // 사라진 표면은 targets()가 그릴 때 빼지만, 그리지 않는 동안(화면이 쉬거나 흐림이 꺼짐) 앱이 표면을
+        // 만들고 없애기를 되풀이하면 목록이 끝없이 커지고 아래 찾기도 그만큼 느려졌다. 여기서도 뺀다
+        self.surfaces.retain(|known| known.upgrade().is_ok());
         if !self.surfaces.iter().any(|known| known == surface) {
             self.surfaces.push(surface.downgrade());
         }
@@ -651,6 +654,23 @@ mod tests {
                 "ext_background_effect_surface_v1".into()
             ))
         );
+    }
+
+    #[test]
+    fn surfaces_come_and_go_without_piling_up_while_nothing_is_drawn() {
+        let (mut server, mut client, surface, manager, _effect) = effect_setup();
+        let compositor: WlCompositor = client.bind("wl_compositor", 4).unwrap();
+        // 그리지 않는 동안이라 targets()를 부르지 않는다
+        surface.destroy();
+        for _ in 0..100 {
+            let surface = compositor.create_surface(&client.qh, ());
+            let _effect = manager.get_background_effect(&surface, &client.qh, ());
+            surface.destroy();
+        }
+        server.pump(&mut client);
+        // 마지막 표면만 다음 효과 객체를 만들 때까지 남는다
+        assert_eq!(server.state.effects.surfaces.len(), 1);
+        assert_eq!(client.protocol_error(), None);
     }
 
     /// cargo test가 함께 빌드한 예제 (target/<프로필>/examples/). 시험 바이너리는 target/<프로필>/deps에 있다.
