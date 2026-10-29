@@ -1910,6 +1910,7 @@ impl BuntState {
                 self.shortcuts_changed();
             }
             Request::RestoreMinimized(id) => self.restore_minimized(id),
+            Request::SelectSwitcher { index, activate } => self.select_switcher(index, activate),
             Request::Agent(request) => self.agent_request(request),
         }
     }

@@ -25,7 +25,7 @@ use smithay::{
 use crate::{
     dbus::Command,
     prefs::KeyRepeat,
-    shortcuts::{self, Accel, Builtin, Hit, Key, Mods, Place},
+    shortcuts::{self, Accel, Builtin, Hit, Key, Mods, Place, SwitcherKey},
     state::BuntState,
 };
 
@@ -155,6 +155,12 @@ impl BuntState {
                     };
                     return FilterResult::Intercept(Some((hit, code)));
                 }
+                // ⌘⇥ 앱 전환 창이 떠 있는 동안 ⌘와 함께 누른 Esc, Q, H, ←, →, `는 전환 창의 키다
+                if let Some(key) = state.switcher_key(modifiers, &handle) {
+                    state.suppressed_keys.push(code.raw());
+                    let hit = Hit::Run(Builtin::Switcher(key));
+                    return FilterResult::Intercept(Some((hit, code)));
+                }
                 match state.shortcut_for(modifiers, &handle) {
                     Some(hit) => {
                         state.suppressed_keys.push(code.raw());
@@ -234,6 +240,21 @@ impl BuntState {
         self.shortcuts.lookup(pressed, self.key_place())
     }
 
+    /// 앱 전환 창이 떠 있고 ⌘를 누른 채 그 창의 키를 눌렀으면 그 키
+    fn switcher_key(
+        &self,
+        modifiers: &ModifiersState,
+        handle: &KeysymHandle<'_>,
+    ) -> Option<SwitcherKey> {
+        if !modifiers.logo || !self.switching_apps() {
+            return None;
+        }
+        let sym = handle.modified_sym();
+        SwitcherKey::of(shortcuts::normalize(
+            handle.raw_latin_sym_or_raw_current_sym().unwrap_or(sym),
+        ))
+    }
+
     /// 키보드 포커스가 있는 곳: 글을 입력하는 중인지, 터미널인지
     fn key_place(&self) -> Place {
         let focus = self
@@ -302,6 +323,7 @@ impl BuntState {
             Builtin::SwitchInputSource => self.dbus.send(Command::ToggleInputMethod),
             Builtin::Screenshot { area, clipboard } => self.screenshot(area, clipboard),
             Builtin::CancelScreenshot => self.cancel_screenshot(),
+            Builtin::Switcher(key) => self.switcher_key_pressed(key),
             Builtin::Quit => self.loop_signal.stop(),
             Builtin::SwitchVt(vt) => {
                 if let Err(err) = self.backend.session.change_vt(vt) {

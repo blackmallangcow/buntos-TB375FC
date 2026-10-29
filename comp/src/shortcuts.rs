@@ -193,10 +193,39 @@ pub enum Builtin {
     },
     /// Esc: 스크린샷 영역 고르기를 그만둔다 (고르는 동안만, 표에 없는 고정 키)
     CancelScreenshot,
+    /// ⌘⇥ 앱 전환 창이 떠 있는 동안 ⌘와 함께 누른 키 (표에 없는 고정 키)
+    Switcher(SwitcherKey),
     /// Ctrl+Alt+Backspace: 세션 끝내기 (표에 없는 고정 키)
     Quit,
     /// Ctrl+Alt+F1..F12: 가상 터미널 전환 (표에 없는 고정 키)
     SwitchVt(i32),
+}
+
+/// 앱 전환 창의 키 (macOS와 같다)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitcherKey {
+    /// Esc: 바꾸지 않고 닫는다
+    Cancel,
+    /// Q: 고른 앱을 끝낸다
+    Quit,
+    /// H: 고른 앱을 가린다
+    Hide,
+    /// ←, →, `: 앞뒤 앱을 고른다
+    Step(isize),
+}
+
+impl SwitcherKey {
+    /// ⌘와 함께 누른 키(배열과 상관없는 라틴 기호)가 앱 전환 창의 키인지
+    pub fn of(key: Keysym) -> Option<Self> {
+        match key {
+            Keysym::Escape => Some(Self::Cancel),
+            Keysym::q => Some(Self::Quit),
+            Keysym::h => Some(Self::Hide),
+            Keysym::Left | Keysym::grave => Some(Self::Step(-1)),
+            Keysym::Right => Some(Self::Step(1)),
+            _ => None,
+        }
+    }
 }
 
 /// 터미널에서 할 일. 터미널은 Ctrl+글자를 제어 문자로 쓰므로 앱과 다르게 보낸다

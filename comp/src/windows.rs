@@ -26,6 +26,7 @@ use smithay::{
 use crate::{
     dbus::{Command, MinimizedInfo},
     screenshot::Image,
+    shortcuts::SwitcherKey,
     state::BuntState,
     toplevels::title_and_app_id,
 };
@@ -126,11 +127,15 @@ impl BuntState {
             self.publish_minimized();
         }
         if let Some(switching) = &mut self.switching {
+            let before = switching.order.len();
             switching.order.retain(|other| other != window);
             if switching.order.is_empty() {
                 self.switching = None;
             } else {
                 switching.index = switching.index.min(switching.order.len() - 1);
+            }
+            if before != self.switching.as_ref().map_or(0, |s| s.order.len()) {
+                self.publish_switcher();
             }
         }
     }
@@ -353,8 +358,9 @@ impl BuntState {
         self.set_window_state(&toplevel, xdg_toplevel::State::Fullscreen, on);
     }
 
-    /// ⌘⇥(`step` 1), ⇧⌘⇥(-1): 최근에 쓴 차례로 다른 앱의 가장 최근 창을 앞으로 가져온다. 가린 앱도
-    /// 차례에 들고, 고르면 돌아온다. ⌘를 누른 채 거듭 누르면 그다음 앱으로 간다
+    /// ⌘⇥(`step` 1), ⇧⌘⇥(-1): 최근에 쓴 차례로 다른 앱을 고른다. 셸이 앱 전환 창을 띄우고, ⌘를 떼면
+    /// 고른 앱의 가장 최근 창을 앞으로 가져온다(macOS). 가린 앱도 차례에 들고, 고르면 돌아온다.
+    /// ⌘를 누른 채 거듭 누르면 그다음 앱을 고른다
     pub fn switch_app(&mut self, step: isize) {
         if !self
             .switching
@@ -414,24 +420,136 @@ impl BuntState {
         self.step_switching(step);
     }
 
+    /// 다음(앞) 앱이나 윈도우를 고른다. 윈도우는 바로 앞으로 가져오고, 앱은 전환 창에서 칠만 한다
     fn step_switching(&mut self, step: isize) {
         let Some(switching) = &mut self.switching else {
             return;
         };
         let len = switching.order.len() as isize;
         switching.index = (switching.index as isize + step).rem_euclid(len) as usize;
-        let window = switching.order[switching.index].clone();
-        self.focus_window(&window, SERIAL_COUNTER.next_serial());
+        if switching.windows {
+            let window = switching.order[switching.index].clone();
+            self.focus_window(&window, SERIAL_COUNTER.next_serial());
+        } else {
+            self.publish_switcher();
+        }
     }
 
-    /// ⌘를 떼면 전환을 마치고, 마지막으로 고른 창을 최근 순서 맨 앞에 둔다
+    /// ⌘를 떼면 전환을 마친다. 앱 전환이면 전환 창을 숨기고 고른 앱을 앞으로 가져온다. 마지막으로
+    /// 고른 창이 최근 순서 맨 앞이 된다
     pub fn finish_switching(&mut self) {
-        if self.switching.take().is_none() {
+        let Some(switching) = self.switching.take() else {
             return;
+        };
+        if !switching.windows {
+            self.publish_switcher();
+            if let Some(window) = switching.order.get(switching.index) {
+                self.focus_window(&window.clone(), SERIAL_COUNTER.next_serial());
+                return;
+            }
         }
         if let Some(window) = self.active_window() {
             self.note_focus(&window);
         }
+    }
+
+    /// 앱 전환 창이 떠 있다 (⌘를 누른 채 ⌘⇥로 앱을 고르는 중)
+    pub fn switching_apps(&self) -> bool {
+        self.switching
+            .as_ref()
+            .is_some_and(|switching| !switching.windows)
+    }
+
+    /// 앱 전환 창의 키: Esc는 바꾸지 않고 닫고, Q는 고른 앱을 끝내고(목록에서 뺀다), H는 고른 앱을
+    /// 가리고(목록에 남는다), ←·→·`는 앞뒤 앱을 고른다
+    pub fn switcher_key_pressed(&mut self, key: SwitcherKey) {
+        let Some(selected) = self
+            .switching
+            .as_ref()
+            .filter(|switching| !switching.windows)
+            .and_then(|switching| switching.order.get(switching.index).cloned())
+        else {
+            return;
+        };
+        let client = client_of(&selected);
+        match key {
+            SwitcherKey::Cancel => {
+                self.switching = None;
+                self.publish_switcher();
+            }
+            SwitcherKey::Step(step) => self.step_switching(step),
+            SwitcherKey::Quit => {
+                for window in self.all_windows() {
+                    if client_of(window) == client
+                        && let Some(toplevel) = window.toplevel()
+                    {
+                        toplevel.send_close();
+                    }
+                }
+                if let Some(switching) = &mut self.switching {
+                    switching.order.retain(|window| client_of(window) != client);
+                    if switching.order.is_empty() {
+                        self.switching = None;
+                    } else {
+                        switching.index = switching.index.min(switching.order.len() - 1);
+                    }
+                }
+                self.publish_switcher();
+            }
+            SwitcherKey::Hide => {
+                let had_focus = self
+                    .active_window()
+                    .is_some_and(|active| client_of(&active) == client);
+                let windows: Vec<Window> = self
+                    .space
+                    .elements()
+                    .filter(|window| client_of(window) == client)
+                    .cloned()
+                    .collect();
+                for window in &windows {
+                    self.hide_window(window, Hidden::App);
+                }
+                if had_focus {
+                    self.focus_next_shown(None);
+                }
+            }
+        }
+    }
+
+    /// 셸의 앱 전환 창에서 포인터로 가리킨(`activate`면 누른) 앱. 누르면 전환을 마치고 그 앱으로 간다
+    pub fn select_switcher(&mut self, index: u32, activate: bool) {
+        let Some(switching) = self
+            .switching
+            .as_mut()
+            .filter(|switching| !switching.windows)
+        else {
+            return;
+        };
+        if index as usize >= switching.order.len() {
+            return;
+        }
+        switching.index = index as usize;
+        if activate {
+            self.finish_switching();
+        } else {
+            self.publish_switcher();
+        }
+    }
+
+    /// 앱 전환 창에 늘어놓을 앱(앱 ID, 최근 차례)과 고른 앱을 셸에 알린다. 전환 중이 아니면 숨긴다(-1)
+    fn publish_switcher(&self) {
+        let (apps, selected) = match &self.switching {
+            Some(switching) if !switching.windows => (
+                switching
+                    .order
+                    .iter()
+                    .map(|window| title_and_app_id(window).1)
+                    .collect(),
+                switching.index as i32,
+            ),
+            _ => (Vec::new(), -1),
+        };
+        self.dbus.send(Command::AppSwitcher { apps, selected });
     }
 }
 
