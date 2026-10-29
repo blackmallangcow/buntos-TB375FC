@@ -10,6 +10,7 @@
 #                                     쳐 그래픽 세션에 들어간다 (VMCTL_GREETER_LOGIN=0이면 들어가지 않는다)
 #   tools/image/vmctl.sh login        로그인 화면에 시험 계정의 암호를 쳐 그래픽 세션에 들어간다
 #   tools/image/vmctl.sh sh '명령'     직렬 콘솔에서 root로 실행하고 출력을 보인다 (SH_TIMEOUT초, 기본 120)
+#   tools/image/vmctl.sh push 파일 경로  빌드 VM의 파일을 게스트의 경로로 넣는다 (실행 권한을 주고 sha256으로 견준다)
 #   tools/image/vmctl.sh qmp 동작...   tools/image/qmp.py 동작 (click:X,Y, type:글자, keys:A+B, screen:경로 ...)
 #   tools/image/vmctl.sh stop
 # 시험 계정은 부팅 때 systemd 자격 증명 buntos.account로 만든다. 기본은 buntos(uid 1000, 암호 buntos,
@@ -22,6 +23,11 @@
 # 디스크(임시 덮어쓰기)는 VMCTL_DISK_SIZE(기본 16G)이고, buntOS가 부팅 때 루트를 디스크 끝까지 늘린다.
 # 덮어쓰기는 쓴 만큼만 자리를 차지한다. 빈 값을 주면 이미지 크기 그대로 띄운다.
 # BUNTOS_IMAGE_DIR을 주면 그 디렉터리의 이미지를 띄운다 (tools/image/build.sh와 같다).
+# VMCTL_GPU=virgl이면 가상 GPU를 3D(virtio-gpu-gl, virglrenderer)로 붙여 게스트가 GPU 경로(linux-dmabuf,
+# GTK의 GL)로 그린다. 게스트의 GL은 이 빌드 VM이 그린다. 화면은 egl-headless로 받아 QMP 화면 저장이 된다.
+# 빌드 VM에 렌더 노드(/dev/dri/renderD*, VMCTL_RENDERNODE로 고른다)와 QEMU의 OpenGL 모듈
+# (qemu-system-modules-opengl, tools/devvm/setup.sh)이 있어야 한다. GPU가 없는 빌드 VM(Lima)은 vgem 커널
+# 모듈로 렌더 노드를 만들고, 그때 빌드 VM은 llvmpipe(CPU)로 그린다. 기본값(빈 값)은 3D 없는 virtio-gpu다.
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -108,9 +114,36 @@ start)
 	fi
 	cmdline="systemd.wants=network.target rw loglevel=4 console=hvc0 TERM=dumb"
 	cmdline+=" systemd.tty.term.hvc0=dumb systemd.tty.columns.hvc0=80 systemd.tty.rows.hvc0=24"
+	# 가상 GPU. virgl은 게스트의 GL을 이 빌드 VM이 그리고, 화면을 egl-headless로 받는다(-nographic 대신)
+	case "${VMCTL_GPU:-}" in
+	"")
+		gpu=(-device virtio-gpu-pci -nographic)
+		;;
+	virgl)
+		if ! qemu-system-aarch64 -device help 2>/dev/null | grep -q '"virtio-gpu-gl-pci"'; then
+			echo "QEMU에 virtio-gpu-gl-pci가 없다. qemu-system-modules-opengl을 설치한다(tools/devvm/setup.sh)" >&2
+			exit 1
+		fi
+		rendernode=${VMCTL_RENDERNODE:-$(find /dev/dri -name 'renderD*' 2>/dev/null | sort | head -n 1)}
+		if [[ -z "$rendernode" ]]; then
+			echo "빌드 VM에 렌더 노드(/dev/dri/renderD*)가 없다. GPU가 없으면 vgem 커널 모듈로 만든다(sudo modprobe vgem)." >&2
+			echo "vgem이 없는 커널이면 VMCTL_RENDERNODE=/dev/null로 Mesa의 소프트웨어 GBM을 써 본다(QEMU의 EGL 초기화까지만 확인했다)" >&2
+			exit 1
+		fi
+		if [[ ! -r "$rendernode" || ! -w "$rendernode" ]]; then
+			echo "$rendernode 을 열 수 없다. render 그룹에 넣고 다시 로그인한다: sudo usermod -aG render $USER" >&2
+			exit 1
+		fi
+		gpu=(-device virtio-gpu-gl-pci -display "egl-headless,rendernode=$rendernode")
+		;;
+	*)
+		echo "VMCTL_GPU는 비우거나 virgl이다" >&2
+		exit 2
+		;;
+	esac
 	# shellcheck disable=SC2086 # VMCTL_QEMU_ARGS는 일부러 낱말로 나눈다
 	qemu-system-aarch64 -machine virt -accel kvm -cpu host -smp "${VMCTL_CPUS:-2}" -m 2048M \
-		-nodefaults -nographic -no-user-config \
+		-nodefaults -no-user-config \
 		-object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 \
 		-nic user,model=virtio-net-pci \
 		-chardev stdio,mux=on,id=console,signal=off \
@@ -120,7 +153,7 @@ start)
 		-drive if=none,id=disk,format=qcow2,discard=unmap,file="$work/disk.qcow2" \
 		-device virtio-blk-pci,drive=disk,bootindex=1 \
 		-smbios "type=11,value=io.systemd.stub.kernel-cmdline-extra=$cmdline" "${credential[@]}" \
-		-device virtio-gpu-pci -device virtio-keyboard-pci -device virtio-tablet-pci \
+		"${gpu[@]}" -device virtio-keyboard-pci -device virtio-tablet-pci \
 		-audiodev none,id=snd0 -device virtio-sound-pci,audiodev=snd0 \
 		-qmp "unix:$work/qmp.sock,server=on,wait=off" ${VMCTL_QEMU_ARGS:-} \
 		<"$work/console.in" >"$work/console.log" 2>&1 8>&- &
@@ -153,6 +186,30 @@ sh)
 	shift
 	console_run "$@"
 	;;
+push)
+	# 콘솔은 4KB 가까운 줄을 자르므로 base64를 1000자씩 나눠 보내고, 64줄마다 게스트가 다 받기를 기다린다.
+	# 다 넣은 뒤 sha256으로 견준다. 시험용 프로그램(예: comp/examples/glass-window)을 넣을 때 쓴다
+	source_file=${2:?"넣을 파일이 필요하다"}
+	target=${3:?"게스트의 경로가 필요하다"}
+	console_run "rm -f '$target.b64'" >/dev/null
+	lines=0
+	while IFS= read -r chunk; do
+		printf 'echo %s >>%s.b64\n' "$chunk" "'$target'" >"$work/console.in"
+		lines=$((lines + 1))
+		if ((lines % 64 == 0)); then
+			console_run true >/dev/null
+		fi
+	done < <(base64 -w 1000 "$source_file")
+	expected=$(sha256sum "$source_file" | cut -d' ' -f1)
+	# 게스트에서 실패하면 해시가 없다. 그때도 끝내지 않고 아래에서 알린다
+	actual=$(console_run "base64 -d '$target.b64' >'$target' && rm -f '$target.b64' && chmod 0755 '$target' && sha256sum '$target'" |
+		grep -a -o -E '^[0-9a-f]{64}' | head -n 1 || true)
+	if [[ "$actual" != "$expected" ]]; then
+		echo "게스트의 $target 이 보낸 파일과 다르다" >&2
+		exit 1
+	fi
+	echo "pushed $target ($lines lines)"
+	;;
 qmp)
 	shift
 	python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" "$@"
@@ -161,7 +218,8 @@ stop)
 	kill "$(cat "$work/vm.pid")" 2>/dev/null || true
 	;;
 *)
-	sed -n '5,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+	# 머리말의 사용법을 보인다. 전에는 5~24줄로 정해 두어 머리말이 늘면 잘렸다. 이제 set 줄 앞까지 읽는다
+	sed -n '5,/^set -euo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//' >&2
 	exit 2
 	;;
 esac

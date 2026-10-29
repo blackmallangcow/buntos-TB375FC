@@ -15,6 +15,8 @@ packages=(
 	debian-archive-keyring dosfstools mtools e2fsprogs btrfs-progs erofs-utils squashfs-tools cpio zstd xz-utils
 	# 이미지 부팅(QEMU, UEFI 펌웨어)과 x86-64 교차 빌드(binfmt)
 	qemu-system-arm qemu-system-x86 qemu-utils qemu-efi-aarch64 ovmf qemu-user-binfmt swtpm swtpm-tools virtiofsd
+	# 3D 가상 GPU(virtio-gpu-gl, virglrenderer)와 화면 없는 GL 화면(egl-headless). tools/image/vmctl.sh의 VMCTL_GPU=virgl
+	qemu-system-modules-opengl
 	# 자체 컴포넌트(Rust) 빌드. 툴체인은 rust-toolchain.toml에 고정한 버전을 rustup으로 받는다
 	build-essential pkg-config rustup
 	libudev-dev libinput-dev libgbm-dev libseat-dev libxkbcommon-dev libegl-dev libgles-dev libdrm-dev
