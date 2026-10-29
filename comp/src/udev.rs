@@ -76,7 +76,7 @@ use crate::{
     config::{Config, parse_hex_color},
     cursor::Cursor,
     dbus::{Command, OutputInfo, PointerDevice},
-    dmabuf::Dmabufs,
+    dmabuf::{self, Dmabufs},
     gpu::{GSK_RENDERER, Rendering, renderer_name},
     prefs::{ModePref, PointerPrefs},
     render::{self, OutputRenderElements},
@@ -241,10 +241,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     tracing::info!("renderer: {renderer_name}");
     let render_formats: FormatSet = renderer.egl_context().dmabuf_render_formats().clone();
     let shm_formats: Vec<_> = renderer.shm_formats().collect();
-    // 앱이 GPU로 그릴 수 있으면 화면 GPU의 렌더 노드로 linux-dmabuf를 연다
-    let render_node = gpu.node_with_type(NodeType::Render).and_then(Result::ok);
+    // 앱이 GPU로 그릴 수 있으면 컴포지터가 그리는 GPU의 렌더 노드로 linux-dmabuf를 연다. 화면 장치의 렌더
+    // 노드만 보던 것을 EGL이 알리는 장치부터 보게 바꿨다(화면 장치와 GPU가 다른 SoC, dmabuf.rs)
+    let render_node = dmabuf::render_node(&egl_display, Some(gpu));
     if rendering.gpu_clients && render_node.is_none() {
-        tracing::info!("linux-dmabuf disabled: {gpu} has no render node");
+        tracing::info!("linux-dmabuf disabled: no render node for {gpu}");
     }
     let dmabuf_device = render_node
         .filter(|_| rendering.gpu_clients)

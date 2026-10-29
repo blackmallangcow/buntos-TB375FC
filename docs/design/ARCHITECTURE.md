@@ -573,7 +573,7 @@ v0 구현 (2026-10-29, 접근 정책):
 
 - 데미지 트래킹: 변경 영역만 재합성. 버퍼 전체를 손상으로 알리는 SHM 앱(GTK의 cairo 렌더러)은 앞 커밋과 타일로 견주어 바뀐 곳만 남긴다
 - 다이렉트 스캔아웃: 전체화면/단일 창은 합성 생략. 앱 버퍼(dmabuf)의 스캔아웃은 아직 켜지 않았다. 흐림이 화면 버퍼를 복사하므로, 평면에 따로 올린 창과의 순서를 하드웨어에서 확인한 뒤 켠다
-- dmabuf 제로카피 경로 우선: 컴포지터가 GPU로 그리면 linux-dmabuf v5를 연다. 기본 피드백은 화면 GPU의 렌더 노드와 렌더러가 텍스처로 읽는 형식이다. 앱 버퍼는 만들 때 렌더러로 가져와 보고, 가져온 텍스처를 그릴 때 다시 쓴다(복사 없음)
+- dmabuf 제로카피 경로 우선: 컴포지터가 GPU로 그리면 linux-dmabuf v5를 연다. 기본 피드백은 컴포지터가 그리는 GPU의 렌더 노드(EGL이 알리는 장치. 화면 장치와 GPU가 다른 SoC에서는 Mesa kmsro가 짝지은 GPU, 예: mediatek-drm과 Panthor)와 렌더러가 텍스처로 읽는 형식이다. 앱 버퍼는 만들 때 렌더러로 가져와 보고, 가져온 텍스처를 그릴 때 다시 쓴다(복사 없음)
 - 앱의 그리기 방식은 컴포지터가 자기 GL 렌더러를 보고 정한다(`comp/src/gpu.rs`). 렌더러는 화면 GPU에 EGL을 만들어 봐야 알기 때문이다
   - CPU 렌더러(llvmpipe, softpipe, SwiftShader): 띄우는 프로그램과 D-Bus 활성화·systemd 사용자 환경(prepare의 `dbus-update-activation-environment --systemd`)에 `GSK_RENDERER=cairo`를 주고 linux-dmabuf를 열지 않는다. GTK의 GL·Vulkan은 소프트웨어 래스터라이저에서 메모리를 몇 배 쓴다(시스템 설정이 GL로 475MB, cairo로 102~164MB, [개발 환경](../dev/environment.md) 7장)
   - GPU: GTK가 Vulkan이나 GL을 골라 dmabuf로 보낸다. linux-dmabuf를 열지 못하면(렌더 노드나 렌더러가 읽는 형식이 없다) CPU 렌더러처럼 다룬다

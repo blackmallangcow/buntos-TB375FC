@@ -4,8 +4,10 @@
 //! 앱이 GPU로 그린 버퍼를 받는다 (linux-dmabuf v5, 기본 피드백 포함. 설계안 8.2절).
 //!
 //! 컴포지터가 GPU로 그릴 때만 연다 (gpu.rs). CPU 렌더러에서는 지금처럼 wl_shm만 받는다.
-//! - 기본 피드백: 주 장치는 화면 GPU의 렌더 노드이고, 형식은 컴포지터의 EGL이 텍스처로 읽을 수 있는
-//!   형식과 수정자(modifier)다. 앱(Mesa의 EGL, GTK의 Vulkan)은 피드백을 보고 그 장치에서 버퍼를 만든다.
+//! - 기본 피드백: 주 장치는 컴포지터가 그리는 GPU의 렌더 노드이고, 형식은 컴포지터의 EGL이 텍스처로 읽을 수
+//!   있는 형식과 수정자(modifier)다. 앱(Mesa의 EGL, GTK의 Vulkan)은 피드백을 보고 그 장치에서 버퍼를 만든다.
+//!   화면 장치와 GPU가 다른 SoC(mediatek-drm과 Panthor처럼 Mesa의 kmsro로 그리는 기기)는 화면 장치에
+//!   렌더 노드가 없으므로 EGL이 알리는 장치(render_node)로 고른다.
 //!   표면마다 다른 피드백(스캔아웃 평면의 형식)은 직접 스캔아웃을 켤 때 준다
 //! - 받기: 평면이 버퍼(fd) 안에 드는지는 smithay가 본다. 컴포지터는 버퍼를 만들 때 렌더러로 가져와 보고,
 //!   안 되면 앱에 실패로 알린다. 가져온 텍스처는 렌더러가 버퍼별로 기억해 그릴 때 다시 쓴다(복사 없음)
@@ -16,7 +18,8 @@
 use smithay::{
     backend::{
         allocator::{Buffer, dmabuf::Dmabuf, format::FormatSet},
-        drm::DrmNode,
+        drm::{DrmNode, NodeType},
+        egl::{EGLDevice, EGLDisplay},
         renderer::{ImportDma, gles::GlesRenderer},
     },
     delegate_dmabuf,
@@ -37,6 +40,20 @@ use smithay::{
 };
 
 use crate::state::BuntState;
+
+/// 앱이 버퍼를 만들 GPU의 렌더 노드 (기본 피드백의 주 장치). 없으면 None
+///
+/// 컴포지터의 EGL이 그리는 장치를 먼저 본다. Mesa는 화면 전용 장치(kmsro)로 연 EGL에 짝이 되는 렌더
+/// 장치를 알린다(Mesa 25.2 `dri2_setup_device`). 화면 장치의 렌더 노드만 보면 그런 기기에서는 렌더 노드가
+/// 없어 linux-dmabuf를 열지 못했다. 렌더 노드가 없는 장치(주 노드뿐)는 앱의 Mesa가 열지 않으므로 고르지
+/// 않는다. EGL이 장치를 알리지 않으면 화면 장치(`display`)의 렌더 노드를 쓴다
+pub fn render_node(egl_display: &EGLDisplay, display: Option<DrmNode>) -> Option<DrmNode> {
+    EGLDevice::device_for_display(egl_display)
+        .ok()
+        .and_then(|device| device.try_get_render_node().ok().flatten())
+        .filter(|node| node.ty() == NodeType::Render)
+        .or_else(|| display.and_then(|node| node.node_with_type(NodeType::Render)?.ok()))
+}
 
 /// linux-dmabuf 상태. 전역이 없으면(CPU 렌더러) 앱은 이 프로토콜을 보지 못한다
 pub struct Dmabufs {
@@ -204,6 +221,20 @@ mod tests {
         list.iter()
             .map(|&(code, modifier)| Format { code, modifier })
             .collect()
+    }
+
+    #[test]
+    fn a_device_without_drm_nodes_gives_apps_no_render_node() {
+        let _gl = gl_lock();
+        let Some(renderer) = software_renderer() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        // Mesa의 소프트웨어 EGL 장치에는 DRM 노드가 없다. 화면 장치도 없으면 linux-dmabuf를 열 곳이 없다
+        assert_eq!(
+            super::render_node(renderer.egl_context().display(), None),
+            None
+        );
     }
 
     #[test]
