@@ -9,7 +9,9 @@
 LANG=$(cat "${XDG_CONFIG_HOME:-$HOME/.config}"/environment.d/*.conf 2>/dev/null | sed -n 's/^LANG=//p' | tail -n 1)
 export LANG="${LANG:-ko_KR.UTF-8}"
 export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP=buntOS
+# 앞이 우선인 목록. 뒤의 GNOME은 Chromium·Electron 앱이 비밀 저장소로 GNOME 키링을 고르게 한다
+# (모르는 데스크톱이면 평문에 저장한다). 자세한 것은 greeter/src/main.rs의 SESSION_ENV
+export XDG_CURRENT_DESKTOP=buntOS:GNOME
 export XCURSOR_THEME=Adwaita
 export XCURSOR_SIZE=24
 # 컴포지터가 아직 dmabuf를 지원하지 않아 GTK는 CPU로 그린다

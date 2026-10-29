@@ -31,11 +31,15 @@ const TRANSLATIONS: &Sources = &[
 ];
 /// 로그인한 뒤 greetd가 띄우는 사용자 세션
 const SESSION_COMMAND: &str = "/usr/libexec/buntos/session";
-/// 사용자 세션에 넘기는 환경. pam_systemd가 세션 종류를 logind에 알린다
+/// 사용자 세션에 넘기는 환경. pam_systemd가 세션 종류를 logind에 알린다.
+/// XDG_CURRENT_DESKTOP은 앞이 우선인 목록이다. buntOS가 먼저라 포털은 buntos-portals.conf를 쓴다. 뒤의
+/// GNOME은 Chromium·Electron 앱(Claude 데스크톱 앱 등)이 비밀 저장소로 GNOME 키링(libsecret)을 고르게
+/// 한다. 그 앱들은 이 목록에 아는 데스크톱이 없으면 키링이 있어도 평문(basic_text)에 저장한다. 우분투의
+/// "ubuntu:GNOME"과 같은 방식이다
 const SESSION_ENV: [&str; 3] = [
     "XDG_SESSION_TYPE=wayland",
     "XDG_SESSION_DESKTOP=buntos",
-    "XDG_CURRENT_DESKTOP=buntOS",
+    "XDG_CURRENT_DESKTOP=buntOS:GNOME",
 ];
 
 /// 보일 화면
