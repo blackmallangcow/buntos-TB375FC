@@ -223,8 +223,8 @@ Phase 2의 종료 조건은 2a~2d다(11장). 2e는 Phase 4·5의 실기기 판�
 | 컴포넌트 | 구현 | 비고 |
 |---|---|---|
 | `bunt-comp` | Rust, Smithay | 창 관리, 애니메이션, 제스처, 다중 seat, 신뢰 레이어. 창 목록·창 조작 프로토콜(wlr-foreign-toplevel)은 컴포지터가 직접 띄운 셸에게만, 입력기 프로토콜(input-method-v2, virtual-keyboard)은 직접 띄운 입력기(fcitx5)에게만 연다. 앱에는 text-input-v3를 준다. 시스템 설정과 셸이 쓰는 제어 API(D-Bus `org.buntos.Compositor1`: 화면 모드·배율, 키 반복, 마우스와 연결된 포인터 장치, 막대 자동 가리기, 키보드 단축키)를 낸다. 셸의 메뉴 막대와 Dock을 macOS의 WindowServer처럼 숨기고 꺼낸다. 키보드 단축키(5.3절), 창 최소화·가리기, 스크린샷을 맡는다. 화면 잠금(ext-session-lock-v1), 로그아웃, 응용 프로그램 강제 종료와 logind 연동을 맡는다(5.4절) |
-| `bunt-shell` | Rust, 레이어 셸 클라이언트. v0은 GTK4 + gtk4-layer-shell로 만들었고 ADR-001의 GTK4 시제품을 겸한다 | 메뉴바, 메뉴 막대 항목(입력 소스, 사운드, 배터리·전원 모드, Wi-Fi, Bluetooth, 앱의 StatusNotifierItem), 제어 센터, Dock, 모든 앱 패널, 알림, 배경화면. 로고 메뉴(macOS의 Apple 메뉴 순서)와 로그아웃 확인 창, 응용 프로그램 강제 종료 창(5.4절). 메뉴바의 앱 메뉴는 앱이 D-Bus로 내보내는 동작(GAction)과 창 목록 프로토콜로 만든다. GNOME 앱처럼 창 안의 메뉴를 밖으로 내보내지 않는 앱은 그 메뉴를 옮길 수 없다 |
-| `bunt-settings` | Rust, 시스템 앱. v0은 ADR-001 잠정안대로 libadwaita 없이 GTK4와 자체 CSS로 만들었고, GTK4 시제품을 겸한다 | 시스템 설정. macOS 26 시스템 설정의 구성(검색 사이드바, 묶음 상자)을 따른다. Wi-Fi, Bluetooth, 네트워크, 배터리, 화면 모드, 메뉴 막대, 데스크탑 및 Dock, 배경화면, 디스플레이, 키보드, 마우스, 언어, 날짜와 시간, 기본 앱, AI 에이전트(6.5절), 사용자 및 그룹(AccountsService로 이름·사진, passwd로 암호), 정보 |
+| `bunt-shell` | Rust, 레이어 셸 클라이언트. v0은 GTK4 + gtk4-layer-shell로 만들었고 ADR-001의 GTK4 시제품을 겸한다 | 메뉴바, 메뉴 막대 항목(입력 소스, 사운드, 배터리·전원 모드, Wi-Fi, Bluetooth, 앱의 StatusNotifierItem), 제어 센터, Dock, 모든 앱 패널, 알림, 배경화면. 로고 메뉴(macOS의 Apple 메뉴 순서)와 로그아웃 확인 창, 응용 프로그램 강제 종료 창(5.4절). 시스템 서비스가 사람에게 묻는 세션 쪽 도우미(polkit 인증 에이전트, NetworkManager 비밀 에이전트, BlueZ 페어링 에이전트)와 그 창(관리자 인증, Wi-Fi 암호, Bluetooth 페어링, 6.5절). 메뉴바의 앱 메뉴는 앱이 D-Bus로 내보내는 동작(GAction)과 창 목록 프로토콜로 만든다. GNOME 앱처럼 창 안의 메뉴를 밖으로 내보내지 않는 앱은 그 메뉴를 옮길 수 없다 |
+| `bunt-settings` | Rust, 시스템 앱. v0은 ADR-001 잠정안대로 libadwaita 없이 GTK4와 자체 CSS로 만들었고, GTK4 시제품을 겸한다 | 시스템 설정. macOS 26 시스템 설정의 구성(검색 사이드바, 묶음 상자)을 따른다. Wi-Fi, Bluetooth, 네트워크, 배터리, 화면 모드, 메뉴 막대, 데스크탑 및 Dock, 배경화면, 디스플레이, 알림(GNOME과 같은 앱별 GSettings), 사운드(PipeWire·WirePlumber, 셸과 같은 `bunt-sound` 크레이트), 키보드, 마우스, 언어, 날짜와 시간, 기본 앱, AI 에이전트(6.5절), 사용자 및 그룹(AccountsService로 이름·사진, passwd로 암호), 정보 |
 | 로그인 관리자 | Debian greetd + `bunt-greeter`(Rust, GTK4) | greetd가 VT1에 로그인 화면을 로그인 화면 사용자(`_greetd`)로 띄운다. 로그인 화면은 로그인 화면용 설정(`/etc/buntos/greeter.toml`)의 `bunt-comp` 위에서 셸로 뜨고, 로그인해 셸이 끝나면 컴포지터도 끝난다(`[session] exit-with-shell`). macOS 로그인 창처럼 흐린 배경화면, 시각, 사진, 이름, 암호 칸이 있고, 정규 계정이 없으면 macOS 설정 지원처럼 계정을 만든다. 로그인은 greetd IPC(PAM)로 하고, 같은 VT에서 사용자 세션을 연다 |
 | 잠금 화면 `bunt-lock` | Rust, GTK4 + gtk4-layer-shell 1.2 이상의 세션 잠금 API(`greeter/` 크레이트의 둘째 실행 파일) | 컴포지터가 화면을 잠근 뒤 그 사용자로 띄운다. 로그인 화면과 같은 모양(흐린 배경화면, 날짜와 큰 시각, 사진, 별칭, 암호 칸)이고, 암호를 PAM 서비스 `bunt-lock`(`common-auth`)으로 확인한다(5.4절) |
 | `buntd-setup` | Rust, 시스템 버스 서비스 `org.buntos.Setup1`(버스 활성화) | 정규 계정이 없을 때만 관리자 계정을 만든다(useradd, chpasswd). root와 로그인 화면 사용자만 부른다. 시험·개발 VM은 부팅 때 systemd 자격 증명 `buntos.account`로 같은 코드를 거쳐 계정을 미리 만든다 |
@@ -371,7 +371,7 @@ v0 구현 (2026-10-29, 2단계 동작 경로):
   - 부른 프로세스의 실행 파일을 경로가 아니라 파일(장치·inode)로 `/usr/bin/buntd-agent`와 견준다. 사용자 이름공간에서 다른 파일을 그 경로에 bind mount하면 `/proc/<pid>/exe`의 경로가 같게 보이기 때문이다.
   - 꾸러미 갱신으로 데몬 파일이 바뀌면 옛 데몬은 다음 연결을 받기 전에 끝난다. 소켓에 남은 연결은 systemd가 새로 띄운 데몬이 받는다.
 - 입력은 사용자 seat에 실제 입력과 같은 길로 넣는다. 컴포지터 단축키는 거치지 않는다. 에이전트 seat는 5단계다.
-- 관리자 인증 창(셸의 레이어 `bunt-polkit-agent`, 6.5절)이 떠 있는 동안 컴포지터는 에이전트의 창 활성화, 키, 글, 포인터를 모두 거절한다.
+- 사람만 답하는 셸 창(관리자 인증 창 `bunt-polkit-agent`, Wi-Fi 암호 창 `bunt-secret-agent`, Bluetooth 페어링 창 `bunt-pairing-agent`. 6.5절)이 떠 있는 동안 컴포지터는 에이전트의 창 활성화, 키, 글, 포인터를 모두 거절한다.
   - 에이전트가 대신 답하거나, 사람이 칠 암호를 다른 창으로 돌리지 못하게 하기 위해서다.
   - 데몬도 이 창을 앱 목록과 스냅샷에서 빼고, 그 안의 요소를 동작 대상으로 받지 않는다. 셸은 레이어 창의 제목(접근성 이름)을 레이어 이름으로 둔다.
 - 화면이 잠긴 동안(5.4절) 컴포지터는 에이전트 전용 메서드(창 목록과 창 그림 포함)를 모두 거절한다. 데몬도 요청을 처리하기 전과 뒤에 컴포지터의 `GetLocked`를 보고, 잠겼으면 스냅샷과 모든 동작을 SCREEN_LOCKED(-32003)로 거절한다. 처리하는 사이에 잠겼으면 읽은 것(트리, diff, 스크린샷)을 돌려주지 않는다. 세션 버스에 붙지 못하거나, 컴포지터가 버스에 없거나, 답이 늦는 것처럼 잠긴 상태를 알 수 없으면 잠긴 것으로 본다(앱의 트리는 접근성 버스로 읽히고, 컴포지터의 D-Bus만 멈추고 화면은 잠겨 있을 수 있다). `GetLocked`를 모르는 옛 컴포지터(화면 잠금이 없다)만 잠기지 않은 것으로 본다. 잠금 화면(창 제목 `bunt-lock`)은 앱 목록과 스냅샷에서 빠지고 동작 대상도 되지 않는다.
@@ -549,6 +549,11 @@ v0 구현 (2026-10-29, 접근 정책):
   - polkit 128은 `polkit-agent-helper-1`을 setuid 없이 소켓 활성화(`/run/polkit/agent-helper.socket`)로 root로 띄운다. 인증 에이전트는 그 소켓에 사용자 이름과 쿠키를 쓰고 PAM 물음에 답한다.
   - 에이전트는 인증 창을 읽지도 조작하지도 못한다(6.3절).
   - 화면 잠금(5.4절): 잠긴 동안 에이전트는 아무것도 읽거나 하지 못하고, 잠금 화면도 읽지 못한다. 잠금을 푸는 길은 사람이 잠금 화면에 친 암호뿐이다. 컴포지터 API에 잠금 해제 메서드가 없다.
+  - Wi-Fi 암호와 Bluetooth PIN·확인 번호도 사람만 답한다. 세션의 NetworkManager 비밀 에이전트(`shell/src/secret_agent.rs`)와 BlueZ 기본 페어링 에이전트(`shell/src/pairing_agent.rs`, 능력 KeyboardDisplay)가 bunt-shell이다.
+    - 창은 인증 창과 같은 틀이고 레이어 이름이 `bunt-secret-agent`, `bunt-pairing-agent`다. 컴포지터(`comp/src/agent.rs`의 `AUTH_NAMESPACES`)와 buntd-agent(`agent/src/atspi.rs`의 `HUMAN_ONLY_WINDOWS`)가 같은 목록으로 이 창들을 막는다.
+    - 사람이 고르지 않은 때 뜨는 창은 키보드를 바로 가져가지 않는다. Wi-Fi 암호 창은 사용자가 고른 연결(USER_REQUESTED)일 때만 키보드를 독점하고, 저장된 네트워크가 스스로 다시 연결하다 묻는 창과 Bluetooth 페어링 창(상대 기기가 먼저 청할 수 있다)은 눌러야 받는다. 다른 앱에 치던 글이 이 창으로 가지 않게 하기 위해서다.
+    - 에이전트는 NetworkManager·bluetoothd가 아닌 호출을 거절한다. 받은 비밀은 기록에 남기지 않고, 답한 뒤 메모리를 지운다.
+    - NetworkManager는 받은 암호를 모든 사용자의 연결에 저장하기 전에 에이전트의 `org.freedesktop.NetworkManager.settings.modify.system` 권한을 본다(upstream 기본값 auth_admin_keep). Debian의 정책에 따라 관리자 인증 창이 먼저 뜰 수 있다.
   - 비밀 저장소(Secret Service)는 gnome-keyring이다. libpam-gnome-keyring이 pam-auth-update로 `common-auth`·`common-session`에 들어가므로, greetd 로그인의 암호로 login 키링을 열고 처음이면 만든다(macOS 로그인 키체인). 앱이 비밀을 저장할 때 따로 키링 암호를 묻거나 켤 때마다 잠금 해제 창이 뜨던 것이 없어졌다. 시스템 설정이 `passwd`로 암호를 바꾸면 키링 암호도 따라간다. Flatpak 앱은 Secret 포털(gnome-keyring 구현)로 같은 키링을 쓴다.
   - 세션의 `XDG_CURRENT_DESKTOP`은 `buntOS:GNOME`이다(앞이 우선인 목록, 세션 스크립트 `/usr/libexec/buntos/session`이 정한다). Electron 앱(Claude 데스크톱 앱 등)의 safeStorage는 이 목록에 GNOME·KDE·XFCE처럼 아는 데스크톱이 있어야 비밀 저장소로 키링(libsecret)을 고르고, 없으면 키링이 있어도 평문(`basic_text`)에 저장한다. `buntOS`만 두었을 때 Claude 앱이 "시스템 키링을 사용할 수 없습니다"라고 알렸고 로그인 토큰을 남기지 못했다(2026-10-29, 앱 로그 `backend=basic_text`). 우분투의 `ubuntu:GNOME`과 같은 방식이다.
     - Chromium 156(Debian)은 모르는 데스크톱이면 Secret 포털(우리 설정으로 gnome-keyring)을 써서 이미 키링에 저장했다(`Local State`의 `os_crypt.portal`). Electron의 safeStorage에는 이 길이 없다.

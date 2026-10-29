@@ -335,8 +335,8 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 유리 패널 뒤 창의 글자가 비쳐 겹침 | 컴포지터에 흐림이 없었다. macOS의 유리는 뒤를 흐리게 한다 | bunt-comp가 셸 표면 뒤를 흐리게 한다(`[effects] blur`, 기본 켬). 소프트웨어 렌더러에서 메뉴를 열 때 한두 프레임 늦어질 수 있다. 끄면 유리 토큰의 불투명도를 높인다([디자인 스펙](../design/DESIGN-SPEC.md) 2.2) |
 | Ctrl+Space를 앱이 받지 못함 | 입력 소스 전환을 컴포지터가 전역으로 가로챈다(macOS와 같다) | 단축키를 바꾸는 설정은 다음 작업이다 |
 | 부하가 클 때 셸과 앱이 1분쯤 늦게 뜸 | GTK가 xdg-desktop-portal을 기다리다 시간이 초과된다(25초×2, `Cannot get portal org.freedesktop.host.portal.Registry version`). 빌드 VM에 테스트 VM 세 대와 빌드가 함께 돌 때 보였다 | 시험할 때 테스트 VM 수를 줄인다. 셸 쪽 대처는 다음 작업이다 |
-| 저장된 Wi-Fi 연결의 암호가 바뀌면 다시 묻지 못함 | NetworkManager 비밀 에이전트가 없다 | 새로 연결할 때 틀린 암호는 만든 연결을 지우고 알린다. 셸에 에이전트를 두는 것이 다음 작업이다 |
-| PIN이나 확인 번호가 필요한 Bluetooth 기기(키보드 등)를 짝지을 수 없음 | BlueZ 페어링 에이전트가 없다 | 다음 작업 |
+| 저장된 Wi-Fi 연결의 암호가 바뀌면 다시 묻지 못함 | NetworkManager 비밀 에이전트가 없다 | 셸이 비밀 에이전트가 되어 Wi-Fi 암호 창으로 다시 묻는다(`shell/src/secret_agent.rs`). 메뉴 막대는 새 네트워크도 연결을 만들어 켜고 암호를 이 창에 맡긴다. 메뉴 막대와 시스템 설정은 창에서 취소하거나 연결하지 못한 새 연결을 지운다. VM에서 아직 확인하지 않았다 |
+| PIN이나 확인 번호가 필요한 Bluetooth 기기(키보드 등)를 짝지을 수 없음 | BlueZ 페어링 에이전트가 없다 | 셸이 세션의 기본 페어링 에이전트(KeyboardDisplay)가 되어 Bluetooth 페어링 창으로 묻는다(`shell/src/pairing_agent.rs`). 시스템 설정의 Bluetooth 페이지와 메뉴 막대의 근처 기기가 이 에이전트로 짝짓는다. QEMU에 Bluetooth 장치가 없어 VM에서 아직 확인하지 않았다 |
 | `gdk_pixbuf::Pixbuf::from_file`이 그림을 못 읽음 | Debian forky의 gdk-pixbuf는 그림 형식 로더 없이 glycin에 맡긴다 | 그림은 `gdk::Texture::from_file`(GTK)로 읽는다 |
 | fcitx5의 키 반복이 바뀐 값을 바로 따르지 않음 | fcitx5는 키보드를 잡을 때 받은 반복 값으로 반복을 직접 흉내 낸다 | 이미 포커스된 입력 칸은 다음 포커스부터 새 값을 쓴다 |
 | 필수 펌웨어를 넣은 뒤 부팅이 30초 넘게 늦어짐 | mkosi는 UKI에 모든 커널 모듈과 그 모듈이 쓰는 펌웨어를 담은 initrd를 붙인다. 펌웨어 패키지를 넣자 initrd가 220MB가 됐다 | 커널 모듈 initrd에는 루트를 여는 모듈만 넣는다(`image/mkosi.conf`의 `KernelModulesInitrdInclude`). 나머지는 루트로 바꾼 뒤 읽는다. UKI 268MB→87MB, 로그인 57초→19초 |
@@ -355,3 +355,4 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | Mac 창(`view-mac.sh`)에서 GPU 경로(linux-dmabuf, GTK의 GL)를 볼 수 없음 | QEMU의 cocoa 화면에는 GL이 없고(QEMU 10.0), Homebrew QEMU에는 virglrenderer가 없어 3D 가상 GPU(virtio-gpu-gl)를 붙일 수 없다 | 빌드 VM에서 `VMCTL_GPU=virgl`로 띄워 QMP로 본다(4장). 게스트의 GL은 빌드 VM이 llvmpipe로 그리므로 성능은 견주지 않고 경로만 본다 |
 | 창 제목 막대를 메뉴 막대 밑으로 옮기면 다시 잡을 수 없음 | 컴포지터가 창을 어디로든 옮기게 했다 | macOS처럼 창의 위쪽 끝은 메뉴 막대 아래 끝을 넘지 못한다(옮기기와 위쪽 가장자리 크기 조절). Dock 쪽은 넘어가도 된다 |
 | 메뉴 막대 메뉴가 Esc로 닫히지 않음 | 글자 칸에 포커스가 있으면 입력기(fcitx5)가 키보드를 잡고 있는데, 컴포지터가 이것을 다른 그랩으로 보고 메뉴의 키보드 그랩을 거절했다. 레이어 포커스 정리가 열린 팝업의 포커스를 창으로 되돌리기도 했다 | 입력기 그랩은 팝업 그랩을 막지 않고, 열린 팝업의 포커스는 건드리지 않는다(`comp/src/state.rs`) |
+| 메뉴 막대와 제어 센터에서 Bluetooth·Wi-Fi를 켜고 끄거나 전원 모드를 골라도 바뀌지 않음 | 셸의 `dbus::set_property`가 값을 v로 두 번 감싸 보냈다. 서비스가 "Expected type 'b' but got 'v'"로 거절했다(GDBus 시험 버스로 재현). QEMU에 Wi-Fi·Bluetooth 장치가 없어 드러나지 않았다 | 값을 한 번만 감싼다(`shell/src/dbus.rs`, 2026-10-29). 전원 모드는 VM에서 다시 확인한다 |
