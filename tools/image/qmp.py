@@ -10,6 +10,7 @@
   dclick:X,Y       두 번 누른다 (예: 제목 표시줄을 두 번 눌러 최대화)
   drag:X1,Y1,X2,Y2 왼쪽 버튼을 누른 채 (X1, Y1)에서 (X2, Y2)로 끈다
   move:X,Y         포인터만 옮긴다
+  press, release   왼쪽 단추를 누른 채로 두거나 뗀다 (끌기 중간에 화면을 찍을 때 move와 함께 쓴다)
   keys:A+B         키를 함께 누른다 (QEMU qcode 이름, 예: alt+ret)
   type:TEXT        영문 소문자·숫자를 한 글자씩 입력한다
   sleep:SECONDS    기다린다
@@ -129,6 +130,8 @@ def main():
                 qmp.click(x, y, count=2 if kind == "dclick" else 1)
         elif kind == "drag":
             qmp.drag(*(int(value) for value in argument.split(",")))
+        elif kind in ("press", "release"):
+            qmp.button(kind == "press")
         elif kind == "keys":
             qmp.keys(argument.split("+"))
         elif kind == "type":

@@ -7,7 +7,7 @@
 # 직렬 콘솔의 root 자동 로그인 뒤 셸에서 명령이 실행되는지 보고, 로그인 화면(bunt-greeter)에 QMP로
 # 암호를 쳐 그 계정으로 들어간다. sudo가 암호를 묻는지 보고, 그래픽 셸(메뉴 막대, Dock)이 떴는지는
 # 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에
-# 넣는다, tests/e2e/agent-apps.sh)을 돌린 뒤 끈다.
+# 넣는다, tests/e2e/agent-apps.sh)과 e2e 6번(키보드 단축키, tests/e2e/shortcuts.sh)을 돌린 뒤 끈다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
 # 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 600)
 set -euo pipefail
@@ -15,7 +15,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 board=${1:?"보드 이름이 필요하다 (bsp/ 아래 디렉터리 이름)"}
 deadline=$((SECONDS + ${E2E_TIMEOUT:-600}))
-# 시험 계정 (계정 이름:전체 이름:암호). 다른 시험과 개발 VM 도구(tools/image/vmctl.sh)도 같은 계정을 쓴다.
+# 시험 계정 (계정 이름:별칭:암호). 다른 시험과 개발 VM 도구(tools/image/vmctl.sh)도 같은 계정을 쓴다.
 # 암호는 QMP로 치므로 영문 소문자와 숫자만 쓴다
 user=buntos
 password=buntos
@@ -49,6 +49,14 @@ fail() {
 	echo "--- 콘솔 마지막 40줄" >&2
 	console | tail -40 >&2
 	exit 1
+}
+# 저장소의 스크립트($1)를 게스트의 $2로 넣는다. 콘솔은 4KB 가까운 줄을 자르므로 base64를 1000자씩 나눠 보낸다
+push() {
+	echo "rm -f $2.b64" >&3
+	base64 -w 1000 "$repo/$1" | while IFS= read -r chunk; do
+		echo "echo $chunk >>$2.b64" >&3
+	done
+	echo "base64 -d $2.b64 >$2" >&3
 }
 
 # 테스트가 빌드한 이미지를 바꾸지 않게, 멈춘 상태로 띄워 디스크에 임시 덮어쓰기를 씌운 뒤 실행한다.
@@ -132,19 +140,101 @@ else
 fi
 
 # e2e 5번: 에이전트가 앱 A(계산기)의 값을 읽어 앱 B(텍스트 편집기)에 넣는다(tests/e2e/agent-apps.sh).
-# 스크립트를 직렬 콘솔로 넣어 root로 돌린다. 콘솔은 4KB 가까운 줄을 자르므로 base64를 1000자씩 나눠 보낸다.
-# 결과 줄은 입력 줄의 에코와 구분되도록 앞에 표시를 붙인다
+# 스크립트를 직렬 콘솔로 넣어 root로 돌린다. 결과 줄은 입력 줄의 에코와 구분되도록 앞에 표시를 붙인다
 if [[ "$agent_refs" != NONE ]]; then
-	echo 'rm -f /tmp/e2e-agent-apps.b64' >&3
-	base64 -w 1000 "$repo/tests/e2e/agent-apps.sh" | while IFS= read -r chunk; do
-		echo "echo $chunk >>/tmp/e2e-agent-apps.b64" >&3
-	done
-	echo 'base64 -d /tmp/e2e-agent-apps.b64 >/tmp/e2e-agent-apps.sh && bash /tmp/e2e-agent-apps.sh 2>&1 | sed "s/^/E2E5: /"' >&3
+	push tests/e2e/agent-apps.sh /tmp/e2e-agent-apps.sh
+	echo 'bash /tmp/e2e-agent-apps.sh 2>&1 | sed "s/^/E2E5: /"' >&3
 	wait_for "^E2E5: E2E5_RESULT [0-9]+ [0-9]+$" || fail "e2e 5번(에이전트 앱 간 제어)이 끝나지 않았다"
 	console | grep -a "^E2E5: E2E5 " | sed 's/^E2E5: E2E5 /e2e 5번 /'
 	read -r passed failed < <(console | grep -a -E "^E2E5: E2E5_RESULT" | tail -1 | sed 's/^E2E5: E2E5_RESULT //')
 	((failed == 0 && passed > 0)) || fail "e2e 5번(에이전트 앱 간 제어): ${failed}개 실패"
 	echo "e2e 5번(에이전트 앱 간 제어): ${SECONDS}초, ${passed}개 통과"
+fi
+
+# e2e 6번: 키보드 단축키. 키는 QMP로 가상 키보드에 넣어 실제 입력과 같은 길(libinput → 컴포지터 단축키 →
+# 앱)을 거치게 하고, 결과는 게스트 쪽 도우미(tests/e2e/shortcuts.sh)가 에이전트와 컴포지터 API로 읽는다.
+# e2e 5번이 연 계산기, 텍스트 편집기, 시스템 설정을 그대로 쓴다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/shortcuts.sh /tmp/e2e-shortcuts.sh
+	step=0
+	# 도우미를 돌려 마지막 줄을 answer에 받는다. 답 줄은 입력 줄의 에코와 구분되도록 차례 표시를 붙인다.
+	# 차례가 이어지도록 명령 치환($(...), 하위 셸) 없이 부른다. 답을 받은 뒤에야 다음 키를 넣는다
+	answer=
+	guest() {
+		step=$((step + 1))
+		echo "bash /tmp/e2e-shortcuts.sh $1 2>&1 | tail -1 | sed 's/^/E2E6_$step=/'" >&3
+		wait_for "^E2E6_$step=" || fail "e2e 6번: $1의 답을 받지 못했다"
+		answer=$(console | grep -a "^E2E6_$step=" | tail -1 | sed "s/^E2E6_$step=//")
+	}
+	keys() {
+		python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" "$@" || fail "e2e 6번: QMP로 키를 넣지 못했다"
+	}
+	shortcut_passed=0
+	shortcut_failed=0
+	check() {
+		if [[ "$2" == "$3" ]]; then
+			echo "e2e 6번 통과: $1"
+			shortcut_passed=$((shortcut_passed + 1))
+		else
+			echo "e2e 6번 실패: $1 (받은 값 '$2', 바란 값 '$3')"
+			shortcut_failed=$((shortcut_failed + 1))
+		fi
+	}
+
+	guest prepare
+	[[ "$answer" == ready ]] || fail "e2e 6번: 텍스트 편집기를 준비하지 못했다 ($answer)"
+	keys keys:meta_l+a sleep:0.3 keys:meta_l+c sleep:0.3 keys:meta_l+right sleep:0.3 keys:meta_l+v sleep:1
+	guest value
+	check "⌘A ⌘C ⌘→ ⌘V로 글을 복사해 붙인다" "$answer" "[one twoone two]"
+	keys keys:meta_l+z sleep:1
+	guest value
+	check "⌘Z로 붙인 것을 되돌린다" "$answer" "[one two]"
+	keys keys:alt+backspace sleep:1
+	guest value
+	check "⌥⌫로 앞 단어를 지운다" "$answer" "[one ]"
+	keys keys:meta_l+tab sleep:1
+	guest focus
+	check "⌘⇥로 앞서 쓰던 앱으로 간다" "$answer" org.buntos.Settings
+	keys keys:meta_l+m sleep:1
+	guest focus
+	check "⌘M으로 최소화하면 다음 창이 포커스를 받는다" "$answer" org.gnome.TextEditor
+	keys keys:meta_l+tab sleep:1
+	guest focus
+	check "⌘⇥로 최소화한 앱이 돌아온다" "$answer" org.buntos.Settings
+	keys keys:meta_l+spc sleep:1.5
+	guest focus
+	check "⌘스페이스로 모든 앱을 연다" "$answer" bunt-launcher
+	keys keys:esc sleep:1
+	guest screenshots
+	before=$answer
+	[[ "$before" =~ ^[0-9]+$ ]] || fail "e2e 6번: 스크린샷 수를 읽지 못했다 ($before)"
+	keys keys:shift+meta_l+3 sleep:3
+	guest screenshots
+	check "⇧⌘3으로 화면을 사진 폴더에 저장한다" "$answer" "$((before + 1))"
+	guest dbus
+	check "단축키 API (목록, 겹치는 키 거절, 바꾸기, 기본값)" "$answer" "1 1 1 0"
+	# 터미널: 편집기에서 ⌘C로 복사한 명령을 ⌥↩로 연 foot에 ⌘V(Ctrl+Shift+V로 간다)로 붙여 실행하고 ⌘W로 닫는다
+	guest terminal-prepare
+	[[ "$answer" == ready ]] || fail "e2e 6번: 터미널 시험을 준비하지 못했다 ($answer)"
+	keys keys:meta_l+a sleep:0.3 keys:meta_l+c sleep:0.5 keys:alt+ret sleep:5 keys:meta_l+v sleep:1 keys:ret sleep:1.5
+	guest terminal
+	check "터미널에서 ⌘V로 붙여 실행한다" "$answer" "pasted 1"
+	keys keys:meta_l+w sleep:2
+	guest terminal
+	check "터미널에서 ⌘W로 창을 닫는다" "$answer" "pasted 0"
+	# 조합 키만으로 된 입력 소스 전환(Windows의 Ctrl+Shift): 다른 키 없이 눌렀다 떼면 바뀌고, 사이에
+	# 다른 키가 끼면(⌃⇧A) 그대로다
+	guest chord-prepare
+	[[ "$answer" == keyboard-us ]] || fail "e2e 6번: 입력 소스 전환을 ⌃⇧로 바꾸지 못했다 ($answer)"
+	keys keys:ctrl+shift sleep:1
+	guest input-method
+	check "⌃⇧를 눌렀다 떼면 입력 소스가 바뀐다" "$answer" hangul
+	keys keys:ctrl+shift+a sleep:1
+	guest input-method
+	check "⌃⇧ 사이에 다른 키를 누르면 바뀌지 않는다" "$answer" hangul
+	guest chord-reset
+	((shortcut_failed == 0)) || fail "e2e 6번(키보드 단축키): ${shortcut_failed}개 실패"
+	echo "e2e 6번(키보드 단축키): ${SECONDS}초, ${shortcut_passed}개 통과"
 fi
 
 echo 'systemctl poweroff' >&3
