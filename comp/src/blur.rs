@@ -41,6 +41,7 @@ use smithay::{
             utils::{CommitCounter, DamageSet, OpaqueRegions, with_renderer_surface_state},
         },
     },
+    output::{Output, WeakOutput},
     reexports::wayland_server::{
         Resource,
         backend::ObjectId,
@@ -245,17 +246,20 @@ impl BlurTarget {
 #[derive(Default)]
 pub struct Blur {
     shared: Rc<RefCell<Shared>>,
-    surfaces: HashMap<ObjectId, SurfaceBlur>,
+    /// 표면과 화면마다 따로 둔다. 표면마다 하나만 두었을 때는 두 화면에 걸친 창이 화면마다 다른 자리로
+    /// 지문을 바꿔, 두 화면이 그릴 때마다 다시 흐리고 크기가 다르면 버퍼도 새로 만들었다
+    surfaces: HashMap<(ObjectId, WeakOutput), SurfaceBlur>,
 }
 
 impl Blur {
-    /// 이번 프레임의 요소 목록(위에서 아래 순)에서 `targets` 각각의 표면 바로 아래에 흐림 요소를 끼운다.
-    /// 하나라도 끼웠으면 true. 전에는 셸 유리 표면만 받았다
+    /// `output`에 그릴 이번 프레임의 요소 목록(위에서 아래 순)에서 `targets` 각각의 표면 바로 아래에 흐림
+    /// 요소를 끼운다. 하나라도 끼웠으면 true. 전에는 셸 유리 표면만 받았다
     pub fn insert(
         &mut self,
         renderer: &mut GlesRenderer,
         elements: &mut Vec<OutputRenderElements>,
         targets: &[BlurTarget],
+        output: &Output,
         scale: Scale<f64>,
     ) -> bool {
         self.collect_garbage(renderer, targets);
@@ -292,7 +296,7 @@ impl Blur {
             }
             let entry = self
                 .surfaces
-                .entry(surface.id())
+                .entry((surface.id(), output.downgrade()))
                 .or_insert_with(|| SurfaceBlur {
                     id: Id::new(),
                     commit: CommitCounter::default(),
@@ -445,13 +449,13 @@ impl Blur {
         self.shared.borrow().broken
     }
 
-    /// 화면에서 사라진 표면의 버퍼를 지운다
+    /// 흐리지 않게 된 표면과 없어진 화면의 버퍼를 지운다
     fn collect_garbage(&mut self, renderer: &mut GlesRenderer, targets: &[BlurTarget]) {
         let alive: Vec<ObjectId> = targets.iter().map(|target| target.surface.id()).collect();
-        let gone: Vec<ObjectId> = self
+        let gone: Vec<(ObjectId, WeakOutput)> = self
             .surfaces
             .keys()
-            .filter(|id| !alive.contains(id))
+            .filter(|(id, output)| !alive.contains(id) || !output.is_alive())
             .cloned()
             .collect();
         let mut shared = self.shared.borrow_mut();
@@ -1241,7 +1245,7 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        Frames, Server, ServerOptions, TestClient, argb, background, gl_lock, memfd, pixel,
+        Frames, Server, ServerOptions, TestClient, argb, background, gl_lock, memfd, output, pixel,
         software_renderer, stripes, texture_formats,
     };
 
@@ -1383,7 +1387,13 @@ mod tests {
         let mut elements = server.surface_elements(0, location, scale);
         elements.push(background(server.renderer(), wallpaper));
         let target = BlurTarget { surface, shape };
-        blur.insert(server.renderer(), &mut elements, &[target], scale);
+        blur.insert(
+            server.renderer(),
+            &mut elements,
+            &[target],
+            &frames.output,
+            scale,
+        );
         frames.render(server.renderer(), &elements)
     }
 
@@ -1628,15 +1638,16 @@ mod tests {
         let mut elements = server.surface_elements(0, (0, 0).into(), scale);
         assert_eq!(elements.len(), 1, "the NV12 buffer was imported");
         let mut blur = Blur::default();
+        let output = output("test");
         let glass = BlurTarget::glass(surface.clone());
-        assert!(!blur.insert(server.renderer(), &mut elements, &[glass], scale));
+        assert!(!blur.insert(server.renderer(), &mut elements, &[glass], &output, scale));
         // 앱 영역은 가림을 쓰지 않지만, NV12에는 알파가 없어 표면 자신이 영역을 다 가린다(불투명 영역).
         // 보이지 않는 흐림은 넣지 않는다. 흐림 위 불투명 요소를 고치며 바꿨다
         let region = BlurTarget {
             surface,
             shape: BlurShape::Region(Arc::from(vec![logical(0, 0, 8, 8)])),
         };
-        assert!(!blur.insert(server.renderer(), &mut elements, &[region], scale));
+        assert!(!blur.insert(server.renderer(), &mut elements, &[region], &output, scale));
         assert_eq!(elements.len(), 1);
     }
 
@@ -1709,7 +1720,13 @@ mod tests {
             surface,
             shape: BlurShape::Region(Arc::from(vec![logical(0, 0, SIZE, SIZE)])),
         };
-        blur.insert(server.renderer(), &mut elements, &[target], scale);
+        blur.insert(
+            server.renderer(),
+            &mut elements,
+            &[target],
+            &frames.output,
+            scale,
+        );
         frames.render(server.renderer(), &elements)
     }
 
@@ -1764,6 +1781,54 @@ mod tests {
     }
 
     #[test]
+    fn a_window_on_two_screens_is_blurred_once_on_each() {
+        let _gl = gl_lock();
+        let Some((mut server, mut client, compositor, shm, _)) = gl_setup() else {
+            eprintln!("skipped: no software EGL device");
+            return;
+        };
+        let buffer = client.shm_buffer(&shm, SIZE, SIZE, &argb(64, 64, [0, 0, 0, 0]));
+        commit(&mut server, &mut client, &compositor, &buffer);
+        let mut blur = Blur::default();
+        let mut left = Frames::new(server.renderer(), (SIZE, SIZE).into(), 1.0);
+        let mut right = Frames::new(server.renderer(), (SIZE, SIZE).into(), 1.0);
+        let wallpaper = wallpaper();
+        let region = || BlurShape::Region(Arc::from(vec![logical(0, 0, SIZE, SIZE)]));
+        let commits = |blur: &Blur| {
+            let mut commits: Vec<CommitCounter> =
+                blur.surfaces.values().map(|entry| entry.commit).collect();
+            commits.sort();
+            commits
+        };
+        // 두 화면에 걸친 창: 왼쪽 화면에서는 x = 32, 오른쪽 화면에서는 x = -32. 두 화면이 번갈아 그린다
+        let mut seen = Vec::new();
+        for frame in 0..6 {
+            let (frames, location) = if frame % 2 == 0 {
+                (&mut left, (32, 0))
+            } else {
+                (&mut right, (-32, 0))
+            };
+            let pixels = draw(
+                &mut server,
+                &mut blur,
+                frames,
+                &wallpaper,
+                location.into(),
+                region(),
+            );
+            let x = if frame % 2 == 0 { 48 } else { 16 };
+            assert!(blurred(pixel(&pixels, SIZE as usize, x, 32), 128));
+            seen.push(commits(&blur));
+        }
+        // 화면마다 처음 한 번만 흐린다 (표면마다 하나만 두었을 때는 프레임마다 다시 흐렸다)
+        assert!(
+            seen[2..].iter().all(|commits| *commits == seen[1]),
+            "{seen:?}"
+        );
+        assert_eq!(blur.surfaces.len(), 2);
+    }
+
+    #[test]
     fn a_blur_hidden_under_an_opaque_window_is_left_out() {
         let _gl = gl_lock();
         let Some((mut server, mut client, compositor, shm, _)) = gl_setup() else {
@@ -1791,6 +1856,7 @@ mod tests {
             shape: BlurShape::Region(Arc::from(vec![logical(0, 0, SIZE, SIZE)])),
         };
         let mut blur = Blur::default();
+        let output = output("test");
         let mut scene = |server: &mut Server, window_x: i32| {
             let mut elements = server.surface_elements(1, (window_x, 0).into(), scale);
             elements.extend(server.surface_elements(0, (0, 0).into(), scale));
@@ -1799,6 +1865,7 @@ mod tests {
                 server.renderer(),
                 &mut elements,
                 std::slice::from_ref(&target),
+                &output,
                 scale,
             );
             let uncovered = elements

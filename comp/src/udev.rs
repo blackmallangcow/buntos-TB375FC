@@ -1105,7 +1105,7 @@ impl BuntState {
         }
         // 흐림은 화면 버퍼에 먼저 그려진 아래 장면을 복사한다. 아래 창이 오버레이 평면에 따로 올라가면
         // 복사에서 빠지므로, 흐릴 때는 오버레이 평면에 내보내지 않는다
-        let flags = if blur.insert(renderer, &mut elements, &blur_targets, scale) {
+        let flags = if blur.insert(renderer, &mut elements, &blur_targets, &output, scale) {
             FrameFlags::DEFAULT.difference(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT)
         } else {
             FrameFlags::DEFAULT

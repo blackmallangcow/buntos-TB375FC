@@ -39,6 +39,7 @@ use smithay::{
     },
     delegate_compositor, delegate_dmabuf, delegate_shm, delegate_xdg_shell,
     input::{SeatHandler, SeatState},
+    output::{Output, PhysicalProperties, Subpixel},
     reexports::{
         rustix::io::{FdFlags, fcntl_setfd},
         wayland_server::{
@@ -631,6 +632,8 @@ delegate_noop!(ClientEvents: ignore ext_background_effect_surface_v1::ExtBackgro
 
 /// 화면 하나를 흉내 낸 오프스크린 그리기. 같은 텍스처에 잇달아 그려(나이 1) 손상 추적을 시험한다
 pub struct Frames {
+    /// 이 화면 (흐림은 화면마다 따로 흐려 둔다)
+    pub output: Output,
     damage: OutputDamageTracker,
     target: GlesTexture,
     size: Size<i32, Physical>,
@@ -646,6 +649,7 @@ impl Frames {
             )
             .expect("offscreen target");
         Self {
+            output: output("test"),
             damage: OutputDamageTracker::new(size, scale, Transform::Normal),
             target,
             size,
@@ -678,6 +682,19 @@ impl Frames {
             .expect("read back");
         renderer.map_texture(&mapping).expect("map").to_vec()
     }
+}
+
+/// 시험용 화면
+pub fn output(name: &str) -> Output {
+    Output::new(
+        name.into(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+        },
+    )
 }
 
 /// 배경으로 깔 Argb8888 그림 요소
