@@ -95,9 +95,11 @@ bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock",
         <choice value="screen"/>
         <choice value="window"/>
         <choice value="area"/>
+        <choice value="record-screen"/>
+        <choice value="record-area"/>
       </choices>
       <default>"area"</default>
-      <summary>⇧⌘5 도구 막대에서 마지막으로 고른 찍기 방식 (전체 화면, 선택한 윈도우, 선택 부분)</summary>
+      <summary>⇧⌘5 도구 막대에서 마지막으로 고른 방식 (전체 화면 캡처, 선택한 윈도우 캡처, 선택 부분 캡처, 전체 화면 기록, 선택 부분 기록)</summary>
     </key>
     <key name="screenshot-location" type="s">
       <choices>

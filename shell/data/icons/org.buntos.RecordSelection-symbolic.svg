@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 선택 부분 기록: 점선 사각형과 오른쪽 아래의 기록 점 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" d="M1 2h3.25v1.25h-2v2H1zm5.25 0h3.5v1.25h-3.5zm5.5 0H15v3.25h-1.25v-2h-2zM1 7.25h1.25v1.5H1zM1 10.75h1.25v2h2V14H1zm5.25 2h2V14h-2z"/>
+  <path fill="#000" d="M12 9a3 3 0 1 1 0 6a3 3 0 1 1 0-6z"/>
+</svg>

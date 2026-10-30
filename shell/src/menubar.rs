@@ -21,7 +21,7 @@ use crate::{
     input_source::{self, InputSources},
     interface_settings, layer_window, menu_names, network, notification_center,
     notifications::Notifications,
-    power, session, shell_settings, sound, status_items,
+    power, recording, session, shell_settings, sound, status_items,
     toplevels::Toplevels,
 };
 
@@ -54,6 +54,8 @@ pub fn build(
     }
     // 오른쪽 항목은 macOS와 같은 순서다: ... 배터리, Wi-Fi, 제어 센터, 시계
     let end = gtk::Box::builder().spacing(2).build();
+    // 화면 기록 중에만 보이는 기록 중단 단추는 맨 왼쪽에 둔다 (macOS)
+    end.append(&recording::stop_button(tr));
     // 앱이 넣는 항목은 시스템 항목 왼쪽에 둔다
     end.append(&status_items::build());
     end.append(&control_center::focus_extra(tr));

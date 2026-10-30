@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 스크린샷 화면 (macOS의 스크린샷): ⇧⌘5 도구 막대와, 찍은 뒤 화면 오른쪽 아래에 뜨는 미리
-//! 보기(플로팅 썸네일). 찍기는 컴포지터가 한다(org.buntos.Compositor1.Screenshot). 도구 막대에서 고른
+//! 보기(플로팅 썸네일). 찍기와 화면 기록은 컴포지터가 한다(org.buntos.Compositor1.Screenshot, Record).
+//! 기록 중에는 메뉴 막대에 기록 중단 단추가 뜬다(recording.rs). 저장한 화면 기록도 마지막 프레임으로
+//! 미리 보기를 띄운다(RecordingSaved). 도구 막대에서 고른
 //! 방식, 저장 위치, 타이머, 썸네일 보기는 셸 설정(screenshot-*)에 둔다. 저장 위치와 썸네일 보기는
 //! 컴포지터에 알려 단축키(⇧⌘3, ⇧⌘4)로 찍은 것에도 쓴다(SetScreenshotOptions). 컴포지터가 파일을
 //! 저장했다고 알리면(ScreenshotSaved) 미리 보기를 5초 띄운다. 누르면 기본 앱으로 열고, 끌어서 다른
@@ -12,7 +14,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     time::Duration,
 };
@@ -32,10 +34,10 @@ const MODE_KEY: &str = "screenshot-mode";
 const LOCATION_KEY: &str = "screenshot-location";
 const TIMER_KEY: &str = "screenshot-timer";
 const THUMBNAIL_KEY: &str = "screenshot-thumbnail";
-/// 선택 부분 (MODES의 설정 값). 고르면 컴포지터가 선택 영역을 띄운다
-const AREA_MODE: &str = "area";
-/// 도구 막대의 찍기 방식: (설정 값, 아이콘, 이름)
-const MODES: [(&str, &str, &str); 3] = [
+/// 선택 영역을 쓰는 방식 (MODES의 설정 값): 선택 부분 캡처, 선택 부분 기록. 고르면 컴포지터가 선택 영역을 띄운다
+const AREA_MODES: [&str; 2] = ["area", "record-area"];
+/// 도구 막대의 방식: (설정 값, 아이콘, 이름). 앞의 CAPTURE_MODES개는 캡처, 뒤는 화면 기록이다(macOS의 차례)
+const MODES: [(&str, &str, &str); 5] = [
     (
         "screen",
         "org.buntos.CaptureScreen-symbolic",
@@ -51,7 +53,19 @@ const MODES: [(&str, &str, &str); 3] = [
         "org.buntos.CaptureSelection-symbolic",
         "screenshot-mode-area",
     ),
+    (
+        "record-screen",
+        "org.buntos.RecordScreen-symbolic",
+        "screenshot-mode-record-screen",
+    ),
+    (
+        "record-area",
+        "org.buntos.RecordSelection-symbolic",
+        "screenshot-mode-record-area",
+    ),
 ];
+/// 캡처 방식의 수 (MODES의 앞부분). 그 뒤의 화면 기록 방식과는 구분선으로 나눈다
+const CAPTURE_MODES: usize = 3;
 /// 옵션 메뉴의 저장 위치 (설정 값, 이름). macOS의 차례다
 const LOCATIONS: [(&str, &str); 4] = [
     ("desktop", "screenshot-location-desktop"),
@@ -125,6 +139,16 @@ fn capture(mode: &str, delay: u32) {
     call_compositor("Screenshot", (mode, delay).to_variant());
 }
 
+/// 컴포지터에 화면을 기록하게 한다: screen(포인터가 있는 화면), area(띄워 둔 선택 영역). `delay`초 뒤부터다
+fn record(mode: &str, delay: u32) {
+    call_compositor("Record", (mode, delay).to_variant());
+}
+
+/// 화면 기록 방식이면 컴포지터의 기록 방식 (record-screen은 screen, record-area는 area)
+fn recording_mode(mode: &str) -> Option<&str> {
+    mode.strip_prefix("record-")
+}
+
 /// 컴포지터가 고칠 수 있는 선택 영역을 띄우거나(`show`) 거두게 한다
 fn select_area(show: bool) {
     call_compositor("SelectScreenshotArea", (show,).to_variant());
@@ -162,12 +186,16 @@ fn call_compositor(method: &'static str, args: glib::Variant) {
 struct ToolbarInner {
     window: gtk::ApplicationWindow,
     settings: Option<gio::Settings>,
-    /// 찍기 방식 단추 (MODES 차례)
+    /// 방식 단추 (MODES 차례)
     modes: Vec<gtk::ToggleButton>,
+    /// 실행 단추와 그 글: 캡처 방식이면 캡처, 화면 기록 방식이면 기록
+    shoot: gtk::Button,
+    labels: (String, String),
 }
 
-/// ⇧⌘5 도구 막대: 화면 아래 가운데의 유리 막대. [닫기] | [전체 화면] [선택한 윈도우] [선택 부분] |
-/// [옵션] [캡처]. 선택 부분을 고른 채 떠 있는 동안 컴포지터가 선택 영역을 띄운다. 화면 기록은 아직 없다
+/// ⇧⌘5 도구 막대: 화면 아래 가운데의 유리 막대. [닫기] | [전체 화면 캡처] [선택한 윈도우 캡처]
+/// [선택 부분 캡처] | [전체 화면 기록] [선택 부분 기록] | [옵션] [캡처 또는 기록]. 선택 부분을 고른 채
+/// 떠 있는 동안 컴포지터가 선택 영역을 띄운다
 #[derive(Clone)]
 pub struct Toolbar(Rc<ToolbarInner>);
 
@@ -192,7 +220,10 @@ impl Toolbar {
         bar.append(&close);
         bar.append(&separator());
         let mut modes: Vec<gtk::ToggleButton> = Vec::new();
-        for (_, icon, label) in MODES {
+        for (index, (_, icon, label)) in MODES.into_iter().enumerate() {
+            if index == CAPTURE_MODES {
+                bar.append(&separator());
+            }
             let button = gtk::ToggleButton::builder()
                 .icon_name(icon)
                 .tooltip_text(tr.get(label))
@@ -231,6 +262,8 @@ impl Toolbar {
             window,
             settings,
             modes,
+            shoot: shoot.clone(),
+            labels: (tr.get("screenshot-capture"), tr.get("screenshot-record")),
         }));
         for (index, button) in toolbar.0.modes.iter().enumerate() {
             let weak = Rc::downgrade(&toolbar.0);
@@ -238,10 +271,18 @@ impl Toolbar {
                 let (true, Some(inner)) = (button.is_active(), weak.upgrade()) else {
                     return;
                 };
+                let mode = MODES[index].0;
                 // 떠 있는 막대에서 방식을 바꾸면 선택 영역을 띄우거나 거둔다 (macOS)
                 if inner.window.is_visible() {
-                    select_area(MODES[index].0 == AREA_MODE);
+                    select_area(AREA_MODES.contains(&mode));
                 }
+                let (capture, record) = &inner.labels;
+                let label = if recording_mode(mode).is_some() {
+                    record
+                } else {
+                    capture
+                };
+                inner.shoot.set_label(label);
                 if let Some(settings) = &inner.settings
                     && let Err(err) = settings.set_string(MODE_KEY, MODES[index].0)
                 {
@@ -254,7 +295,7 @@ impl Toolbar {
         let weak = Rc::downgrade(&toolbar.0);
         toolbar.0.window.connect_map(move |_| {
             if let Some(inner) = weak.upgrade() {
-                select_area(Toolbar(inner).mode() == AREA_MODE);
+                select_area(AREA_MODES.contains(&Toolbar(inner).mode()));
             }
         });
         toolbar.0.window.connect_unmap(|_| select_area(false));
@@ -322,8 +363,8 @@ impl Toolbar {
         MODES[index].0
     }
 
-    /// 막대를 숨기고, 화면에서 사라진 뒤에 고른 방식과 타이머로 찍는다. 선택 부분은 막대가 숨으며 거둔
-    /// 선택 영역을 찍는다
+    /// 막대를 숨기고, 화면에서 사라진 뒤에 고른 방식과 타이머로 찍거나 기록을 시작한다. 선택 부분은 막대가
+    /// 숨으며 거둔 선택 영역을 찍거나 기록한다
     fn capture(&self) {
         let inner = &self.0;
         let mode = self.mode();
@@ -332,7 +373,10 @@ impl Toolbar {
             .as_ref()
             .map_or(0, |settings| settings.int(TIMER_KEY).max(0) as u32);
         inner.window.set_visible(false);
-        glib::timeout_add_local_once(HIDE_BEFORE_CAPTURE, move || capture(mode, delay));
+        glib::timeout_add_local_once(HIDE_BEFORE_CAPTURE, move || match recording_mode(mode) {
+            Some(mode) => record(mode, delay),
+            None => capture(mode, delay),
+        });
     }
 }
 
@@ -388,8 +432,10 @@ struct ThumbnailInner {
     window: gtk::ApplicationWindow,
     card: gtk::Box,
     picture: gtk::Picture,
-    /// 지금 보이는 스크린샷 파일
+    /// 지금 보이는 스크린샷이나 화면 기록 파일 (누르면 열고 끌면 건넨다)
     file: RefCell<Option<gio::File>>,
+    /// 접근성 이름: 스크린샷 미리 보기, 화면 기록 미리 보기
+    labels: (String, String),
     /// 사라지기까지 남은 초. 포인터가 올라가 있는 동안은 세지 않는다
     left: Cell<u32>,
     hovered: Cell<bool>,
@@ -428,6 +474,7 @@ impl Thumbnail {
             card,
             picture,
             file: RefCell::default(),
+            labels: (tr.get("screenshot-preview"), tr.get("recording-preview")),
             left: Cell::new(0),
             hovered: Cell::new(false),
             countdown: RefCell::default(),
@@ -499,9 +546,9 @@ impl Thumbnail {
         inner.card.add_controller(drag);
     }
 
-    /// 컴포지터가 스크린샷을 저장했다고 알리면 띄운다
+    /// 컴포지터가 스크린샷이나 화면 기록을 저장했다고 알리면 띄운다. 화면 기록은 마지막 프레임의 그림을 보인다
     fn follow_saved(&self) {
-        let thumbnail = self.clone();
+        let (thumbnail, recordings) = (self.clone(), self.clone());
         gio::bus_get(
             gio::BusType::Session,
             gio::Cancellable::NONE,
@@ -522,27 +569,52 @@ impl Thumbnail {
                     gio::DBusSignalFlags::NONE,
                     move |signal| {
                         if let Some((path,)) = signal.parameters.get::<(String,)>() {
-                            thumbnail.show(PathBuf::from(path));
+                            let path = PathBuf::from(path);
+                            thumbnail.show(&path, path.clone(), false);
+                        }
+                    },
+                );
+                let recorded = connection.subscribe_to_signal(
+                    Some(NAME),
+                    Some(INTERFACE),
+                    Some("RecordingSaved"),
+                    Some(PATH),
+                    None,
+                    gio::DBusSignalFlags::NONE,
+                    move |signal| {
+                        if let Some((path, preview)) = signal.parameters.get::<(String, String)>() {
+                            recordings.show(Path::new(&preview), PathBuf::from(path), true);
                         }
                     },
                 );
                 // 셸이 끝날 때까지 받는다
                 std::mem::forget(subscription);
+                std::mem::forget(recorded);
             },
         );
     }
 
-    /// 스크린샷 파일을 THUMBNAIL_SECONDS초 띄운다. 이미 떠 있으면 새 것으로 바꾼다
-    fn show(&self, path: PathBuf) {
+    /// 그림(`picture`)을 THUMBNAIL_SECONDS초 띄운다. 누르면 `path`를 열고 끌면 건넨다(스크린샷은 그림
+    /// 자신, 화면 기록은 동영상). 이미 떠 있으면 새 것으로 바꾼다. 전에는 스크린샷 파일 하나만 받았다
+    fn show(&self, picture: &Path, path: PathBuf, recording: bool) {
         let inner = &self.0;
         let file = gio::File::for_path(&path);
-        let texture = match gdk::Texture::from_file(&file) {
+        let texture = match gdk::Texture::from_file(&gio::File::for_path(picture)) {
             Ok(texture) => texture,
             Err(err) => {
-                eprintln!("bunt-shell: cannot read {}: {err}", path.display());
+                eprintln!("bunt-shell: cannot read {}: {err}", picture.display());
                 return;
             }
         };
+        let (screenshot_label, recording_label) = &inner.labels;
+        let label = if recording {
+            recording_label
+        } else {
+            screenshot_label
+        };
+        inner
+            .card
+            .update_property(&[gtk::accessible::Property::Label(label)]);
         let (width, height) = thumbnail_size(texture.width(), texture.height());
         inner.picture.set_paintable(Some(&texture));
         inner.picture.set_size_request(width, height);
@@ -625,7 +697,20 @@ mod tests {
                 "{value}"
             );
         }
-        assert!(MODES.iter().any(|(value, _, _)| *value == AREA_MODE));
+        // 선택 영역을 쓰는 방식과 화면 기록 방식은 막대에 있는 방식이다
+        for mode in AREA_MODES {
+            assert!(MODES.iter().any(|(value, _, _)| *value == mode), "{mode}");
+        }
+        assert_eq!(recording_mode("record-area"), Some("area"));
+        assert_eq!(recording_mode("record-screen"), Some("screen"));
+        assert_eq!(recording_mode("area"), None);
+        // 캡처 방식이 앞에, 화면 기록 방식이 뒤에 모여 있다 (그 사이에 구분선을 둔다)
+        let records: Vec<bool> = MODES
+            .iter()
+            .map(|(value, _, _)| recording_mode(value).is_some())
+            .collect();
+        assert_eq!(records, [false, false, false, true, true]);
+        assert!(records[..CAPTURE_MODES].iter().all(|record| !record));
         for (value, _) in LOCATIONS {
             assert!(
                 schema.contains(&format!("<choice value=\"{value}\"/>")),

@@ -86,6 +86,30 @@ window.bunt-wallpaper.background {
   background: var(--on-wallpaper-hover);
 }
 
+/* 화면 기록 중의 기록 중단 단추 (recording.rs). 메뉴가 없는 단추라 메뉴바 단추 모양을 따로 준다 */
+.bar button.recording-stop {
+  min-height: 0;
+  padding: 2px 9px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  box-shadow: none;
+  color: inherit;
+}
+
+.bar button.recording-stop:hover {
+  background: var(--on-wallpaper-hover);
+}
+
+.bar button.recording-stop image {
+  -gtk-icon-size: 16px;
+  -gtk-icon-shadow: var(--on-wallpaper-shadow);
+}
+
+.bar.solid button.recording-stop image {
+  -gtk-icon-shadow: none;
+}
+
 /* 메뉴바 단추의 아이콘. 팝오버 안 아이콘에는 닿지 않게 단추 바로 아래만 고른다 */
 .bar menubutton > button image {
   -gtk-icon-size: 16px;

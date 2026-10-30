@@ -150,8 +150,11 @@ screenshot-close = 닫기
 screenshot-mode-screen = 전체 화면 캡처
 screenshot-mode-window = 선택한 윈도우 캡처
 screenshot-mode-area = 선택 부분 캡처
+screenshot-mode-record-screen = 전체 화면 기록
+screenshot-mode-record-area = 선택 부분 기록
 screenshot-options = 옵션
 screenshot-capture = 캡처
+screenshot-record = 기록
 screenshot-save-to = 저장 위치
 screenshot-location-desktop = 데스크탑
 screenshot-location-documents = 문서
@@ -163,6 +166,9 @@ screenshot-timer-5 = 5초
 screenshot-timer-10 = 10초
 screenshot-show-thumbnail = 플로팅 썸네일 보기
 screenshot-preview = 스크린샷 미리 보기
+recording-preview = 화면 기록 미리 보기
+# 화면 기록 중 메뉴 막대의 단추
+recording-stop = 기록 중단
 
 ## 로고 메뉴의 세션 항목 (macOS의 Apple 메뉴)
 menu-force-quit = 강제 종료…

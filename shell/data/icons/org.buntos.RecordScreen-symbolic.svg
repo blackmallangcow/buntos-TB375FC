@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 전체 화면 기록: 화면 테두리와 받침, 오른쪽 아래의 기록 점 (macOS 스크린샷 도구 막대의 아이콘처럼) -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" d="M2.5 2h11A1.5 1.5 0 0 1 15 3.5V8h-1.25V3.5a.25.25 0 0 0-.25-.25h-11a.25.25 0 0 0-.25.25v7a.25.25 0 0 0 .25.25H8V12H2.5A1.5 1.5 0 0 1 1 10.5v-7A1.5 1.5 0 0 1 2.5 2z"/>
+  <path fill="#000" d="M3 13.25h4v1.25H3z"/>
+  <path fill="#000" d="M12 9a3 3 0 1 1 0 6a3 3 0 1 1 0-6z"/>
+</svg>

@@ -23,6 +23,7 @@ mod notification_center;
 mod notifications;
 mod polkit_agent;
 mod power;
+mod recording;
 mod screenshot;
 mod sound;
 mod status_items;

@@ -150,8 +150,11 @@ screenshot-close = Close
 screenshot-mode-screen = Capture Entire Screen
 screenshot-mode-window = Capture Selected Window
 screenshot-mode-area = Capture Selected Portion
+screenshot-mode-record-screen = Record Entire Screen
+screenshot-mode-record-area = Record Selected Portion
 screenshot-options = Options
 screenshot-capture = Capture
+screenshot-record = Record
 screenshot-save-to = Save to
 screenshot-location-desktop = Desktop
 screenshot-location-documents = Documents
@@ -163,6 +166,9 @@ screenshot-timer-5 = 5 Seconds
 screenshot-timer-10 = 10 Seconds
 screenshot-show-thumbnail = Show Floating Thumbnail
 screenshot-preview = Screenshot preview
+recording-preview = Screen recording preview
+# The menu bar button while recording the screen
+recording-stop = Stop Recording
 
 ## Session items in the logo menu (like the Apple menu on macOS)
 menu-force-quit = Force Quit…
