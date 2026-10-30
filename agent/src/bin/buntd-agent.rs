@@ -28,14 +28,16 @@ use std::{
 use bunt_access::{Client, Policy};
 use bunt_agent::{
     atspi::{self, A11y, AppRef, Focus, LOCK_WINDOW, Placed, ROOT, WindowRef},
+    desk::Desk,
     desktop::{self, DesktopApp},
     diff,
     protocol::{
         self, ActParams, Acted, Installed, LaunchParams, Launched, Request, Response, RpcError,
-        Screenshot, ScreenshotParams, Snapshot, SnapshotParams, Untracked,
+        Screenshot, ScreenshotParams, Snapshot, SnapshotParams, Untracked, WaitParams,
     },
     session::Sessions,
     tree::{self, Item, Options, Tree, iface, role, state},
+    wait,
 };
 use futures_util::future::{Either, select};
 use serde_json::{Value, json};
@@ -366,16 +368,29 @@ fn handle(line: &str, agent: &Mutex<Agent>, client: Option<&Client>) -> Response
             );
         }
     };
+    // 허용하지 않은 AI는 무엇을 하기 전에(기다리기 전에도) 거절한다
     let policy = Policy::load();
     if let Err(failure) = admit(client, &policy) {
         return reply(request.id, Err(failure));
     }
     let started = Instant::now();
-    let mut agent = agent
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    agent.policy = policy;
-    let result = async_io::block_on(agent.dispatch(&request.method, request.params));
+    let dispatch =
+        |policy: Policy, method: &str, params: Value| locked(agent, policy, method, params);
+    let gate = Gate {
+        client,
+        policy: &Policy::load,
+        dispatch: &dispatch,
+    };
+    let result = match request.method.as_str() {
+        // 데몬을 여러 번 부르며 기다리는 메서드는 데몬을 붙잡지 않고, 부를 때마다 정책을 다시 본다
+        "wait" => serde_json::from_value::<WaitParams>(request.params)
+            .map_err(|err| (protocol::INVALID_PARAMS, err.to_string()))
+            .and_then(|params| wait::run(&gate, &params))
+            .and_then(|waited| {
+                serde_json::to_value(waited).map_err(|err| agent_error(err.to_string()))
+            }),
+        method => locked(agent, policy, method, request.params),
+    };
     tracing::info!(
         client = client.map_or("", |client| client.name.as_str()),
         method = %request.method,
@@ -384,6 +399,37 @@ fn handle(line: &str, agent: &Mutex<Agent>, client: Option<&Client>) -> Response
         "request"
     );
     reply(request.id, result)
+}
+
+/// 데몬을 잡고 메서드 하나를 처리한다
+fn locked(
+    agent: &Mutex<Agent>,
+    policy: Policy,
+    method: &str,
+    params: Value,
+) -> Result<Value, Failure> {
+    let mut agent = agent
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    agent.policy = policy;
+    async_io::block_on(agent.dispatch(method, params))
+}
+
+/// 정책을 거쳐 데몬의 메서드를 부르는 길 (bunt_agent::desk). 기다리기와 REPL은 호출 하나 안에서 이것을 여러 번
+/// 부른다: 부를 때마다 정책을 다시 읽어 클라이언트를 받고(설정에서 끈 AI는 다음 호출부터 거절된다), 데몬을 잡아
+/// 화면 잠금과 막은 앱을 본다(dispatch)
+struct Gate<'a> {
+    client: Option<&'a Client>,
+    policy: &'a dyn Fn() -> Policy,
+    dispatch: &'a dyn Fn(Policy, &str, Value) -> Result<Value, Failure>,
+}
+
+impl Desk for Gate<'_> {
+    fn call(&self, method: &str, params: Value) -> Result<Value, Failure> {
+        let policy = (self.policy)();
+        admit(self.client, &policy)?;
+        (self.dispatch)(policy, method, params)
+    }
 }
 
 fn reply(id: Value, result: Result<Value, Failure>) -> Response {
@@ -658,10 +704,15 @@ impl Agent {
             .render(&a11y, &session_name, &bus, &roots, options)
             .await?;
         let key = scope_key(&scope, options);
-        let previous = self
-            .sessions
-            .get(&session_name)
-            .remember(key, &rendered.text);
+        // 기다리기(wait)가 다시 읽는 것(peek)은 지난 트리를 바꾸지 않는다: 다음 스냅샷의 diff는 AI가 지난번에 본
+        // 트리와 견준 것이어야 한다
+        let previous = if params.peek {
+            None
+        } else {
+            self.sessions
+                .get(&session_name)
+                .remember(key, &rendered.text)
+        };
         let diff = previous
             .as_deref()
             .map(|old| diff::unified(old, &rendered.text))
@@ -675,7 +726,7 @@ impl Agent {
         Ok(Snapshot {
             tree: rendered.text,
             diff,
-            first: previous.is_none(),
+            first: previous.is_none() && !params.peek,
         })
     }
 
@@ -2417,7 +2468,109 @@ async fn wait_until_shown(a11y: &A11y, bus: &str, path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+
+    use bunt_access::AllowedClient;
+
     use super::*;
+
+    fn claude() -> Client {
+        Client {
+            name: "claude".into(),
+            exe: PathBuf::from("/usr/bin/claude"),
+            script: None,
+            admin: false,
+        }
+    }
+
+    /// claude가 목록에 있는 정책. 끈 AI는 거절하며 요청 기록(사용자 파일)에 남기지 않는다
+    fn policy_with(enabled: bool) -> Policy {
+        Policy {
+            clients: vec![AllowedClient {
+                name: "claude".into(),
+                exe: PathBuf::from("/usr/bin/claude"),
+                exe_pattern: None,
+                script: None,
+                script_pattern: None,
+                enabled,
+            }],
+            blocked_apps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn every_call_through_the_gate_is_admitted_again() {
+        let client = claude();
+        // 사용자가 세 번째 읽기부터 이 AI를 끈다
+        let loads = Cell::new(0);
+        let policy = || {
+            loads.set(loads.get() + 1);
+            policy_with(loads.get() < 3)
+        };
+        let dispatched = RefCell::new(Vec::new());
+        let dispatch = |_policy: Policy, method: &str, _params: Value| {
+            dispatched.borrow_mut().push(method.to_string());
+            Err((protocol::SCREEN_LOCKED, "locked".to_string()))
+        };
+        let gate = Gate {
+            client: Some(&client),
+            policy: &policy,
+            dispatch: &dispatch,
+        };
+        // 데몬(dispatch)이 잠금을 보고 거절한다
+        assert_eq!(
+            gate.call("snapshot", Value::Null).unwrap_err().0,
+            protocol::SCREEN_LOCKED
+        );
+        assert_eq!(
+            gate.call("apps", Value::Null).unwrap_err().0,
+            protocol::SCREEN_LOCKED
+        );
+        // 끈 뒤의 호출은 데몬에 닿지 않는다
+        let refused = gate.call("apps", Value::Null).unwrap_err();
+        assert_eq!(refused.0, protocol::NOT_ALLOWED);
+        assert!(refused.1.contains("turned off"), "{}", refused.1);
+        assert_eq!(*dispatched.borrow(), ["snapshot", "apps"]);
+        // 알아보지 못한 클라이언트는 처음부터 거절한다
+        let unknown = Gate {
+            client: None,
+            policy: &policy,
+            dispatch: &dispatch,
+        };
+        assert_eq!(
+            unknown.call("apps", Value::Null).unwrap_err().0,
+            protocol::NOT_ALLOWED
+        );
+        assert_eq!(dispatched.borrow().len(), 2);
+    }
+
+    #[test]
+    fn waiting_stops_when_the_user_turns_the_ai_off() {
+        let client = claude();
+        let loads = Cell::new(0);
+        let policy = || {
+            loads.set(loads.get() + 1);
+            policy_with(loads.get() < 3)
+        };
+        let dispatch = |_policy: Policy, method: &str, params: Value| {
+            assert_eq!((method, params["peek"].as_bool()), ("snapshot", Some(true)));
+            Ok(json!({ "tree": "- window \"w\" [ref=e1]\n", "diff": "", "first": false }))
+        };
+        let gate = Gate {
+            client: Some(&client),
+            policy: &policy,
+            dispatch: &dispatch,
+        };
+        let params = WaitParams {
+            text: Some("never".into()),
+            timeout_ms: Some(5_000),
+            ..WaitParams::default()
+        };
+        let started = Instant::now();
+        let refused = wait::run(&gate, &params).unwrap_err();
+        assert_eq!(refused.0, protocol::NOT_ALLOWED);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn refusals_tell_the_ai_what_the_user_can_do() {

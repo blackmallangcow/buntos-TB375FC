@@ -57,6 +57,8 @@ pub const NOT_ALLOWED: i64 = -32001;
 pub const BLOCKED_APP: i64 = -32002;
 /// 화면이 잠겼다. 잠긴 동안 에이전트는 아무것도 읽거나 하지 못하고, 사람이 잠금 화면에 암호를 쳐야만 풀린다
 pub const SCREEN_LOCKED: i64 = -32003;
+/// 기다리던 것이 시간 상한 안에 일어나지 않았다 (`wait`)
+pub const TIMEOUT: i64 = -32004;
 
 /// `snapshot`의 인자
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -73,6 +75,9 @@ pub struct SnapshotParams {
     pub interactive: bool,
     /// 숨은 요소도
     pub hidden: bool,
+    /// 읽기만 하고 다음 diff가 견줄 지난 트리는 그대로 둔다. 기다리기(`wait`)가 다시 읽을 때 쓴다: 다음
+    /// 스냅샷의 diff는 기다리는 동안 읽은 것이 아니라 AI가 지난번에 본 트리와 견준 것이어야 한다
+    pub peek: bool,
 }
 
 /// `snapshot`의 답
@@ -223,30 +228,109 @@ pub struct Untracked {
     pub unsupported: bool,
 }
 
+/// `wait`의 인자: 범위(ref 아래, 앱의 창, 없으면 활성 창)를 다시 읽으며 조건이 맞을 때까지 기다린다.
+/// 조건은 하나다: 요소(role·name·text), 창(window), ref 요소의 값(value, changed), 또는 ref 요소 자체
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WaitParams {
+    pub session: Option<String>,
+    /// 범위: 이 앱의 창 (`snapshot`의 app과 같다)
+    pub app: Option<String>,
+    /// 범위: 이 ref 아래. 조건이 없으면 이 요소가 보이기(gone이면 사라지기)를 기다린다
+    #[serde(rename = "ref")]
+    pub scope: Option<String>,
+    /// 역할이 이것인 요소 (ARIA 이름: button, textbox, listitem …)
+    pub role: Option<String>,
+    /// 이름에 이 글이 든 요소
+    pub name: Option<String>,
+    /// 이름, 글 줄, 값에 이 글이 든 줄
+    pub text: Option<String>,
+    /// name·text·window가 통째로 같아야 한다 (아니면 대소문자를 가리지 않고 일부만 맞아도 된다)
+    pub exact: bool,
+    /// 맞는 요소가 여럿일 때 고를 차례 (0부터, 음수는 끝에서)
+    pub nth: Option<i64>,
+    /// 제목에 이 글이 든 창. 빈 글이면 기다리기 시작한 뒤 새로 뜬 창
+    pub window: Option<String>,
+    /// ref 요소의 값(값이 없으면 이름)이 이것이 될 때까지
+    pub value: Option<String>,
+    /// ref 요소의 값(값이 없으면 이름)이 처음 본 것과 달라질 때까지
+    pub changed: bool,
+    /// 나타나기 대신 사라지기(창은 닫히기)를 기다린다
+    pub gone: bool,
+    /// 기다리는 시간의 상한(ms). 0이면 한 번만 본다. 없으면 10초
+    pub timeout_ms: Option<u64>,
+}
+
+/// `wait`가 찾은 요소 한 줄
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Found {
+    /// 동작에 쓸 ref. 줄에 ref가 없으면(글 줄) 가장 가까운 조상의 ref다
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+    /// 트리 글의 그 줄 (들여쓰기 뺀 것)
+    pub line: String,
+    pub role: String,
+    pub name: String,
+    /// 값 (글 칸·막대의 value, 없으면 이름)
+    pub value: String,
+    /// 줄 끝의 상태 (focused, checked, disabled …)
+    pub states: Vec<String>,
+    /// 그 요소와 아래 줄의 이름·글을 이은 것
+    pub text: String,
+}
+
+/// `wait`의 답
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Waited {
+    /// 본 것 (예: `button "OK" appeared`)
+    pub done: String,
+    pub waited_ms: u64,
+    /// 맞는 요소 (nth로 고른 것. 사라지기를 기다렸으면 없다)
+    pub found: Option<Found>,
+    /// 맞는 요소 수와 앞의 몇 개
+    pub count: usize,
+    pub matches: Vec<Found>,
+    /// 창을 기다렸으면 그 창의 제목
+    pub window: Option<String>,
+}
+
 /// 데몬에 요청 하나를 보내고 답을 기다린다
 pub fn call(method: &str, params: Value) -> Result<Value, String> {
-    let path = socket_path().ok_or("XDG_RUNTIME_DIR is not set")?;
-    let stream = UnixStream::connect(&path)
-        .map_err(|err| format!("cannot reach buntd-agent at {}: {err}", path.display()))?;
+    request(method, params).map_err(|error| error.message)
+}
+
+/// `call`과 같고, 실패하면 오류 번호도 준다. 데몬에 닿지 못하면 AGENT_ERROR다
+pub fn request(method: &str, params: Value) -> Result<Value, RpcError> {
+    let unreachable = |message: String| RpcError {
+        code: AGENT_ERROR,
+        message,
+    };
+    let path = socket_path().ok_or_else(|| unreachable("XDG_RUNTIME_DIR is not set".into()))?;
+    let stream = UnixStream::connect(&path).map_err(|err| {
+        unreachable(format!(
+            "cannot reach buntd-agent at {}: {err}",
+            path.display()
+        ))
+    })?;
     let request = Request {
         jsonrpc: "2.0".into(),
         id: Value::from(1),
         method: method.into(),
         params,
     };
-    let mut line = serde_json::to_string(&request).map_err(|err| err.to_string())?;
+    let mut line = serde_json::to_string(&request).map_err(|err| unreachable(err.to_string()))?;
     line.push('\n');
     (&stream)
         .write_all(line.as_bytes())
-        .map_err(|err| format!("cannot send to buntd-agent: {err}"))?;
+        .map_err(|err| unreachable(format!("cannot send to buntd-agent: {err}")))?;
     let mut reply = String::new();
     BufReader::new(&stream)
         .read_line(&mut reply)
-        .map_err(|err| format!("no reply from buntd-agent: {err}"))?;
-    let response: Response =
-        serde_json::from_str(&reply).map_err(|err| format!("bad reply from buntd-agent: {err}"))?;
+        .map_err(|err| unreachable(format!("no reply from buntd-agent: {err}")))?;
+    let response: Response = serde_json::from_str(&reply)
+        .map_err(|err| unreachable(format!("bad reply from buntd-agent: {err}")))?;
     match (response.result, response.error) {
-        (_, Some(error)) => Err(error.message),
+        (_, Some(error)) => Err(error),
         (result, None) => Ok(result.unwrap_or(Value::Null)),
     }
 }

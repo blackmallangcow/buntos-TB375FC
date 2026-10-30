@@ -7,7 +7,7 @@ use std::{path::Path, process::ExitCode};
 
 use bunt_agent::protocol::{
     self, ActParams, Acted, App, Installed, LaunchParams, Launched, Screenshot, ScreenshotParams,
-    Snapshot, SnapshotParams, Untracked,
+    Snapshot, SnapshotParams, Untracked, WaitParams, Waited,
 };
 use serde_json::Value;
 
@@ -47,6 +47,17 @@ Commands:
   scroll <up|down|left|right> [<notches>] [--ref <ref>]
                            Turn the mouse wheel (default 5 notches) over the ref, or over the
                            middle of the active window. Use the ref of the list or page to move
+  wait <condition> [--app <name> | --ref <ref>] [--gone] [--timeout <ms>]
+                           Wait until something shows up, goes away or changes in the active
+                           window (or the app's windows, or below the ref), then print it.
+                           Default 10000 ms, at most 120000; 0 checks once. Conditions:
+                             --text <text>                 a name, text or field value with it
+                             --role <role> [--name <name>] an element (button, textbox, ...)
+                             --window <title>, --new-window
+                                                           a window of the app (or of any app)
+                             --value <value>, --changed    the value of the --ref element
+                             --ref <ref> alone             that element
+                           --exact matches whole names; --nth <n> picks one of several matches
 
 After an action the reply is what changed in that window once it stopped changing.
 Elements of a web page that are scrolled out of view are marked [offscreen]; an action on
@@ -99,6 +110,7 @@ fn main() -> ExitCode {
         }
         ["agent", action @ ("press" | "type"), keys, rest @ ..] => press(action, keys, rest),
         ["agent", "scroll", rest @ ..] => scroll(rest),
+        ["agent", "wait", rest @ ..] => wait(rest),
         ["agent", "launch", app, rest @ ..] => launch(app, rest),
         []
         | ["help" | "-h" | "--help", ..]
@@ -220,6 +232,79 @@ fn scroll_params(args: &[&str]) -> Result<(ActParams, bool), String> {
     }
     params.amount = Some([x * count, y * count]);
     let json = act_options(&mut params, &rest)?;
+    Ok((params, json))
+}
+
+/// `wait`: 조건이 맞을 때까지 기다려 본 것을 적는다
+fn wait(args: &[&str]) -> Result<(), String> {
+    let (params, json) = wait_params(args)?;
+    let params = serde_json::to_value(&params).map_err(|err| err.to_string())?;
+    let reply = protocol::call("wait", params)?;
+    if json {
+        println!("{reply:#}");
+        return Ok(());
+    }
+    let waited: Waited = serde_json::from_value(reply)
+        .map_err(|err| format!("bad reply from buntd-agent: {err}"))?;
+    println!("# {} (after {} ms)", waited.done, waited.waited_ms);
+    for found in &waited.matches {
+        println!("{}", found.line);
+        // 글 줄에는 ref가 없다: 누르려면 그것을 담은 요소의 ref를 쓴다
+        if let Some(owner) = found
+            .reference
+            .as_deref()
+            .filter(|owner| !found.line.contains(&format!("[ref={owner}]")))
+        {
+            println!("# (inside {owner})");
+        }
+    }
+    if waited.count > waited.matches.len() {
+        println!("# and {} more", waited.count - waited.matches.len());
+    }
+    Ok(())
+}
+
+fn wait_params(args: &[&str]) -> Result<(WaitParams, bool), String> {
+    let mut params = WaitParams::default();
+    let mut json = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let mut value = |name: &str| {
+            rest.next()
+                .map(|value| value.to_string())
+                .ok_or(format!("{name} needs a value"))
+        };
+        match *arg {
+            "--app" => params.app = Some(value("--app")?),
+            "--ref" => params.scope = Some(value("--ref")?),
+            "--role" => params.role = Some(value("--role")?),
+            "--name" => params.name = Some(value("--name")?),
+            "--text" => params.text = Some(value("--text")?),
+            "--window" => params.window = Some(value("--window")?),
+            "--new-window" => params.window = Some(String::new()),
+            "--value" => params.value = Some(value("--value")?),
+            "--nth" => {
+                let nth = value("--nth")?;
+                params.nth = Some(
+                    nth.parse()
+                        .map_err(|_| format!("--nth needs a whole number, not {nth:?}"))?,
+                );
+            }
+            "--timeout" => {
+                let ms = value("--timeout")?;
+                params.timeout_ms = Some(
+                    ms.parse()
+                        .map_err(|_| format!("--timeout needs milliseconds, not {ms:?}"))?,
+                );
+            }
+            "--session" => params.session = Some(value("--session")?),
+            "--changed" => params.changed = true,
+            "--gone" => params.gone = true,
+            "--exact" => params.exact = true,
+            "--json" => json = true,
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
     Ok((params, json))
 }
 
@@ -523,6 +608,45 @@ mod tests {
         // --app은 ref가 없으면 그 앱의 창에 하고, 있으면 ref가 그 앱의 것인지 본다
         assert!(params("click", "e3", &["--app", "계산기"]).is_ok());
         assert!(params("press", "", &["--app", "firefox"]).is_ok());
+    }
+
+    #[test]
+    fn wait_reads_its_condition_and_scope() {
+        let (params, json) = wait_params(&[
+            "--app",
+            "계산기",
+            "--role",
+            "button",
+            "--name",
+            "=",
+            "--exact",
+            "--nth",
+            "-1",
+            "--timeout",
+            "0",
+            "--json",
+        ])
+        .unwrap();
+        assert!(json && params.exact);
+        assert_eq!(params.app.as_deref(), Some("계산기"));
+        assert_eq!(
+            (params.role.as_deref(), params.name.as_deref()),
+            (Some("button"), Some("="))
+        );
+        assert_eq!((params.nth, params.timeout_ms), (Some(-1), Some(0)));
+        let (window, _) = wait_params(&["--new-window"]).unwrap();
+        assert_eq!(window.window.as_deref(), Some(""));
+        let (value, _) = wait_params(&["--ref", "e9", "--value", "42"]).unwrap();
+        assert_eq!(
+            (value.scope.as_deref(), value.value.as_deref()),
+            (Some("e9"), Some("42"))
+        );
+        assert!(wait_params(&["--timeout", "soon"]).is_err());
+        assert!(wait_params(&["--nth", "x"]).is_err());
+        assert!(wait_params(&["--text"]).is_err());
+        assert!(wait_params(&["--later"]).is_err());
+        // 조건이 맞는지는 데몬이 본다 (wait::condition)
+        assert!(wait_params(&[]).is_ok());
     }
 
     #[test]
