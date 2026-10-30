@@ -99,14 +99,15 @@ state)
 	echo "$current $shown"
 	;;
 focus-list)
-	# 키보드 포커스를 글 입력 칸이 아닌 곳(시스템 설정의 사이드바 항목)에 둔다. 입력기는 키보드를 놓는다.
-	# 포커스를 가진 앱과 입력기가 키보드를 잡았는지를 낸다
+	# 키보드 포커스를 글 입력 칸이 아닌 곳(시스템 설정의 사이드바 항목)에 둔다. 포커스를 가진 앱과 그 창에서
+	# 포커스를 가진 요소의 종류를 낸다. 입력기는 여기서도 켜져 있다: GTK4 앱은 글 입력 칸 밖에서도 글 입력을
+	# 켜 두어, 치면 검색을 여는 앱(시스템 모니터)에 한글로 칠 수 있다(2026-10-30 확인)
 	# 검색 칸에 글이 있으면 사이드바가 걸러지므로 먼저 비운다
 	settings=$(open_app org.buntos.Settings)
 	A fill "$(ref 'textbox "\(검색\|Search\)"' <<<"$settings")" "" >/dev/null 2>&1
 	A click "$(A snapshot --app org.buntos.Settings -i | ref 'listitem "Wi-Fi"')" --pointer >/dev/null
-	wait_im_focus 0
-	echo "$(focus_app) $(im_focus)"
+	focused=$(A snapshot --app org.buntos.Settings -i | grep -m1 '\[focused\]' | sed -E 's/^ *- ([a-z]+).*/\1/')
+	echo "$(focus_app) $focused"
 	;;
 clear)
 	# 편집기 문서를 비워 포커스를 주고 입력기를 그 입력 소스로 둔다 (준비이므로 키가 아니라 fcitx5-remote로)

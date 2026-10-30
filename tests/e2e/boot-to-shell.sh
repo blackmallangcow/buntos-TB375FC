@@ -333,9 +333,10 @@ if [[ "$agent_refs" != NONE ]]; then
 	keys keys:lang1 sleep:0.5
 	guest state
 	check "한/영 키로 영문이 된다" "$answer" "keyboard-us A"
-	# 입력기가 키보드를 잡지 않았을 때(글 입력 칸 밖)도 바뀌면 컴포지터가 받은 한/영 키다
+	# 글 입력 칸 밖(시스템 설정의 사이드바)에서도 한/영 키는 컴포지터가 받아 바꾼다. GTK4 앱은 글 입력 칸 밖에서도
+	# 입력기를 켜 두므로(치면 검색을 여는 앱에 한글로 친다) 입력기의 키보드 잡기가 아니라 포커스로 본다
 	guest focus-list
-	check "글 입력 칸 밖으로 포커스를 옮기면 입력기가 키보드를 놓는다" "$answer" "org.buntos.Settings 0"
+	check "글 입력 칸 밖(시스템 설정 사이드바 항목)으로 포커스를 옮긴다" "$answer" "org.buntos.Settings listitem"
 	keys keys:lang1 sleep:0.5
 	guest state
 	check "글 입력 칸 밖에서도 한/영 키로 바뀐다" "$answer" "hangul 한"
