@@ -180,8 +180,8 @@ impl Drop for Worker {
 }
 
 /// 워커의 표준 오류를 줄마다 `log`로 옮긴다. 워커는 믿지 않으므로 STDERR_LIMIT 바이트까지만 옮기고 제어 문자는
-/// 드러내 적는다(로그 줄, journald의 `<N>` 머리, 터미널 이스케이프를 꾸미지 못하게). 넘친 것은 읽어 버린다: 워커가
-/// 쓰다가 막히지 않는다. 워커가 끝나면(파이프가 닫히면) 돌아온다
+/// 드러내 적는다(로그 줄, journald의 `<N>` 머리, 터미널 이스케이프를 꾸미지 못하게). 상한에 닿거나 워커가 끝나면
+/// (파이프가 닫히면) 돌아오며 파이프를 닫는다: 그 뒤 워커의 쓰기는 실패한다
 fn relay(mut errors: impl io::Read, mut log: impl FnMut(String)) {
     let mut pending: Vec<u8> = Vec::new();
     let mut room = STDERR_LIMIT;
@@ -193,9 +193,6 @@ fn relay(mut errors: impl io::Read, mut log: impl FnMut(String)) {
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
-        if room == 0 {
-            continue;
-        }
         let kept = read.min(room);
         room -= kept;
         pending.extend_from_slice(&chunk[..kept]);
@@ -211,6 +208,8 @@ fn relay(mut errors: impl io::Read, mut log: impl FnMut(String)) {
             log(format!(
                 "(the error output of a REPL worker is cut at {STDERR_LIMIT} bytes)"
             ));
+            // 넘친 것을 끝없이 읽어 버리지 않는다 (검토: 쉬지 않고 쓰는 워커가 데몬 스레드 하나를 붙잡았다)
+            return;
         }
     }
     if !pending.is_empty() {
@@ -595,16 +594,21 @@ fn drive(
     if let Err(err) = pipe::send_by(&mut *worker.to, &eval, kill_at) {
         return Err(lost(err.kind() == io::ErrorKind::TimedOut, err.to_string()));
     }
+    let killed = || {
+        Stopped::Late(format!(
+            "the REPL did not stop at its time limit ({} ms) and was killed; its variables are gone",
+            limit.as_millis()
+        ))
+    };
     loop {
+        // 줄이 끊이지 않고 오면 읽기와 쓰기가 기다리지 않아 기한을 보지 않는다: 돌 때마다 본다 (검토: 호출을 앞서
+        // 쌓아 두는 워커가 기한 뒤에도 데몬 스레드를 붙잡았다)
+        if Instant::now() >= kill_at {
+            return Err(killed());
+        }
         let line = match worker.from.next(Some(kill_at)) {
             Ok(Some(line)) => line,
-            Ok(None) => {
-                return Err(Stopped::Late(format!(
-                    "the REPL did not stop at its time limit ({} ms) and was killed; its \
-                     variables are gone",
-                    limit.as_millis()
-                )));
-            }
+            Ok(None) => return Err(killed()),
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
                 return Err(lost(heard, "it crashed".into()));
             }

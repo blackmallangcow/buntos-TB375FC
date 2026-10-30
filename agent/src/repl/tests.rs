@@ -844,6 +844,50 @@ fn a_worker_that_keeps_calling_is_killed_in_time() {
 }
 
 #[test]
+fn a_worker_that_keeps_calls_queued_is_killed_in_time() {
+    // 호출을 600개쯤 앞서 쌓아 두고 답을 비우는 워커: 데몬의 읽기와 쓰기가 기다리지 않아도 기한에 끝낸다
+    const CALL: &[u8] = b"{\"call\":{\"method\":\"apps\",\"params\":{}}}\n";
+    let (took, failure) = time_to_kill(
+        misbehaving(|lines, out| {
+            if lines.next(None).is_err() {
+                return;
+            }
+            let batch = CALL.repeat(50);
+            let started = Instant::now();
+            for _ in 0..12 {
+                if out.write_all(&batch).is_err() {
+                    return;
+                }
+            }
+            let mut owed = 0;
+            // 고친 데몬이 끝내지 못해도 시험이 멈추지 않게 20초에 그만둔다
+            while started.elapsed() < Duration::from_secs(20) {
+                if !matches!(lines.next(None), Ok(Some(_))) {
+                    return;
+                }
+                owed += 1;
+                if owed == 50 {
+                    owed = 0;
+                    if out.write_all(&batch).is_err() {
+                        return;
+                    }
+                }
+            }
+        }),
+        "1".into(),
+    );
+    assert!(
+        failure.1.contains("did not stop at its time limit"),
+        "{}",
+        failure.1
+    );
+    assert!(
+        took >= GRACE && took < GRACE + Duration::from_secs(2),
+        "{took:?}"
+    );
+}
+
+#[test]
 fn a_call_waiting_for_its_repl_spends_its_own_time_limit() {
     let repls = repls();
     let desk = desktop();
@@ -934,6 +978,10 @@ fn worker_errors_reach_the_log_bounded_and_escaped() {
     assert_eq!(logged.len(), 2);
     assert_eq!(logged[0].len(), STDERR_LIMIT);
     assert!(logged[1].contains("is cut at"));
+    // 끝없이 쓰는 워커에서도 돌아온다 (파이프를 닫는다)
+    let mut endless = 0;
+    relay(io::repeat(b'x'), |_| endless += 1);
+    assert_eq!(endless, 2);
 }
 
 #[test]
