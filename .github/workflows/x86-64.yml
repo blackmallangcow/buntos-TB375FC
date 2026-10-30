@@ -7,14 +7,11 @@
 #   실패한다(마스크된 getty@tty1과 기본 프리셋의 getty@.service)
 # - 자체 컴포넌트는 같은 스냅숏의 Debian 컨테이너에서 rust-toolchain.toml의 툴체인으로 빌드한다
 #   (tools/image/cargo-debian.sh). 러너(Ubuntu)의 라이브러리는 이미지(Debian)와 다르다
-# 비공개 저장소의 Actions 시간(한 달 2000분 안팎)을 아끼려고, 개발하는 동안은 이 브랜치의 push와 수동 실행만 받는다.
+# 비공개 저장소의 Actions 시간(한 달 2000분 안팎)을 아끼려고 main에서는 손으로만 돌린다(이미지 레시피, bsp/, comp/의
+# 입력·그래픽, tests/e2e/를 바꿨을 때 병합 전에). 매일 한 번 돌릴지는 아직 정하지 않았다(작업 하나 15~19분).
 name: x86-64 이미지와 e2e
 
 on:
-  push:
-    branches: [feat/x86-graphical-ci]
-    # 문서와 인계 문서만 바꾼 커밋은 이미지와 e2e에 영향이 없다
-    paths-ignore: ["docs/**", ".handoff/**"]
   workflow_dispatch:
     inputs:
       e2e_timeout:
