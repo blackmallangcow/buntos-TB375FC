@@ -93,6 +93,13 @@ impl<D: Daemon> Server<D> {
     /// 메시지 하나에 답한다. 알림(id가 없다)과 답(method가 없다)에는 답하지 않는다
     pub fn handle(&self, message: Value) -> Option<Value> {
         if let Value::Array(batch) = message {
+            // 빈 묶음은 잘못된 요청이다 (JSON-RPC 2.0, 두 번째 검토)
+            if batch.is_empty() {
+                return Some(error_reply(
+                    Value::Null,
+                    failure(INVALID_REQUEST, "an empty batch"),
+                ));
+            }
             // 2025-03-26의 묶음
             let replies: Vec<Value> = batch
                 .into_iter()
@@ -691,6 +698,11 @@ mod tests {
             .handle(json!([request("ping", json!({})), { "jsonrpc": "2.0", "method": "notifications/initialized" }]))
             .unwrap();
         assert_eq!(batch.as_array().unwrap().len(), 1);
+        let empty = server.handle(json!([])).unwrap();
+        assert_eq!(
+            (&empty["id"], &empty["error"]["code"]),
+            (&Value::Null, &json!(INVALID_REQUEST))
+        );
     }
 
     #[test]
