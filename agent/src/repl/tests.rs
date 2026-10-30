@@ -340,7 +340,7 @@ fn playwright_names_become_daemon_calls() {
 #[test]
 fn get_by_role_finds_one_ref_or_says_which() {
     let repls = repls();
-    let tree = "- window \"w\" [ref=e1]:\n  - button \"OK\" [ref=e3]\n  - dialog \"d\" [ref=e4]:\n    - button \"OK\" [ref=e5]\n    - text: \"합계 42\"\n";
+    let tree = "- window \"w\" [ref=e1]:\n  - button \"OK\" [ref=e3]\n  - dialog \"d\" [ref=e4]:\n    - button \"OK\" [ref=e5]\n    - listitem \"합계 줄\" [ref=e6]:\n      - text: \"합계 42\"\n    - text: \"안내\"\n";
     let desk = Fake::new(move |method, _| match method {
         "snapshot" => Ok(
             json!({ "tree": format!("- app: \"a\" [pid=1]\n{tree}"), "diff": "", "first": false }),
@@ -367,19 +367,27 @@ fn get_by_role_finds_one_ref_or_says_which() {
         "await desktop.app('a').getByRole('button', { name: 'OK' }).last().click()",
     );
     assert_eq!(last.output, "# e5: clicked\n");
-    // ref 아래에서만 찾고, ref 없는 글 줄은 그것을 담은 요소로 누른다
+    // ref 아래에서만 찾고, ref 없는 글 줄은 그것을 담은 요소(목록 항목)로 누른다
     let below = run(
         &repls,
         &desk,
-        "await desktop.app('a').locator('e4').getByText('합계').click()",
+        "await desktop.app('a').locator('e4').getByText('42').click()",
     );
-    assert_eq!(below.output, "# e4: clicked\n");
+    assert_eq!(below.output, "# e6: clicked\n");
+    // 대화 상자에 바로 든 글: 그릇을 대신 누르지 않는다
+    let loose = run(
+        &repls,
+        &desk,
+        "await desktop.app('a').getByText('안내').click()",
+    );
+    let error = loose.error.unwrap();
+    assert!(error.contains("nothing that holds it has a ref"), "{error}");
     let info = run(
         &repls,
         &desk,
         "const i = await desktop.app('a').getByText('42').info(); [i.ref, i.role, i.text]",
     );
-    assert_eq!(info.value, Some(json!(["e4", "text", "합계 42"])));
+    assert_eq!(info.value, Some(json!(["e6", "text", "합계 42"])));
     let count = run(
         &repls,
         &desk,

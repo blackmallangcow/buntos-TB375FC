@@ -240,7 +240,29 @@ fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// ref가 없는 줄(글 줄, 이름만 있는 그릇)을 대신 누를 요소: 그 줄이나 가장 가까운 조상 가운데 ref가 있는 줄
+/// ref를 범위로 쓰는 그릇의 역할 (tree.rs의 scope와 같다). 안의 글을 누르려고 그릇을 누르면 엉뚱한 곳(창의
+/// 가운데)이 눌리므로 대신 누를 요소로 고르지 않는다
+const CONTAINERS: [&str; 16] = [
+    "window",
+    "dialog",
+    "alertdialog",
+    "menu",
+    "menubar",
+    "tablist",
+    "list",
+    "listbox",
+    "tree",
+    "treegrid",
+    "table",
+    "toolbar",
+    "group",
+    "document",
+    "form",
+    "region",
+];
+
+/// ref가 없는 줄(글 줄)을 대신 누를 요소: 그 줄, 아니면 그것을 담은 가장 가까운 요소 가운데 ref가 있는 것(목록
+/// 항목, 단추). 가장 가까운 ref가 그릇(창, 목록 등)이면 없다
 pub fn owner(lines: &[Line], at: usize) -> Option<usize> {
     let mut depth = lines.get(at)?.depth;
     if lines[at].reference.is_some() {
@@ -249,7 +271,7 @@ pub fn owner(lines: &[Line], at: usize) -> Option<usize> {
     for index in (0..at).rev() {
         if lines[index].depth < depth {
             if lines[index].reference.is_some() {
-                return Some(index);
+                return (!CONTAINERS.contains(&lines[index].role.as_str())).then_some(index);
             }
             depth = lines[index].depth;
         }
@@ -417,6 +439,13 @@ mod tests {
         assert_eq!(owner(&[], 0), None);
         let orphan = parse("- text: \"alone\"\n");
         assert_eq!(owner(&orphan, 0), None);
+        // 창이나 목록에 바로 든 글은 그릇을 대신 누르지 않는다 (창의 가운데가 눌린다)
+        let loose = parse(
+            "- window \"w\" [ref=e1]:\n  - text: \"label\"\n  - list [ref=e2]:\n    - text: \"row\"\n",
+        );
+        assert_eq!((owner(&loose, 1), owner(&loose, 3)), (None, None));
+        // 그릇을 ref로 바로 가리키면 그 그릇이다
+        assert_eq!(owner(&loose, 2), Some(2));
     }
 
     #[test]
