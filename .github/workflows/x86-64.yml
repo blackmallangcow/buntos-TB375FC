@@ -13,7 +13,14 @@ name: x86-64 이미지와 e2e
 on:
   push:
     branches: [feat/x86-graphical-ci]
+    # 문서와 인계 문서만 바꾼 커밋은 이미지와 e2e에 영향이 없다
+    paths-ignore: ["docs/**", ".handoff/**"]
   workflow_dispatch:
+    inputs:
+      e2e_timeout:
+        description: e2e 전체 제한 시간(초). 짧게 주면 실패했을 때의 기록(아티팩트)을 시험할 수 있다
+        required: false
+        default: "1800"
 
 permissions:
   contents: read
@@ -30,15 +37,15 @@ defaults:
 jobs:
   x86-64:
     name: x86_64-generic 빌드와 e2e
-    # Ubuntu 26.04의 이미지 도구(systemd 259, QEMU 10.2, OVMF 2025.11)는 빌드 VM(Debian 13)과 같거나 새 판이다
+    # 러너는 Ubuntu 26.04다. 이미지 도구는 러너의 것이 아니라 Debian 13 도구 트리의 것을 쓴다(머리말)
     runs-on: ubuntu-26.04
     timeout-minutes: 150
     env:
       BOARD: x86_64-generic
       # mkosi 27은 systemd-nsresourced가 있으면 그것으로 사용자 이름공간을 받는다. 빌드 VM처럼 unshare로 만든다
       MKOSI_FORCE_USERNS_FALLBACK: "1"
-      # 2코어 러너에서 e2e 5·6·4·7번까지 넉넉히 기다린다 (기본 1200초)
-      E2E_TIMEOUT: "1800"
+      # 2코어 러너에서 e2e 5·6·4·7번까지 넉넉히 기다린다 (드라이버의 기본은 1200초). 수동 실행은 입력으로 바꾼다
+      E2E_TIMEOUT: ${{ inputs.e2e_timeout || '1800' }}
     steps:
       - name: 저장소 받기
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
