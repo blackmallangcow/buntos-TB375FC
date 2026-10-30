@@ -27,6 +27,10 @@ pub const MAX_TIMEOUT_MS: u64 = 120_000;
 const POLL: Duration = Duration::from_millis(100);
 /// 답에 싣는 맞는 요소 수 (REPL의 all(), strict 검사와 안내에 쓴다. all()이 쓰도록 10에서 늘렸다)
 const MATCHES_KEPT: usize = 50;
+/// 맞는 요소 목록의 한 줄에 싣는 아래 글(text)의 글자 수. 그릇(region, document)은 아래의 글을 모두 담아, 여럿이
+/// 맞으면 답이 트리의 수십 배가 되었다 (두 번째 검토: 1.3MiB 트리에서 56MiB 답, REPL을 잃었다). 고른 요소(found)는 다
+/// 싣는다
+const MATCH_TEXT: usize = 200;
 /// 시간이 다 됐을 때 알리는 창 제목 수
 const WINDOWS_SHOWN: usize = 5;
 
@@ -367,7 +371,7 @@ fn check(
                 matches: hits
                     .iter()
                     .take(MATCHES_KEPT)
-                    .map(|&at| found(lines, at))
+                    .map(|&at| listed(found(lines, at)))
                     .collect(),
                 count: hits.len(),
             })
@@ -397,10 +401,20 @@ fn check(
 fn single(lines: &[Line]) -> Outcome {
     let found = found(lines, 0);
     Outcome::Found {
-        matches: vec![found.clone()],
+        matches: vec![listed(found.clone())],
         found,
         count: 1,
     }
+}
+
+/// 목록에 싣는 요소: 아래 글을 MATCH_TEXT 글자로 자른다 (트리처럼 `…[+N chars]`)
+fn listed(mut found: Found) -> Found {
+    if let Some((cut, _)) = found.text.char_indices().nth(MATCH_TEXT) {
+        let hidden = found.text[cut..].chars().count();
+        found.text.truncate(cut);
+        found.text.push_str(&format!("…[+{hidden} chars]"));
+    }
+    found
 }
 
 fn found(lines: &[Line], at: usize) -> Found {
@@ -870,6 +884,39 @@ mod tests {
         .unwrap();
         assert_eq!(waited.found.unwrap().reference.as_deref(), Some("e2400"));
         assert_eq!(desk.calls.borrow()[1].1["interactive"], true);
+    }
+
+    #[test]
+    fn the_list_of_matches_stays_small() {
+        // 겹친 그릇 60개가 저마다 아래 글을 모두 담는 트리: 목록의 글은 잘리고, 고른 요소의 글은 다 있다
+        let mut lines = String::new();
+        for depth in 0..60 {
+            lines.push_str(&format!(
+                "{}- region \"r{depth}\" [ref=e{depth}]:\n{}  - text: \"{}\"\n",
+                "  ".repeat(depth),
+                "  ".repeat(depth),
+                "가".repeat(200)
+            ));
+        }
+        let waited = run(
+            &Script::new(vec![tree(&lines)]),
+            &params(|p| {
+                p.role = Some("region".into());
+                p.nth = Some(0);
+            }),
+        )
+        .unwrap();
+        assert_eq!((waited.count, waited.matches.len()), (60, MATCHES_KEPT));
+        assert!(
+            waited
+                .matches
+                .iter()
+                .all(|found| found.text.chars().count() < MATCH_TEXT + 20)
+        );
+        assert!(waited.matches[0].text.ends_with(" chars]"));
+        assert!(waited.found.unwrap().text.chars().count() > 60 * 200);
+        let size = serde_json::to_string(&waited.matches).unwrap().len();
+        assert!(size < 100_000, "{size}");
     }
 
     #[test]
