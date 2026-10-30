@@ -6,14 +6,14 @@
 # 넣고(boot-to-shell.sh), 이 스크립트는 상태만 읽는다. 잠금을 푸는 길은 잠금 화면에 사람이 친 암호뿐이므로
 # 시험도 그 길(QMP 키 → libinput → 컴포지터 → bunt-lock → PAM)로만 푼다. 직렬 콘솔의 root로 실행하며 마지막
 # 줄이 답이다.
-# 사용법: session-lock.sh locked | ready | agent | journal
+# 사용법: session-lock.sh locked | ready | agent | journal | sleep
 set -u
 
 user=buntos
 A() { sudo -u "$user" XDG_RUNTIME_DIR=/run/user/1000 bunt agent "$@"; }
+session_bus() { sudo -u "$user" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }
 compositor() {
-	sudo -u "$user" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
-		busctl --user call org.buntos.Compositor /org/buntos/Compositor org.buntos.Compositor1 "$@" 2>&1
+	session_bus busctl --user call org.buntos.Compositor /org/buntos/Compositor org.buntos.Compositor1 "$@" 2>&1
 }
 # 컴포지터가 띄운 잠금 화면의 출력은 세션의 bunt-comp 저널에 남는다 (/usr/libexec/buntos/session)
 lock_log() { journalctl -b -q -t bunt-comp --no-pager 2>/dev/null | grep -c -- "bunt-lock: $1"; }
@@ -43,8 +43,18 @@ journal)
 	# 잠금 화면이 남긴 틀린 암호와 잠금 해제의 수 (예: "1 1")
 	echo "$(lock_log 'wrong password') $(lock_log unlocked)"
 	;;
+sleep)
+	# logind가 잠자기를 받는지(CanSuspend)와 셸이 로고 메뉴의 잠자기 동작을 켰는지. 셸은 동작을 D-Bus
+	# (org.gtk.Actions)로 내보낸다. 가상 기기에서는 잠자기를 끄므로(buntos-vm-sleep.service) "no false"다
+	can=$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager \
+		CanSuspend 2>&1 | awk '{gsub(/"/, "", $2); print $2}')
+	shell=$(session_bus busctl --user list 2>/dev/null | awk '$3 == "bunt-shell" {print $1; exit}')
+	enabled=$(session_bus busctl --user call "$shell" /org/buntos/Shell org.gtk.Actions Describe s sleep \
+		2>&1 | awk '{print $2}')
+	echo "$can $enabled"
+	;;
 *)
-	echo "사용법: $0 locked | ready | agent | journal" >&2
+	echo "사용법: $0 locked | ready | agent | journal | sleep" >&2
 	exit 2
 	;;
 esac

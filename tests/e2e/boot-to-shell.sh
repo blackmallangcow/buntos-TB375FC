@@ -8,7 +8,7 @@
 # 암호를 쳐 그 계정으로 들어간다. sudo가 암호를 묻는지 보고, 그래픽 셸(메뉴 막대, Dock)이 떴는지는
 # 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에
 # 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키, tests/e2e/shortcuts.sh), e2e 4번(한글 입력,
-# tests/e2e/hangul.sh), e2e 7번(화면 잠금, tests/e2e/session-lock.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는
+# tests/e2e/hangul.sh), e2e 7번(화면 잠금과 VM의 잠자기, tests/e2e/session-lock.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는
 # 이미지(그래픽 세션이 없는 x86-64)에서는 5·6·4·7번을 건너뛴다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
 # 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 5·6·4·7번에 10분 넘게 걸린다)
@@ -425,10 +425,13 @@ fi
 
 # e2e 7번: 화면 잠금(ARCHITECTURE 6.5). ⌃⌘Q로 잠그면 잠금 화면이 뜨고, 잠긴 동안 에이전트의 화면 읽기와 앱
 # 목록을 거절하며, 틀린 암호로는 풀리지 않고 사람이 잠금 화면에 친 암호(QMP 키)로만 풀리는지 본다. 상태는
-# 게스트 쪽 도우미(tests/e2e/session-lock.sh)가 컴포지터 API(GetLocked)와 저널로 읽는다
+# 게스트 쪽 도우미(tests/e2e/session-lock.sh)가 컴포지터 API(GetLocked)와 저널로 읽는다. 잠든 VM은 깨울 수
+# 없으므로 VM에서는 잠자기를 받지 않고 로고 메뉴의 잠자기가 흐린지도 본다(5.4절)
 if [[ "$agent_refs" != NONE ]]; then
 	push tests/e2e/session-lock.sh /tmp/e2e-session-lock.sh
 	begin 7 /tmp/e2e-session-lock.sh
+	guest sleep
+	check "VM에서는 logind가 잠자기를 받지 않고 로고 메뉴의 잠자기가 흐리다" "$answer" "no false"
 	guest locked
 	check "처음에는 잠기지 않았다" "$answer" false
 	keys keys:ctrl+meta_l+q sleep:2
