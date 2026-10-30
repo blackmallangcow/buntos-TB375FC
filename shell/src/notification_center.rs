@@ -361,8 +361,10 @@ pub fn banner(
     notifications: &Notifications,
     tr: &Rc<Translations>,
 ) -> gtk::ApplicationWindow {
+    // 제목은 보이지 않지만 접근성 이름이 된다. 에이전트는 이것으로 레이어 표면을 찾는다 (layer_window)
     let window = gtk::ApplicationWindow::builder()
         .application(app)
+        .title("bunt-banner")
         .css_classes(["bunt-banner"])
         .build();
     window.init_layer_shell();
