@@ -325,12 +325,21 @@ impl Toolbar {
                 Toolbar(inner).capture();
             }
         });
+        // 키는 포커스를 가진 단추보다 먼저(캡처 단계) 받는다. 막대가 뜨면 닫기 단추가 포커스를 가져, 버블
+        // 단계에서는 그 단추가 Return을 먼저 받아 찍지 않고 막대를 닫았다(macOS의 Return은 캡처다). 옵션 메뉴가
+        // 열려 있으면 Return과 Esc는 메뉴의 것이다
         let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(&toolbar.0);
         keys.connect_key_pressed(move |_, key, _, _| {
             let Some(inner) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
+            let in_menu = GtkWindowExt::focus(&inner.window)
+                .is_some_and(|focus| focus.ancestor(gtk::Popover::static_type()).is_some());
+            if in_menu {
+                return glib::Propagation::Proceed;
+            }
             match key {
                 gdk::Key::Escape => inner.window.set_visible(false),
                 gdk::Key::Return | gdk::Key::KP_Enter => Toolbar(inner).capture(),
