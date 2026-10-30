@@ -55,7 +55,7 @@ use crate::{
     state::{BuntState, ClientState},
 };
 
-const TRANSLATIONS: &Sources = &[
+pub(crate) const TRANSLATIONS: &Sources = &[
     ("ko", include_str!("../../i18n/ko/bunt-comp.ftl")),
     ("en", include_str!("../../i18n/en/bunt-comp.ftl")),
 ];
@@ -386,6 +386,19 @@ impl BuntState {
             self.start_screenshot(mode, false, delay);
             return;
         }
+        let clipboard = self.screenshot_options.location == Location::Clipboard;
+        match self.take_selected_area() {
+            Some(rect) if !self.session_lock.is_locked() && self.screenshot_area.is_none() => {
+                self.capture_area(rect, clipboard, delay)
+            }
+            Some(_) => {}
+            None => self.start_screenshot(Mode::Area, false, delay),
+        }
+    }
+
+    /// ⇧⌘5의 선택 영역 (화면 좌표): 띄워 둔 영역이면 거두고 그 영역을, 아니면(막대가 숨으며 거뒀으면)
+    /// 기억한 영역을 준다. 선택 부분 캡처와 선택 부분 기록(recording.rs)이 쓴다
+    pub(crate) fn take_selected_area(&mut self) -> Option<Rectangle<i32, Logical>> {
         let shown = self
             .screenshot_area
             .as_ref()
@@ -394,14 +407,7 @@ impl BuntState {
         if shown.is_some() {
             self.end_selection();
         }
-        let clipboard = self.screenshot_options.location == Location::Clipboard;
-        match shown.or(self.screenshot_last_area) {
-            Some(rect) if !self.session_lock.is_locked() && self.screenshot_area.is_none() => {
-                self.capture_area(rect, clipboard, delay)
-            }
-            Some(_) => {}
-            None => self.start_screenshot(Mode::Area, false, delay),
-        }
+        shown.or(self.screenshot_last_area)
     }
 
     /// ⇧⌘5 도구 막대의 레이어 표면이 사라졌다(막대를 숨겼거나 셸이 끝났다). 막대 없이 남은 선택 영역은
@@ -439,8 +445,8 @@ impl BuntState {
     }
 
     /// `delay`초 뒤에 한다 (0이면 바로). 그때 화면이 잠겨 있으면 하지 않는다: 창 찍기는 잠긴 장면이 아니라
-    /// 창을 따로 그린다
-    fn after(&mut self, delay: u32, then: impl FnOnce(&mut BuntState) + 'static) {
+    /// 창을 따로 그린다. 화면 기록의 타이머도 쓴다(recording.rs)
+    pub(crate) fn after(&mut self, delay: u32, then: impl FnOnce(&mut BuntState) + 'static) {
         if delay == 0 {
             if !self.session_lock.is_locked() {
                 then(self);
@@ -718,12 +724,11 @@ impl BuntState {
             });
             return;
         }
-        let dir = match self.screenshot_options.location {
-            Location::Desktop => user_dir("XDG_DESKTOP_DIR", "Desktop"),
-            Location::Documents => user_dir("XDG_DOCUMENTS_DIR", "Documents"),
-            Location::Pictures | Location::Clipboard => user_dir("XDG_PICTURES_DIR", "Pictures"),
-        };
-        let path = unique_path(&dir, &file_name(&tr));
+        let dir = save_dir(
+            self.screenshot_options.location,
+            ("XDG_PICTURES_DIR", "Pictures"),
+        );
+        let path = unique_path(&dir, &file_name(&tr, "screenshot-file"), "png");
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -935,6 +940,18 @@ fn unpremultiply([red, green, blue, alpha]: [u8; 4]) -> [u8; 4] {
     [channel(red), channel(green), channel(blue), alpha]
 }
 
+/// 저장 위치의 폴더. 클립보드는 파일을 담지 못하므로 `clipboard`(xdg-user-dirs의 키와 홈 폴더 아래 이름)
+/// 폴더를 쓴다. 스크린샷은 클립보드에 넣으므로 이 폴더를 쓰지 않고(사진 폴더를 준다), 화면 기록은 동영상
+/// 폴더에 둔다. 전에는 screenshot_taken 안에 있었고 화면 기록도 쓰면서 뺐다
+pub(crate) fn save_dir(location: Location, clipboard: (&str, &str)) -> PathBuf {
+    match location {
+        Location::Desktop => user_dir("XDG_DESKTOP_DIR", "Desktop"),
+        Location::Documents => user_dir("XDG_DOCUMENTS_DIR", "Documents"),
+        Location::Pictures => user_dir("XDG_PICTURES_DIR", "Pictures"),
+        Location::Clipboard => user_dir(clipboard.0, clipboard.1),
+    }
+}
+
 /// xdg-user-dirs의 폴더(user-dirs.dirs의 `key`), 없으면 홈 폴더 아래 `fallback`
 fn user_dir(key: &str, fallback: &str) -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -965,19 +982,20 @@ fn user_dir_entry(text: &str, key: &str, home: &Path) -> Option<PathBuf> {
     (path.is_absolute() && path != home).then_some(path)
 }
 
-/// 이미 있으면 " 2", " 3"을 붙인 경로
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let mut path = dir.join(format!("{name}.png"));
+/// 이미 있으면 " 2", " 3"을 붙인 경로. 확장자(`extension`)는 화면 기록도 쓰면서 받게 했다
+pub(crate) fn unique_path(dir: &Path, name: &str, extension: &str) -> PathBuf {
+    let mut path = dir.join(format!("{name}.{extension}"));
     let mut number = 2;
     while path.exists() {
-        path = dir.join(format!("{name} {number}.png"));
+        path = dir.join(format!("{name} {number}.{extension}"));
         number += 1;
     }
     path
 }
 
-/// macOS처럼 찍은 때를 넣은 이름 ("스크린샷 2026-10-29 오전 9.52.13")
-fn file_name(tr: &Translations) -> String {
+/// macOS처럼 찍은 때를 넣은 이름 ("스크린샷 2026-10-29 오전 9.52.13"). `message`는 이름 틀의 메시지 ID다
+/// (screenshot-file, 화면 기록은 recording-file)
+pub(crate) fn file_name(tr: &Translations, message: &str) -> String {
     let now = LocalTime::now();
     let (hour, period) = match now.hour {
         0 => (12, "screenshot-am"),
@@ -995,7 +1013,7 @@ fn file_name(tr: &Translations) -> String {
         "time",
         format!("{hour}.{:02}.{:02}", now.minute, now.second),
     );
-    tr.get_with("screenshot-file", &args)
+    tr.get_with(message, &args)
 }
 
 /// 시스템 시간대(/etc/localtime, TZ)의 지금 시각
@@ -1040,11 +1058,13 @@ mod tests {
     #[test]
     fn file_names_follow_macos() {
         let ko = Translations::from_source("ko", TRANSLATIONS[0].1);
-        let name = file_name(&ko);
+        let name = file_name(&ko, "screenshot-file");
         assert!(name.starts_with("스크린샷 20"), "{name}");
         assert!(name.contains(" 오전 ") || name.contains(" 오후 "), "{name}");
+        let name = file_name(&ko, "recording-file");
+        assert!(name.starts_with("화면 기록 20"), "{name}");
         let en = Translations::from_source("en", TRANSLATIONS[1].1);
-        let name = file_name(&en);
+        let name = file_name(&en, "screenshot-file");
         assert!(
             name.starts_with("Screenshot 20") && name.contains(" at "),
             "{name}"

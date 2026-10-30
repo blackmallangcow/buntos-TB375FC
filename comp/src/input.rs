@@ -515,6 +515,10 @@ impl BuntState {
             pointer.frame(self);
             return;
         }
+        // 화면 기록에는 커서도 들어가므로 포인터만 움직여도 다시 그린다 (recording.rs)
+        if self.recording.is_some() {
+            self.queue_redraw_all();
+        }
         // 화면 가장자리에 닿으면 숨은 막대를 꺼내고, 꺼낸 막대를 떠나면 숨길 때를 잰다
         self.update_bars(Some(pos));
         let under = self.surface_under(pos);

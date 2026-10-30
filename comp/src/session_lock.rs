@@ -293,6 +293,8 @@ impl BuntState {
         self.finish_switching();
         self.cancel_screenshot();
         self.screenshot_capture = None;
+        // 잠금 화면(암호를 치는 화면)은 기록하지 않는다 (recording.rs)
+        self.stop_recording();
         self.stop_key_repeat();
         let serial = SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;

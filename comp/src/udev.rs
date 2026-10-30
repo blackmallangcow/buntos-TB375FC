@@ -1001,6 +1001,7 @@ impl BuntState {
         // 숨기고 꺼낼 때의 미끄러짐은 이 렌더 루프가 프레임마다 그린다. 최소화 효과는 칸의 자리를 새로 본다
         self.update_bars(None);
         self.update_minimize_effects();
+        self.check_recording();
         let bar_places = match self.backend.outputs.get(&crtc) {
             Some(surface) => self.bar_places(&surface.output),
             None => Vec::new(),
@@ -1169,6 +1170,15 @@ impl BuntState {
                 None
             }
         };
+        // 화면 기록 (recording.rs): 기록하는 화면이면 커서까지 넣은 같은 장면을 따로 그려 읽는다
+        if let Some(recording) = self
+            .recording
+            .as_mut()
+            .filter(|recording| *recording.output() == output)
+        {
+            let scene: Vec<&Elements> = elements.iter().collect();
+            recording.capture(renderer, &scene);
+        }
 
         // 한 프레임 간격보다 오래 걸린 프레임은 디버그 기록에 남긴다 (RUST_LOG=bunt_comp=debug)
         let interval = surface.frame_interval(rendering.cpu_composited);

@@ -29,6 +29,7 @@ use crate::{
     minimize::{self, Effect},
     panels::{Autohide, Panels},
     prefs::PointerPrefs,
+    recording,
     session::SessionRequest,
     shortcuts::{self, Category, ShortcutInfo},
 };
@@ -148,6 +149,8 @@ pub struct Snapshot {
     pub locked: bool,
     /// 컴포지터가 띄운 셸의 pid. 셸 전용 메서드(로그아웃, 앱 목록, 강제 종료)를 부를 수 있다. 셸이 없으면 0
     pub shell_pid: u32,
+    /// 화면을 기록하는 중이다 (recording.rs)
+    pub recording: bool,
 }
 
 /// 에이전트가 보는 창 하나 (GetWindows)
@@ -376,6 +379,13 @@ pub enum Request {
     MinimizeEffect(Effect),
     /// Dock의 최소화 칸: 최소화 번호와 Dock 표면 안 논리 좌표
     MinimizedSlots(Vec<(u32, Rectangle<i32, Logical>)>),
+    /// ⇧⌘5 도구 막대의 기록: 전체 화면이나 선택 영역을 `delay`초 뒤부터 기록한다
+    Record {
+        mode: recording::Mode,
+        delay: u32,
+    },
+    /// 메뉴 막대의 기록 중단
+    StopRecording,
     Agent(AgentRequest),
     /// 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
     Session(SessionRequest),
@@ -404,6 +414,10 @@ pub enum Command {
     ScreenshotSaved(String),
     /// LockedChanged 신호를 보낸다: 화면을 잠갔거나 풀었다
     LockedChanged(bool),
+    /// RecordingChanged 신호를 보낸다: 화면 기록을 시작했거나 멈췄다 (셸이 메뉴 막대의 기록 중단을 보인다)
+    RecordingChanged(bool),
+    /// RecordingSaved 신호를 보낸다: 저장한 화면 기록 파일과 그 미리 보기 그림 (플로팅 썸네일)
+    RecordingSaved { path: String, preview: String },
 }
 
 pub struct Service {
@@ -470,6 +484,12 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
             }
             Command::ScreenshotSaved(path) => emit(&connection, "ScreenshotSaved", &(path,)),
             Command::LockedChanged(locked) => emit(&connection, "LockedChanged", &(locked,)),
+            Command::RecordingChanged(recording) => {
+                emit(&connection, "RecordingChanged", &(recording,))
+            }
+            Command::RecordingSaved { path, preview } => {
+                emit(&connection, "RecordingSaved", &(path, preview))
+            }
         }
     }
 }
@@ -1270,6 +1290,50 @@ impl Api {
         })
     }
 
+    /// ⇧⌘5 도구 막대의 기록. `mode`는 screen(포인터가 있는 화면 전체), area(SelectScreenshotArea로 띄워
+    /// 고친 선택 영역)이고 `delay`초 뒤부터 기록한다. 기록을 시작하면 RecordingChanged(true)를, StopRecording으로
+    /// 멈추고 파일을 마무리하면 RecordingChanged(false)와 RecordingSaved(플로팅 썸네일을 켰을 때) 또는 알림을
+    /// 보낸다. 셸만 부른다
+    async fn record(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        mode: &str,
+        delay: u32,
+    ) -> fdo::Result<()> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        let mode = recording::Mode::parse(mode).ok_or_else(|| {
+            fdo::Error::InvalidArgs(format!("mode must be screen or area (got {mode})"))
+        })?;
+        self.request(Request::Record {
+            mode,
+            delay: delay.min(60),
+        })
+    }
+
+    /// 화면 기록을 멈춘다 (메뉴 막대의 기록 중단). 기록 중이 아니면 아무것도 하지 않는다. 셸만 부른다
+    async fn stop_recording(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<()> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        self.request(Request::StopRecording)
+    }
+
+    /// 화면을 기록하는 중인지. 셸이 다시 뜨면 기록 중단 단추를 보일지 묻는다. 셸만 부른다
+    async fn is_recording(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<bool> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        Ok(self.snapshot.lock().unwrap().recording)
+    }
+
     /// ⇧⌘5 도구 막대의 선택 부분. `show`면 고칠 수 있는 선택 영역을 마지막으로 고른 자리(처음이면 포인터가
     /// 있는 화면 가운데)에 띄우고, 아니면 거둔다. 띄운 동안 안쪽을 끌면 옮기고 테두리·모서리를 끌면 크기를
     /// 바꾸며 바깥을 끌면 새로 고른다. 도구 막대는 영역 위에 남아 포인터와 키를 받고, 막대의 캡처
@@ -1401,6 +1465,18 @@ impl Api {
     /// 화면을 잠갔거나(true) 풀었다(false)
     #[zbus(signal)]
     async fn locked_changed(emitter: &SignalEmitter<'_>, locked: bool) -> zbus::Result<()>;
+
+    /// 화면 기록을 시작했거나(true) 멈췄다(false)
+    #[zbus(signal)]
+    async fn recording_changed(emitter: &SignalEmitter<'_>, recording: bool) -> zbus::Result<()>;
+
+    /// 화면 기록을 파일로 마무리한 뒤 보낸다 (플로팅 썸네일을 켰을 때). `preview`는 마지막 프레임의 PNG다
+    #[zbus(signal)]
+    async fn recording_saved(
+        emitter: &SignalEmitter<'_>,
+        path: &str,
+        preview: &str,
+    ) -> zbus::Result<()>;
 
     /// 단축키를 바꾼 뒤 보낸다
     #[zbus(signal)]

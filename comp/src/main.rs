@@ -30,8 +30,9 @@ mod windows;
 mod logind;
 mod session;
 mod session_lock;
-// ⇧⌘5의 고칠 수 있는 선택 영역, 창 최소화 효과
+// ⇧⌘5의 고칠 수 있는 선택 영역과 화면 기록, 창 최소화 효과
 mod minimize;
+mod recording;
 mod selection;
 
 fn main() {

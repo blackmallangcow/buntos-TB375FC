@@ -112,6 +112,7 @@ use crate::{
     minimize,
     panels::{self, Bar, BarInput, Edge, Fill, Panels, Reveal},
     prefs::{KeyRepeat, PointerPrefs, Prefs},
+    recording::Recording,
     render,
     screenshot::{self as screenshots, AreaSelection, Capture, Image},
     session::{self, Session},
@@ -190,6 +191,8 @@ pub struct BuntState {
     pub screenshot_last_area: Option<Rectangle<i32, Logical>>,
     /// 창 최소화 효과 (minimize.rs)
     pub minimize_effects: minimize::Effects,
+    /// 화면 기록 (recording.rs)
+    pub recording: Option<Recording>,
 
     /// 시스템 설정에서 고른 값 (다음 로그인에도 쓴다)
     pub prefs: Prefs,
@@ -364,6 +367,7 @@ impl BuntState {
             screenshot_options: screenshots::Options::default(),
             screenshot_last_area: None,
             minimize_effects: minimize::Effects::default(),
+            recording: None,
             prefs,
             panels: Panels::default(),
             bars: [Reveal::default(); 2],
@@ -2065,6 +2069,8 @@ impl BuntState {
             Request::ScreenshotArea(show) => self.show_screenshot_area(show),
             Request::MinimizeEffect(effect) => self.set_minimize_effect(effect),
             Request::MinimizedSlots(slots) => self.set_minimized_slots(slots),
+            Request::Record { mode, delay } => self.start_recording(mode, delay),
+            Request::StopRecording => self.stop_recording(),
             Request::Agent(request) => self.agent_request(request),
             // 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
             Request::Session(request) => self.session_request(request),

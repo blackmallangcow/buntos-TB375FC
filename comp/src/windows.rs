@@ -563,7 +563,7 @@ impl BuntState {
 
 /// 그림을 긴 변이 `max` 픽셀 이하가 되게 줄인다. 작은 그림은 그대로 둔다. 줄인 픽셀은 그 자리에 든
 /// 원래 픽셀의 평균이다 (그린 그림은 알파를 미리 곱해 두었으므로 그대로 평균 내도 된다)
-fn shrink(image: Image, max: u32) -> Image {
+pub(crate) fn shrink(image: Image, max: u32) -> Image {
     let longest = image.width.max(image.height);
     if longest <= max || image.width == 0 || image.height == 0 {
         return image;
