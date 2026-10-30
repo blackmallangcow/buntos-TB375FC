@@ -90,6 +90,15 @@
     return Math.round(number);
   }
 
+  /** 정수 (데몬은 i64로 읽는다). 아무 값이나 넘기지 않는다 */
+  function integer(value, what) {
+    if (value === undefined) return undefined;
+    if (!Number.isSafeInteger(value)) {
+      throw new TypeError(`${what} needs a whole number (negative counts from the end), not ${inspect(value, true)}`);
+    }
+    return value;
+  }
+
   function text(value, what) {
     if (typeof value === 'number') return String(value);
     if (typeof value !== 'string') {
@@ -524,7 +533,7 @@
           name: o.name === undefined ? undefined : text(o.name, 'wait name'),
           window: o.window === undefined ? undefined : o.window === true ? '' : text(o.window, 'wait window'),
           exact: !!o.exact,
-          nth: o.nth,
+          nth: integer(o.nth, 'wait nth'),
           gone: !!o.gone,
           timeout_ms: millis(o.timeout, 'timeout'),
         }),
@@ -867,7 +876,7 @@
     }
 
     nth(index) {
-      if (!Number.isInteger(index)) throw new TypeError('nth needs a whole number (negative counts from the end)');
+      integer(index, 'nth');
       if (this.selector.ref) {
         if (index === 0 || index === -1) return this;
         throw new TypeError('a ref is one element; nth() goes with getByRole and getByText');

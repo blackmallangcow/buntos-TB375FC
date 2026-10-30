@@ -36,6 +36,8 @@ impl AsRawFd for Source {
 pub struct Lines<R> {
     inner: R,
     buffer: Vec<u8>,
+    /// buffer의 앞에서 이만큼은 줄바꿈이 없다 (긴 줄을 조각마다 처음부터 다시 훑지 않는다)
+    scanned: usize,
     /// 한 줄의 바이트 수 상한
     limit: usize,
 }
@@ -45,25 +47,34 @@ impl<R: Read + AsRawFd> Lines<R> {
         Lines {
             inner,
             buffer: Vec::new(),
+            scanned: 0,
             limit,
         }
     }
 
     /// 다음 줄(줄바꿈 뺀 것). 기한까지 오지 않으면 None이고, 건너편이 닫히면 UnexpectedEof다
     pub fn next(&mut self, deadline: Option<Instant>) -> io::Result<Option<String>> {
+        let too_long = || io::Error::new(io::ErrorKind::InvalidData, "the line is too long");
         loop {
-            if let Some(end) = self.buffer.iter().position(|&byte| byte == b'\n') {
+            let newline = self.buffer[self.scanned..]
+                .iter()
+                .position(|&byte| byte == b'\n');
+            if let Some(found) = newline {
+                let end = self.scanned + found;
+                // 상한은 줄이 한 조각에 끝나도 지킨다 (검토: 상한을 조금 넘는 줄이 지나갔다)
+                if end > self.limit {
+                    return Err(too_long());
+                }
                 let mut line: Vec<u8> = self.buffer.drain(..=end).collect();
                 line.pop();
+                self.scanned = 0;
                 return String::from_utf8(line)
                     .map(Some)
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not UTF-8"));
             }
+            self.scanned = self.buffer.len();
             if self.buffer.len() > self.limit {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "the line is too long",
-                ));
+                return Err(too_long());
             }
             if let Some(deadline) = deadline
                 && !readable(self.inner.as_raw_fd(), deadline)?
@@ -152,6 +163,15 @@ mod tests {
         let (reader, mut writer) = io::pipe().unwrap();
         let mut lines = Lines::new(reader, 16);
         writer.write_all(&[b'x'; 64]).unwrap();
+        let err = lines.next(None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        // 한 조각에 끝난 줄도
+        let (reader, mut writer) = io::pipe().unwrap();
+        let mut lines = Lines::new(reader, 16);
+        writer
+            .write_all(b"0123456789abcdef\n0123456789abcdefg\n")
+            .unwrap();
+        assert_eq!(lines.next(None).unwrap().unwrap().len(), 16);
         let err = lines.next(None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let (reader, mut writer) = io::pipe().unwrap();

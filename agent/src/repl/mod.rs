@@ -12,6 +12,8 @@
 //!   엔진이 뚫려도 파이프 말고는 아무것도 하지 못한다. 시간 상한을 넘겨 멈춘 워커는 죽인다
 //! - 워커가 청하는 데스크톱 호출은 여기서 허용 목록으로 거르고 Desk로 데몬에 넘긴다. 데몬은 부를 때마다 정책을 다시
 //!   읽어 클라이언트를 받고, 화면 잠금, 막은 앱, 사람만 답하는 창을 본다. 파일 쓰기(screenshot의 out)는 받지 않는다
+//! - 워커가 보낸 것은 믿지 않는다: 줄 길이와 JSON의 크기·깊이·값 수에 상한을 두고(worker::fits), 인자는 메서드마다
+//!   정한 꼴로만 읽는다
 
 pub mod pipe;
 pub mod sandbox;
@@ -26,7 +28,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::{Value, json};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, value::RawValue};
 
 use self::{
     pipe::{Lines, ReadFd, Source},
@@ -34,7 +37,10 @@ use self::{
 };
 use crate::{
     desk::{Desk, Failure},
-    protocol::{self, Repl, ReplImage, ReplParams, WaitParams},
+    protocol::{
+        self, ActParams, LaunchParams, Repl, ReplImage, ReplParams, ScreenshotParams,
+        SnapshotParams, WaitParams,
+    },
     wait,
 };
 
@@ -54,8 +60,9 @@ const IDLE: Duration = Duration::from_secs(60 * 60);
 /// 데몬 전체와 클라이언트 하나가 띄울 수 있는 REPL 수
 const TOTAL: usize = 8;
 const PER_CLIENT: usize = 4;
-/// 워커가 보내는 한 줄의 상한 (출력은 워커가 OUTPUT_LIMIT 글자로 자른다)
-const LINE_LIMIT: usize = 16 << 20;
+/// 워커가 보내는 한 줄의 상한. 맞게 도는 워커의 줄은 2MiB를 넘지 않는다: 출력(OUTPUT_LIMIT 글자)과 오류(ERROR_LIMIT
+/// 글자)는 JSON에서 글자마다 6바이트까지, 값과 인자는 JSON_LIMIT까지다
+const LINE_LIMIT: usize = 4 << 20;
 /// 답에 붙이는 스크린샷 수와 파일 하나의 크기 상한
 const IMAGES_KEPT: usize = 4;
 const IMAGE_LIMIT: u64 = 16 << 20;
@@ -273,7 +280,10 @@ impl Repls {
         Ok(Repl {
             output: done.output,
             error,
-            value: done.value,
+            // 크기를 본 값이라(drive) 트리로 풀어도 메모리가 크게 늘지 않는다
+            value: done
+                .value
+                .and_then(|value| serde_json::from_str(value.get()).ok()),
             fresh,
             ms: started.elapsed().as_millis() as u64,
             images: images(&bridge.shots, params.images),
@@ -396,10 +406,19 @@ fn drive(
             Err(err) => return Err(lost(true, err.to_string())),
         };
         heard = true;
+        // 인자와 값은 글 그대로 받는다 (serde_json은 RawValue를 되부르지 않고 훑는다)
         match serde_json::from_str::<FromWorker>(&line) {
-            Ok(FromWorker::Done(done)) => return Ok(done),
+            Ok(FromWorker::Done(done)) => {
+                if let Some(Err(why)) = done.value.as_ref().map(|value| worker::fits(value.get())) {
+                    return Err(lost(true, format!("it sent a value {why}")));
+                }
+                return Ok(done);
+            }
             Ok(FromWorker::Call { method, params }) => {
-                let reply = match bridge.call(&method, params) {
+                let reply = match bridge
+                    .call(&method, &params)
+                    .and_then(|value| to_raw(&value))
+                {
                     Ok(value) => Reply::Ok(value),
                     Err((code, message)) => Reply::Err { code, message },
                 };
@@ -422,13 +441,17 @@ struct Bridge<'a> {
 }
 
 impl Bridge<'_> {
-    fn call(&mut self, method: &str, params: Value) -> Result<Value, Failure> {
+    /// 워커가 청한 데스크톱 호출. 인자는 메서드마다 정한 꼴로만 읽고 모르는 키는 버린다: 값 트리를 만들지 않아 워커가
+    /// 데몬의 메모리를 부풀리지 못하고, 받지 않는 인자(파일 경로 같은)를 숨겨 보내지 못한다
+    fn call(&mut self, method: &str, params: &RawValue) -> Result<Value, Failure> {
         if !METHODS.contains(&method) {
             return Err((
                 protocol::METHOD_NOT_FOUND,
                 format!("the REPL cannot call {method:?}"),
             ));
         }
+        worker::fits(params.get())
+            .map_err(|why| invalid(format!("the arguments of {method} are {why}")))?;
         let left = self.deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err((
@@ -436,50 +459,72 @@ impl Bridge<'_> {
                 "this REPL call ran out of time; nothing more was done".into(),
             ));
         }
-        let mut params = match params {
-            Value::Object(params) => params,
-            Value::Null => serde_json::Map::new(),
-            _ => return Err(invalid("params must be an object".into())),
-        };
-        // ref와 diff는 REPL의 세션 것이다
-        params.insert("session".into(), json!(self.session));
         let left_ms = left.as_millis() as u64;
-        match method {
+        // ref와 diff는 REPL의 세션 것이다
+        let session = Some(self.session.to_string());
+        let params = match method {
+            "snapshot" => to_value(SnapshotParams {
+                session,
+                ..parse(params)?
+            })?,
+            "launch" => to_value(LaunchParams {
+                session,
+                ..parse(params)?
+            })?,
+            "act" => {
+                let act: ActParams = parse(params)?;
+                // 동작의 기다림은 남은 시간 안에서
+                let settle = act.settle_ms.unwrap_or(SETTLE_DEFAULT_MS).min(left_ms);
+                to_value(ActParams {
+                    session,
+                    settle_ms: Some(settle),
+                    ..act
+                })?
+            }
             "screenshot" => {
+                let shot: ScreenshotParams = parse(params)?;
                 // REPL은 파일을 쓰지 못한다. 스크린샷은 데몬의 스크린샷 폴더에 남고 경로가 답에 있다
-                if params.get("out").is_some_and(|out| !out.is_null()) {
+                if shot.out.is_some() {
                     return Err(invalid(
                         "the REPL cannot choose where files go: screenshot() saves into the \
                          screenshot folder and returns the path"
                             .into(),
                     ));
                 }
-                let shot = self.desk.call(method, Value::Object(params))?;
+                let shot = self.desk.call(method, to_value(shot)?)?;
                 if let Some(path) = shot["path"].as_str() {
                     self.shots.push(path.to_string());
                 }
                 return Ok(shot);
             }
-            "act" => {
-                // 동작의 기다림은 남은 시간 안에서
-                let settle = params
-                    .get("settle_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(SETTLE_DEFAULT_MS);
-                params.insert("settle_ms".into(), json!(settle.min(left_ms)));
-            }
             "wait" => {
-                let mut wait: WaitParams = serde_json::from_value(Value::Object(params))
-                    .map_err(|err| invalid(err.to_string()))?;
+                let mut wait: WaitParams = parse(params)?;
+                wait.session = session;
                 let timeout = wait.timeout_ms.unwrap_or(wait::DEFAULT_TIMEOUT_MS);
                 wait.timeout_ms = Some(timeout.min(left_ms));
-                let waited = wait::run(self.desk, &wait)?;
-                return serde_json::to_value(waited).map_err(|err| agent_error(err.to_string()));
+                return to_value(wait::run(self.desk, &wait)?);
             }
-            _ => {}
-        }
-        self.desk.call(method, Value::Object(params))
+            // apps, installed: 인자가 없다
+            _ => Value::Null,
+        };
+        self.desk.call(method, params)
     }
+}
+
+/// 워커가 보낸 인자를 메서드의 인자 꼴로 읽는다 (null은 기본값)
+fn parse<T: DeserializeOwned + Default>(params: &RawValue) -> Result<T, Failure> {
+    if params.get() == "null" {
+        return Ok(T::default());
+    }
+    serde_json::from_str(params.get()).map_err(|err| invalid(err.to_string()))
+}
+
+fn to_value(value: impl Serialize) -> Result<Value, Failure> {
+    serde_json::to_value(value).map_err(|err| agent_error(err.to_string()))
+}
+
+fn to_raw(value: &Value) -> Result<Box<RawValue>, Failure> {
+    serde_json::value::to_raw_value(value).map_err(|err| agent_error(err.to_string()))
 }
 
 /// 스크린샷 파일을 답에 붙인다. `data`면 base64로 넣는다 (MCP 어댑터가 그림으로 넘긴다)

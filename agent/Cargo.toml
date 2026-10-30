@@ -30,8 +30,8 @@ libc = "0.2"
 # REPL의 JS 엔진 QuickJS-ng (MIT, C 소스를 함께 빌드한다). std·os 모듈(파일, 프로세스)은 넣지 않는다
 rquickjs = { version = "0.14", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
-# 데몬과 CLI 사이의 JSON-RPC
-serde_json = "1"
+# 데몬과 CLI 사이의 JSON-RPC. raw_value: REPL 워커가 보낸 인자를 값 트리로 풀지 않고 받는다(메모리 부풀림 막기)
+serde_json = { version = "1", features = ["raw_value"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 접근성 버스(AT-SPI)와 세션 버스

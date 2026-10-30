@@ -268,7 +268,8 @@ Options:
   --session <name>         Your REPL and refs of this session (default: default)
   --timeout <ms>           Stop the code after this long (default 30000, at most 120000)
   --reset                  Start from a new REPL (forget the variables) before running
-  --json                   Print the reply as JSON
+  --json                   Print the reply as JSON (the last value as data when it fits in
+                           1 MiB, 100 levels and 50 000 values)
   --                       Everything after it is code
 
 The exit status is 1 when the code throws or the daemon refuses.

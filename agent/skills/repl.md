@@ -13,6 +13,7 @@ Electron apps alike. Run code with `bunt agent repl '<code>'` or the MCP tool `r
 
 - Top-level `await` works. The value of the last expression is printed, as in a console:
   strings as they are, results the way `bunt agent` prints them, other values as JSON.
+  `--json` also returns it as data when it fits in 1 MiB, 100 levels and 50 000 values.
 - Variables live between calls (for each AI and session). Top-level `const` and `let` may be
   declared again in a later call.
 - `console.log` prints. `setTimeout` works within a call.

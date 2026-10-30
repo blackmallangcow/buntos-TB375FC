@@ -26,7 +26,7 @@ use rquickjs::{
     Value, context::EvalOptions, promise::PromiseState,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, value::RawValue};
 
 use super::{pipe, sandbox, source};
 use crate::{desk::Failure, protocol};
@@ -41,6 +41,12 @@ pub const MAX_TIMEOUT: Duration = Duration::from_secs(120);
 const FORMAT_GRACE: Duration = Duration::from_secs(1);
 /// 출력(console과 값)의 글자 수 상한. 넘친 글은 버리고 버린 글자 수를 적는다
 pub const OUTPUT_LIMIT: usize = 100_000;
+/// 오류 글의 글자 수 상한
+pub const ERROR_LIMIT: usize = 10_000;
+/// 워커와 데몬이 주고받는 JSON(데스크톱 호출의 인자, 마지막 식의 값)의 바이트 수, 중첩 깊이, 값 수의 상한 (`fits`)
+pub const JSON_LIMIT: usize = 1 << 20;
+pub const JSON_DEPTH: usize = 100;
+pub const JSON_VALUES: usize = 50_000;
 /// 데몬이 보내는 한 줄의 상한 (스냅샷 트리, 앱 목록)
 const LINE_LIMIT: usize = 32 << 20;
 /// 이만큼 아무 호출도 없으면 워커가 스스로 끝난다. 데몬은 그 전에(repl::IDLE) 끝낸다
@@ -55,21 +61,22 @@ pub enum ToWorker {
     Reply(Reply),
 }
 
-/// 데스크톱 호출의 답
+/// 데스크톱 호출의 답. JSON은 값 트리로 풀지 않고 글 그대로 나른다
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
-    Ok(serde_json::Value),
+    Ok(Box<RawValue>),
     Err { code: i64, message: String },
 }
 
-/// 워커 → 데몬
+/// 워커 → 데몬. 데몬은 이것을 믿지 않는다: 인자와 값은 글 그대로 받아 크기를 보고(`fits`) 메서드마다 정한 꼴로만
+/// 읽는다(repl::Bridge)
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FromWorker {
     Call {
         method: String,
-        params: serde_json::Value,
+        params: Box<RawValue>,
     },
     Done(Done),
 }
@@ -79,14 +86,70 @@ pub enum FromWorker {
 pub struct Done {
     /// console 출력과 마지막 식의 값을 적은 글
     pub output: String,
-    /// 던진 오류
+    /// 던진 오류 (ERROR_LIMIT 글자까지)
     pub error: Option<String>,
-    /// 마지막 식의 값 (JSON으로 바꿀 수 있으면)
-    pub value: Option<serde_json::Value>,
+    /// 마지막 식의 값 (JSON으로 바꿀 수 있고 `fits`에 맞으면)
+    pub value: Option<Box<RawValue>>,
 }
 
 /// JS가 데스크톱을 부르는 길 (데몬에 묻는다)
-pub type Host = Box<dyn FnMut(&str, serde_json::Value) -> Result<serde_json::Value, Failure>>;
+pub type Host = Box<dyn FnMut(&str, Box<RawValue>) -> Result<Box<RawValue>, Failure>>;
+
+/// 워커와 데몬이 주고받는 JSON이 상한 안인지. 깊거나 값이 많은 JSON은 값 트리로 풀 때 바이트 수의 수십 배 메모리를
+/// 쓰고, 너무 깊으면 받는 쪽(serde_json은 128단까지)이 읽지 못한다. 상한을 넘으면 그 까닭(“larger than …”)을 준다
+pub fn fits(json: &str) -> Result<(), String> {
+    if json.len() > JSON_LIMIT {
+        return Err(format!("larger than {} KiB", JSON_LIMIT >> 10));
+    }
+    let (mut depth, mut deepest, mut values) = (0usize, 0usize, 1usize);
+    let (mut quoted, mut escaped) = (false, false);
+    for byte in json.bytes() {
+        if quoted {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => quoted = true,
+            b'[' | b'{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+                values += 1;
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            // 배열의 값과 객체의 키·값 짝은 쉼표로 가른다
+            b',' => values += 1,
+            _ => {}
+        }
+    }
+    if deepest > JSON_DEPTH {
+        return Err(format!("nested more than {JSON_DEPTH} levels deep"));
+    }
+    if values > JSON_VALUES {
+        return Err(format!("made of more than {JSON_VALUES} values"));
+    }
+    Ok(())
+}
+
+/// JS가 만든 JSON을 보낼 꼴로: 상한을 넘거나 JSON이 아니면 그 까닭
+fn bounded(json: String) -> Result<Box<RawValue>, String> {
+    fits(&json)?;
+    RawValue::from_string(json).map_err(|err| err.to_string())
+}
+
+/// 글을 `limit` 글자로 자르고 자른 글자 수를 적는다
+fn shorten(mut text: String, limit: usize) -> String {
+    if let Some((cut, _)) = text.char_indices().nth(limit) {
+        let dropped = text[cut..].chars().count();
+        text.truncate(cut);
+        text.push_str(&format!("…[+{dropped} chars]"));
+    }
+    text
+}
 
 /// 출력: console 줄과 값. OUTPUT_LIMIT 글자를 넘는 것은 버리고 센다
 #[derive(Default)]
@@ -137,15 +200,23 @@ struct State {
 }
 
 impl State {
-    /// native.call: 데몬에 묻고 답을 `{"ok": …}`나 `{"err": {"code", "message"}}` JSON으로 준다
-    fn call(&self, method: &str, params: &str) -> String {
-        let params = serde_json::from_str(params).unwrap_or(serde_json::Value::Null);
-        let reply = (self.host.borrow_mut())(method, params);
+    /// native.call: 데몬에 묻고 답을 `{"ok": …}`나 `{"err": {"code", "message"}}` JSON으로 준다. 상한을 넘는
+    /// 인자는 보내지 않는다(데몬은 그런 줄을 받으면 워커를 끝낸다)
+    fn call(&self, method: &str, params: String) -> String {
+        let reply = bounded(params)
+            .map_err(|why| {
+                (
+                    protocol::INVALID_PARAMS,
+                    format!("the arguments of {method} are {why}"),
+                )
+            })
+            .and_then(|params| (self.host.borrow_mut())(method, params));
         match reply {
-            Ok(value) => json!({ "ok": value }),
-            Err((code, message)) => json!({ "err": { "code": code, "message": message } }),
+            Ok(value) => format!("{{\"ok\":{}}}", value.get()),
+            Err((code, message)) => {
+                json!({ "err": { "code": code, "message": message } }).to_string()
+            }
         }
-        .to_string()
     }
 
     fn timer(&self, id: u32, ms: f64) {
@@ -202,7 +273,7 @@ impl Engine {
                 let native = Object::new(ctx.clone()).map_err(failed)?;
                 let calls = state.clone();
                 let call = Function::new(ctx.clone(), move |method: String, params: String| {
-                    calls.call(&method, &params)
+                    calls.call(&method, params)
                 });
                 native.set("call", call.map_err(failed)?).map_err(failed)?;
                 let prints = state.clone();
@@ -380,7 +451,8 @@ fn finish<'js>(
             let error = match stop {
                 Stop::TimeLimit => time_limit(timeout),
                 Stop::Thrown(_) if late => time_limit(timeout),
-                Stop::Thrown(error) => hint(describe(hooks, error)),
+                // 오류 글도 줄이 넘치지 않게 자른다 (출력처럼)
+                Stop::Thrown(error) => hint(shorten(describe(hooks, error), ERROR_LIMIT)),
                 Stop::NeverSettles => "the code awaits a promise that never settles (no timers \
                                        are left to settle it)"
                     .into(),
@@ -408,7 +480,8 @@ fn finish<'js>(
     Done {
         output: String::new(),
         error: None,
-        value: json.and_then(|json| serde_json::from_str(&json).ok()),
+        // 상한을 넘는 값은 글(output)로만 보인다
+        value: json.and_then(|json| bounded(json).ok()),
     }
 }
 
@@ -445,11 +518,7 @@ struct Io<R> {
 
 impl<R: Read + AsRawFd> Io<R> {
     /// 데몬에 데스크톱 호출을 보내고 답을 기다린다 (데몬이 정책을 보고 대신 한다)
-    fn call(
-        &mut self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, Failure> {
+    fn call(&mut self, method: &str, params: Box<RawValue>) -> Result<Box<RawValue>, Failure> {
         let gone = |err: io::Error| {
             (
                 protocol::AGENT_ERROR,

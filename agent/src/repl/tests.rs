@@ -6,6 +6,8 @@
 
 use std::{sync::Mutex, thread};
 
+use serde_json::json;
+
 use super::*;
 
 type Answer = Box<dyn Fn(&str, &Value) -> Result<Value, Failure> + Send + Sync>;
@@ -318,9 +320,10 @@ fn playwright_names_become_daemon_calls() {
         (acts[3]["keys"].as_bool(), acts[3]["keep_focus"].as_bool()),
         (Some(true), Some(true))
     );
-    assert_eq!(acts[4]["at"], json!([10, 20]));
-    assert_eq!(acts[5]["amount"], json!([0, 3]));
-    assert_eq!(acts[6]["amount"], json!([0, -2]));
+    // 인자는 데몬의 꼴(ActParams)로 읽어 넘긴다: 좌표와 눈금은 실수다
+    assert_eq!(acts[4]["at"], json!([10.0, 20.0]));
+    assert_eq!(acts[5]["amount"], json!([0.0, 3.0]));
+    assert_eq!(acts[6]["amount"], json!([0.0, -2.0]));
     // 모르는 선택지는 받을 수 있는 것과 함께 알린다
     let wrong = run(
         &repls,
@@ -403,6 +406,11 @@ fn get_by_role_finds_one_ref_or_says_which() {
     assert!(peeks >= 5, "{peeks}");
 }
 
+/// 워커가 보낸 인자 (JSON 글 그대로)
+fn raw(value: Value) -> Box<RawValue> {
+    serde_json::value::to_raw_value(&value).unwrap()
+}
+
 #[test]
 fn the_bridge_lets_through_only_desktop_calls() {
     let desk = desktop();
@@ -413,26 +421,152 @@ fn the_bridge_lets_through_only_desktop_calls() {
         shots: Vec::new(),
     };
     for method in ["repl", "skills", "exec", ""] {
-        let refused = bridge.call(method, json!({})).unwrap_err();
+        let refused = bridge.call(method, &raw(json!({}))).unwrap_err();
         assert_eq!(refused.0, protocol::METHOD_NOT_FOUND, "{method}");
     }
     let file = bridge
-        .call("screenshot", json!({ "out": "/home/user/.bashrc" }))
+        .call("screenshot", &raw(json!({ "out": "/home/user/.bashrc" })))
         .unwrap_err();
     assert_eq!(file.0, protocol::INVALID_PARAMS);
+    // 꼴이 다르거나 너무 깊거나 큰 인자는 넘기지 않는다
+    let mut deep = json!(0);
+    for _ in 0..200 {
+        deep = json!([deep]);
+    }
+    for params in [
+        json!({ "nth": deep }),
+        json!({ "nth": "first" }),
+        json!("text"),
+        json!({ "text": "x".repeat(worker::JSON_LIMIT) }),
+    ] {
+        let refused = bridge.call("wait", &raw(params)).unwrap_err();
+        assert_eq!(refused.0, protocol::INVALID_PARAMS, "{}", refused.1);
+    }
     assert!(desk.calls().is_empty(), "nothing reached the daemon");
-    // 세션은 REPL의 것으로 바꾼다
+    // 세션은 REPL의 것으로 바꾸고, 메서드가 받지 않는 키는 넘기지 않는다
     bridge
-        .call("snapshot", json!({ "session": "other", "app": "calc" }))
+        .call(
+            "snapshot",
+            &raw(json!({ "session": "other", "app": "calc", "out": "/tmp/x" })),
+        )
         .unwrap();
-    assert_eq!(desk.calls()[0].1["session"], "s");
+    let sent = &desk.calls()[0].1;
+    assert_eq!(
+        (&sent["session"], &sent["app"]),
+        (&json!("s"), &json!("calc"))
+    );
+    assert!(sent.get("out").is_none(), "{sent}");
     // 남은 시간이 없으면 더 하지 않는다
     bridge.deadline = Instant::now();
     assert_eq!(
-        bridge.call("act", json!({})).unwrap_err().0,
+        bridge.call("act", &raw(json!({}))).unwrap_err().0,
         protocol::TIMEOUT
     );
     assert_eq!(desk.calls().len(), 1);
+}
+
+#[test]
+fn what_the_js_sends_and_returns_is_bounded() {
+    let repls = repls();
+    let desk = desktop();
+    run(&repls, &desk, "const kept = 1");
+    // nth에 아무 값이나 넘기지 않는다 (검토: 깊은 객체가 데몬의 메모리를 수백 MB로 부풀렸다)
+    let nested = run(
+        &repls,
+        &desk,
+        "let o = { a: 0 }; for (let i = 0; i < 20; i++) o = [o, o]; await desktop.wait({ text: 'x', nth: o, timeout: 0 })",
+    );
+    let error = nested.error.unwrap();
+    assert!(
+        error.starts_with("TypeError: wait nth needs a whole number"),
+        "{error}"
+    );
+    // 상한을 넘는 인자는 워커가 보내지 않는다
+    let long = run(
+        &repls,
+        &desk,
+        "await desktop.app('a').locator('e1').fill('x'.repeat(2 << 20))",
+    );
+    let error = long.error.unwrap();
+    assert!(
+        error.starts_with("DesktopError: the arguments of act are larger than 1024 KiB"),
+        "{error}"
+    );
+    // 긴 오류 글은 잘라 보낸다 (검토: 줄 상한을 넘겨 REPL을 잃었다)
+    let thrown = run(&repls, &desk, "throw new Error('\\x01'.repeat(3e6))");
+    let error = thrown.error.unwrap();
+    assert!(error.chars().count() < worker::ERROR_LIMIT + 30);
+    assert!(error.ends_with(" chars]"), "{}", &error[error.len() - 40..]);
+    // JSON으로 넘기기에 너무 깊은 값은 글로만 보인다 (검토: 126~127단이면 REPL을 잃었다)
+    let deep = run(
+        &repls,
+        &desk,
+        "let v = 0; for (let i = 0; i < 127; i++) v = [v]; v",
+    );
+    assert_eq!(deep.value, None);
+    assert!(deep.output.starts_with("[\n  [\n"), "{:.20}", deep.output);
+    let deepest = run(
+        &repls,
+        &desk,
+        "v = 0; for (let i = 0; i < worker_depth; i++) v = [v]; v"
+            .replace("worker_depth", &worker::JSON_DEPTH.to_string())
+            .as_str(),
+    );
+    assert!(deepest.value.is_some());
+    let many = run(&repls, &desk, "Array(60000).fill(0)");
+    assert_eq!(many.value, None);
+    // REPL은 그대로다
+    assert_eq!(run(&repls, &desk, "kept").output, "1\n");
+}
+
+/// 코드를 받으면 `line`을 보내는 워커: 엔진이 뚫린 워커를 흉내 낸다
+fn sends(line: String) -> Spawn {
+    Box::new(move || {
+        let (from_daemon, to_worker) = io::pipe()?;
+        let (from_worker, mut to_daemon) = io::pipe()?;
+        let line = line.clone();
+        thread::spawn(move || {
+            let mut lines = Lines::new(from_daemon, 1 << 30);
+            if lines.next(None).is_ok() {
+                let _ = to_daemon.write_all(line.as_bytes());
+            }
+            let _ = lines.next(None);
+        });
+        Ok(Worker::new(
+            Box::new(to_worker),
+            Box::new(from_worker),
+            None,
+        ))
+    })
+}
+
+#[test]
+fn the_daemon_does_not_trust_what_a_worker_sends() {
+    let desk = desktop();
+    let deep = format!(
+        "{{\"done\":{{\"output\":\"\",\"error\":null,\"value\":{}0{}}}}}\n",
+        "[".repeat(200),
+        "]".repeat(200)
+    );
+    let long = format!("{}\n", " ".repeat(LINE_LIMIT + 1));
+    for (line, why) in [
+        (deep, "it sent a value nested more than 100 levels deep"),
+        (long, "the line is too long"),
+    ] {
+        let repls = Repls::new(sends(line));
+        let failure = repls
+            .run(
+                &desk,
+                "claude",
+                ReplParams {
+                    code: "1".into(),
+                    ..ReplParams::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(failure.0, protocol::AGENT_ERROR);
+        assert!(failure.1.contains(why), "{}", failure.1);
+    }
 }
 
 #[test]
