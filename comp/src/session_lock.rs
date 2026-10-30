@@ -323,8 +323,10 @@ impl BuntState {
             drawing: HashSet::new(),
             previous_focus,
         });
-        // 잠금 표면이 생길 때까지는 아무도 키를 받지 않는다
+        // 잠금 표면이 생길 때까지는 아무도 키를 받지 않는다. 조합하던 글자는 다른 포커스 이동처럼 앱에 확정한다
+        // (ime.rs). 잠그기 전에 사람이 친 글이다
         if let Some(keyboard) = keyboard {
+            self.commit_preedit_before_focus(None);
             keyboard.set_focus(self, None, serial);
         }
         self.refresh_pointer_focus();
