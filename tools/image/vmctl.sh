@@ -28,12 +28,37 @@
 # 빌드 VM에 렌더 노드(/dev/dri/renderD*, VMCTL_RENDERNODE로 고른다)와 QEMU의 OpenGL 모듈
 # (qemu-system-modules-opengl, tools/devvm/setup.sh)이 있어야 한다. GPU가 없는 빌드 VM(Lima)은 vgem 커널
 # 모듈로 렌더 노드를 만들고, 그때 빌드 VM은 llvmpipe(CPU)로 그린다. 기본값(빈 값)은 3D 없는 virtio-gpu다.
+# 보드는 BOARD(기본 qemu-aarch64)로 고른다. BOARD=x86_64-generic이면 q35 기계와 OVMF로 띄우고, 빌드 VM과
+# 아키텍처가 다르면(Apple Silicon의 빌드 VM) KVM 없이 소프트웨어 에뮬레이션(TCG)으로 띄워 느리다.
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 board=${BOARD:-qemu-aarch64}
 build_root="${BUNTOS_BUILD_DIR:-$HOME/buntos-build}"
 work="$build_root/vm-${VMCTL_ID:-dbg}"
+
+# 보드의 아키텍처에 따른 QEMU와 UEFI 펌웨어(tools/devvm/setup.sh의 qemu-efi-aarch64, ovmf). 전에는 aarch64로
+# 정해 두었다. x86-64는 보안 부팅 없는 OVMF라 SMM이 필요 없다
+case "$(sed -n 's/^Architecture=//p' "$repo/bsp/$board/mkosi.conf" 2>/dev/null)" in
+arm64)
+	qemu=qemu-system-aarch64 machine=virt host_arch=aarch64
+	firmware_code=/usr/share/AAVMF/AAVMF_CODE.fd firmware_vars=/usr/share/AAVMF/AAVMF_VARS.fd
+	;;
+x86-64)
+	qemu=qemu-system-x86_64 machine=q35 host_arch=x86_64
+	firmware_code=/usr/share/OVMF/OVMF_CODE_4M.fd firmware_vars=/usr/share/OVMF/OVMF_VARS_4M.fd
+	;;
+*)
+	echo "bsp/$board/mkosi.conf의 Architecture=를 모른다" >&2
+	exit 2
+	;;
+esac
+# 빌드 VM과 아키텍처가 같고 KVM이 있으면 KVM, 아니면 TCG로 돌린다
+if [[ "$(uname -m)" == "$host_arch" && -e /dev/kvm ]]; then
+	accel=(-accel kvm -cpu host)
+else
+	accel=(-accel tcg -cpu max)
+fi
 
 clean() { sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\r//g' "$work/console.log"; }
 
@@ -105,7 +130,7 @@ start)
 	disk_size=${VMCTL_DISK_SIZE-16G}
 	qemu-img create -q -f qcow2 -F raw -b "$image" "$work/disk.qcow2" ${disk_size:+"$disk_size"}
 	exec 7>&-
-	cp /usr/share/AAVMF/AAVMF_VARS.fd "$work/vars.fd"
+	cp "$firmware_vars" "$work/vars.fd"
 	account=${VMCTL_ACCOUNT-buntos:buntOS:buntos}
 	printf '%s' "$account" >"$work/account"
 	credential=()
@@ -120,7 +145,7 @@ start)
 		gpu=(-device virtio-gpu-pci -nographic)
 		;;
 	virgl)
-		if ! qemu-system-aarch64 -device help 2>/dev/null | grep -q '"virtio-gpu-gl-pci"'; then
+		if ! "$qemu" -device help 2>/dev/null | grep -q '"virtio-gpu-gl-pci"'; then
 			echo "QEMU에 virtio-gpu-gl-pci가 없다. qemu-system-modules-opengl을 설치한다(tools/devvm/setup.sh)" >&2
 			exit 1
 		fi
@@ -142,13 +167,13 @@ start)
 		;;
 	esac
 	# shellcheck disable=SC2086 # VMCTL_QEMU_ARGS는 일부러 낱말로 나눈다
-	qemu-system-aarch64 -machine virt -accel kvm -cpu host -smp "${VMCTL_CPUS:-2}" -m 2048M \
+	"$qemu" -machine "$machine" "${accel[@]}" -smp "${VMCTL_CPUS:-2}" -m 2048M \
 		-nodefaults -no-user-config \
 		-object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0 \
 		-nic user,model=virtio-net-pci \
 		-chardev stdio,mux=on,id=console,signal=off \
 		-device virtio-serial-pci -device virtconsole,chardev=console -mon console \
-		-drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd \
+		-drive if=pflash,format=raw,readonly=on,file="$firmware_code" \
 		-drive if=pflash,format=raw,file="$work/vars.fd" \
 		-drive if=none,id=disk,format=qcow2,discard=unmap,file="$work/disk.qcow2" \
 		-device virtio-blk-pci,drive=disk,bootindex=1 \
