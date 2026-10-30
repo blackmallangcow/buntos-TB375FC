@@ -440,18 +440,12 @@ fn answer(
     reply(request.id, result)
 }
 
-/// REPL의 주인: 같은 AI(실행 파일과 스크립트)의 호출만 같은 REPL의 변수를 본다
+/// REPL의 주인: 같은 AI(실행 파일과 스크립트)의 호출만 같은 REPL의 변수를 본다. 경로는 Debug 꼴(따옴표와
+/// 이스케이프)로 적어 서로 다른 AI가 같은 글이 되지 않는다 (검토: 줄바꿈으로 이어 붙여, 경로에 줄바꿈이 든 다른 AI와
+/// 같은 글이 될 수 있었다)
 fn repl_owner(client: Option<&Client>) -> String {
     client.map_or_else(String::new, |client| {
-        format!(
-            "{}\n{}\n{}",
-            client.exe.display(),
-            client
-                .script
-                .as_deref()
-                .map_or_else(String::new, |script| script.display().to_string()),
-            client.admin
-        )
+        format!("{:?}", (&client.exe, &client.script, client.admin))
     })
 }
 
@@ -2742,6 +2736,14 @@ mod tests {
         let mut admin = claude();
         admin.admin = true;
         assert_ne!(repl_owner(Some(&claude())), repl_owner(Some(&admin)));
+        // 경로의 줄바꿈으로 실행 파일과 스크립트의 경계를 꾸미지 못한다
+        let mut joined = claude();
+        joined.exe = PathBuf::from("/a\n/b");
+        joined.script = None;
+        let mut split = claude();
+        split.exe = PathBuf::from("/a");
+        split.script = Some(PathBuf::from("/b\n"));
+        assert_ne!(repl_owner(Some(&joined)), repl_owner(Some(&split)));
     }
 
     #[test]
