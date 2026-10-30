@@ -493,6 +493,8 @@ impl BuntState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
+        // 커서를 옮겨 그린다 (에이전트가 옮긴 포인터도 여기로 온다)
+        self.queue_redraw_all();
         let serial = SERIAL_COUNTER.next_serial();
         // 스크린샷 영역을 고르는 동안에는 포인터만 옮기고 앱에는 보내지 않는다
         if self.screenshot_pointer_moved(pos) {

@@ -272,6 +272,8 @@ impl BuntState {
             .insert_source(request_channel, |event, _, state| {
                 if let channel::Event::Msg(request) = event {
                     state.handle_request(request);
+                    // 셸과 에이전트의 요청은 창을 내리거나 올리고 포인터를 옮긴다
+                    state.queue_redraw_all();
                 }
             })
             .map_err(|err| err.error)?;
@@ -307,8 +309,10 @@ impl BuntState {
                 Generic::new(display, Interest::READ, Mode::Level),
                 |_, display, state| {
                     // 안전: 이벤트 소스가 살아 있는 동안 display를 버리지 않는다
-                    unsafe {
-                        display.get_mut().dispatch_clients(state).unwrap();
+                    let dispatched = unsafe { display.get_mut().dispatch_clients(state).unwrap() };
+                    // 커밋 말고도 표면을 지우거나 커서 모양을 바꾸는 요청이 화면을 바꾼다
+                    if dispatched > 0 {
+                        state.queue_redraw_all();
                     }
                     Ok(PostAction::Continue)
                 },
@@ -857,6 +861,12 @@ impl BuntState {
             .unwrap_or((false, false))
     }
 
+    /// 막대가 미끄러지는 중이다 (udev.rs의 is_animating)
+    pub fn bars_sliding(&self) -> bool {
+        let now = Instant::now();
+        self.bars.iter().any(|bar| bar.sliding(now))
+    }
+
     /// 막대를 숨길지 꺼낼지 다시 정한다 (panels.rs). 포인터가 움직일 때(`pointer`는 새 위치), 화면을
     /// 그릴 때, 숨기기를 기다리던 때가 됐을 때 부른다
     pub fn update_bars(&mut self, pointer: Option<Point<f64, Logical>>) {
@@ -930,6 +940,7 @@ impl BuntState {
             .insert_source(Timer::from_deadline(at), |_, _, state| {
                 state.bar_timer = None;
                 state.update_bars(None);
+                state.queue_redraw_all();
                 TimeoutAction::Drop
             });
         self.bar_timer = token.ok().map(|token| (token, at));
@@ -1048,6 +1059,7 @@ impl BuntState {
                 .insert_source(Timer::from_duration(REFILL_DELAY), |_, _, state| {
                     state.refill_timer = None;
                     state.refill_windows();
+                    state.queue_redraw_all();
                     TimeoutAction::Drop
                 });
         match token {
@@ -1286,6 +1298,8 @@ impl CompositorHandler for BuntState {
         if self.is_layer_surface(surface) {
             self.watch_window_areas();
         }
+        // dmabuf를 기다렸다 받은 커밋도 여기로 온다 (new_surface)
+        self.queue_redraw_all();
     }
 }
 

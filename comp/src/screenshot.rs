@@ -289,6 +289,8 @@ impl BuntState {
                 && !state.session_lock.is_locked()
             {
                 then(state);
+                // 화면을 찍는 것은 다음 프레임을 그릴 때다 (udev.rs의 render_output)
+                state.queue_redraw_all();
             }
             TimeoutAction::Drop
         }) {

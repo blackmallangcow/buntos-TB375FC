@@ -331,6 +331,8 @@ impl BuntState {
         }
         self.refresh_pointer_focus();
         self.publish_lock(true);
+        // logind의 Lock 신호처럼 입력이나 커밋 없이 잠글 때도 바로 가린다
+        self.queue_redraw_all();
     }
 
     /// 잠금을 푼다. 잠금을 확인받은 잠금 객체의 unlock_and_destroy로만 온다
@@ -352,6 +354,7 @@ impl BuntState {
         self.refresh_layer_focus();
         self.refresh_pointer_focus();
         self.publish_lock(false);
+        self.queue_redraw_all();
     }
 
     /// 잠긴 상태를 D-Bus 사본과 신호, logind의 LockedHint로 알린다

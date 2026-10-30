@@ -67,7 +67,7 @@ use smithay::{
         wayland_server::{Display, backend::GlobalId, protocol::wl_surface::WlSurface},
     },
     utils::{DeviceFd, IsAlive, Logical, Physical, Point, Scale, Size, Transform},
-    wayland::compositor::{SurfaceData, with_states},
+    wayland::compositor::{SurfaceAttributes, SurfaceData, with_states},
 };
 
 use crate::{
@@ -88,10 +88,11 @@ type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
 type Elements = OutputRenderElements;
 
-/// 화면 갱신이 없을 때 다시 확인하는 간격
-const IDLE_REDRAW: Duration = Duration::from_millis(16);
-/// 이보다 오래 걸린 프레임은 디버그 기록에 남긴다 (RUST_LOG=bunt_comp=debug)
-const SLOW_FRAME: Duration = Duration::from_millis(12);
+/// 화면의 주사율을 모를 때 프레임 사이의 간격 (60Hz)
+const DEFAULT_FRAME: Duration = Duration::from_micros(16_667);
+/// 바뀐 것 없는 프레임이 이만큼 이어지면 렌더 루프가 쉰다. 다음 커밋, 입력, 요청이 깨운다(queue_redraw_all).
+/// 전에는 바뀐 것이 없어도 16ms마다 다시 그려, 가만히 둔 화면에서도 1초에 약 62번 깨어났다
+const IDLE_AFTER: u32 = 2;
 /// 소프트웨어 렌더러에서 프레임 사이의 최소 간격 (60Hz)
 const SOFTWARE_FRAME: Duration = Duration::from_micros(16_667);
 /// 소프트웨어 렌더러에서 앞에 있지 않은 창에 프레임 알림을 보내는 간격 (30Hz)
@@ -177,8 +178,30 @@ struct OutputSurface {
     frame_pending: bool,
     /// 마지막으로 프레임을 내보낸 때 (소프트웨어 렌더러의 60Hz 제한)
     rendered_at: Option<Instant>,
-    redraw_timer: Option<RegistrationToken>,
+    /// 마지막으로 그려 본 때(바뀐 것이 없어 내보내지 않은 프레임 포함). 다시 그리기를 한 프레임 간격 넘게 띄운다
+    tried_at: Option<Instant>,
+    /// 바뀐 것 없이 이어진 프레임 수 (IDLE_AFTER)
+    idle_frames: u32,
+    /// 잡아 둔 다시 그리기와 그 시각
+    redraw_timer: Option<(RegistrationToken, Instant)>,
     global: GlobalId,
+}
+
+impl OutputSurface {
+    /// 프레임 사이의 간격: 화면의 주사율. 소프트웨어 렌더러는 60Hz보다 자주 그리지 않는다
+    fn frame_interval(&self, cpu_composited: bool) -> Duration {
+        let interval = u64::try_from(WlMode::from(self.mode).refresh)
+            .ok()
+            .filter(|millihertz| *millihertz > 0)
+            .map_or(DEFAULT_FRAME, |millihertz| {
+                Duration::from_nanos(1_000_000_000_000 / millihertz)
+            });
+        if cpu_composited {
+            interval.max(SOFTWARE_FRAME)
+        } else {
+            interval
+        }
+    }
 }
 
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
@@ -352,7 +375,9 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                     InputEvent::DeviceRemoved { device } => state.pointer_device_removed(device),
                     _ => {}
                 }
-                state.process_input_event(event)
+                state.process_input_event(event);
+                // 키와 단추는 컴포지터가 그리는 것(스크린샷 영역, 막대, 창 자리)도 바꾼다
+                state.queue_redraw_all();
             },
         )
         .map_err(|err| err.error)?;
@@ -572,6 +597,8 @@ impl BuntState {
                 wallpaper,
                 frame_pending: false,
                 rendered_at: None,
+                tried_at: None,
+                idle_frames: 0,
                 redraw_timer: None,
                 global,
             },
@@ -630,6 +657,8 @@ impl BuntState {
         }
         let before = self.backend.outputs.len();
         self.scan_connectors();
+        // 새로 꽂은 화면은 아직 그린 적이 없다
+        self.queue_redraw_all();
         if changed || self.backend.outputs.len() != before {
             self.refit_windows();
             self.publish_outputs();
@@ -641,7 +670,7 @@ impl BuntState {
             return;
         };
         tracing::info!("output {} disconnected", surface.output.name());
-        if let Some(token) = surface.redraw_timer {
+        if let Some((token, _)) = surface.redraw_timer {
             self.loop_handle.remove(token);
         }
         for layer in layer_map_for_output(&surface.output).layers() {
@@ -824,20 +853,23 @@ impl BuntState {
         self.render_output(crtc);
     }
 
-    fn schedule_redraw(&mut self, crtc: crtc::Handle) {
-        self.schedule_redraw_after(crtc, IDLE_REDRAW);
-    }
-
+    /// `delay` 뒤에 그 화면을 그린다. 그보다 이르게 잡아 둔 다시 그리기가 있으면 그것을 쓰고, 늦게 잡아 둔
+    /// 것(가려진 창의 프레임 알림)은 앞당긴다
     fn schedule_redraw_after(&mut self, crtc: crtc::Handle, delay: Duration) {
         let Some(surface) = self.backend.outputs.get_mut(&crtc) else {
             return;
         };
-        if surface.redraw_timer.is_some() {
-            return;
+        let deadline = Instant::now() + delay;
+        if let Some((token, at)) = surface.redraw_timer {
+            if at <= deadline {
+                return;
+            }
+            self.loop_handle.remove(token);
+            surface.redraw_timer = None;
         }
         let token =
             self.loop_handle
-                .insert_source(Timer::from_duration(delay), move |_, _, state| {
+                .insert_source(Timer::from_deadline(deadline), move |_, _, state| {
                     if let Some(surface) = state.backend.outputs.get_mut(&crtc) {
                         surface.redraw_timer = None;
                     }
@@ -845,7 +877,7 @@ impl BuntState {
                     TimeoutAction::Drop
                 });
         match token {
-            Ok(token) => surface.redraw_timer = Some(token),
+            Ok(token) => surface.redraw_timer = Some((token, deadline)),
             Err(err) => tracing::warn!("failed to schedule redraw: {}", err.error),
         }
     }
@@ -983,6 +1015,7 @@ impl BuntState {
             cursor_key,
             blur,
             background_effects,
+            rendering,
             ..
         } = &mut self.backend;
         let Some(surface) = outputs.get_mut(&crtc) else {
@@ -1139,12 +1172,14 @@ impl BuntState {
             }
         };
 
+        // 한 프레임 간격보다 오래 걸린 프레임은 디버그 기록에 남긴다 (RUST_LOG=bunt_comp=debug)
+        let interval = surface.frame_interval(rendering.cpu_composited);
         let started = std::time::Instant::now();
         let rendered = surface
             .drm_output
             .render_frame(renderer, &elements, CLEAR_COLOR, flags);
         let elapsed = started.elapsed();
-        if elapsed > SLOW_FRAME {
+        if elapsed > interval {
             tracing::debug!("slow frame on {}: {elapsed:?}", output.name());
         }
         // 흐림 셰이더를 만들지 못했으면 앱에도 흐림이 없다고 알린다
@@ -1169,9 +1204,14 @@ impl BuntState {
             }
         };
         surface.frame_pending = queued;
+        surface.tried_at = Some(Instant::now());
         if queued {
-            surface.rendered_at = Some(Instant::now());
+            surface.rendered_at = surface.tried_at;
+            surface.idle_frames = 0;
+        } else {
+            surface.idle_frames = surface.idle_frames.saturating_add(1);
         }
+        let idle_frames = surface.idle_frames;
         if let Some(states) = &states {
             self.note_visible_surfaces(&output, states);
         }
@@ -1227,9 +1267,51 @@ impl BuntState {
             );
         }
 
-        // 새로 보낸 프레임이 없으면 플립 이벤트가 오지 않으므로 잠시 뒤 다시 확인한다
+        // 새로 보낸 프레임이 없으면 플립 이벤트가 오지 않는다. 애니메이션이 돌거나 방금 바뀐 것이 있었으면
+        // 한 프레임 뒤에 다시 그리고, 아니면 쉰다. 쉬는 동안에도 프레임 알림을 기다리는 표면이 있으면 알림을
+        // 보낼 때 깨어난다
         if !queued {
-            self.schedule_redraw(crtc);
+            if self.is_animating() || idle_frames < IDLE_AFTER {
+                self.schedule_redraw_after(crtc, interval);
+            } else if let Some(wait) = self.frame_callback_wait(&output) {
+                self.schedule_redraw_after(crtc, wait);
+            }
+        }
+    }
+
+    /// 프레임 알림을 기다리는 표면이 남았으면 다음 알림까지 기다릴 시간. 이번 프레임에 보인 표면은 늘 알림을
+    /// 받으므로, 남는 것은 소프트웨어 렌더러에서 앞에 있지 않은 창(BACKGROUND_FRAME)과 가려진 표면
+    /// (HIDDEN_FRAME_INTERVAL)이다
+    fn frame_callback_wait(&self, output: &Output) -> Option<Duration> {
+        let (mut visible, mut hidden) = (false, false);
+        let mut waiting = |surface: &WlSurface, states: &SurfaceData| {
+            let pending = !states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .frame_callbacks
+                .is_empty();
+            if !pending {
+                return;
+            }
+            if surface_primary_scanout_output(surface, states).as_ref() == Some(output) {
+                visible = true;
+            } else {
+                hidden = true;
+            }
+        };
+        for window in self.space.elements() {
+            window.with_surfaces(&mut waiting);
+        }
+        for layer in layer_map_for_output(output).layers() {
+            layer.with_surfaces(&mut waiting);
+        }
+        if visible {
+            Some(BACKGROUND_FRAME)
+        } else if hidden {
+            HIDDEN_FRAME_INTERVAL
+        } else {
+            None
         }
     }
 }
@@ -1438,6 +1520,42 @@ fn device_info(device: &InputDevice) -> PointerDevice {
         product: device.id_product(),
         bus,
         touchpad: device.config_tap_finger_count() > 0,
+    }
+}
+
+impl BuntState {
+    /// 화면이 바뀌었다(앱의 커밋, 입력, 셸과 에이전트의 요청, 창과 막대의 변화). 화면마다 다음 프레임을 그린다.
+    /// 프레임을 낸 화면은 플립 뒤(frame_finish)에 이어 그리고, 쉬던 화면은 한 프레임 간격을 띄워 그린다.
+    /// 컴포지터가 직접 그리는 것(선택 사각형, 효과)이 바뀌어도 부른다
+    pub fn queue_redraw_all(&mut self) {
+        let crtcs: Vec<_> = self.backend.outputs.keys().copied().collect();
+        for crtc in crtcs {
+            self.queue_redraw(crtc);
+        }
+    }
+
+    fn queue_redraw(&mut self, crtc: crtc::Handle) {
+        let cpu_composited = self.backend.rendering.cpu_composited;
+        let Some(surface) = self.backend.outputs.get_mut(&crtc) else {
+            return;
+        };
+        surface.idle_frames = 0;
+        if surface.frame_pending {
+            return;
+        }
+        // 바로 앞에 그려 본 때부터 한 프레임 간격을 띄운다. 그리는 것 없이 프레임 알림만 바라는 앱이 빈
+        // 프레임을 쉬지 않고 그리게 하지 않는다
+        let delay = surface.tried_at.map_or(Duration::ZERO, |at| {
+            surface
+                .frame_interval(cpu_composited)
+                .saturating_sub(at.elapsed())
+        });
+        self.schedule_redraw_after(crtc, delay);
+    }
+
+    /// 컴포지터가 그리는 애니메이션(막대 미끄러짐)이 도는 중이다. 그동안은 프레임마다 그린다
+    pub fn is_animating(&self) -> bool {
+        self.bars_sliding()
     }
 }
 

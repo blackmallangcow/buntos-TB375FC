@@ -153,6 +153,12 @@ impl Reveal {
         self.from + (target - self.from) * eased
     }
 
+    /// 미끄러지는 중이다. 그동안 렌더 루프가 프레임마다 그린다 (udev.rs의 is_animating)
+    pub fn sliding(&self, now: Instant) -> bool {
+        self.since
+            .is_some_and(|since| now.saturating_duration_since(since) < SLIDE)
+    }
+
     /// 보이게 하거나 숨긴다. 미끄러지는 중이면 지금 자리에서 방향을 바꾼다
     pub fn set(&mut self, shown: bool, now: Instant) {
         if self.shown == shown {
