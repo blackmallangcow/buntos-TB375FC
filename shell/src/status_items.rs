@@ -320,8 +320,10 @@ fn item_widget(
                 .css_classes(["status-item"])
                 .build();
             let menu = DbusMenu::new(connection, &address.bus, menu_path.as_str());
-            button.insert_action_group("sni", Some(&menu.actions));
             let popover = gtk::PopoverMenu::from_model(Some(&menu.model));
+            // 동작 묶음은 단추가 아니라 메뉴에 단다. 단추에 달면 GTK가 메뉴 항목의 동작을 단추의 접근성
+            // 동작으로 내보내, 에이전트가 단추를 누를 때 메뉴를 여는 대신 그 가운데 첫 항목을 실행했다
+            popover.insert_action_group("sni", Some(&menu.actions));
             popover.set_has_arrow(false);
             // 항목에 접근성 이름을 단다(GTK 4.24의 GtkModelButton은 이름이 비어 있다)
             crate::menu_names::follow(&popover);
