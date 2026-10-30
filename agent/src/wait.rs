@@ -214,9 +214,9 @@ fn snapshot(params: &WaitParams, interactive: bool) -> Value {
     snapshot
 }
 
-/// 범위의 요소 줄. 트리가 길어 잘렸는데 나타나기를 기다리는 요소가 없으면, 상호작용 요소만 읽은 트리(훨씬 짧다)에서도
-/// 찾는다: 긴 웹 페이지의 2000줄 뒤에 있는 단추, 링크, 글 칸 (검토: snapshot({ interactive: true })에는 보이는 것을
-/// getByRole이 찾지 못했다)
+/// 범위의 요소 줄. 트리가 길어 잘렸으면 상호작용 요소만 읽은 트리(훨씬 짧다)도 읽어, 찾는 요소가 더 많이 맞는 쪽을
+/// 쓴다: 긴 웹 페이지의 2000줄 뒤에 있는 단추, 링크, 글 칸을 찾고(검토: snapshot({ interactive: true })에는 보이는
+/// 것을 getByRole이 찾지 못했다), 여럿 가운데 고르기(nth, last)와 세기, strict 검사가 앞쪽만 보지 않는다(두 번째 검토)
 fn lines(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<Seen, Failure> {
     let reply = desk.call("snapshot", snapshot(params, false))?;
     let tree = reply["tree"].as_str().unwrap_or_default();
@@ -225,12 +225,12 @@ fn lines(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<
     if let Condition::Element(matcher) = condition
         && cut
         && !params.gone
-        && !lines.iter().any(|line| matcher.matches(line))
     {
+        let count = |lines: &[Line]| lines.iter().filter(|line| matcher.matches(line)).count();
         let reply = desk.call("snapshot", snapshot(params, true))?;
         let short = reply["tree"].as_str().unwrap_or_default();
         let found = outline::parse(short);
-        if found.iter().any(|line| matcher.matches(line)) {
+        if count(&found) > count(&lines) {
             return Ok(Seen::Lines {
                 lines: found,
                 cut: outline::truncated(short),
@@ -884,6 +884,28 @@ mod tests {
         .unwrap();
         assert_eq!(waited.found.unwrap().reference.as_deref(), Some("e2400"));
         assert_eq!(desk.calls.borrow()[1].1["interactive"], true);
+        // 앞쪽에 하나가 보여도 뒤쪽까지 센다: last()는 뒤의 것이고, strict 검사는 둘을 본다 (두 번째 검토)
+        let both = || {
+            Script::new(vec![
+                cut("- document \"page\" [ref=e1]:\n  - button \"Delete\" [ref=e2]\n"),
+                tree(
+                    "# note: interactive elements only\n- document \"page\" [ref=e1]:\n  - button \"Delete\" [ref=e2]\n  - button \"Delete\" [ref=e2400]\n",
+                ),
+            ])
+        };
+        let last = run(
+            &both(),
+            &params(|p| {
+                p.role = Some("button".into());
+                p.name = Some("Delete".into());
+                p.nth = Some(-1);
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            (last.count, last.found.unwrap().reference.as_deref()),
+            (2, Some("e2400"))
+        );
     }
 
     #[test]
