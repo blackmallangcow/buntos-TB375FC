@@ -23,6 +23,8 @@ packages=(
 	libwayland-dev libpixman-1-dev libgtk-4-dev libgtk4-layer-shell-dev
 	# 잠금 화면(bunt-lock)의 암호 확인
 	libpam0g-dev
+	# 화면 기록의 부호기 시험(comp의 recording::tests). 없으면 알리고 건너뛴다
+	gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 )
 
 sudo apt-get update

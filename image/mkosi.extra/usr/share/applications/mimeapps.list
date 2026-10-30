@@ -23,3 +23,4 @@ image/heif=org.gnome.Loupe.desktop
 image/x-icon=org.gnome.Loupe.desktop
 image/vnd.microsoft.icon=org.gnome.Loupe.desktop
 image/apng=org.gnome.Loupe.desktop
+video/webm=org.gnome.Showtime.desktop
