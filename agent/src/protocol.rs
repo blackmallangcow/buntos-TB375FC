@@ -60,6 +60,11 @@ pub const SCREEN_LOCKED: i64 = -32003;
 /// 기다리던 것이 시간 상한 안에 일어나지 않았다 (`wait`)
 pub const TIMEOUT: i64 = -32004;
 
+/// 데몬 알림(AGENT_ERROR)의 앞머리: `app`에 맞는 앱이 없다. 기다리기는 이것을 그 앱이 없는 것으로 읽는다
+pub const NO_APP_MATCHES: &str = "no app matches";
+/// 데몬 알림의 일부: `app`이 여러 앱에 맞는다. 기다리기는 기다려도 하나로 정해지지 않으므로 바로 알린다
+pub const BE_MORE_SPECIFIC: &str = "be more specific";
+
 /// `snapshot`의 인자
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]

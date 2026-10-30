@@ -51,7 +51,9 @@ calc.getByRole('button').nth(2)                   // .first(), .last(), .nth(i) 
 
 `getByRole` and `getByText` look for the element when you use them, waiting up to 5 s for it
 to appear (`timeout` option). When several elements match they refuse to guess and list them.
-A text line has no ref; acting on it acts on the nearest element above it that has one.
+A text line has no ref; acting on it acts on the nearest element above it that has one. Long
+names are cut in the tree (`"Terms…[+80 chars]"`): `exact: true` then needs the whole name, so
+match a part of it without `exact`.
 
 ## Act
 
@@ -97,6 +99,10 @@ await calc.locator('e159').wait({ value: '42' })    // the element's value becom
 await calc.locator('e159').wait({ changed: true })  // the element's value changes
 await dialog.getByRole('button', { name: 'OK' }).waitFor({ state: 'hidden' })
 ```
+
+Something is gone only when the whole scope was read and it was not there, or when its app quit.
+While no window has the keyboard focus or a tree is cut at 2000 lines, the wait goes on; wait
+below a ref (`locator('e12').getByText(…)`) to read a smaller part.
 
 ## Read values
 

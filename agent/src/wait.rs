@@ -47,10 +47,15 @@ enum Condition {
 
 /// 범위를 한 번 읽은 것
 enum Seen {
-    Lines(Vec<Line>),
-    Windows(Vec<String>),
-    /// 읽지 못했다 (앱이 아직 없거나 끝났다). 사라지기를 기다렸으면 사라진 것이다
-    Missing(String),
+    /// 트리의 요소 줄. `cut`이면 트리가 길어 끝을 잘라 안 보이는 요소가 더 있을 수 있다
+    Lines { lines: Vec<Line>, cut: bool },
+    /// 창 제목. `complete`가 아니면 빠진 창이 있을 수 있다 (잘린 트리에서 읽었다)
+    Windows { titles: Vec<String>, complete: bool },
+    /// 앱이 없다 (아직 뜨지 않았거나 끝났다): 그 앱의 요소와 창도 없다
+    Absent(String),
+    /// 보지 못했다 (키보드 포커스를 가진 창이 없다, 트리가 없는 창, 접근성 버스의 오류): 있는지 없는지 모른다.
+    /// 검토: 이것을 사라진 것으로 보아, 포커스가 터미널로 가기만 해도 기다리던 요소가 사라졌다고 했다
+    Unknown(String),
 }
 
 /// 처음 본 것: 새로 뜬 창은 처음 본 창 목록과, 바뀐 값은 처음 본 값과 견준다
@@ -140,8 +145,10 @@ pub fn run(desk: &dyn Desk, params: &WaitParams) -> Result<Waited, Failure> {
     let limit = limit(params);
     let started = Instant::now();
     let mut baseline: Option<Baseline> = None;
+    // 창을 기다리는 앱의 pid (처음 읽을 때 안다)
+    let mut pid: Option<u32> = None;
     loop {
-        let seen = observe(desk, params, &condition)?;
+        let seen = observe(desk, params, &condition, &mut pid)?;
         if let Some(outcome) = check(&condition, params, &seen, &mut baseline) {
             return Ok(answer(
                 &condition,
@@ -161,60 +168,158 @@ pub fn run(desk: &dyn Desk, params: &WaitParams) -> Result<Waited, Failure> {
     }
 }
 
-/// 범위를 한 번 읽는다. 앱이 없거나 끝나 읽지 못하는 것(AGENT_ERROR)은 기다릴 것이 아직(또는 더) 없는 것이다.
-/// 정책의 거절(허용하지 않은 AI, 막은 앱, 화면 잠김)과 잘못된 인자는 바로 돌려준다
-fn observe(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<Seen, Failure> {
-    let reply = if matches!(condition, Condition::Window(_)) && params.app.is_none() {
-        desk.call("apps", Value::Null)
-            .map(|reply| Seen::Windows(all_windows(&reply)))
-    } else {
-        let mut snapshot = json!({ "peek": true });
-        for (key, value) in [
-            ("session", &params.session),
-            ("app", &params.app),
-            ("ref", &params.scope),
-        ] {
-            if let Some(value) = value {
-                snapshot[key] = json!(value);
-            }
-        }
-        desk.call("snapshot", snapshot).map(|reply| {
-            let lines = outline::parse(reply["tree"].as_str().unwrap_or_default());
-            match condition {
-                Condition::Window(_) => Seen::Windows(
-                    lines
-                        .iter()
-                        .filter(|line| line.depth == 0)
-                        .map(|line| line.name.clone())
-                        .collect(),
-                ),
-                _ => Seen::Lines(lines),
-            }
-        })
+/// 범위를 한 번 읽는다. 정책의 거절(허용하지 않은 AI, 막은 앱, 화면 잠김)과 잘못된 인자는 바로 돌려준다. 읽지 못한
+/// 것(AGENT_ERROR)은 그 까닭으로 가른다(`unseen`)
+fn observe(
+    desk: &dyn Desk,
+    params: &WaitParams,
+    condition: &Condition,
+    pid: &mut Option<u32>,
+) -> Result<Seen, Failure> {
+    let seen = match condition {
+        Condition::Window(_) => windows(desk, params, pid),
+        _ => lines(desk, params, condition),
     };
-    match reply {
-        Ok(seen) => Ok(seen),
-        Err((protocol::AGENT_ERROR, message)) => Ok(Seen::Missing(message)),
-        Err(failure) => Err(failure),
+    match seen {
+        Err((protocol::AGENT_ERROR, message)) => unseen(message),
+        seen => seen,
     }
 }
 
-/// `apps`의 답에서 모든 창의 제목 (트리가 있는 앱의 창과 트리가 없는 창)
-fn all_windows(reply: &Value) -> Vec<String> {
-    let titles = |list: &Value| -> Vec<String> {
-        list.as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|window| window["title"].as_str().map(str::to_string))
-            .collect()
-    };
+/// 데몬이 범위를 읽지 못한 까닭: 앱이 없다, 앱 이름이 여럿에 맞는다(기다려도 하나로 정해지지 않아 바로 알린다), 그
+/// 밖은 보지 못한 것이다. 데몬의 알림은 buntd-agent의 find_app이 쓴다 (그 시험이 이 글을 본다)
+fn unseen(message: String) -> Result<Seen, Failure> {
+    if message.starts_with(protocol::NO_APP_MATCHES) {
+        Ok(Seen::Absent(message))
+    } else if message.contains(protocol::BE_MORE_SPECIFIC) {
+        Err((protocol::AGENT_ERROR, message))
+    } else {
+        Ok(Seen::Unknown(message))
+    }
+}
+
+/// 다시 읽는 스냅샷의 인자. peek이라 다음 스냅샷의 diff를 흐리지 않는다
+fn snapshot(params: &WaitParams, interactive: bool) -> Value {
+    let mut snapshot = json!({ "peek": true });
+    for (key, value) in [
+        ("session", &params.session),
+        ("app", &params.app),
+        ("ref", &params.scope),
+    ] {
+        if let Some(value) = value {
+            snapshot[key] = json!(value);
+        }
+    }
+    if interactive {
+        snapshot["interactive"] = json!(true);
+    }
+    snapshot
+}
+
+/// 범위의 요소 줄. 트리가 길어 잘렸는데 나타나기를 기다리는 요소가 없으면, 상호작용 요소만 읽은 트리(훨씬 짧다)에서도
+/// 찾는다: 긴 웹 페이지의 2000줄 뒤에 있는 단추, 링크, 글 칸 (검토: snapshot({ interactive: true })에는 보이는 것을
+/// getByRole이 찾지 못했다)
+fn lines(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<Seen, Failure> {
+    let reply = desk.call("snapshot", snapshot(params, false))?;
+    let tree = reply["tree"].as_str().unwrap_or_default();
+    let lines = outline::parse(tree);
+    let cut = outline::truncated(tree);
+    if let Condition::Element(matcher) = condition
+        && cut
+        && !params.gone
+        && !lines.iter().any(|line| matcher.matches(line))
+    {
+        let reply = desk.call("snapshot", snapshot(params, true))?;
+        let short = reply["tree"].as_str().unwrap_or_default();
+        let found = outline::parse(short);
+        if found.iter().any(|line| matcher.matches(line)) {
+            return Ok(Seen::Lines {
+                lines: found,
+                cut: outline::truncated(short),
+            });
+        }
+    }
+    Ok(Seen::Lines { lines, cut })
+}
+
+/// 창 제목. 앱을 주었으면 그 앱의 창만: 처음에 스냅샷의 머리줄로 pid를 알아 두고, 앱 목록(`apps`)에서 그 pid의 창을
+/// 본다. 검토: 트리의 맨 위 줄로 창을 읽어, 트리가 2000줄에서 잘리면 뒤의 창(웹 페이지 뒤에 뜬 대화 상자)을 닫힌
+/// 것으로 보았다
+fn windows(desk: &dyn Desk, params: &WaitParams, pid: &mut Option<u32>) -> Result<Seen, Failure> {
+    if let Some(query) = &params.app {
+        if pid.is_none() {
+            let reply = desk.call("snapshot", snapshot(params, false))?;
+            let tree = reply["tree"].as_str().unwrap_or_default();
+            let Some(found) = outline::app_pid(tree) else {
+                // pid를 모르는 앱 (드물다): 트리의 맨 위 줄
+                return Ok(Seen::Windows {
+                    titles: outline::parse(tree)
+                        .into_iter()
+                        .filter(|line| line.depth == 0)
+                        .map(|line| line.name)
+                        .collect(),
+                    complete: !outline::truncated(tree),
+                });
+            };
+            *pid = Some(found);
+        }
+        let reply = desk.call("apps", Value::Null)?;
+        let titles = all_windows(&reply, *pid);
+        if titles.is_empty() && !runs(&reply, *pid) {
+            // 앱이 끝났다. 다시 띄웠을 수 있으므로 다음에 다시 찾는다
+            *pid = None;
+            return Ok(Seen::Absent(format!(
+                "{} {query:?} (it quit)",
+                protocol::NO_APP_MATCHES
+            )));
+        }
+        return Ok(Seen::Windows {
+            titles,
+            complete: true,
+        });
+    }
+    let reply = desk.call("apps", Value::Null)?;
+    Ok(Seen::Windows {
+        titles: all_windows(&reply, None),
+        complete: true,
+    })
+}
+
+/// 이 pid의 앱이 `apps`의 답에 있는가 (창이 없어도)
+fn runs(reply: &Value, pid: Option<u32>) -> bool {
+    let pid = pid.map(u64::from);
+    reply["apps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|app| app["pid"].as_u64() == pid)
+}
+
+/// `apps`의 답에서 창 제목 (트리가 있는 앱의 창과 트리가 없는 창). pid를 주면 그 프로세스의 창만
+fn all_windows(reply: &Value, pid: Option<u32>) -> Vec<String> {
+    let mine = |entry: &&Value| pid.is_none_or(|pid| entry["pid"].as_u64() == Some(u64::from(pid)));
+    let title = |window: &Value| window["title"].as_str().map(str::to_string);
     let mut windows: Vec<String> = reply["apps"]
         .as_array()
         .into_iter()
         .flatten()
-        .flat_map(|app| titles(&app["windows"]))
+        .filter(mine)
+        .flat_map(|app| {
+            app["windows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(title)
+        })
         .collect();
-    windows.extend(titles(&reply["untracked"]));
+    windows.extend(
+        reply["untracked"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(mine)
+            .filter_map(title),
+    );
     windows
 }
 
@@ -225,7 +330,13 @@ fn check(
     baseline: &mut Option<Baseline>,
 ) -> Option<Outcome> {
     match (condition, seen) {
-        (Condition::Window(title), Seen::Windows(windows)) => {
+        (
+            Condition::Window(title),
+            Seen::Windows {
+                titles: windows,
+                complete,
+            },
+        ) => {
             if title.is_empty() {
                 // 새로 뜬 창: 처음 본 목록에 없던 것
                 let Baseline::Windows(known) =
@@ -241,27 +352,33 @@ fn check(
             let open = windows
                 .iter()
                 .rev()
-                .find(|window| outline::fits(title, window, false, params.exact));
+                .find(|window| outline::fits(title, window, 0, params.exact));
             match (open, params.gone) {
                 (Some(window), false) => Some(Outcome::Window(window.clone())),
-                (None, true) => Some(Outcome::Gone),
+                (None, true) if *complete => Some(Outcome::Gone),
                 _ => None,
             }
         }
-        (Condition::Window(title), Seen::Missing(_)) => {
+        (Condition::Window(title), Seen::Absent(_)) => {
+            // 아직 뜨지 않은 앱의 첫 창도 새 창이다
+            if title.is_empty() {
+                baseline.get_or_insert_with(|| Baseline::Windows(Vec::new()));
+            }
             (params.gone && !title.is_empty()).then_some(Outcome::Gone)
         }
-        (_, Seen::Missing(_)) => params.gone.then_some(Outcome::Gone),
+        (_, Seen::Absent(_)) => params.gone.then_some(Outcome::Gone),
+        (_, Seen::Unknown(_)) => None,
         // observe는 창을 기다릴 때만 창 목록을, 아닐 때만 줄을 읽는다
-        (_, Seen::Windows(_)) | (Condition::Window(_), Seen::Lines(_)) => None,
-        (Condition::Element(matcher), Seen::Lines(lines)) => {
+        (_, Seen::Windows { .. }) | (Condition::Window(_), Seen::Lines { .. }) => None,
+        (Condition::Element(matcher), Seen::Lines { lines, cut }) => {
             // ref 아래에서 찾을 때 맨 위 줄은 그 ref 자신이다 (Playwright처럼 자손만 찾는다)
             let start = usize::from(params.scope.is_some()).min(lines.len());
             let hits: Vec<usize> = (start..lines.len())
                 .filter(|&at| matcher.matches(&lines[at]))
                 .collect();
             if params.gone {
-                return hits.is_empty().then_some(Outcome::Gone);
+                // 잘린 트리에 없다고 사라진 것은 아니다
+                return (hits.is_empty() && !cut).then_some(Outcome::Gone);
             }
             let pick = match params.nth {
                 None => hits.first(),
@@ -281,16 +398,16 @@ fn check(
                 count: hits.len(),
             })
         }
-        (Condition::Itself, Seen::Lines(lines)) => match (lines.is_empty(), params.gone) {
+        (Condition::Itself, Seen::Lines { lines, .. }) => match (lines.is_empty(), params.gone) {
             (true, true) => Some(Outcome::Gone),
             (false, false) => Some(single(lines)),
             _ => None,
         },
-        (Condition::Value(value), Seen::Lines(lines)) => {
+        (Condition::Value(value), Seen::Lines { lines, .. }) => {
             let root = lines.first()?;
-            outline::fits(value, root.value(), root.value_cut(), true).then(|| single(lines))
+            outline::fits(value, root.value(), root.value_hidden(), true).then(|| single(lines))
         }
-        (Condition::Changed, Seen::Lines(lines)) => {
+        (Condition::Changed, Seen::Lines { lines, .. }) => {
             // 처음에 없던 요소가 나타나도 바뀐 것이다
             let now = lines.first().map(|root| root.value().to_string());
             let Baseline::Value(first) =
@@ -411,31 +528,41 @@ fn timed_out(condition: &Condition, params: &WaitParams, seen: &Seen, limit: Dur
         Condition::Value(value) => format!("{target}'s value to be {value:?}"),
         Condition::Changed => format!("{target}'s value to change"),
     };
+    // 잘린 트리에서는 다 보지 못한다: 범위를 좁히라고 알린다
+    let narrower = "the tree is longer than the 2000 lines a snapshot shows; wait below a ref \
+                    (locator(ref).getByText(…), --ref) to see the rest";
     let now = match (condition, seen) {
-        (_, Seen::Missing(message)) => format!("; last error: {message}"),
-        (Condition::Window(_), Seen::Windows(windows)) => {
-            let open: Vec<String> = windows
+        (_, Seen::Absent(message) | Seen::Unknown(message)) => format!("; last error: {message}"),
+        (Condition::Window(_), Seen::Windows { titles, complete }) => {
+            let open: Vec<String> = titles
                 .iter()
                 .take(WINDOWS_SHOWN)
                 .map(|title| format!("{title:?}"))
                 .collect();
-            match open.len() {
+            let open = match open.len() {
                 0 => "; no windows are open".into(),
                 _ => format!("; open: {}", open.join(", ")),
+            };
+            match complete {
+                true => open,
+                false => format!("{open}; {narrower}"),
             }
         }
-        (Condition::Element(matcher), Seen::Lines(lines)) => {
-            match lines.iter().find(|line| matcher.matches(line)) {
-                Some(line) if params.gone => format!("; still there: {}", line.text),
-                Some(_) => String::new(),
-                None => "; nothing matches it now".into(),
+        (Condition::Element(matcher), Seen::Lines { lines, cut }) => {
+            match (lines.iter().find(|line| matcher.matches(line)), cut) {
+                (Some(line), _) if params.gone => format!("; still there: {}", line.text),
+                (Some(_), _) => String::new(),
+                (None, false) => "; nothing matches it now".into(),
+                (None, true) => format!("; nothing matches it in what it can see: {narrower}"),
             }
         }
-        (Condition::Value(_) | Condition::Changed, Seen::Lines(lines)) => match lines.first() {
-            Some(root) => format!("; it is {:?}", root.value()),
-            None => format!("; {target} is not on screen"),
-        },
-        (Condition::Itself, Seen::Lines(lines)) => match lines.first() {
+        (Condition::Value(_) | Condition::Changed, Seen::Lines { lines, .. }) => {
+            match lines.first() {
+                Some(root) => format!("; it is {:?}", root.value()),
+                None => format!("; {target} is not on screen"),
+            }
+        }
+        (Condition::Itself, Seen::Lines { lines, .. }) => match lines.first() {
             Some(root) => format!("; still there: {}", root.text),
             None => format!("; {target} is not on screen"),
         },
@@ -643,6 +770,105 @@ mod tests {
     }
 
     #[test]
+    fn what_it_cannot_see_is_not_gone() {
+        // 키보드 포커스가 트리 없는 창(터미널)으로 갔다: 기다리던 대화 상자가 사라졌다고 하지 않는다
+        let unseen = || -> Result<Value, Failure> {
+            Err((
+                protocol::AGENT_ERROR,
+                "no window has the keyboard focus; pass --app".into(),
+            ))
+        };
+        let failure = run(
+            &Script::new(vec![unseen()]),
+            &params(|p| {
+                p.role = Some("dialog".into());
+                p.gone = true;
+                p.timeout_ms = Some(150);
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, protocol::TIMEOUT);
+        assert!(
+            failure
+                .1
+                .ends_with("last error: no window has the keyboard focus; pass --app"),
+            "{}",
+            failure.1
+        );
+        // 다시 보이면 그때 본다
+        let desk = Script::new(vec![unseen(), tree("- window \"w\" [ref=e1]\n")]);
+        let gone = run(
+            &desk,
+            &params(|p| {
+                p.role = Some("dialog".into());
+                p.gone = true;
+            }),
+        )
+        .unwrap();
+        assert_eq!(gone.done, "dialog in the active window is gone");
+        // 앱 이름이 여럿에 맞으면 기다려도 하나로 정해지지 않는다: 바로 알린다
+        let desk = Script::new(vec![Err((
+            protocol::AGENT_ERROR,
+            "\"editor\" matches Text Editor, Text Editor; be more specific".into(),
+        ))]);
+        let failure = run(
+            &desk,
+            &params(|p| {
+                p.app = Some("editor".into());
+                p.text = Some("x".into());
+                p.gone = true;
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, protocol::AGENT_ERROR);
+        assert!(failure.1.ends_with("be more specific"));
+        assert_eq!(desk.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_cut_tree_neither_hides_nor_loses_elements() {
+        let cut = |lines: &str| {
+            tree(&format!(
+                "{lines}# note: cut at 2000 lines; pass a ref to read one part\n"
+            ))
+        };
+        // 사라지기: 잘린 트리에 없다고 사라졌다고 하지 않는다
+        let failure = run(
+            &Script::new(vec![cut("- document \"page\" [ref=e1]\n")]),
+            &params(|p| {
+                p.text = Some("Uploading".into());
+                p.gone = true;
+                p.timeout_ms = Some(150);
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            failure
+                .1
+                .contains("nothing matches it in what it can see: the tree is longer than"),
+            "{}",
+            failure.1
+        );
+        // 나타나기: 잘린 트리에 없으면 상호작용 요소만 읽은 트리에서 찾는다
+        let desk = Script::new(vec![
+            cut("- document \"page\" [ref=e1]\n"),
+            tree(
+                "# note: interactive elements only\n- document \"page\" [ref=e1]:\n  - button \"Submit\" [ref=e2400]\n",
+            ),
+        ]);
+        let waited = run(
+            &desk,
+            &params(|p| {
+                p.role = Some("button".into());
+                p.name = Some("Submit".into());
+            }),
+        )
+        .unwrap();
+        assert_eq!(waited.found.unwrap().reference.as_deref(), Some("e2400"));
+        assert_eq!(desk.calls.borrow()[1].1["interactive"], true);
+    }
+
+    #[test]
     fn refusals_end_the_wait_at_once() {
         for code in [
             protocol::NOT_ALLOWED,
@@ -702,12 +928,30 @@ mod tests {
         assert!(failure.1.ends_with("; it is \"6×7\""), "{}", failure.1);
     }
 
+    /// pid 7인 앱(편집기)의 창과 다른 앱 하나가 있는 `apps`의 답
+    fn editor(titles: &[&str]) -> Result<Value, Failure> {
+        let windows: Vec<Value> = titles
+            .iter()
+            .map(|title| json!({ "title": title, "active": false }))
+            .collect();
+        Ok(json!({
+            "apps": [
+                { "name": "editor", "pid": 7, "windows": windows },
+                { "name": "other", "pid": 8, "windows": [{ "title": "다른 저장", "active": true }] },
+            ],
+            "untracked": [],
+        }))
+    }
+
     #[test]
     fn waits_for_windows_of_an_app_or_of_any_app() {
-        // 앱 범위: 스냅샷의 맨 위 줄이 그 앱의 창이다
+        // 앱 범위: 처음 스냅샷의 머리줄로 pid를 알고, 앱 목록에서 그 pid의 창을 본다. 트리가 잘려도 창은 다 보인다
         let desk = Script::new(vec![
-            tree("- window \"편집기\" [ref=e1]\n"),
-            tree("- window \"편집기\" [ref=e1]\n- dialog \"다른 이름으로 저장\" [ref=e8]\n"),
+            tree(
+                "- window \"편집기\" [ref=e1]\n# note: cut at 2000 lines; pass a ref to read one part\n",
+            ),
+            editor(&["편집기"]),
+            editor(&["편집기", "다른 이름으로 저장"]),
         ]);
         let waited = run(
             &desk,
@@ -718,6 +962,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(waited.window.as_deref(), Some("다른 이름으로 저장"));
+        let methods: Vec<String> = desk
+            .calls
+            .borrow()
+            .iter()
+            .map(|(method, _)| method.clone())
+            .collect();
+        assert_eq!(methods, ["snapshot", "apps", "apps"]);
+        // 앱이 끝나면 그 창도 닫혔다
+        let desk = Script::new(vec![
+            tree("- window \"편집기\" [ref=e1]\n"),
+            editor(&["편집기"]),
+            Ok(json!({ "apps": [], "untracked": [] })),
+        ]);
+        let closed = run(
+            &desk,
+            &params(|p| {
+                p.app = Some("editor".into());
+                p.window = Some("편집기".into());
+                p.gone = true;
+            }),
+        )
+        .unwrap();
+        assert_eq!(closed.done, "the window \"편집기\" is gone");
+        // 아직 뜨지 않은 앱의 첫 창도 새 창이다
+        let desk = Script::new(vec![
+            Err((
+                protocol::AGENT_ERROR,
+                "no app matches \"editor\"; see `bunt agent apps`".into(),
+            )),
+            tree("- window \"편집기\" [ref=e1]\n"),
+            editor(&["편집기"]),
+        ]);
+        let first = run(
+            &desk,
+            &params(|p| {
+                p.app = Some("editor".into());
+                p.window = Some(String::new());
+            }),
+        )
+        .unwrap();
+        assert_eq!(first.done, "a new window \"편집기\" appeared");
         // 앱 없이: 모든 앱의 창 (트리가 없는 창 포함)에서 새로 뜬 창
         let apps = |titles: &[&str]| -> Result<Value, Failure> {
             Ok(json!({

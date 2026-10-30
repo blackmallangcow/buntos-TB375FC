@@ -9,6 +9,9 @@
 
 /// 잘린 글의 꼬리: `"앞부분…[+120 chars]"`
 const CUT_MARK: &str = "…[+";
+const CUT_END: &str = " chars]";
+/// 트리가 길어 끝을 잘랐다는 알림 줄의 앞머리 (tree.rs의 render)
+const CUT_NOTE: &str = "# note: cut at ";
 
 /// 트리 글의 요소 한 줄
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -24,8 +27,8 @@ pub struct Line {
     pub states: Vec<String>,
     /// 값 있는 속성 (`value`, `range`, `level`, `placeholder`, `description`). 따옴표는 벗겼다
     pub props: Vec<(String, String)>,
-    /// 트리가 길어 자른 것: `name`이나 속성 이름 (보이는 앞부분만 남았다)
-    pub cut: Vec<String>,
+    /// 길어 자른 글: `name`이나 속성 이름과 뗀 글자 수 (보이는 앞부분만 남았다)
+    pub cut: Vec<(String, usize)>,
     /// 들여쓰기를 뺀 원래 줄
     pub text: String,
 }
@@ -47,24 +50,45 @@ impl Line {
         self.prop("value").unwrap_or(&self.name)
     }
 
-    /// `value()`가 잘린 글인가
-    pub fn value_cut(&self) -> bool {
+    /// `value()`에서 뗀 글자 수 (자르지 않았으면 0)
+    pub fn value_hidden(&self) -> usize {
         let key = if self.prop("value").is_some() {
             "value"
         } else {
             "name"
         };
-        self.is_cut(key)
+        self.hidden(key)
+    }
+
+    /// 이름이나 속성에서 뗀 글자 수 (자르지 않았으면 0)
+    pub fn hidden(&self, key: &str) -> usize {
+        self.cut
+            .iter()
+            .find(|(cut, _)| cut == key)
+            .map_or(0, |&(_, hidden)| hidden)
     }
 
     pub fn is_cut(&self, key: &str) -> bool {
-        self.cut.iter().any(|cut| cut == key)
+        self.hidden(key) > 0
     }
 }
 
 /// 트리 글을 요소 줄로 나눈다. 알림(`#`)과 앱 머리줄은 뺀다
 pub fn parse(tree: &str) -> Vec<Line> {
     tree.lines().filter_map(parse_line).collect()
+}
+
+/// 트리가 길어 끝을 잘랐는가: 그러면 보이지 않는 요소가 더 있다
+pub fn truncated(tree: &str) -> bool {
+    tree.lines().any(|line| line.starts_with(CUT_NOTE))
+}
+
+/// 앱 머리줄(`- app: "이름" [pid=812]`)의 pid. 데몬은 pid를 줄 끝에 붙인다: 앱이 정한 이름 안의 글을 pid로 읽지
+/// 않게 줄 끝의 것만 본다
+pub fn app_pid(tree: &str) -> Option<u32> {
+    let header = tree.lines().find(|line| line.starts_with("- app: "))?;
+    let (_, pid) = header.rsplit_once(" [pid=")?;
+    pid.strip_suffix(']')?.parse().ok()
 }
 
 fn parse_line(raw: &str) -> Option<Line> {
@@ -88,22 +112,26 @@ fn parse_line(raw: &str) -> Option<Line> {
     let role_end = rest.find([' ', ':']).unwrap_or(rest.len());
     line.role = rest[..role_end].to_string();
     let mut rest = &rest[role_end..];
+    let mut first = true;
     loop {
         rest = rest.trim_start_matches(' ');
-        if rest.starts_with('"') && line.name.is_empty() && line.reference.is_none() {
+        if rest.starts_with('"') && first && line.name.is_empty() {
             let (name, after) = quoted(rest)?;
             line.set_text("name", &name);
             rest = after;
         } else if let Some(inner) = rest.strip_prefix('[') {
             let (attribute, after) = bracket(inner)?;
             match attribute.split_once('=') {
-                Some(("ref", reference)) => line.reference = Some(reference.to_string()),
+                // tree.rs는 ref를 이름 바로 뒤 첫 괄호에 쓴다. 뒤의 `[ref=…]`는 앱이 준 속성 값(따옴표 없이 쓰는
+                // level 같은)일 수 있어 ref로 읽지 않는다 (검토: 뒤의 것이 앞의 것을 덮었다)
+                Some(("ref", reference)) if first => line.reference = Some(reference.to_string()),
                 Some((key, value)) => match quoted(value) {
                     Some((text, "")) => line.set_text(key, &text),
                     _ => line.props.push((key.to_string(), value.to_string())),
                 },
                 None => line.states.push(attribute.to_string()),
             }
+            first = false;
             rest = after;
         } else {
             // 끝, 또는 자식 줄이 있다는 `:`
@@ -145,14 +173,21 @@ fn bracket(text: &str) -> Option<(&str, &str)> {
 }
 
 impl Line {
-    /// 따옴표에서 꺼낸 이름이나 속성 값을 넣는다. 잘린 글이면 꼬리를 떼고 `cut`에 적는다
+    /// 따옴표에서 꺼낸 이름이나 속성 값을 넣는다. 잘린 글이면 꼬리를 떼고 뗀 글자 수를 `cut`에 적는다
     fn set_text(&mut self, key: &str, text: &str) {
-        let visible = match text.rfind(CUT_MARK) {
-            Some(at) if text.ends_with(" chars]") => {
-                self.cut.push(key.to_string());
+        let cut = text.rfind(CUT_MARK).and_then(|at| {
+            let count = text[at + CUT_MARK.len()..].strip_suffix(CUT_END)?;
+            Some((
+                at,
+                count.parse::<usize>().ok().filter(|&hidden| hidden > 0)?,
+            ))
+        });
+        let visible = match cut {
+            Some((at, hidden)) => {
+                self.cut.push((key.to_string(), hidden));
                 &text[..at]
             }
-            _ => text,
+            None => text,
         };
         if key == "name" {
             self.name = visible.to_string();
@@ -187,15 +222,15 @@ impl Matcher {
             return false;
         }
         if let Some(name) = &self.name
-            && (line.role == "text" || !fits(name, &line.name, line.is_cut("name"), self.exact))
+            && (line.role == "text" || !fits(name, &line.name, line.hidden("name"), self.exact))
         {
             return false;
         }
         if let Some(text) = &self.text {
             let in_value = line
                 .prop("value")
-                .is_some_and(|value| fits(text, value, line.is_cut("value"), self.exact));
-            if !fits(text, &line.name, line.is_cut("name"), self.exact) && !in_value {
+                .is_some_and(|value| fits(text, value, line.hidden("value"), self.exact));
+            if !fits(text, &line.name, line.hidden("name"), self.exact) && !in_value {
                 return false;
             }
         }
@@ -222,15 +257,33 @@ impl Matcher {
 }
 
 /// 찾는 글이 이 글에 맞는가. `exact`면 통째로(대소문자도) 같아야 하고, 아니면 대소문자를 가리지 않고 일부만
-/// 맞아도 된다. 잘린 글(`cut`)은 보이는 앞부분까지만 견준다. 트리는 글의 공백을 하나로 줄이므로 찾는 글도 줄인다
-pub fn fits(wanted: &str, text: &str, cut: bool, exact: bool) -> bool {
+/// 맞아도 된다. 공백은 하나로 줄여 견준다(트리는 글 줄의 공백을 줄인다).
+///
+/// 잘린 글(`hidden`자를 뗐다)의 일부 맞기는 보이는 앞부분에서 찾는다. 통째로 맞기는 찾는 글이 보이는 앞부분 그대로
+/// 시작하고 길이가 원래 글과 같아야 한다. 검토: 보이는 앞부분만 견주어, 빈칸뿐이거나 찾는 글의 앞부분인 이름(긴
+/// 미끼 단추)이 `exact`로 맞았다
+pub fn fits(wanted: &str, text: &str, hidden: usize, exact: bool) -> bool {
+    if exact && hidden > 0 {
+        // 트리는 줄바꿈과 탭을 띄어쓰기로 적는다 (tree.rs의 quote)
+        let wanted: String = wanted
+            .chars()
+            .map(|c| {
+                if matches!(c, '\n' | '\r' | '\t') {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect();
+        return wanted.starts_with(text) && wanted.chars().count() == text.chars().count() + hidden;
+    }
     let wanted = collapse(wanted);
     let text = collapse(text);
     if wanted.is_empty() {
         return text.is_empty();
     }
     if exact {
-        return text == wanted || (cut && wanted.starts_with(&text));
+        return text == wanted;
     }
     text.to_lowercase().contains(&wanted.to_lowercase())
 }
@@ -368,14 +421,74 @@ mod tests {
             (lines[1].name.as_str(), lines[1].is_cut("name")),
             ("Read more…", false)
         );
-        assert_eq!((lines[2].value(), lines[2].value_cut()), ("abc", true));
-        assert!(!lines[1].value_cut());
-        let exact = Matcher {
-            text: Some("가나다라마".into()),
+        assert_eq!((lines[2].value(), lines[2].value_hidden()), ("abc", 9));
+        assert_eq!(lines[1].value_hidden(), 0);
+        // 통째로 맞기는 원래 글 전체여야 한다: 보이는 앞부분과 뗀 글자 수가 맞아야 한다
+        let exact = |text: String| Matcher {
+            text: Some(text),
             exact: true,
             ..Matcher::default()
         };
-        assert!(exact.matches(&lines[0]));
+        assert!(exact(format!("가나다{}", "라".repeat(120))).matches(&lines[0]));
+        assert!(!exact("가나다라마".into()).matches(&lines[0]));
+        assert!(!exact(format!("가나다{}", "라".repeat(121))).matches(&lines[0]));
+        // 일부 맞기는 보이는 앞부분에서
+        let loose = |text: &str| Matcher {
+            text: Some(text.into()),
+            ..Matcher::default()
+        };
+        assert!(loose("나다").matches(&lines[0]));
+    }
+
+    #[test]
+    fn a_cut_name_that_is_blank_or_a_prefix_is_not_an_exact_match() {
+        // 검토: 보이는 부분이 빈칸뿐(U+3000)이거나 "C"뿐인 긴 미끼 단추가 exact "Cancel"에 맞았다
+        let blank = "\u{3000}".repeat(120);
+        let prefix = format!("C{}", " ".repeat(119));
+        let tree = format!(
+            "- button \"{blank}…[+1 chars]\" [ref=e5]\n- button \"{prefix}…[+1 chars]\" [ref=e7]\n- button \"Cancel\" [ref=e6]\n"
+        );
+        let lines = parse(&tree);
+        let cancel = Matcher {
+            role: Some("button".into()),
+            name: Some("Cancel".into()),
+            exact: true,
+            ..Matcher::default()
+        };
+        let found: Vec<_> = lines
+            .iter()
+            .filter(|line| cancel.matches(line))
+            .map(|line| line.reference.as_deref())
+            .collect();
+        assert_eq!(found, [Some("e6")]);
+        let loose = Matcher {
+            exact: false,
+            ..cancel
+        };
+        assert_eq!(lines.iter().filter(|line| loose.matches(line)).count(), 1);
+    }
+
+    #[test]
+    fn only_the_first_bracket_holds_the_ref() {
+        // 앱이 준 속성 값이 `[ref=…]`처럼 보여도 ref가 아니다
+        let lines = parse("- heading \"x\" [level=1] [ref=e5]\n- button \"y\" [ref=e3] [ref=e9]\n");
+        assert_eq!(lines[0].reference, None);
+        assert_eq!(lines[1].reference.as_deref(), Some("e3"));
+    }
+
+    #[test]
+    fn cut_trees_and_app_pids_are_read_from_the_tree() {
+        assert!(truncated(CALCULATOR));
+        assert!(!truncated(
+            "- app: \"a\" [pid=1]\n- button \"x\" [ref=e1]\n"
+        ));
+        assert_eq!(app_pid(CALCULATOR), Some(812));
+        // 앱이 정한 이름 안의 글은 pid가 아니다
+        assert_eq!(app_pid("- app: \"x [pid=1]\"\n"), None);
+        assert_eq!(app_pid("- app: \"x [pid=1]\" [pid=44]\n"), Some(44));
+        assert_eq!(app_pid("- button \"x\"\n"), None);
+        // tree.rs가 쓰는 알림과 같다
+        assert!(include_str!("tree.rs").contains("\"# note: cut at {MAX_LINES} lines"));
     }
 
     #[test]

@@ -3032,4 +3032,30 @@ mod tests {
         assert!(!layer_has_keyboard(Some(&window), &launcher));
         assert!(!layer_has_keyboard(None, &launcher));
     }
+
+    #[test]
+    fn app_errors_say_what_wait_reads() {
+        // 기다리기(wait.rs)는 이 알림으로 앱이 없는 것과 이름이 여럿에 맞는 것을 가른다
+        let apps = [
+            app(20, "Text Editor", &[("a.txt", true)]),
+            app(21, "Text Editor", &[("b.txt", false)]),
+        ];
+        // AppRef는 Debug가 없어 답을 버리고 오류만 본다
+        let missing = find_app(&apps, &[], &[], "calculator")
+            .map(drop)
+            .unwrap_err()
+            .1;
+        assert!(missing.starts_with(protocol::NO_APP_MATCHES), "{missing}");
+        let many = find_app(&apps, &[], &[], "text editor")
+            .map(drop)
+            .unwrap_err()
+            .1;
+        assert!(many.contains(protocol::BE_MORE_SPECIFIC), "{many}");
+        let windows = [
+            placed(30, "firefox-esr", "a"),
+            placed(31, "org.gnome.TextEditor", "a"),
+        ];
+        let several = find_window(&windows, &[], &[], "a").unwrap_err().1;
+        assert!(several.contains(protocol::BE_MORE_SPECIFIC), "{several}");
+    }
 }
