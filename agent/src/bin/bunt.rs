@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! bunt: buntOS 명령줄 도구. 지금은 에이전트 데몬(buntd-agent)에 묻는 `bunt agent`만 있다.
+//! bunt: buntOS 명령줄 도구. 에이전트 데몬(buntd-agent)에 묻는 `bunt agent`와, 같은 데몬을 MCP로 여는
+//! `bunt mcp`가 있다.
 
 use std::{
     io::{self, BufRead, Read, Write},
@@ -10,6 +11,7 @@ use std::{
 };
 
 use bunt_agent::{
+    mcp,
     protocol::{
         self, ActParams, Acted, App, Installed, LaunchParams, Launched, Repl, ReplParams,
         Screenshot, ScreenshotParams, Skill, Snapshot, SnapshotParams, Untracked, WaitParams,
@@ -22,8 +24,10 @@ use serde_json::Value;
 
 const USAGE: &str = "\
 Usage: bunt agent <command> [options]
+       bunt mcp [--session <name>]
 
-Read and control the desktop through accessibility trees (buntd-agent).
+Read and control the desktop through accessibility trees (buntd-agent). `bunt mcp` speaks MCP
+on standard input and output for AI apps without a shell: its tools are repl and skills.
 
 Commands:
   repl [<code>]            Run JavaScript that reads and controls the apps (Playwright-like:
@@ -127,6 +131,7 @@ fn main() -> ExitCode {
         ["agent", "repl", rest @ ..] => repl(rest),
         ["agent", "skills", rest @ ..] => skills(rest),
         ["agent", "launch", app, rest @ ..] => launch(app, rest),
+        ["mcp", rest @ ..] => serve_mcp(rest),
         []
         | ["help" | "-h" | "--help", ..]
         | ["agent"]
@@ -450,6 +455,38 @@ fn skills(args: &[&str]) -> Result<(), String> {
         println!("{}  {}", skill.name, skill.description);
     }
     Ok(())
+}
+
+const MCP_USAGE: &str = "\
+Usage: bunt mcp [--session <name>]
+
+Serve MCP (JSON-RPC 2.0, one message per line) on standard input and output, for AI apps that
+have no shell. It asks buntd-agent over the same socket as `bunt agent`, so the same user
+settings apply: System Settings > AI Agents decides whether the app that started this may
+control the computer. Tools:
+  repl                     Run JavaScript with the desktop API (screenshots come back as images)
+  skills                   List or read the usage guides
+
+Options:
+  --session <name>         REPL and refs of this session (default: default)
+
+Add it to an MCP client as a stdio server with the command `bunt` and the arguments `mcp`.
+";
+
+/// `mcp`: 표준 입출력으로 MCP를 말한다. 표준 출력은 MCP만 쓴다
+fn serve_mcp(args: &[&str]) -> Result<(), String> {
+    let session = match args {
+        [] => "default".to_string(),
+        ["--session", name] => name.to_string(),
+        ["-h" | "--help"] => {
+            print!("{MCP_USAGE}");
+            return Ok(());
+        }
+        _ => return Err(format!("unknown option\n\n{MCP_USAGE}")),
+    };
+    let server = mcp::Server::new(mcp::Socket, session);
+    mcp::serve(io::stdin().lock(), io::stdout(), &server)
+        .map_err(|err| format!("MCP stopped: {err}"))
 }
 
 /// `wait`: 조건이 맞을 때까지 기다려 본 것을 적는다

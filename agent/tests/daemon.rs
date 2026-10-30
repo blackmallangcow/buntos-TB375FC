@@ -184,3 +184,83 @@ fn skills_come_from_the_daemon_and_help_is_local() {
     let missing = daemon.bunt(&["agent", "skills", "nope"], None);
     assert!(text(&missing.stderr).contains("no skill named \"nope\""));
 }
+
+/// `bunt mcp`에 MCP 메시지를 차례로 보내고, 입력을 닫은 뒤 받은 답을 준다
+fn mcp(daemon: &Daemon, messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let input: String = messages
+        .iter()
+        .map(|message| format!("{message}\n"))
+        .collect();
+    let output = daemon.bunt(&["mcp"], Some(&input));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    text(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn an_mcp_client_runs_the_repl_through_the_same_daemon() {
+    use serde_json::json;
+    let daemon = Daemon::start();
+    let call = |id: u64, name: &str, arguments: serde_json::Value| json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+    let replies = mcp(
+        &daemon,
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "1" } } }),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+            call(
+                3,
+                "repl",
+                json!({ "code": "const product = 6 * 7; product" }),
+            ),
+            call(4, "repl", json!({ "code": "product + 1" })),
+            call(5, "repl", json!({ "code": "await desktop.apps()" })),
+            call(6, "skills", json!({ "name": "repl" })),
+        ],
+    );
+    // 도구 호출은 스레드에서 도므로 답의 차례는 id로 찾는다
+    let reply = |id: u64| {
+        replies
+            .iter()
+            .find(|reply| reply["id"] == id)
+            .unwrap_or_else(|| panic!("no reply {id} in {replies:?}"))
+            .clone()
+    };
+    assert_eq!(replies.len(), 6, "{replies:?}");
+    assert_eq!(reply(1)["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(reply(2)["result"]["tools"][0]["name"], "repl");
+    let first = &reply(3)["result"];
+    if !admin() {
+        // 허용 목록에 없는 MCP 클라이언트: 모델이 읽을 거절
+        assert_eq!(first["isError"], true);
+        assert!(
+            first["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("is not allowed to control this computer")
+        );
+        return;
+    }
+    assert_eq!(first["content"][0]["text"], "42", "{first}");
+    assert_eq!(first["isError"], false);
+    // 도구 호출은 들어온 차례로 돌아 앞 호출의 변수가 남는다
+    assert_eq!(reply(4)["result"]["content"][0]["text"], "43");
+    // 데몬의 정책(세션 버스가 없어 잠긴 것으로 본다)이 MCP의 REPL에도 걸린다
+    let locked = &reply(5)["result"];
+    assert_eq!(locked["isError"], true);
+    assert!(
+        locked["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("ScreenLockedError: the screen is locked")
+    );
+    let guide = &reply(6)["result"];
+    assert!(
+        guide["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("# buntOS desktop REPL")
+    );
+}

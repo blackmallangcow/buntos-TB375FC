@@ -5,13 +5,15 @@
 //! 대신 앱의 접근성 트리로 데스크톱을 읽게 한다. Aside 브라우저의 snapshot()처럼 누를 수 있는
 //! 요소에 ref를 달고, 같은 범위를 다시 읽으면 바뀐 줄(diff)도 돌려준다.
 //!
-//! - `buntd-agent`: 사용자 서비스. 접근성 버스를 읽고 세션(ref, 지난 트리)을 지닌다
+//! - `buntd-agent`: 사용자 서비스. 접근성 버스를 읽고 세션(ref, 지난 트리)과 AI마다의 JS REPL을 지닌다
 //! - `bunt agent`: 데몬에 JSON-RPC로 묻는 CLI
+//! - `bunt mcp`: 같은 소켓으로 묻는 MCP 어댑터 (도구 repl, skills)
 
 pub mod atspi;
 pub mod desk;
 pub mod desktop;
 pub mod diff;
+pub mod mcp;
 pub mod outline;
 pub mod protocol;
 pub mod repl;
