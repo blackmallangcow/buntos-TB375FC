@@ -1970,13 +1970,21 @@ async fn press(
             .pid(bus)
             .await
             .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
-        let activated = a11y
-            .activate_window(pid, window_title)
-            .await
-            .map_err(|err| agent_error(format!("activating the window failed: {err}")))?;
-        if !activated {
-            return Err(agent_error("the compositor has no window for this app"));
-        }
+        // 셸의 레이어 표면(메뉴 막대, 모든 앱 패널 등)은 앞으로 가져올 창이 없어, 창만 찾던 이 자리에서 "no
+        // window"로 실패했다. 레이어 표면이면 가져오지 않고, 포커스를 준 뒤 그 표면이 키보드를 가졌는지 본다
+        let layer = match compositor_surface(a11y, pid, window_title).await? {
+            Surface::Window(_) => {
+                let activated = a11y
+                    .activate_window(pid, window_title)
+                    .await
+                    .map_err(|err| agent_error(format!("activating the window failed: {err}")))?;
+                if !activated {
+                    return Err(agent_error("the compositor has no window for this app"));
+                }
+                None
+            }
+            Surface::Layer(layer) => Some(layer),
+        };
         if !params.keep_focus {
             focus_element(a11y, bus, window_title, target)
                 .await
@@ -1989,6 +1997,17 @@ async fn press(
                         ),
                     )
                 })?;
+        }
+        // 메뉴 막대와 Dock은 키보드를 받지 않는다. 그대로 치면 키가 포커스를 가진 다른 앱으로 간다
+        if let Some(layer) = layer
+            && !layer_has_keyboard(a11y.focus().await.as_ref(), &layer)
+        {
+            return Err(agent_error(format!(
+                "{} of the shell does not have the keyboard focus, so nothing was {}; click the \
+                 element instead, or open its menu first",
+                layer.namespace,
+                if typing { "typed" } else { "pressed" }
+            )));
         }
     }
     if !typing {
@@ -2100,7 +2119,8 @@ async fn wait_for_text_input(a11y: &A11y) -> bool {
 }
 
 /// 접근성 동작이 없는 요소의 가운데를 포인터로 누른다. 자리는 컴포지터가 놓은 창의 자리와 앱이
-/// 알린 창 안 자리를 더한 것이다
+/// 알린 창 안 자리를 더한 것이다. 셸의 레이어 표면(메뉴 막대, Dock, 모든 앱 패널과 그 열린 메뉴)은
+/// 컴포지터가 표면 기준 자리를 받아 누른다
 async fn pointer_click(
     a11y: &A11y,
     bus: &str,
@@ -2111,7 +2131,9 @@ async fn pointer_click(
         .pid(bus)
         .await
         .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
-    let window = compositor_window(a11y, pid, window_title).await?;
+    // 창만 찾던 compositor_window 대신 셸의 레이어 표면도 찾는다. 셸 단추(로고 메뉴, 시계, Dock 아이콘)가
+    // "the compositor has no window for this app"으로 실패했다
+    let surface = compositor_surface(a11y, pid, window_title).await?;
     let (x, y, width, height) = a11y
         .extents(bus, &target.path)
         .await
@@ -2119,19 +2141,100 @@ async fn pointer_click(
     if width <= 0 || height <= 0 {
         return Err(agent_error("the element has no size on screen"));
     }
-    // 다른 창에 가려 있으면 그 창을 누르게 되므로 먼저 앞으로 가져온다
-    activate(a11y, pid, &window.title).await?;
-    let at = (
-        f64::from(window.x + x) + f64::from(width) / 2.0,
-        f64::from(window.y + y) + f64::from(height) / 2.0,
+    // 요소 가운데의 창(표면) 기준 좌표
+    let center = (
+        f64::from(x) + f64::from(width) / 2.0,
+        f64::from(y) + f64::from(height) / 2.0,
     );
-    a11y.click(at.0, at.1)
-        .await
-        .map_err(|err| agent_error(format!("the pointer click failed: {err}")))?;
+    let at = match surface {
+        Surface::Window(window) => {
+            // 다른 창에 가려 있으면 그 창을 누르게 되므로 먼저 앞으로 가져온다
+            activate(a11y, pid, &window.title).await?;
+            let at = (
+                f64::from(window.x) + center.0,
+                f64::from(window.y) + center.1,
+            );
+            a11y.click(at.0, at.1)
+                .await
+                .map_err(|err| agent_error(format!("the pointer click failed: {err}")))?;
+            at
+        }
+        // 레이어 표면은 늘 제 층에 있어 앞으로 가져올 것이 없다. 컴포지터가 그 점에서 포인터가 실제로 이
+        // 표면이나 그 열린 메뉴에 가는지 보고 누른다: 자동으로 숨은 막대 자리를 누르면 아래 창이 눌린다
+        Surface::Layer(layer) => a11y
+            .click_layer(pid, &layer.namespace, center.0, center.1)
+            .await
+            .map_err(|err| agent_error(format!("the pointer click failed: {}", reason(&err))))?,
+    };
     Ok(format!(
         "clicked with the pointer at ({:.0}, {:.0})",
         at.0, at.1
     ))
+}
+
+/// 접근성 창이 컴포지터에서 놓인 것: 앱의 창이거나 셸의 레이어 표면
+enum Surface {
+    Window(Placed),
+    Layer(atspi::Layer),
+}
+
+/// 컴포지터가 놓은 그 pid의 표면 (choose_surface). 사람만 답하는 창과 잠금 화면은 거절한다
+async fn compositor_surface(a11y: &A11y, pid: u32, title: &str) -> Result<Surface, Failure> {
+    if atspi::is_human_only(title) {
+        return Err(auth_dialog());
+    }
+    if title == LOCK_WINDOW {
+        return Err(screen_locked());
+    }
+    let windows = a11y
+        .windows()
+        .await
+        .map_err(|err| agent_error(format!("cannot read the window list: {err}")))?;
+    // GetLayers가 없는 옛 컴포지터에서는 창만 찾는다
+    let layers = a11y.layers().await.unwrap_or_else(|err| {
+        tracing::warn!("cannot read the shell surfaces: {err}");
+        Vec::new()
+    });
+    choose_surface(&windows, &layers, pid, title)
+        .ok_or_else(|| agent_error("the compositor has no window for this app"))
+}
+
+/// 그 pid의 표면: 제목이 같은 창, 이름이 같은 레이어 표면, 없으면 맨 위 창. 셸은 레이어 창의 접근성
+/// 이름을 레이어 이름으로 두므로, 셸에 창(다시 시작 확인 창 등)이 떠 있어도 메뉴 막대는 메뉴 막대로
+/// 찾는다. 사람만 답하는 창과 잠금 화면의 레이어 표면은 고르지 않는다(컴포지터도 알리지 않는다)
+fn choose_surface(
+    windows: &[Placed],
+    layers: &[atspi::Layer],
+    pid: u32,
+    title: &str,
+) -> Option<Surface> {
+    let of_pid = || windows.iter().rev().filter(|window| window.pid == pid);
+    of_pid()
+        .find(|window| window.title == title)
+        .map(|window| Surface::Window(window.clone()))
+        .or_else(|| {
+            layers
+                .iter()
+                .rev()
+                .filter(|layer| {
+                    !atspi::is_human_only(&layer.namespace) && layer.namespace != LOCK_WINDOW
+                })
+                .find(|layer| layer.pid == pid && layer.namespace == title)
+                .map(|layer| Surface::Layer(layer.clone()))
+        })
+        .or_else(|| {
+            of_pid()
+                .next()
+                .map(|window| Surface::Window(window.clone()))
+        })
+}
+
+/// 키보드 포커스가 그 레이어 표면(이나 그 열린 메뉴)에 있는지. 컴포지터는 팝업의 포커스를 그 뿌리
+/// 표면의 레이어 이름으로 알린다
+fn layer_has_keyboard(focus: Option<&Focus>, layer: &atspi::Layer) -> bool {
+    focus.is_some_and(|focus| {
+        focus.layer && focus.pid == layer.pid && focus.app_id == layer.namespace
+    })
 }
 
 /// 컴포지터가 놓은 그 pid의 창: 제목이 같은 창, 없으면 맨 위 창
@@ -2499,5 +2602,107 @@ mod tests {
         // 여러 앱에 맞으면 고르지 않는다
         let message = find("org.gnome").unwrap_err().1;
         assert!(message.contains("several apps"), "{message}");
+    }
+
+    fn layer(pid: u32, namespace: &str) -> atspi::Layer {
+        atspi::Layer {
+            pid,
+            namespace: namespace.into(),
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 24,
+        }
+    }
+
+    /// 고른 표면: 창이면 ("window", 제목), 레이어 표면이면 ("layer", 이름)
+    fn chosen(surface: Option<Surface>) -> Option<(&'static str, String)> {
+        surface.map(|surface| match surface {
+            Surface::Window(window) => ("window", window.title),
+            Surface::Layer(layer) => ("layer", layer.namespace),
+        })
+    }
+
+    #[test]
+    fn shell_surfaces_are_found_by_their_layer_name() {
+        // 셸(pid 10)에 다시 시작 확인 창이 떠 있고, 계산기(pid 20)가 있다
+        let windows = [
+            placed(10, "org.buntos.Shell", "Restart"),
+            placed(20, "org.gnome.Calculator", "Calculator"),
+        ];
+        let layers = [
+            layer(10, "bunt-menubar"),
+            layer(10, "bunt-dock"),
+            // 컴포지터는 알리지 않지만, 알려도 고르지 않는다
+            layer(10, "bunt-polkit-agent"),
+            layer(10, LOCK_WINDOW),
+        ];
+        let choose = |pid, title| chosen(choose_surface(&windows, &layers, pid, title));
+        // 메뉴 막대와 Dock의 요소는 셸의 창이 아니라 그 레이어 표면을 누른다
+        assert_eq!(
+            choose(10, "bunt-menubar"),
+            Some(("layer", "bunt-menubar".into()))
+        );
+        assert_eq!(choose(10, "bunt-dock"), Some(("layer", "bunt-dock".into())));
+        // 제목이 같은 창이 먼저다. 접근성 이름과 창 제목이 다르면 맨 위 창이다(Firefox 등)
+        assert_eq!(choose(10, "Restart"), Some(("window", "Restart".into())));
+        assert_eq!(
+            choose(20, "Calculator"),
+            Some(("window", "Calculator".into()))
+        );
+        assert_eq!(
+            choose(20, "Calculator — 1"),
+            Some(("window", "Calculator".into()))
+        );
+        // 다른 앱(pid 20)의 이름으로는 셸 표면을 고르지 않는다
+        assert_eq!(
+            chosen(choose_surface(&windows[1..], &layers, 20, "bunt-dock")),
+            Some(("window", "Calculator".into()))
+        );
+        assert_eq!(chosen(choose_surface(&[], &layers, 20, "bunt-dock")), None);
+        // 사람만 답하는 창과 잠금 화면의 레이어 표면은 고르지 않는다
+        assert_eq!(
+            chosen(choose_surface(&[], &layers, 10, "bunt-polkit-agent")),
+            None
+        );
+        assert_eq!(chosen(choose_surface(&[], &layers, 10, LOCK_WINDOW)), None);
+        // 창도 레이어 표면도 없으면 없다
+        assert_eq!(chosen(choose_surface(&[], &[], 10, "bunt-menubar")), None);
+    }
+
+    #[test]
+    fn keys_go_to_a_shell_surface_only_while_it_has_the_keyboard() {
+        let launcher = layer(10, "bunt-launcher");
+        let layer_focus = |pid, namespace: &str| Focus {
+            pid,
+            app_id: namespace.into(),
+            title: String::new(),
+            layer: true,
+        };
+        // 모든 앱 패널(키보드 독점)이나 그 열린 메뉴가 포커스를 가졌다
+        assert!(layer_has_keyboard(
+            Some(&layer_focus(10, "bunt-launcher")),
+            &launcher
+        ));
+        // 메뉴 막대·Dock처럼 키보드를 받지 않는 표면이면 포커스는 다른 곳에 있다
+        assert!(!layer_has_keyboard(
+            Some(&layer_focus(10, "bunt-menubar")),
+            &launcher
+        ));
+        assert!(!layer_has_keyboard(
+            Some(&focus(20, "Calculator")),
+            &launcher
+        ));
+        // 다른 클라이언트의 같은 이름, 창 포커스, 포커스 없음
+        assert!(!layer_has_keyboard(
+            Some(&layer_focus(30, "bunt-launcher")),
+            &launcher
+        ));
+        let window = Focus {
+            layer: false,
+            ..layer_focus(10, "bunt-launcher")
+        };
+        assert!(!layer_has_keyboard(Some(&window), &launcher));
+        assert!(!layer_has_keyboard(None, &launcher));
     }
 }

@@ -160,6 +160,19 @@ pub struct WindowInfo {
     pub focused: bool,
 }
 
+/// 에이전트가 보는 레이어 표면 하나 (GetLayers): 셸의 메뉴 막대, Dock, 모든 앱 패널 등
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerInfo {
+    pub pid: u32,
+    /// 레이어 이름. 셸은 레이어 창의 접근성 이름을 이것으로 둔다
+    pub namespace: String,
+    /// 지금 그리는 자리와 크기 (논리 좌표). 미끄러지는 막대는 옮긴 자리다
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 /// 에이전트의 입력을 받지 않은 까닭
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
@@ -177,6 +190,9 @@ pub enum Refused {
     CaptureFailed,
     /// 화면이 잠겼다. 잠긴 동안 에이전트는 아무것도 읽거나 하지 못한다. 사람이 암호를 쳐야만 풀린다
     Locked,
+    /// 누를 점에서 포인터가 그 레이어 표면(과 그 열린 메뉴)에 가지 않는다: 자동으로 숨은 메뉴 막대·Dock,
+    /// 그 위를 덮은 다른 표면, 표면의 입력 영역 밖
+    NotShown,
 }
 
 /// 에이전트 입력 요청의 답을 기다린다
@@ -209,6 +225,11 @@ fn answer_within<T>(answer: mpsc::Receiver<Result<T, Refused>>, wait: Duration) 
         )),
         Ok(Err(Refused::Locked)) => Err(fdo::Error::AccessDenied(
             "the screen is locked; only the user can unlock it with their password".into(),
+        )),
+        Ok(Err(Refused::NotShown)) => Err(fdo::Error::Failed(
+            "that part of the shell is not under that point: it is hidden (the menu bar and the \
+             Dock can hide automatically) or something covers it, so nothing was clicked"
+                .into(),
         )),
         Err(_) => Err(fdo::Error::Failed("the compositor did not answer".into())),
     }
@@ -283,6 +304,18 @@ pub enum AgentRequest {
     ClickWindow {
         pid: u32,
         title: String,
+        x: f64,
+        y: f64,
+        button: u32,
+        reply: mpsc::Sender<Result<(f64, f64), Refused>>,
+    },
+    /// 레이어 표면 목록. 사람만 답하는 창은 들지 않는다
+    Layers(mpsc::Sender<Result<Vec<LayerInfo>, Refused>>),
+    /// 그 pid의 레이어 표면(이름이 같은 것) 안의 점(표면 기준 논리 좌표)을 누른다. 누른 화면의 논리 좌표를
+    /// 돌려준다
+    ClickLayer {
+        pid: u32,
+        namespace: String,
         x: f64,
         y: f64,
         button: u32,
@@ -913,6 +946,65 @@ impl Api {
         answer(receiver)
     }
 
+    /// 에이전트 전용: 레이어 표면(셸의 메뉴 막대, Dock, 모든 앱 패널 등) 목록 (pid, 레이어 이름, x, y, 너비,
+    /// 높이). 출력마다 아래층부터 쌓인 순서다. 사람만 답하는 창(관리자 인증, Wi-Fi 암호, Bluetooth 페어링)은
+    /// 들지 않는다
+    #[allow(clippy::type_complexity)]
+    async fn get_layers(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<Vec<(u32, String, i32, i32, i32, i32)>> {
+        check_agent(connection, &header).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::Layers(reply)))?;
+        let layers = answer(receiver)?;
+        Ok(layers
+            .into_iter()
+            .map(|layer| {
+                (
+                    layer.pid,
+                    layer.namespace,
+                    layer.x,
+                    layer.y,
+                    layer.width,
+                    layer.height,
+                )
+            })
+            .collect())
+    }
+
+    /// 에이전트 전용: 그 pid의 레이어 표면(이름이 같은 것) 안의 (x, y)를 누른다. x, y는 표면 기준 논리
+    /// 좌표(셸 창의 접근성 좌표)이고, 그 표면의 열린 메뉴도 같은 좌표로 누른다. 사람만 답하는 창은 거절하고,
+    /// 그 점에서 포인터가 그 표면이나 그 메뉴에 가지 않으면(자동으로 숨은 막대, 다른 표면에 가림) 누르지
+    /// 않는다. 누른 화면의 논리 좌표를 돌려준다
+    #[allow(clippy::too_many_arguments)]
+    async fn click_layer(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        namespace: String,
+        x: f64,
+        y: f64,
+        button: u32,
+    ) -> fdo::Result<(f64, f64)> {
+        check_agent(connection, &header).await?;
+        if !x.is_finite() || !y.is_finite() {
+            return Err(fdo::Error::InvalidArgs("x and y must be numbers".into()));
+        }
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::ClickLayer {
+            pid,
+            namespace,
+            x,
+            y,
+            button,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
     /// 키보드 포커스: (클라이언트 pid, 앱 ID나 레이어 이름, 창 제목, 레이어 표면인지).
     /// 포커스가 없으면 pid가 0이다
     fn get_focus(&self) -> (u32, String, String, bool) {
@@ -1331,6 +1423,14 @@ mod tests {
         match refusal(Refused::Locked) {
             fdo::Error::AccessDenied(message) => {
                 assert!(message.contains("screen is locked"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // 숨은 막대나 가려진 셸 표면은 누르지 않았다고 알린다
+        match refusal(Refused::NotShown) {
+            fdo::Error::Failed(message) => {
+                assert!(message.contains("hide automatically"), "{message}");
+                assert!(message.contains("nothing was clicked"), "{message}");
             }
             other => panic!("{other:?}"),
         }

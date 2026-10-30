@@ -3,7 +3,9 @@
 
 //! 에이전트(buntd-agent)가 부르는 컴포지터 기능: 창 목록, 창 활성화, 키·포인터 입력
 //! (D-Bus의 에이전트 전용 메서드, ARCHITECTURE 6장). 입력은 사용자의 seat에 넣으며 실제 입력과
-//! 같은 길을 거친다. 키는 컴포지터 단축키를 거치지 않는다. 에이전트 전용 seat는 뒤에 둔다
+//! 같은 길을 거친다. 키는 컴포지터 단축키를 거치지 않는다. 에이전트 전용 seat는 뒤에 둔다.
+//! 셸의 레이어 표면(메뉴 막대, Dock, 모든 앱 패널과 그 열린 메뉴)도 목록과 포인터 누르기로 다룬다.
+//! 사람만 답하는 창(AUTH_NAMESPACES)은 목록에 들지 않고 누를 수도 없다
 
 use std::{sync::mpsc, time::Duration};
 
@@ -25,8 +27,12 @@ use smithay::{
 };
 
 use crate::{
-    dbus::{AgentRequest, Chord, Refused, Typed, WindowInfo},
+    dbus::{AgentRequest, Chord, LayerInfo, Refused, Typed, WindowInfo},
     state::BuntState,
+};
+// 셸의 레이어 표면(메뉴 막대, Dock 등)과 그 열린 메뉴 누르기
+use smithay::{
+    reexports::wayland_server::protocol::wl_surface::WlSurface, wayland::shell::wlr_layer::Layer,
 };
 // 창 스크린샷과 창 안의 점 누르기
 use crate::{
@@ -152,6 +158,25 @@ impl BuntState {
                     None => self.agent_click_window(pid, &title, (x, y), button),
                 });
             }
+            AgentRequest::Layers(reply) => {
+                let _ = reply.send(match locked {
+                    Some(why) => Err(why),
+                    None => Ok(listed(self.placed_layers())),
+                });
+            }
+            AgentRequest::ClickLayer {
+                pid,
+                namespace,
+                x,
+                y,
+                button,
+                reply,
+            } => {
+                let _ = reply.send(match refused {
+                    Some(why) => Err(why),
+                    None => self.agent_click_layer(pid, &namespace, (x, y), button),
+                });
+            }
         }
     }
 
@@ -159,20 +184,85 @@ impl BuntState {
         self.space.outputs().any(|output| {
             layer_map_for_output(output)
                 .layers()
-                .any(|layer| AUTH_NAMESPACES.contains(&layer.namespace()))
+                .any(|layer| human_only(layer.namespace()))
         })
     }
 
+    // 레이어 표면의 pid도 같은 길로 알아내도록 표면 하나를 받는 surface_pid로 나눴다
     fn client_pid(&self, window: &Window) -> u32 {
         window
             .toplevel()
-            .and_then(|toplevel| {
-                self.display_handle
-                    .get_client(toplevel.wl_surface().id())
-                    .ok()
-            })
+            .map_or(0, |toplevel| self.surface_pid(toplevel.wl_surface()))
+    }
+
+    /// 표면을 만든 클라이언트의 pid. 모르면 0
+    fn surface_pid(&self, surface: &WlSurface) -> u32 {
+        self.display_handle
+            .get_client(surface.id())
+            .ok()
             .and_then(|client| client.get_credentials(&self.display_handle).ok())
             .map_or(0, |credentials| credentials.pid as u32)
+    }
+
+    /// 출력마다 아래층부터 쌓인 차례의 레이어 표면과 그것을 지금 그리는 자리(전역 논리 좌표). 미끄러지는
+    /// 막대는 옮긴 자리이고, 다 숨은 막대는 원래 자리다(그 점은 surface_under가 막대로 찾지 않는다)
+    fn placed_layers(&self) -> Vec<PlacedLayer> {
+        let mut placed = Vec::new();
+        for output in self.space.outputs() {
+            let Some(output_geo) = self.space.output_geometry(output) else {
+                continue;
+            };
+            // bar_places도 레이어 맵을 잠그므로 맵을 잠그기 전에 읽는다
+            let bars = self.bar_places(output);
+            let map = layer_map_for_output(output);
+            for kind in [Layer::Background, Layer::Bottom, Layer::Top, Layer::Overlay] {
+                for layer in map.layers_on(kind) {
+                    let Some(mut area) = map.layer_geometry(layer) else {
+                        continue;
+                    };
+                    if let Some(at) = bars
+                        .iter()
+                        .find(|bar| bar.layer == *layer)
+                        .and_then(|bar| bar.at)
+                    {
+                        area.loc = at;
+                    }
+                    area.loc += output_geo.loc;
+                    placed.push(PlacedLayer {
+                        pid: self.surface_pid(layer.wl_surface()),
+                        namespace: layer.namespace().to_string(),
+                        surface: layer.wl_surface().clone(),
+                        area,
+                    });
+                }
+            }
+        }
+        placed
+    }
+
+    /// 그 pid의 레이어 표면(이름이 같은 것의 맨 위) 안의 한 점을 포인터로 누른다. (x, y)는 표면 기준 논리
+    /// 좌표(셸 창의 접근성 좌표)다. GTK는 열린 메뉴(팝오버)의 요소도 그 창 기준으로 알리므로, 표면 밖의 점도
+    /// 그 표면의 팝업 위면 누른다. 그 점에서 포인터가 실제로 이 표면이나 그 팝업에 가지 않으면(자동으로 숨은
+    /// 막대, 다른 표면에 가림) 누르지 않는다: 숨은 막대 자리를 누르면 그 아래 창이 눌린다
+    fn agent_click_layer(
+        &mut self,
+        pid: u32,
+        namespace: &str,
+        (x, y): (f64, f64),
+        button: u32,
+    ) -> Result<(f64, f64), Refused> {
+        let placed = self.placed_layers();
+        let layer = choose_layer(&placed, pid, namespace)?;
+        let pos = layer.area.loc.to_f64() + Point::<f64, Logical>::from((x, y));
+        // 사람의 포인터와 같은 길(surface_under)로 그 점의 표면을 찾는다. 팝업과 하위 표면은 뿌리로 올라간다
+        let reaches = self
+            .surface_under(pos)
+            .is_some_and(|(under, _)| self.root_surface(&under) == layer.surface);
+        if !reaches {
+            return Err(Refused::NotShown);
+        }
+        self.agent_click(pos.x, pos.y, button);
+        Ok((pos.x, pos.y))
     }
 
     fn agent_windows(&self) -> Vec<WindowInfo> {
@@ -552,6 +642,53 @@ impl BuntState {
     }
 }
 
+/// 사람만 답하는 셸 창의 레이어 이름인지
+fn human_only(namespace: &str) -> bool {
+    AUTH_NAMESPACES.contains(&namespace)
+}
+
+/// 레이어 표면 하나와 지금 그리는 자리 (placed_layers). 시험은 표면 없이(`()`) 만든다
+struct PlacedLayer<S = WlSurface> {
+    pid: u32,
+    namespace: String,
+    surface: S,
+    /// 전역 논리 좌표
+    area: Rectangle<i32, Logical>,
+}
+
+/// 에이전트에게 알리는 레이어 표면 (GetLayers): 사람만 답하는 창은 뺀다
+fn listed<S>(placed: Vec<PlacedLayer<S>>) -> Vec<LayerInfo> {
+    placed
+        .into_iter()
+        .filter(|layer| !human_only(&layer.namespace))
+        .map(|layer| LayerInfo {
+            pid: layer.pid,
+            namespace: layer.namespace,
+            x: layer.area.loc.x,
+            y: layer.area.loc.y,
+            width: layer.area.size.w,
+            height: layer.area.size.h,
+        })
+        .collect()
+}
+
+/// 에이전트가 누를 레이어 표면: 쌓인 차례(아래부터) 가운데 pid와 이름이 같은 것의 맨 위. 사람만 답하는
+/// 창은 떠 있어도 고르지 않는다
+fn choose_layer<'a, S>(
+    placed: &'a [PlacedLayer<S>],
+    pid: u32,
+    namespace: &str,
+) -> Result<&'a PlacedLayer<S>, Refused> {
+    if human_only(namespace) {
+        return Err(Refused::AuthDialog);
+    }
+    placed
+        .iter()
+        .rev()
+        .find(|layer| layer.pid == pid && layer.namespace == namespace)
+        .ok_or(Refused::NoWindow)
+}
+
 /// 창 제목 (xdg_toplevel)
 fn window_title(window: &Window) -> Option<String> {
     let toplevel = window.toplevel()?;
@@ -592,5 +729,82 @@ mod tests {
         assert_eq!(chunks(text, 12).collect::<Vec<_>>(), ["가나다라"]);
         assert_eq!(chunks("abc", 1).collect::<Vec<_>>(), ["a", "b", "c"]);
         assert_eq!(chunks("", 4).count(), 0);
+    }
+
+    /// 셸(pid 10)의 레이어 표면들: 배경, 메뉴 막대, Dock, 관리자 인증 창, 다른 앱(pid 20)의 막대
+    fn shell_layers() -> Vec<PlacedLayer<()>> {
+        let layer = |pid, namespace: &str, (x, y, w, h)| PlacedLayer {
+            pid,
+            namespace: namespace.into(),
+            surface: (),
+            area: Rectangle::new((x, y).into(), (w, h).into()),
+        };
+        vec![
+            layer(10, "bunt-wallpaper", (0, 0, 1280, 800)),
+            layer(10, "bunt-menubar", (0, 0, 1280, 24)),
+            layer(10, "bunt-dock", (400, 720, 480, 80)),
+            layer(20, "bunt-dock", (0, 760, 1280, 40)),
+            layer(10, "bunt-polkit-agent", (440, 250, 400, 300)),
+        ]
+    }
+
+    #[test]
+    fn the_agent_sees_shell_surfaces_but_not_dialogs_people_answer() {
+        let listed = listed(shell_layers());
+        let names: Vec<(u32, &str)> = listed
+            .iter()
+            .map(|layer| (layer.pid, layer.namespace.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (10, "bunt-wallpaper"),
+                (10, "bunt-menubar"),
+                (10, "bunt-dock"),
+                (20, "bunt-dock"),
+            ]
+        );
+        // 자리는 지금 그리는 전역 좌표다
+        assert_eq!(
+            (listed[2].x, listed[2].y, listed[2].width, listed[2].height),
+            (400, 720, 480, 80)
+        );
+        for namespace in AUTH_NAMESPACES {
+            assert!(human_only(namespace), "{namespace}");
+        }
+    }
+
+    #[test]
+    fn clicks_go_to_the_named_shell_surface_and_never_to_dialogs_people_answer() {
+        let placed = shell_layers();
+        // 메뉴 막대와 Dock은 pid와 이름이 같은 표면을 누른다. 다른 앱의 같은 이름은 고르지 않는다
+        let menubar = choose_layer(&placed, 10, "bunt-menubar").unwrap();
+        assert_eq!(menubar.area.loc, (0, 0).into());
+        let dock = choose_layer(&placed, 10, "bunt-dock").unwrap();
+        assert_eq!(dock.area.loc, (400, 720).into());
+        assert_eq!(
+            choose_layer(&placed, 20, "bunt-dock").unwrap().area.loc,
+            (0, 760).into()
+        );
+        // 사람만 답하는 창은 떠 있어도, 없어도 거절한다
+        for namespace in AUTH_NAMESPACES {
+            assert_eq!(
+                choose_layer(&placed, 10, namespace).err(),
+                Some(Refused::AuthDialog)
+            );
+            assert_eq!(
+                choose_layer::<()>(&[], 10, namespace).err(),
+                Some(Refused::AuthDialog)
+            );
+        }
+        // 없는 표면, 다른 pid의 셸 표면
+        assert_eq!(
+            choose_layer(&placed, 10, "bunt-launcher").err(),
+            Some(Refused::NoWindow)
+        );
+        assert_eq!(
+            choose_layer(&placed, 20, "bunt-menubar").err(),
+            Some(Refused::NoWindow)
+        );
     }
 }

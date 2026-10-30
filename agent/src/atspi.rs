@@ -118,6 +118,21 @@ pub struct Placed {
     pub focused: bool,
 }
 
+/// GetLayers 항목: pid, 레이어 이름, x, y, 너비, 높이
+type RawLayer = (u32, String, i32, i32, i32, i32);
+
+/// 컴포지터가 놓은 레이어 표면 (GetLayers): 셸의 메뉴 막대, Dock, 모든 앱 패널 등. 셸은 레이어 창의
+/// 접근성 이름을 레이어 이름으로 둔다. 사람만 답하는 창은 컴포지터가 알리지 않는다
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layer {
+    pub pid: u32,
+    pub namespace: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 /// 컴포지터가 키보드 포커스를 준 곳 (GetFocus)
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Focus {
@@ -267,6 +282,36 @@ impl A11y {
                 },
             )
             .collect())
+    }
+
+    /// 컴포지터의 레이어 표면 목록 (출력마다 아래층부터)
+    pub async fn layers(&self) -> zbus::Result<Vec<Layer>> {
+        let layers: Vec<RawLayer> = self.compositor("GetLayers", &()).await?;
+        Ok(layers
+            .into_iter()
+            .map(|(pid, namespace, x, y, width, height)| Layer {
+                pid,
+                namespace,
+                x,
+                y,
+                width,
+                height,
+            })
+            .collect())
+    }
+
+    /// 그 pid의 레이어 표면(이름이 같은 것) 안의 (x, y)를 왼쪽 단추로 누른다. x, y는 표면 기준 논리
+    /// 좌표(셸 창의 접근성 좌표, 열린 메뉴 포함)다. 누른 화면의 논리 좌표를 돌려준다. 그 점에서 포인터가 그
+    /// 표면에 가지 않으면(자동으로 숨은 막대, 가림) 오류다
+    pub async fn click_layer(
+        &self,
+        pid: u32,
+        namespace: &str,
+        x: f64,
+        y: f64,
+    ) -> zbus::Result<(f64, f64)> {
+        self.compositor("ClickLayer", &(pid, namespace, x, y, BUTTON_LEFT))
+            .await
     }
 
     /// 그 pid의 창(제목이 같은 것 먼저)을 앞으로 가져와 키보드 포커스를 준다
