@@ -30,9 +30,11 @@ enum Frame {
     Brace {
         literal: bool,
     },
-    /// `(`. if·while·for·with 뒤의 것이면 닫은 뒤 문장이 온다
+    /// `(`. if·while·for·with 뒤의 것이면(head) 닫은 뒤 문장이 온다. `do { … } while (…)`의 것이면(do_while) 닫으면
+    /// 문장이 끝난다
     Paren {
         head: bool,
+        do_while: bool,
     },
     Bracket,
     /// 템플릿 글의 글 부분
@@ -65,6 +67,16 @@ enum Prev {
     Punct,
 }
 
+/// 앞의 낱말 토큰
+#[derive(Debug, Clone, Copy)]
+struct Word<'a> {
+    text: &'a str,
+    /// 블록의 `}` 바로 뒤에 왔다 (`do { … } while`)
+    after_block: bool,
+    /// 문장을 시작했다 (이름표 `out:`)
+    starts_statement: bool,
+}
+
 /// 뒤에 오는 `/`가 정규식인 낱말 (else와 do는 BlockKeyword)
 const REGEX_KEYWORDS: [&str; 13] = [
     "return",
@@ -92,7 +104,7 @@ fn scan(code: &str) -> Scan {
     let mut stack: Vec<Frame> = Vec::new();
     let mut prev = Prev::Start;
     // 앞 토큰이 속성 이름이 아닌 낱말이었으면 그 낱말 (if·while·for·with의 괄호를 가린다)
-    let mut word_before: Option<&str> = None;
+    let mut word_before: Option<Word> = None;
     // 앞 토큰 뒤에 줄바꿈이 있었다 (자동 세미콜론)
     let mut newline = false;
     let mut at = 0;
@@ -181,7 +193,11 @@ fn scan(code: &str) -> Scan {
                         literal: matches!(prev, Prev::Punct | Prev::Keyword),
                     },
                     b'(' => Frame::Paren {
-                        head: matches!(last_word, Some("if" | "while" | "for" | "with")),
+                        head: last_word.is_some_and(|word| {
+                            matches!(word.text, "if" | "while" | "for" | "with")
+                        }),
+                        do_while: last_word
+                            .is_some_and(|word| word.text == "while" && word.after_block),
                     },
                     _ => Frame::Bracket,
                 });
@@ -204,7 +220,9 @@ fn scan(code: &str) -> Scan {
                 prev = match (byte, top.filter(|_| paired)) {
                     (b'}', Some(Frame::Brace { literal: true })) => Prev::Operand,
                     (b'}', _) => Prev::CloseBrace,
-                    (b')', Some(Frame::Paren { head: true })) => Prev::Head,
+                    // `do { … } while (c)` 뒤 줄의 선언도 최상위 문장이다 (두 번째 검토)
+                    (b')', Some(Frame::Paren { do_while: true, .. })) => Prev::Semicolon,
+                    (b')', Some(Frame::Paren { head: true, .. })) => Prev::Head,
                     _ => Prev::Operand,
                 };
                 newline = false;
@@ -244,13 +262,30 @@ fn scan(code: &str) -> Scan {
                 }
                 // `.` 뒤의 낱말은 속성 이름이다 (검토: `bytes.in / total`의 나누기를 정규식으로 보았다)
                 let property = prev == Prev::Dot;
+                let after_block = prev == Prev::CloseBrace;
+                let in_function = stack
+                    .iter()
+                    .any(|frame| matches!(frame, Frame::Brace { .. }));
                 prev = match word {
                     _ if property => Prev::Operand,
                     "else" | "do" => Prev::BlockKeyword,
+                    // `of`는 for 머리의 괄호에서만, `yield`는 함수 안에서만 낱말이다. 밖에서는 이름이다
+                    // (`x = of / 2`, 두 번째 검토)
+                    "of" if !matches!(stack.last(), Some(Frame::Paren { .. })) => Prev::Operand,
+                    "yield" if !in_function => Prev::Operand,
                     _ if REGEX_KEYWORDS.contains(&word) => Prev::Keyword,
                     _ => Prev::Operand,
                 };
-                word_before = (!property).then_some(word);
+                word_before = match word {
+                    _ if property => None,
+                    // `for await (…)`의 괄호는 for의 것이다
+                    "await" if last_word.is_some_and(|word| word.text == "for") => last_word,
+                    _ => Some(Word {
+                        text: word,
+                        after_block,
+                        starts_statement,
+                    }),
+                };
                 newline = false;
                 continue;
             }
@@ -264,6 +299,9 @@ fn scan(code: &str) -> Scan {
                     (if byte == b'.' { 1 } else { 2 }, Prev::Dot)
                 } else if rest.starts_with(b"=>") {
                     (2, Prev::Arrow)
+                } else if byte == b':' && last_word.is_some_and(|word| word.starts_statement) {
+                    // 이름표 (`out: { … }`): 뒤에 문장(블록, 정규식)이 온다 (두 번째 검토)
+                    (1, Prev::Head)
                 } else if rest.starts_with(b"++") || rest.starts_with(b"--") {
                     // 뒤에 붙은 `i++`는 식을 끝낸다 (검토: `i++ / 2`를 정규식으로 보았다). 줄이 바뀌었으면 앞에 붙는다
                     let postfix = prev == Prev::Operand && !newline;
@@ -450,8 +488,25 @@ mod tests {
             replify("f = () => /'/; const z = 1"),
             "f = () => /'/; var   z = 1"
         );
+        // 이름으로 쓴 of·yield, 이름표 뒤의 블록, for await의 괄호 (두 번째 검토)
+        for code in [
+            "x = of / 2; s = '/; const t = 1'",
+            "x = yield / 2; s = '/; const t = 1'",
+            "out: { } /'/.test(s); x = 'a; const q = 1'",
+            "for await (const x of xs) /'/.test(x); s = 'a; const q = 1'",
+        ] {
+            assert_eq!(replify(code), code);
+        }
         // 블록과 객체 글자 뒤의 줄바꿈은 문장을 끝낸다
         for (code, out) in [
+            (
+                "do { x++ } while (x < 3)\nconst n = 1",
+                "do { x++ } while (x < 3)\nvar   n = 1",
+            ),
+            (
+                "switch (a) { default: {} }\nlet b = [1]",
+                "switch (a) { default: {} }\nvar b = [1]",
+            ),
             (
                 "for (const k of ks) {}\nconst n = 1",
                 "for (const k of ks) {}\nvar   n = 1",
