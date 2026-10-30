@@ -425,6 +425,61 @@ impl std::ops::Deref for DbusMenu {
 /// dbusmenu 레이아웃의 한 항목: (id, 속성, 자식들)
 type Layout = (i32, HashMap<String, glib::Variant>, Vec<glib::Variant>);
 
+/// dbusmenu 항목의 동작 이름 (동작 묶음 "sni" 안)
+fn action_name(id: i32) -> String {
+    format!("item-{}", id.unsigned_abs())
+}
+
+/// GetLayout의 자식 항목들을 model에 넣고, 누를 수 있는 항목마다 (dbusmenu id, 켜짐)을 `items`에
+/// 더한다. 구분선이 나오면 새 묶음(section)을 열고, 하위 메뉴는 그 안으로 들어간다
+fn fill_model(model: &gio::Menu, children: &[glib::Variant], items: &mut Vec<(i32, bool)>) {
+    let mut section = gio::Menu::new();
+    for child in children {
+        // 자식(av)은 glib-rs가 Vec<Variant>로 읽을 때 상자(v)를 이미 벗겼다(FromVariant for Variant). 한 번 더
+        // 벗기면(as_variant) GLib이 항목마다 g_variant_get_variant 경고를 내고 None을 돌려줘, 메뉴가 대체
+        // 길로만 채워졌다. 그대로 읽는다
+        let Some((id, props, grandchildren)) = child.get::<Layout>() else {
+            continue;
+        };
+        let text = |name: &str| props.get(name).and_then(|value| value.get::<String>());
+        let flag = |name: &str, default: bool| {
+            props
+                .get(name)
+                .and_then(|value| value.get::<bool>())
+                .unwrap_or(default)
+        };
+        if !flag("visible", true) {
+            continue;
+        }
+        if text("type").as_deref() == Some("separator") {
+            if section.n_items() > 0 {
+                model.append_section(None, &section);
+                section = gio::Menu::new();
+            }
+            continue;
+        }
+        let mut label = plain_label(&text("label").unwrap_or_default());
+        let toggled = props
+            .get("toggle-state")
+            .and_then(|value| value.get::<i32>())
+            == Some(1);
+        if toggled {
+            label = format!("✓ {label}");
+        }
+        if text("children-display").as_deref() == Some("submenu") {
+            let submenu = gio::Menu::new();
+            fill_model(&submenu, &grandchildren, items);
+            section.append_submenu(Some(&label), &submenu);
+            continue;
+        }
+        items.push((id, flag("enabled", true)));
+        section.append(Some(&label), Some(&format!("sni.{}", action_name(id))));
+    }
+    if section.n_items() > 0 {
+        model.append_section(None, &section);
+    }
+}
+
 /// 메뉴 글자의 니모닉 밑줄을 뺀다 ("_Open" → "Open", "__" → "_")
 fn plain_label(label: &str) -> String {
     let mut out = String::new();
@@ -529,65 +584,20 @@ impl DbusMenu {
             for action in menu.actions.list_actions() {
                 menu.actions.remove_action(&action);
             }
-            menu.fill(&menu.model, &root.2);
+            menu.fill(&root.2);
         });
     }
 
-    /// 자식 항목들을 model에 넣는다. 구분선이 나오면 새 묶음(section)을 연다
-    fn fill(&self, model: &gio::Menu, children: &[glib::Variant]) {
-        let mut section = gio::Menu::new();
-        for child in children {
-            let Some(child) = child
-                .as_variant()
-                .unwrap_or_else(|| child.clone())
-                .get::<Layout>()
-            else {
-                continue;
-            };
-            let (id, props, grandchildren) = child;
-            let text = |name: &str| props.get(name).and_then(|value| value.get::<String>());
-            let flag = |name: &str, default: bool| {
-                props
-                    .get(name)
-                    .and_then(|value| value.get::<bool>())
-                    .unwrap_or(default)
-            };
-            if !flag("visible", true) {
-                continue;
-            }
-            if text("type").as_deref() == Some("separator") {
-                if section.n_items() > 0 {
-                    model.append_section(None, &section);
-                    section = gio::Menu::new();
-                }
-                continue;
-            }
-            let mut label = plain_label(&text("label").unwrap_or_default());
-            let toggled = props
-                .get("toggle-state")
-                .and_then(|value| value.get::<i32>())
-                == Some(1);
-            if toggled {
-                label = format!("✓ {label}");
-            }
-            if text("children-display").as_deref() == Some("submenu") {
-                let submenu = gio::Menu::new();
-                self.fill(&submenu, &grandchildren);
-                section.append_submenu(Some(&label), &submenu);
-                continue;
-            }
-            let action = gio::SimpleAction::new(&format!("item-{}", id.unsigned_abs()), None);
-            action.set_enabled(flag("enabled", true));
+    /// 자식 항목들을 메뉴 모델에 넣고, 누를 수 있는 항목마다 동작을 단다
+    fn fill(&self, children: &[glib::Variant]) {
+        let mut items = Vec::new();
+        fill_model(&self.model, children, &mut items);
+        for (id, enabled) in items {
+            let action = gio::SimpleAction::new(&action_name(id), None);
+            action.set_enabled(enabled);
             let menu = self.clone();
             action.connect_activate(move |_, _| menu.clicked(id));
             self.actions.add_action(&action);
-            section.append(
-                Some(&label),
-                Some(&format!("sni.item-{}", id.unsigned_abs())),
-            );
-        }
-        if section.n_items() > 0 {
-            model.append_section(None, &section);
         }
     }
 
@@ -640,5 +650,133 @@ mod tests {
         assert_eq!(plain_label("_Open"), "Open");
         assert_eq!(plain_label("Save__As"), "Save_As");
         assert_eq!(plain_label("Quit"), "Quit");
+    }
+
+    /// dbusmenu 항목 하나 (ia{sv}av). 속성 값과 자식은 앱이 보내듯 상자(v)에 넣는다
+    fn entry(
+        id: i32,
+        props: &[(&str, glib::Variant)],
+        children: &[glib::Variant],
+    ) -> glib::Variant {
+        let props: HashMap<String, glib::Variant> = props
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .collect();
+        (id, props, children.to_vec()).to_variant()
+    }
+
+    /// 메뉴 모델의 묶음마다 항목 (레이블, 동작). 하위 메뉴는 동작 대신 "submenu: <항목 레이블들>"
+    fn sections(menu: &gio::Menu) -> Vec<Vec<(String, String)>> {
+        let label = |model: &gio::MenuModel, item| {
+            model
+                .item_attribute_value(item, gio::MENU_ATTRIBUTE_LABEL, None)
+                .and_then(|value| value.get::<String>())
+                .unwrap_or_default()
+        };
+        let action = |model: &gio::MenuModel, item| {
+            if let Some(submenu) = model.item_link(item, gio::MENU_LINK_SUBMENU) {
+                let labels: Vec<String> = (0..submenu.n_items())
+                    .filter_map(|section| submenu.item_link(section, gio::MENU_LINK_SECTION))
+                    .flat_map(|section| {
+                        (0..section.n_items())
+                            .map(|item| label(&section, item))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                return format!("submenu: {}", labels.join(", "));
+            }
+            model
+                .item_attribute_value(item, gio::MENU_ATTRIBUTE_ACTION, None)
+                .and_then(|value| value.get::<String>())
+                .unwrap_or_default()
+        };
+        (0..menu.n_items())
+            .filter_map(|index| menu.item_link(index, gio::MENU_LINK_SECTION))
+            .map(|section| {
+                (0..section.n_items())
+                    .map(|item| (label(&section, item), action(&section, item)))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn app_menus_are_read_without_unboxing_twice() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        // 이미 벗긴 값을 다시 벗기면 GLib이 g_variant_get_variant 경고(critical)를 낸다
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let counter = warnings.clone();
+        let handler = glib::log_set_handler(
+            Some("GLib"),
+            glib::LogLevels::LEVEL_CRITICAL | glib::LogLevels::LEVEL_WARNING,
+            false,
+            false,
+            move |_, _, message| {
+                if message.contains("g_variant_get_variant") {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        );
+        let text = |value: &str| value.to_variant();
+        let root = entry(
+            0,
+            &[("children-display", text("submenu"))],
+            &[
+                entry(1, &[("label", text("_Open"))], &[]),
+                entry(
+                    2,
+                    &[("label", text("Hidden")), ("visible", false.to_variant())],
+                    &[],
+                ),
+                entry(3, &[("type", text("separator"))], &[]),
+                entry(
+                    4,
+                    &[
+                        ("label", text("Sync")),
+                        ("toggle-type", text("checkmark")),
+                        ("toggle-state", 1i32.to_variant()),
+                        ("enabled", false.to_variant()),
+                    ],
+                    &[],
+                ),
+                entry(
+                    5,
+                    &[
+                        ("label", text("More")),
+                        ("children-display", text("submenu")),
+                    ],
+                    &[entry(6, &[("label", text("About"))], &[])],
+                ),
+                entry(7, &[("type", text("separator"))], &[]),
+            ],
+        );
+        // GetLayout의 답 (u(ia{sv}av))을 reload와 같은 길로 읽는다
+        let reply = glib::Variant::tuple_from_iter([7u32.to_variant(), root]);
+        let layout = reply.child_value(1).get::<Layout>().unwrap();
+        let model = gio::Menu::new();
+        let mut items = Vec::new();
+        fill_model(&model, &layout.2, &mut items);
+        glib::log_remove_handler(Some("GLib"), handler);
+
+        assert_eq!(warnings.load(Ordering::SeqCst), 0);
+        let owned = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(label, action)| ((*label).to_owned(), (*action).to_owned()))
+                .collect()
+        };
+        // 숨긴 항목은 빠지고, 구분선이 묶음을 나누고, 끝의 구분선은 빈 묶음을 만들지 않는다
+        assert_eq!(
+            sections(&model),
+            [
+                owned(&[("Open", "sni.item-1")]),
+                owned(&[("✓ Sync", "sni.item-4"), ("More", "submenu: About")]),
+            ]
+        );
+        // 누를 수 있는 항목마다 동작이 하나다. 꺼진 항목은 꺼진 동작이다
+        assert_eq!(items, [(1, true), (4, false), (6, true)]);
     }
 }
