@@ -1,0 +1,193 @@
+# x86-64 이미지(bsp/x86_64-generic)를 자체 컴포넌트와 함께 빌드하고 e2e 1·5·6·4·7번(tests/e2e/boot-to-shell.sh)을
+# KVM에서 돌린다. 설계안 9.4절의 x86-64 e2e이고, Phase 0·1 종료 조건(같은 레시피로 셸 도달, 한글 입력 e2e)의
+# x86-64 쪽이다. 빌드 VM(docs/dev/environment.md 2·4장)과 같게 한다:
+# - mkosi는 tools/devvm/setup.sh에 고정한 판, 이미지 꾸러미는 image/mkosi.conf의 스냅숏
+# - 자체 컴포넌트는 같은 스냅숏의 Debian 컨테이너에서 rust-toolchain.toml의 툴체인으로 빌드한다
+#   (tools/image/cargo-debian.sh). 러너(Ubuntu)의 라이브러리는 이미지(Debian)와 다르다
+# 비공개 저장소의 Actions 시간(한 달 2000분 안팎)을 아끼려고, 개발하는 동안은 이 브랜치의 push와 수동 실행만 받는다.
+name: x86-64 이미지와 e2e
+
+on:
+  push:
+    branches: [feat/x86-graphical-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 같은 브랜치에 새로 올리면 앞선 실행을 멈춘다
+concurrency:
+  group: x86-64-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  x86-64:
+    name: x86_64-generic 빌드와 e2e
+    # Ubuntu 26.04의 이미지 도구(systemd 259, QEMU 10.2, OVMF 2025.11)는 빌드 VM(Debian 13)과 같거나 새 판이다
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+    env:
+      BOARD: x86_64-generic
+      # mkosi 27은 systemd-nsresourced가 있으면 그것으로 사용자 이름공간을 받는다. 빌드 VM처럼 unshare로 만든다
+      MKOSI_FORCE_USERNS_FALLBACK: "1"
+      # 2코어 러너에서 e2e 5·6·4·7번까지 넉넉히 기다린다 (기본 1200초)
+      E2E_TIMEOUT: "1800"
+    steps:
+      - name: 저장소 받기
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 러너 확인
+        run: |
+          echo "CPU $(nproc)개, 메모리 $(free -h | awk '/^Mem:/ {print $2}'), 커널 $(uname -r)"
+          df -h / /mnt 2>/dev/null || df -h /
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::error::러너에 /dev/kvm이 없다. e2e는 KVM에서 돈다"
+            exit 1
+          fi
+
+      - name: 작업 디렉터리
+        # 빌드는 20GB 가까이 쓴다(mkosi 작업 공간의 루트 트리와 디스크 이미지, 꾸러미 캐시, cargo). 빈자리가 넓은 쪽에 둔다
+        run: |
+          free_gb() { df --output=avail -BG "$1" | tail -n 1 | tr -dc 0-9; }
+          work=$HOME/buntos
+          if [[ -d /mnt ]] && (($(free_gb /mnt) > $(free_gb /))); then
+            work=/mnt/buntos
+          fi
+          sudo install -d -o "$(id -u)" -g "$(id -g)" "$work"
+          {
+            echo "WORK=$work"
+            echo "BUNTOS_BUILD_DIR=$work/build"
+            echo "CARGO_TARGET_DIR=$work/build/cargo-target"
+            echo "BUNTOS_CARGO_CACHE=$work/cache/cargo-debian"
+            echo "XDG_CACHE_HOME=$work/cache"
+            echo "E2E_LOG_DIR=$work/e2e"
+          } >>"$GITHUB_ENV"
+          echo "작업 디렉터리: $work (빈자리 $(free_gb "$work")GB)"
+
+      - name: 디스크 비우기
+        # 빈자리가 30GB보다 적으면 쓰지 않는, 미리 깔린 도구를 지운다
+        run: |
+          if (($(df --output=avail -BG "$WORK" | tail -n 1 | tr -dc 0-9) < 30)); then
+            sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
+              /opt/hostedtoolcache/CodeQL
+            docker image prune --all --force >/dev/null
+          fi
+          df -h "$WORK"
+
+      - name: KVM과 사용자 이름공간
+        run: |
+          # mkosi는 사용자 이름공간 안에서 QEMU를 띄워 kvm 그룹 권한을 쓰지 못한다(mkosi 문서 FAQ). 빌드 VM의 사용자는
+          # kvm 그룹(setup.sh)과 QEMU 9.0 이상의 장치 넘기기로 열지만, 러너의 사용자는 이 작업 중에 새 그룹을 얻지
+          # 못하므로 mkosi 문서대로 /dev/kvm을 모두에게 연다
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-buntos-kvm.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo chmod 0666 /dev/kvm
+          ls -l /dev/kvm
+          # Ubuntu는 AppArmor로 비특권 사용자 이름공간을 막는다. mkosi는 그 안에서 이미지를 만든다
+          sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_unconfined=0
+          sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: 빌드 도구
+        # tools/devvm/setup.sh의 이미지 도구 중 x86-64 이미지에 쓰는 것. systemd-boot 꾸러미는 러너의 부트로더를
+        # 고치려 하므로 넣지 않는다(mkosi는 bootctl과 이미지 안의 systemd-boot를 쓴다)
+        run: |
+          sudo apt-get -q update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -q -y install --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf \
+            systemd-repart systemd-ukify systemd-boot-tools systemd-container \
+            debian-archive-keyring dosfstools mtools e2fsprogs btrfs-progs erofs-utils squashfs-tools cpio zstd xz-utils
+          mkosi_version=$(sed -n 's/^MKOSI_VERSION=//p' tools/devvm/setup.sh)
+          pipx install "git+https://github.com/systemd/mkosi.git@$mkosi_version"
+          bin=$(pipx environment --value PIPX_BIN_DIR)
+          echo "$bin" >>"$GITHUB_PATH"
+          "$bin/mkosi" --version
+          qemu-system-x86_64 --version | head -n 1
+
+      - name: 캐시 복원 (이미지 꾸러미)
+        id: mkosi-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.XDG_CACHE_HOME }}/mkosi/debian~*~x86-64
+          key: mkosi-x86-64-${{ hashFiles('image/mkosi.conf', 'image/mkosi.conf.d/*.conf', 'bsp/x86_64-generic/mkosi.conf') }}
+          restore-keys: mkosi-x86-64-
+
+      - name: 캐시 복원 (cargo)
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.BUNTOS_CARGO_CACHE }}
+            ${{ env.CARGO_TARGET_DIR }}
+          key: cargo-x86-64-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'image/mkosi.conf') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-x86-64-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'image/mkosi.conf') }}-
+            cargo-x86-64-
+
+      - name: 자체 컴포넌트 빌드
+        id: components
+        timeout-minutes: 40
+        run: tools/image/cargo-debian.sh build --release --locked --workspace
+
+      - name: 캐시 저장 (cargo)
+        if: ${{ !cancelled() && steps.components.outcome != 'skipped' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.BUNTOS_CARGO_CACHE }}
+            ${{ env.CARGO_TARGET_DIR }}
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+      - name: 이미지 빌드
+        id: image
+        timeout-minutes: 60
+        # build.sh가 자체 컴포넌트를 다시 cargo로 모은다. 앞 단계의 컨테이너와 산출물을 그대로 쓴다
+        run: |
+          BUNTOS_CARGO="$PWD/tools/image/cargo-debian.sh" tools/image/build.sh "$BOARD"
+          ls -l "$BUNTOS_BUILD_DIR/$BOARD"
+          df -h "$WORK"
+
+      - name: 캐시 저장 (이미지 꾸러미)
+        if: ${{ !cancelled() && steps.image.outcome != 'skipped' && steps.mkosi-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.XDG_CACHE_HOME }}/mkosi/debian~*~x86-64
+          key: ${{ steps.mkosi-cache.outputs.cache-primary-key }}
+
+      - name: e2e 1·5·6·4·7번
+        timeout-minutes: 40
+        run: |
+          mkdir -p "$E2E_LOG_DIR"
+          tests/e2e/boot-to-shell.sh "$BOARD" 2>&1 | tee "$E2E_LOG_DIR/e2e.log"
+
+      - name: e2e 결과 요약
+        if: ${{ !cancelled() }}
+        # e2e의 걸린 시간과 통과·실패, 컴포지터가 고른 렌더러(게스트 저널의 renderer:, apps:, linux-dmabuf: 줄)
+        run: |
+          {
+            echo '### e2e (x86_64-generic)'
+            echo '```'
+            if [[ -f "$E2E_LOG_DIR/e2e.log" ]]; then
+              grep -E '초|통과|실패|이미지:|상태' "$E2E_LOG_DIR/e2e.log" | head -n 200
+            fi
+            if [[ -f "$E2E_LOG_DIR/journal.log" ]]; then
+              grep -E 'bunt[-_](comp|greeter).*(renderer|apps|linux-dmabuf): ' "$E2E_LOG_DIR/journal.log" | head -n 20
+            fi
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: e2e 기록 올리기
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-x86_64-generic
+          path: ${{ env.E2E_LOG_DIR }}
+          if-no-files-found: ignore
+          retention-days: 14
