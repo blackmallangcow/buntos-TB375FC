@@ -14,6 +14,8 @@
 # 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 5·6·4·7번에 10분 넘게 걸린다)
 #            BUNTOS_IMAGE_DIR 띄울 이미지의 디렉터리 (tools/image/build.sh·vmctl.sh와 같다. 기본
 #            $BUNTOS_BUILD_DIR/<보드>, BUNTOS_BUILD_DIR의 기본은 ~/buntos-build)
+#            E2E_LOG_DIR 기록을 남길 디렉터리. 주면 끝날 때(실패해도) 직렬 콘솔 기록(console.log)과 게스트의 저널
+#            (journal.log, 부팅부터)을 남기고, 실패하면 그때의 화면(screen.png)도 남긴다. CI가 아티팩트로 올린다
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -40,6 +42,11 @@ cleanup() {
 	if [[ -n "${vm_pid:-}" ]] && kill -0 "$vm_pid" 2>/dev/null; then
 		kill "$vm_pid" 2>/dev/null || true
 	fi
+	# E2E_LOG_DIR: 지우기 전에 콘솔 기록과 게스트 저널을 남긴다
+	if [[ -n "${E2E_LOG_DIR:-}" ]]; then
+		console >"$E2E_LOG_DIR/console.log" 2>/dev/null || true
+		cp "$work/journal.log" "$E2E_LOG_DIR/journal.log" 2>/dev/null || true
+	fi
 	rm -rf "$work"
 }
 trap cleanup EXIT
@@ -61,6 +68,10 @@ fail() {
 	echo "실패($board): $1" >&2
 	echo "--- 콘솔 마지막 40줄" >&2
 	console | tail -40 >&2
+	# E2E_LOG_DIR: 실패한 때의 화면을 남긴다 (QEMU가 파일을 쓴다)
+	if [[ -n "${E2E_LOG_DIR:-}" ]] && kill -0 "${vm_pid:-0}" 2>/dev/null; then
+		timeout 30 python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" "screen:$E2E_LOG_DIR/screen.png" || true
+	fi
 	exit 1
 }
 # 저장소의 스크립트($1)를 게스트의 $2로 넣는다. 콘솔은 4KB 가까운 줄을 자르므로 base64를 1000자씩 나눠 보낸다.
@@ -93,8 +104,15 @@ push() {
 # 테스트가 빌드한 이미지를 바꾸지 않게, 멈춘 상태로 띄워 디스크에 임시 덮어쓰기를 씌운 뒤 실행한다.
 # mkosi는 이미지를 -blockdev로 붙여 QEMU의 -snapshot이 효과가 없고, --ephemeral은 이미지 전체를 복사한다
 # 그래픽 세션이 뜨도록 가상 GPU를 붙이고(화면은 내보내지 않는다), 로그인 화면에 암호를 치도록 가상 키보드를 붙인다
+# E2E_LOG_DIR이 있으면 게스트 저널을 받을 virtio 직렬 포트를 더한다(셸에 들어간 뒤 journalctl -f를 이 포트로 보낸다)
+journal_port=()
+if [[ -n "${E2E_LOG_DIR:-}" ]]; then
+	mkdir -p "$E2E_LOG_DIR"
+	journal_port=(-device "virtio-serial-pci,id=e2e-serial" -chardev "file,id=e2e-journal,path=$work/journal.log"
+		-device "virtserialport,bus=e2e-serial.0,chardev=e2e-journal,name=org.buntos.e2e.journal")
+fi
 BUNTOS_IMAGE_DIR="$image_dir" "$repo/tools/image/build.sh" "$board" vm -- -S -qmp "unix:$work/qmp.sock,server=on,wait=off" \
-	-device virtio-gpu-pci -device virtio-keyboard-pci \
+	-device virtio-gpu-pci -device virtio-keyboard-pci "${journal_port[@]}" \
 	-smbios "type=11,value=io.systemd.credential:buntos.account=$account" \
 	<"$work/console.in" >"$log" 2>&1 &
 vm_pid=$!
@@ -110,6 +128,10 @@ sleep 2
 echo 'echo "E2E_SHELL_$((6*7))"; systemctl is-system-running' >&3
 wait_for "^E2E_SHELL_42$" || fail "셸에서 명령 실행 결과를 받지 못했다"
 echo "셸: ${SECONDS}초"
+if [[ -n "${E2E_LOG_DIR:-}" ]]; then
+	# 게스트 저널을 부팅부터 끝까지 저널 포트로 보낸다. 시험이 어디서 멈춰도 그때까지의 저널이 남는다
+	echo 'setsid -f sh -c "exec journalctl -b -f -o short-monotonic --no-pager >/dev/virtio-ports/org.buntos.e2e.journal 2>&1"' >&3
+fi
 wait_for "^(running|degraded|starting|maintenance)$" || true
 system_state=$(console | grep -a -E "^(running|degraded|starting|maintenance)$" | tail -1)
 echo "시스템 상태: $system_state"
