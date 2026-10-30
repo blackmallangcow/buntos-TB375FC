@@ -106,11 +106,13 @@ mod tests {
             let content = read["content"].as_str().unwrap();
             assert!(content.starts_with("# "), "{}: {content:.40}", guide.name);
             assert!(!content.contains("SPDX"), "{}", guide.name);
+            // REUSE-IgnoreStart (이 줄의 글을 이 파일의 라이선스 표시로 읽지 않게)
             assert!(
                 guide
                     .source
                     .contains("SPDX-License-Identifier: GPL-3.0-or-later")
             );
+            // REUSE-IgnoreEnd
         }
         let missing = answer(json!({ "name": "nope" })).unwrap_err();
         assert_eq!(missing.0, protocol::INVALID_PARAMS);
