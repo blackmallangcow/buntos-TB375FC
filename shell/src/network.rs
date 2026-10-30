@@ -7,6 +7,8 @@
 //! 암호가 필요한 새 네트워크는 연결을 만들어 켜고, 암호는 NetworkManager가 셸의 비밀 에이전트
 //! (secret_agent.rs)에게 묻는다. 사용자 이름이 필요한 회사·학교 네트워크(802.1X)나 에이전트가 없을 때는
 //! 시스템 설정의 Wi-Fi 페이지를 연다. NetworkManager가 없으면 항목을 숨긴다.
+//! Wi-Fi 장치가 여럿이면 시스템 설정처럼 핫스팟으로 쓰지 않는 장치를 쓰고, 이 기기의 핫스팟 연결은
+//! 알고 있는 네트워크에 넣지 않는다.
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
@@ -33,6 +35,8 @@ const CONNECTION_INTERFACE: &str = "org.freedesktop.NetworkManager.Settings.Conn
 const WIRELESS: &str = "802-11-wireless";
 /// NMDeviceType: Wi-Fi
 const DEVICE_TYPE_WIFI: u32 = 2;
+/// NM80211Mode: 접속 지점(이 기기가 여는 핫스팟)
+const MODE_AP: u32 = 3;
 /// NM80211ApSecurityFlags: 802.1X 키 관리 (회사·학교 네트워크)
 const KEY_MGMT_802_1X: u32 = 0x200;
 
@@ -136,6 +140,27 @@ fn join_kind(access_point: &AccessPoint, saved: bool, agent_registered: bool) ->
     }
 }
 
+/// 메뉴가 쓸 Wi-Fi 장치: (경로, 핫스팟으로 쓰이는지) 가운데 핫스팟이 아닌 첫 장치, 모두 핫스팟이면 첫
+/// 장치. 시스템 설정의 Wi-Fi 페이지와 같다
+fn choose_wifi_device(devices: &[(String, bool)]) -> Option<&str> {
+    devices
+        .iter()
+        .min_by_key(|(_, hotspot)| *hotspot)
+        .map(|(path, _)| path.as_str())
+}
+
+/// 저장된 연결(GetSettings)이 알고 있는 Wi-Fi 네트워크면 그 이름. 이 기기가 여는 핫스팟 연결(mode
+/// "ap")은 알고 있는 네트워크가 아니다(시스템 설정의 Wi-Fi 페이지와 같다)
+fn known_ssid(settings: &HashMap<String, HashMap<String, glib::Variant>>) -> Option<String> {
+    let wireless = settings.get(WIRELESS)?;
+    let mode = wireless.get("mode").and_then(|mode| mode.get::<String>());
+    if mode.as_deref() == Some("ap") {
+        return None;
+    }
+    let ssid = wireless.get("ssid")?.get::<Vec<u8>>()?;
+    Some(ssid_text(&ssid))
+}
+
 /// 활성 연결의 상태(NMActiveConnectionState)로 본 연결 결과. 사라진 활성 연결(None)은 실패한 것이다.
 /// 아직 연결 중이면 None
 fn join_result(state: Option<u32>) -> Option<bool> {
@@ -154,7 +179,7 @@ struct Inner {
     manager: RefCell<Option<gio::DBusProxy>>,
     /// 주 연결이 Wi-Fi일 때 그 접속 지점. 신호 세기가 바뀌면 알려 준다
     access_point: RefCell<Option<gio::DBusProxy>>,
-    /// 첫 Wi-Fi 장치의 경로. 없으면 None
+    /// 메뉴가 쓰는 Wi-Fi 장치의 경로(choose_wifi_device). 없으면 None
     wifi_device: RefCell<Option<String>>,
     listeners: Listeners<Network>,
 }
@@ -302,36 +327,27 @@ impl Network {
         });
     }
 
-    /// 장치 목록에서 첫 Wi-Fi 장치를 찾는다
+    /// NetworkManager가 바뀌면 메뉴가 쓸 Wi-Fi 장치를 다시 고른다
     fn find_wifi_device(&self) {
-        let Some(manager) = self.manager() else {
-            self.0.wifi_device.replace(None);
-            return;
-        };
-        let devices: Vec<glib::variant::ObjectPath> =
-            dbus::property(&manager, "Devices").unwrap_or_default();
-        let connection = manager.connection();
         let weak = Rc::downgrade(&self.0);
         glib::spawn_future_local(async move {
-            let mut found = None;
-            for device in devices {
-                let kind =
-                    property_value(&connection, device.as_str(), DEVICE_INTERFACE, "DeviceType")
-                        .await
-                        .and_then(|value| value.get::<u32>());
-                if kind == Some(DEVICE_TYPE_WIFI) {
-                    found = Some(device.as_str().to_owned());
-                    break;
-                }
-            }
-            let Some(inner) = weak.upgrade() else {
-                return;
-            };
-            if *inner.wifi_device.borrow() != found {
-                inner.wifi_device.replace(found);
-                Network(inner).notify();
+            if let Some(inner) = weak.upgrade() {
+                Network(inner).refresh_wifi_device().await;
             }
         });
+    }
+
+    /// 메뉴가 쓸 Wi-Fi 장치를 고르고, 바뀌었으면 알린다. 예전에는 첫 Wi-Fi 장치를 써서, 장치가 여럿이고
+    /// 첫 장치가 핫스팟이면 그 장치로 연결하려다 핫스팟을 끊었다. 이제 핫스팟이 아닌 장치를 고른다
+    async fn refresh_wifi_device(&self) {
+        let found = match self.manager() {
+            Some(manager) => wifi_device(&manager).await,
+            None => None,
+        };
+        if *self.0.wifi_device.borrow() != found {
+            self.0.wifi_device.replace(found);
+            self.notify();
+        }
     }
 
     /// 주변 네트워크를 다시 찾게 한다 (결과는 몇 초 뒤 목록에 들어온다)
@@ -416,7 +432,8 @@ impl Network {
         found
     }
 
-    /// 저장된 Wi-Fi 연결: SSID → 연결 경로
+    /// 저장된 Wi-Fi 연결: SSID → 연결 경로. 이 기기의 핫스팟 연결은 뺀다(known_ssid). 예전에는 핫스팟
+    /// 연결도 알고 있는 네트워크로 세어, 다른 장치가 찾은 그 핫스팟을 누르면 핫스팟 연결을 켜려 했다
     pub async fn saved_networks(&self) -> HashMap<String, String> {
         let mut saved = HashMap::new();
         let Some(manager) = self.manager() else {
@@ -457,12 +474,8 @@ impl Network {
             };
             let settings: HashMap<String, HashMap<String, glib::Variant>> =
                 reply.child_value(0).get().unwrap_or_default();
-            let ssid = settings
-                .get(WIRELESS)
-                .and_then(|wireless| wireless.get("ssid"))
-                .and_then(|ssid| ssid.get::<Vec<u8>>());
-            if let Some(ssid) = ssid {
-                saved.insert(ssid_text(&ssid), path.as_str().to_owned());
+            if let Some(ssid) = known_ssid(&settings) {
+                saved.insert(ssid, path.as_str().to_owned());
             }
         }
         saved
@@ -506,6 +519,27 @@ impl Network {
             Join::Settings => open_settings(Some("wifi")),
         }
     }
+}
+
+/// 장치 목록에서 메뉴가 쓸 Wi-Fi 장치 (choose_wifi_device)
+async fn wifi_device(manager: &gio::DBusProxy) -> Option<String> {
+    let devices: Vec<glib::variant::ObjectPath> =
+        dbus::property(manager, "Devices").unwrap_or_default();
+    let connection = manager.connection();
+    let mut wifi = Vec::new();
+    for device in devices {
+        let kind = property_value(&connection, device.as_str(), DEVICE_INTERFACE, "DeviceType")
+            .await
+            .and_then(|value| value.get::<u32>());
+        if kind != Some(DEVICE_TYPE_WIFI) {
+            continue;
+        }
+        let mode = property_value(&connection, device.as_str(), WIRELESS_INTERFACE, "Mode")
+            .await
+            .and_then(|value| value.get::<u32>());
+        wifi.push((device.as_str().to_owned(), mode == Some(MODE_AP)));
+    }
+    choose_wifi_device(&wifi).map(str::to_owned)
 }
 
 /// 새 연결을 저장하고 켠다. 연결하지 못하면(암호 창에서 취소, 시간 초과) 만든 연결을 지워
@@ -680,7 +714,6 @@ fn fill_menu(menu: &Menu, tr: &Rc<Translations>, network: &Network) {
         switcher.set_wifi_enabled(on)
     });
     if enabled {
-        network.request_scan();
         // 검색 결과와 저장된 연결은 D-Bus로 읽은 뒤 채운다
         let list = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -688,6 +721,10 @@ fn fill_menu(menu: &Menu, tr: &Rc<Translations>, network: &Network) {
         menu.append(&list);
         let (menu, tr, network) = (menu.clone(), tr.clone(), network.clone());
         glib::spawn_future_local(async move {
+            // 열 때마다 장치를 다시 고른다. 핫스팟을 막 켠 장치의 Mode는 NetworkManager의 활성 연결
+            // 목록이 바뀐 뒤에 바뀌어, 그 알림으로 고른 장치가 핫스팟일 수 있다
+            network.refresh_wifi_device().await;
+            network.request_scan();
             let points = network.access_points().await;
             let saved = network.saved_networks().await;
             let current = network.ssid();
@@ -833,6 +870,63 @@ mod tests {
         assert_eq!(ssid_text(b"Lab\0Guest"), "Lab\u{FFFD}Guest");
         assert_eq!(ssid_text(b"\xff\nx"), "\u{FFFD}\u{FFFD}x");
         assert_eq!(ssid_text(b""), "");
+    }
+
+    #[test]
+    fn the_menu_uses_a_wifi_device_that_is_not_a_hotspot() {
+        let device = |path: &str, hotspot| (path.to_owned(), hotspot);
+        // 첫 장치(wlan0)가 핫스팟이면 그다음 장치로 연결한다
+        let wifi = [
+            device("/wlan0", true),
+            device("/wlan1", false),
+            device("/wlan2", false),
+        ];
+        assert_eq!(choose_wifi_device(&wifi), Some("/wlan1"));
+        // 핫스팟이 없으면 첫 장치
+        let wifi = [device("/wlan0", false), device("/wlan1", false)];
+        assert_eq!(choose_wifi_device(&wifi), Some("/wlan0"));
+        // 모두 핫스팟이면 시스템 설정처럼 첫 장치를 보인다
+        let wifi = [device("/wlan0", true), device("/wlan1", true)];
+        assert_eq!(choose_wifi_device(&wifi), Some("/wlan0"));
+        assert_eq!(choose_wifi_device(&[]), None);
+    }
+
+    #[test]
+    fn hotspot_connections_are_not_known_networks() {
+        let saved = |wireless: &[(&str, glib::Variant)]| {
+            let wireless: HashMap<String, glib::Variant> = wireless
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect();
+            HashMap::from([(WIRELESS.to_owned(), wireless)])
+        };
+        let ssid = |name: &str| name.as_bytes().to_vec().to_variant();
+        assert_eq!(
+            known_ssid(&saved(&[
+                ("ssid", ssid("Home")),
+                ("mode", "infrastructure".to_variant())
+            ])),
+            Some("Home".into())
+        );
+        // mode가 없으면 infrastructure다
+        assert_eq!(
+            known_ssid(&saved(&[("ssid", ssid("Cafe"))])),
+            Some("Cafe".into())
+        );
+        // 이 기기가 여는 핫스팟
+        assert_eq!(
+            known_ssid(&saved(&[
+                ("ssid", ssid("Bunt")),
+                ("mode", "ap".to_variant())
+            ])),
+            None
+        );
+        // 유선 연결, SSID 없는 연결
+        assert_eq!(known_ssid(&HashMap::new()), None);
+        assert_eq!(
+            known_ssid(&saved(&[("mode", "infrastructure".to_variant())])),
+            None
+        );
     }
 
     #[test]
