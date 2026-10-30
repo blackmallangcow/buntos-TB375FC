@@ -159,6 +159,10 @@ fn main() {
     };
     let agent = Arc::new(Mutex::new(Agent::default()));
     let repls = Arc::new(Repls::new(Box::new(Worker::spawn)));
+    // 오래 쉰 REPL과 스스로 끝난 워커를 때때로 거둔다
+    if let Err(err) = Repls::reap_in_background(&repls) {
+        tracing::warn!("cannot start reaping REPL workers: {err}");
+    }
     loop {
         // 받기 전에 본다: 끝나면 기다리는 연결은 소켓에 남고 systemd가 새 데몬을 띄워 넘긴다
         wait_for_connection(&listener);

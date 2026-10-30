@@ -57,7 +57,14 @@ const PRELUDE: &str = include_str!("prelude.js");
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToWorker {
-    Eval { code: String, timeout_ms: u64 },
+    /// 코드를 돌린다. `timeout_ms`는 쓸 수 있는 시간이고, `limit_ms`는 호출의 시간 상한이다(알림에 쓴다). 같은
+    /// REPL의 앞 호출을 기다렸으면 그만큼 더 길다
+    Eval {
+        code: String,
+        timeout_ms: u64,
+        #[serde(default)]
+        limit_ms: Option<u64>,
+    },
     Reply(Reply),
 }
 
@@ -312,8 +319,8 @@ impl Engine {
         })
     }
 
-    /// 코드를 돌려 출력, 오류, 값을 준다. 변수는 다음 호출에 남는다
-    pub fn eval(&mut self, code: &str, timeout: Duration) -> Done {
+    /// 코드를 돌려 출력, 오류, 값을 준다. 변수는 다음 호출에 남는다. `limit`은 알림에 쓰는 호출의 시간 상한이다
+    pub fn eval(&mut self, code: &str, timeout: Duration, limit: Duration) -> Done {
         let timeout = timeout.min(MAX_TIMEOUT);
         self.state.deadline.set(Instant::now() + timeout);
         let source = source::replify(code);
@@ -334,7 +341,7 @@ impl Engine {
             let late = Instant::now() >= state.deadline.get();
             // 값과 오류를 적는 JS는 시간 상한이 지났어도 잠깐 돈다
             state.deadline.set(Instant::now() + FORMAT_GRACE);
-            let done = finish(&ctx, &state, &hooks, outcome, late, timeout);
+            let done = finish(&ctx, &state, &hooks, outcome, late, (timeout, limit));
             let _ = hooks
                 .get::<_, Function>("clear")
                 .and_then(|clear| clear.call::<_, ()>(()));
@@ -443,14 +450,14 @@ fn finish<'js>(
     hooks: &Object<'js>,
     outcome: Result<Value<'js>, Stop<'js>>,
     late: bool,
-    timeout: Duration,
+    (timeout, limit): (Duration, Duration),
 ) -> Done {
     let value = match outcome {
         Ok(value) => value,
         Err(stop) => {
             let error = match stop {
-                Stop::TimeLimit => time_limit(timeout),
-                Stop::Thrown(_) if late => time_limit(timeout),
+                Stop::TimeLimit => time_limit(timeout, limit),
+                Stop::Thrown(_) if late => time_limit(timeout, limit),
                 // 오류 글도 줄이 넘치지 않게 자른다 (출력처럼)
                 Stop::Thrown(error) => hint(shorten(describe(hooks, error), ERROR_LIMIT)),
                 Stop::NeverSettles => "the code awaits a promise that never settles (no timers \
@@ -485,11 +492,21 @@ fn finish<'js>(
     }
 }
 
-fn time_limit(timeout: Duration) -> String {
+/// 시간 상한 알림. 상한은 호출의 것(`limit`)으로 적고, 같은 REPL의 앞 호출을 기다리느라 덜 돌았으면 그것도 적는다
+fn time_limit(timeout: Duration, limit: Duration) -> String {
+    let waited = limit.saturating_sub(timeout);
+    let queued = if waited >= Duration::from_millis(100) {
+        format!(
+            "; it waited {} ms of that for an earlier call of this REPL session",
+            waited.as_millis()
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "the code ran past its time limit ({} ms) and was stopped; what it set before that is kept. \
-         Pass a longer timeout, or split the work into several calls",
-        timeout.as_millis()
+        "the code ran past its time limit ({} ms{queued}) and was stopped; what it set before that \
+         is kept. Pass a longer timeout, or split the work into several calls",
+        limit.as_millis()
     )
 }
 
@@ -577,13 +594,23 @@ impl<R: Read + AsRawFd + 'static> Session<R> {
                 Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
                 Err(err) => return Err(err),
             };
-            let Ok(ToWorker::Eval { code, timeout_ms }) = serde_json::from_str(&line) else {
+            let Ok(ToWorker::Eval {
+                code,
+                timeout_ms,
+                limit_ms,
+            }) = serde_json::from_str(&line)
+            else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "expected code to run",
                 ));
             };
-            let done = self.engine.eval(&code, Duration::from_millis(timeout_ms));
+            let limit = limit_ms.unwrap_or(timeout_ms).max(timeout_ms);
+            let done = self.engine.eval(
+                &code,
+                Duration::from_millis(timeout_ms),
+                Duration::from_millis(limit),
+            );
             pipe::send(&mut self.io.borrow_mut().out, &FromWorker::Done(done))?;
         }
     }

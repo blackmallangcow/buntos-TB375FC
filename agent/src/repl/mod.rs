@@ -22,9 +22,9 @@ pub mod worker;
 
 use std::{
     collections::HashMap,
-    io::{self, Write},
+    io,
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -32,7 +32,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, value::RawValue};
 
 use self::{
-    pipe::{Lines, ReadFd, Source},
+    pipe::{Lines, ReadFd, Source, WriteFd},
     worker::{Done, FromWorker, Reply, ToWorker},
 };
 use crate::{
@@ -51,19 +51,24 @@ pub const MAX_TIMEOUT_MS: u64 = 120_000;
 const CODE_LIMIT: usize = 1 << 20;
 /// 세션 이름의 글자 수 상한
 const SESSION_LIMIT: usize = 128;
-/// 시간 상한이 지난 뒤 워커가 답하기를 기다리는 시간. 그 뒤로도 답이 없으면 죽인다. 데스크톱 호출(앱 열기는 20초)이
-/// 상한을 넘겨 끝난 직후라도 워커가 중단을 알릴 시간은 준다
+/// 시간 상한이 지난 뒤 워커가 끝을 알리기를 기다리는 시간 (워커는 상한 뒤 값과 오류를 적는 데 1초를 더 쓴다). 그
+/// 뒤로도 답이 없으면 죽인다
 const GRACE: Duration = Duration::from_secs(5);
+/// 상한 안에 시작한 데스크톱 호출(앱 열기는 20초까지)이 상한을 넘겨 끝났을 때, 그 뒤 워커가 중단을 알리게 주는 시간
 const MIN_GRACE: Duration = Duration::from_secs(2);
-/// 이만큼 쓰지 않은 REPL은 끝낸다
+/// 이만큼 쓰지 않은 REPL은 끝낸다 (워커는 70분 뒤 스스로 끝난다)
 const IDLE: Duration = Duration::from_secs(60 * 60);
+/// 데몬이 오래 쉰 REPL과 끝난 워커를 거두는 간격
+const REAP_EVERY: Duration = Duration::from_secs(60);
+/// 워커의 표준 오류에서 로그로 옮기는 바이트 수 (워커 하나마다)
+const STDERR_LIMIT: usize = 8 << 10;
 /// 데몬 전체와 클라이언트 하나가 띄울 수 있는 REPL 수
 const TOTAL: usize = 8;
 const PER_CLIENT: usize = 4;
 /// 워커가 보내는 한 줄의 상한. 맞게 도는 워커의 줄은 2MiB를 넘지 않는다: 출력(OUTPUT_LIMIT 글자)과 오류(ERROR_LIMIT
 /// 글자)는 JSON에서 글자마다 6바이트까지, 값과 인자는 JSON_LIMIT까지다
 const LINE_LIMIT: usize = 4 << 20;
-/// 답에 붙이는 스크린샷 수와 파일 하나의 크기 상한
+/// 답에 붙이는 스크린샷 수(마지막 것들)와 파일 하나의 크기 상한
 const IMAGES_KEPT: usize = 4;
 const IMAGE_LIMIT: u64 = 16 << 20;
 /// REPL이 부를 수 있는 데몬 메서드. repl(되부르기)은 없다
@@ -87,20 +92,27 @@ pub struct Key {
     pub session: String,
 }
 
-/// 띄운 워커: 보내는 파이프, 받는 파이프, 프로세스
+/// 띄운 워커: 보내는 파이프(막히지 않게 쓴다), 받는 파이프, 프로세스
 pub struct Worker {
-    to: Box<dyn Write + Send>,
+    to: Box<dyn WriteFd>,
     from: Lines<Source>,
     child: Option<Child>,
 }
 
 impl Worker {
-    pub fn new(to: Box<dyn Write + Send>, from: Box<dyn ReadFd>, child: Option<Child>) -> Worker {
-        Worker {
+    pub fn new(
+        to: Box<dyn WriteFd>,
+        from: Box<dyn ReadFd>,
+        child: Option<Child>,
+    ) -> io::Result<Worker> {
+        let worker = Worker {
             to,
             from: Lines::new(Source(from), LINE_LIMIT),
             child,
-        }
+        };
+        // 워커가 읽지 않아도 데몬이 쓰다가 멈추지 않는다: 기한까지만 기다린다(pipe::send_by). 실패하면 워커는 버려진다
+        pipe::set_nonblocking(worker.to.as_raw_fd())?;
+        Ok(worker)
     }
 
     /// `buntd-agent --repl-worker`를 띄운다. 환경 변수 없이 루트 디렉터리에서 돈다
@@ -112,11 +124,31 @@ impl Worker {
             .current_dir("/")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // 표준 오류는 데몬이 걸러 로그에 옮긴다(relay). 검토: 물려주면 갇힌 워커도 데몬의 표준 오류(journald
+            // 스트림, 터미널)에 무엇이든 썼다
+            .stderr(Stdio::piped())
             .spawn()?;
+        let pid = child.id();
         let to = child.stdin.take().ok_or(io::ErrorKind::BrokenPipe)?;
         let from = child.stdout.take().ok_or(io::ErrorKind::BrokenPipe)?;
-        Ok(Worker::new(Box::new(to), Box::new(from), Some(child)))
+        let errors = child.stderr.take().ok_or(io::ErrorKind::BrokenPipe)?;
+        // 이제부터 실패하면 Worker를 버리며 프로세스를 끝낸다
+        let worker = Worker::new(Box::new(to), Box::new(from), Some(child))?;
+        std::thread::Builder::new()
+            .name("repl-stderr".into())
+            .spawn(move || {
+                relay(errors, |line| {
+                    tracing::warn!(pid, "REPL worker: {line}");
+                })
+            })?;
+        Ok(worker)
+    }
+
+    /// 워커 프로세스가 스스로 끝났는지. 끝났으면 거둔다 (좀비를 남기지 않는다)
+    fn exited(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .is_some_and(|child| !matches!(child.try_wait(), Ok(None)))
     }
 }
 
@@ -134,11 +166,7 @@ impl Worker {
                     let _ = session.serve(None);
                 }
             })?;
-        Ok(Worker::new(
-            Box::new(to_worker),
-            Box::new(from_worker),
-            None,
-        ))
+        Worker::new(Box::new(to_worker), Box::new(from_worker), None)
     }
 }
 
@@ -151,29 +179,158 @@ impl Drop for Worker {
     }
 }
 
-/// REPL 하나: 워커(아직 없거나 끝났으면 None)와 마지막으로 쓴 때
+/// 워커의 표준 오류를 줄마다 `log`로 옮긴다. 워커는 믿지 않으므로 STDERR_LIMIT 바이트까지만 옮기고 제어 문자는
+/// 드러내 적는다(로그 줄, journald의 `<N>` 머리, 터미널 이스케이프를 꾸미지 못하게). 넘친 것은 읽어 버린다: 워커가
+/// 쓰다가 막히지 않는다. 워커가 끝나면(파이프가 닫히면) 돌아온다
+fn relay(mut errors: impl io::Read, mut log: impl FnMut(String)) {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut room = STDERR_LIMIT;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = match errors.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        if room == 0 {
+            continue;
+        }
+        let kept = read.min(room);
+        room -= kept;
+        pending.extend_from_slice(&chunk[..kept]);
+        while let Some(end) = pending.iter().position(|&byte| byte == b'\n') {
+            let line: Vec<u8> = pending.drain(..=end).collect();
+            log(shown(&line[..end]));
+        }
+        if room == 0 {
+            if !pending.is_empty() {
+                log(shown(&pending));
+                pending.clear();
+            }
+            log(format!(
+                "(the error output of a REPL worker is cut at {STDERR_LIMIT} bytes)"
+            ));
+        }
+    }
+    if !pending.is_empty() {
+        log(shown(&pending));
+    }
+}
+
+/// 믿지 않는 글을 한 줄 로그로: 제어 문자는 `\u{1b}`처럼 적는다
+fn shown(bytes: &[u8]) -> String {
+    let mut text = String::new();
+    for char in String::from_utf8_lossy(bytes).chars() {
+        if char.is_control() {
+            text.extend(char.escape_default());
+        } else {
+            text.push(char);
+        }
+    }
+    text
+}
+
+/// REPL 하나. 워커는 한 번에 호출 하나가 빌려 쓴다(Lease)
 struct Context {
-    worker: Mutex<Option<Worker>>,
-    used: Mutex<Instant>,
+    slot: Mutex<Slot>,
+    /// 빌려 간 워커를 돌려놓았다 (기다리는 호출을 깨운다)
+    freed: Condvar,
+}
+
+struct Slot {
+    /// 쉬고 있는 워커 (아직 띄우지 않았거나 끝났으면 None)
+    worker: Option<Worker>,
+    /// 워커를 빌려 간 호출이 있다
+    busy: bool,
+    /// 빌리기를 기다리는 호출 수. 기다리는 REPL은 끝내지 않는다
+    waiting: usize,
+    used: Instant,
 }
 
 impl Context {
     fn new() -> Context {
         Context {
-            worker: Mutex::new(None),
-            used: Mutex::new(Instant::now()),
+            slot: Mutex::new(Slot {
+                worker: None,
+                busy: false,
+                waiting: 0,
+                used: Instant::now(),
+            }),
+            freed: Condvar::new(),
         }
     }
 
-    fn idle(&self) -> Duration {
-        lock(&self.used).elapsed()
+    /// 아무 호출도 쓰거나 기다리지 않으면 쉰 시간
+    fn idle(&self) -> Option<Duration> {
+        let slot = lock(&self.slot);
+        (!slot.busy && slot.waiting == 0).then(|| slot.used.elapsed())
+    }
+
+    /// 아무 호출도 쓰거나 기다리지 않고 `idle`보다 오래 쉬었으면 워커를 끝낸다 (끝냈으면 참)
+    fn end_if_idle(&self, idle: Duration) -> bool {
+        let mut slot = lock(&self.slot);
+        if slot.busy || slot.waiting > 0 || slot.used.elapsed() < idle {
+            return false;
+        }
+        slot.worker = None;
+        true
+    }
+
+    /// 쉬는 동안 스스로 끝난 워커(오래 쉬었거나 죽었다)를 거둔다
+    fn collect(&self) {
+        let mut slot = lock(&self.slot);
+        if !slot.busy && slot.worker.as_mut().is_some_and(Worker::exited) {
+            slot.worker = None;
+        }
+    }
+
+    /// 워커를 빌린다. 앞 호출이 쓰고 있으면 `deadline`까지 기다리고, 그때까지 돌려놓지 않으면 None
+    fn lease(&self, deadline: Instant) -> Option<Lease<'_>> {
+        let mut slot = lock(&self.slot);
+        slot.waiting += 1;
+        while slot.busy {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                slot.waiting -= 1;
+                return None;
+            }
+            slot = self
+                .freed
+                .wait_timeout(slot, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        slot.waiting -= 1;
+        slot.busy = true;
+        let worker = slot.worker.take();
+        Some(Lease {
+            context: self,
+            worker,
+        })
+    }
+}
+
+/// 호출 하나가 빌린 워커. 버리면(오류로 끝나도) 워커를 돌려놓고 기다리는 호출을 깨운다
+struct Lease<'a> {
+    context: &'a Context,
+    worker: Option<Worker>,
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        let mut slot = lock(&self.context.slot);
+        slot.worker = self.worker.take();
+        slot.busy = false;
+        slot.used = Instant::now();
+        drop(slot);
+        // 모두 깨운다: 하나만 깨우면 그 호출이 마침 상한이 지나 그만둘 때 다른 호출이 자리가 빈 줄 모른다
+        self.context.freed.notify_all();
     }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// 워커를 띄우는 길 (시험은 스레드로 띄운다)
@@ -223,49 +380,61 @@ impl Repls {
                 .unwrap_or(DEFAULT_TIMEOUT_MS)
                 .clamp(1, MAX_TIMEOUT_MS),
         );
+        // 시간 상한은 요청이 온 때부터 센다: 같은 REPL의 앞 호출을 기다린 시간도 그 안이고, 워커는 남은 시간만 받는다
+        // (검토: 기다린 뒤 워커는 상한을 다 받았는데 데몬은 그만큼 일찍 끊어 REPL을 죽였다)
+        let deadline = started + timeout;
         let key = Key {
             client: client.to_string(),
             session,
         };
         let context = self.context(&key)?;
         // 같은 REPL의 호출은 차례로 돈다 (MCP 클라이언트가 한꺼번에 보내도)
-        let mut slot = lock(&context.worker);
+        let mut lease = context.lease(deadline).ok_or_else(|| {
+            (
+                protocol::TIMEOUT,
+                format!(
+                    "the REPL session {:?} was busy with an earlier call for the whole time \
+                     limit ({} ms); nothing was run",
+                    key.session,
+                    timeout.as_millis()
+                ),
+            )
+        })?;
         if params.reset {
-            *slot = None;
+            lease.worker = None;
         }
-        let mut fresh = slot.is_none();
+        let mut fresh = lease.worker.is_none();
         let mut bridge = Bridge {
             desk,
             session: &key.session,
-            deadline: started + timeout,
+            deadline,
             shots: Vec::new(),
         };
         let mut retried = false;
         let done = loop {
-            if slot.is_none() {
-                *slot = Some(
+            if lease.worker.is_none() {
+                lease.worker = Some(
                     (self.spawn)()
                         .map_err(|err| agent_error(format!("cannot start the REPL: {err}")))?,
                 );
                 fresh = true;
             }
-            let worker = slot.as_mut().expect("a worker was just started");
+            let worker = lease.worker.as_mut().expect("a worker was just started");
             match drive(worker, &params.code, timeout, &mut bridge) {
                 Ok(done) => break done,
                 // 코드를 받기 전에 끝난 워커(오래 쉬어 스스로 끝났다)는 새로 띄워 한 번 더 한다. 데스크톱 호출을
                 // 하나도 하지 않았으므로 되풀이해도 같은 동작을 두 번 하지 않는다
                 Err(Stopped::Early(_)) if !retried => {
                     retried = true;
-                    *slot = None;
+                    lease.worker = None;
                 }
                 Err(Stopped::Early(message) | Stopped::Late(message)) => {
-                    *slot = None;
+                    lease.worker = None;
                     return Err(agent_error(message));
                 }
             }
         };
-        drop(slot);
-        *lock(&context.used) = Instant::now();
+        drop(lease);
         let mut error = done.error;
         // 앞 호출의 변수를 쓰려다 없으면 왜 없는지 알린다
         if let Some(message) = error
@@ -294,7 +463,7 @@ impl Repls {
     /// 가장 오래 쓰지 않은 것(클라이언트가 너무 많이 띄웠으면 그 클라이언트의 것)을 끝낸다
     fn context(&self, key: &Key) -> Result<Arc<Context>, Failure> {
         let mut contexts = lock(&self.contexts);
-        contexts.retain(|_, context| !(context.idle() > IDLE && end(context)));
+        contexts.retain(|_, context| !context.end_if_idle(IDLE));
         if let Some(context) = contexts.get(key) {
             return Ok(context.clone());
         }
@@ -319,16 +488,30 @@ impl Repls {
         contexts.insert(key.clone(), context.clone());
         Ok(context)
     }
-}
 
-/// 쉬고 있는(돌고 있지 않은) REPL의 워커를 끝낸다. 돌고 있으면 거짓
-fn end(context: &Context) -> bool {
-    match context.worker.try_lock() {
-        Ok(mut worker) => {
-            *worker = None;
-            true
+    /// 오래 쓰지 않은 REPL을 끝내고, 스스로 끝난 워커를 거둔다. 데몬은 이것을 REAP_EVERY마다 부른다 (검토: 다음
+    /// repl 요청 때만 거두어, 오래 쉬어 스스로 끝난 워커가 좀비로 남았다)
+    pub fn reap(&self) {
+        let mut contexts = lock(&self.contexts);
+        contexts.retain(|_, context| !context.end_if_idle(IDLE));
+        for context in contexts.values() {
+            context.collect();
         }
-        Err(_) => false,
+    }
+
+    /// REAP_EVERY마다 거두는 스레드를 띄운다. REPL들을 버리면 스레드도 끝난다
+    pub fn reap_in_background(repls: &Arc<Repls>) -> io::Result<()> {
+        let repls = Arc::downgrade(repls);
+        std::thread::Builder::new()
+            .name("repl-reaper".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(REAP_EVERY);
+                    let Some(repls) = repls.upgrade() else { return };
+                    repls.reap();
+                }
+            })?;
+        Ok(())
     }
 }
 
@@ -337,13 +520,13 @@ fn evict(contexts: &mut HashMap<Key, Arc<Context>>, pick: impl Fn(&Key) -> bool)
     let mut candidates: Vec<(Duration, Key)> = contexts
         .iter()
         .filter(|(key, _)| pick(key))
-        .map(|(key, context)| (context.idle(), key.clone()))
+        .filter_map(|(key, context)| Some((context.idle()?, key.clone())))
         .collect();
     candidates.sort_by_key(|(idle, _)| std::cmp::Reverse(*idle));
     let key = candidates
         .into_iter()
         .map(|(_, key)| key)
-        .find(|key| end(&contexts[key]))?;
+        .find(|key| contexts[key].end_if_idle(Duration::ZERO))?;
     contexts.remove(&key);
     Some(key)
 }
@@ -364,17 +547,28 @@ enum Stopped {
     Late(String),
 }
 
-/// 워커에 코드를 보내고, 워커가 청하는 데스크톱 호출을 대신 하고, 끝을 받는다
+/// 워커에 코드를 보내고, 워커가 청하는 데스크톱 호출을 대신 하고, 끝을 받는다. 워커는 시간 상한(`bridge.deadline`)에
+/// GRACE를 더한 때까지 끝을 알려야 하고, 넘기면 Late다(워커를 버리며 죽인다). `limit`은 알림에 쓰는 호출의 상한이다
 fn drive(
     worker: &mut Worker,
     code: &str,
-    timeout: Duration,
+    limit: Duration,
     bridge: &mut Bridge,
 ) -> Result<Done, Stopped> {
+    // 워커는 남은 시간만 받는다 (같은 REPL의 앞 호출을 기다렸으면 그만큼 적다)
+    let budget = bridge
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(1));
     let eval = ToWorker::Eval {
         code: code.to_string(),
-        timeout_ms: timeout.as_millis() as u64,
+        timeout_ms: budget.as_millis().max(1) as u64,
+        limit_ms: Some(limit.as_millis() as u64),
     };
+    // 죽일 때. 늦추는 것은 상한 안에 시작해 상한을 넘겨 끝난 데스크톱 호출(앱 열기는 20초까지) 뒤에 MIN_GRACE를 주는
+    // 것뿐이다: 상한 뒤에 청한 호출은 하지 않으므로(TIMEOUT) 끝없이 늦출 수 없다. 검토: 줄을 받을 때마다 기다림을 새로
+    // 주어, 호출을 계속 보내는 워커는 끝없이 돌았다
+    let mut kill_at = bridge.deadline + GRACE;
     let mut heard = false;
     let lost = |heard: bool, why: String| {
         if heard {
@@ -385,19 +579,19 @@ fn drive(
             Stopped::Early(format!("the REPL stopped ({why}); its variables are gone"))
         }
     };
-    if let Err(err) = pipe::send(&mut worker.to, &eval) {
-        return Err(lost(false, err.to_string()));
+    // 보내기도 기한까지만 기다린다 (검토: 읽지 않는 워커에 64KiB가 넘는 코드를 보내면 데몬이 끝없이 멈췄다). 읽지
+    // 않아 기한을 넘긴 워커는 코드를 받았을 수 있으므로 다시 하지 않는다
+    if let Err(err) = pipe::send_by(&mut *worker.to, &eval, kill_at) {
+        return Err(lost(err.kind() == io::ErrorKind::TimedOut, err.to_string()));
     }
     loop {
-        // 상한이 지난 뒤로도 답이 없는 워커는 멈춘 것이다 (데스크톱 호출이 상한을 넘겨 끝났어도 MIN_GRACE는 준다)
-        let wait_until = (bridge.deadline + GRACE).max(Instant::now() + MIN_GRACE);
-        let line = match worker.from.next(Some(wait_until)) {
+        let line = match worker.from.next(Some(kill_at)) {
             Ok(Some(line)) => line,
             Ok(None) => {
                 return Err(Stopped::Late(format!(
                     "the REPL did not stop at its time limit ({} ms) and was killed; its \
                      variables are gone",
-                    timeout.as_millis()
+                    limit.as_millis()
                 )));
             }
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
@@ -415,6 +609,7 @@ fn drive(
                 return Ok(done);
             }
             Ok(FromWorker::Call { method, params }) => {
+                let in_time = Instant::now() < bridge.deadline;
                 let reply = match bridge
                     .call(&method, &params)
                     .and_then(|value| to_raw(&value))
@@ -422,7 +617,10 @@ fn drive(
                     Ok(value) => Reply::Ok(value),
                     Err((code, message)) => Reply::Err { code, message },
                 };
-                if let Err(err) = pipe::send(&mut worker.to, &ToWorker::Reply(reply)) {
+                if in_time {
+                    kill_at = kill_at.max(Instant::now() + MIN_GRACE);
+                }
+                if let Err(err) = pipe::send_by(&mut *worker.to, &ToWorker::Reply(reply), kill_at) {
                     return Err(lost(true, err.to_string()));
                 }
             }
@@ -527,11 +725,12 @@ fn to_raw(value: &Value) -> Result<Box<RawValue>, Failure> {
     serde_json::value::to_raw_value(value).map_err(|err| agent_error(err.to_string()))
 }
 
-/// 스크린샷 파일을 답에 붙인다. `data`면 base64로 넣는다 (MCP 어댑터가 그림으로 넘긴다)
+/// 이번 호출에 찍은 스크린샷 가운데 마지막 IMAGES_KEPT개를 답에 붙인다. `data`면 base64로 넣는다 (MCP 어댑터가
+/// 그림으로 넘긴다)
 fn images(paths: &[String], data: bool) -> Vec<ReplImage> {
-    paths
+    // 마지막에 찍은 것이 지금 화면이다 (검토: 처음 것들을 붙였다)
+    paths[paths.len().saturating_sub(IMAGES_KEPT)..]
         .iter()
-        .take(IMAGES_KEPT)
         .map(|path| ReplImage {
             path: path.clone(),
             mime: "image/png".into(),

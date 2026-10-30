@@ -4,7 +4,14 @@
 //! REPL 시험. 워커는 스레드로 띄우고(가두지 않는다, 가두기는 sandbox.rs와 tests/repl_worker.rs가 본다), 데몬은
 //! 부른 것을 적고 정한 답을 주는 가짜 Desk다. 실제 데스크톱 없이 돈다.
 
-use std::{sync::Mutex, thread};
+use std::{
+    io::Write,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+};
 
 use serde_json::json;
 
@@ -532,11 +539,7 @@ fn sends(line: String) -> Spawn {
             }
             let _ = lines.next(None);
         });
-        Ok(Worker::new(
-            Box::new(to_worker),
-            Box::new(from_worker),
-            None,
-        ))
+        Worker::new(Box::new(to_worker), Box::new(from_worker), None)
     })
 }
 
@@ -575,10 +578,30 @@ fn screenshots_come_back_as_images_when_asked() {
     std::fs::create_dir_all(&folder).unwrap();
     let path = folder.join("shot.png");
     std::fs::write(&path, b"\x89PNG fake").unwrap();
+    for shot in 0..6 {
+        std::fs::write(
+            folder.join(format!("shot-{shot}.png")),
+            format!("PNG {shot}"),
+        )
+        .unwrap();
+    }
     let shown = path.display().to_string();
-    let desk = Fake::new(move |_, _| {
+    let taken = AtomicUsize::new(0);
+    let shots_folder = folder.clone();
+    let desk = Fake::new(move |_, params| {
+        // 첫 호출은 shot.png, 그 뒤로는 찍을 때마다 다른 파일
+        let path = match params["app"].as_str() {
+            Some("many") => shots_folder
+                .join(format!(
+                    "shot-{}.png",
+                    taken.fetch_add(1, Ordering::Relaxed)
+                ))
+                .display()
+                .to_string(),
+            _ => shown.clone(),
+        };
         Ok(
-            json!({ "path": shown, "width": 4, "height": 3, "scale": 1.0, "window": "계산기", "app_id": "org.gnome.Calculator", "pid": 812 }),
+            json!({ "path": path, "width": 4, "height": 3, "scale": 1.0, "window": "계산기", "app_id": "org.gnome.Calculator", "pid": 812 }),
         )
     });
     let repls = repls();
@@ -595,15 +618,33 @@ fn screenshots_come_back_as_images_when_asked() {
     let shots = run_with(
         &repls,
         &desk,
-        "for (let i = 0; i < 6; i++) await desktop.screenshot()",
+        "for (let i = 0; i < 6; i++) await desktop.app('many').screenshot()",
         |p| p.images = true,
     );
-    assert_eq!(shots.images.len(), IMAGES_KEPT);
+    // 마지막 것들이 지금 화면이다
+    let kept: Vec<Option<&str>> = shots
+        .images
+        .iter()
+        .map(|image| image.data.as_deref())
+        .collect();
+    let latest: Vec<String> = (2..6)
+        .map(|shot| base64(format!("PNG {shot}").as_bytes()))
+        .collect();
     assert_eq!(
-        shots.images[0].data.as_deref(),
-        Some(base64(b"\x89PNG fake").as_str())
+        kept,
+        latest
+            .iter()
+            .map(|data| Some(data.as_str()))
+            .collect::<Vec<_>>()
     );
     assert_eq!(shots.images[0].mime, "image/png");
+    let plain = run_with(&repls, &desk, "await desktop.screenshot()", |p| {
+        p.images = true
+    });
+    assert_eq!(
+        plain.images[0].data.as_deref(),
+        Some(base64(b"\x89PNG fake").as_str())
+    );
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
@@ -666,7 +707,7 @@ fn a_dead_worker_is_replaced_before_it_runs_anything() {
             let (reader, writer) = io::pipe()?;
             drop(writer);
             let (_, sink) = io::pipe()?;
-            return Ok(Worker::new(Box::new(sink), Box::new(reader), None));
+            return Worker::new(Box::new(sink), Box::new(reader), None);
         }
         Worker::in_thread()
     }));
@@ -685,7 +726,7 @@ fn a_worker_that_hangs_past_its_time_is_dropped() {
             let _keep = (writer, from_daemon);
             thread::sleep(Duration::from_secs(30));
         });
-        Ok(Worker::new(Box::new(sink), Box::new(reader), None))
+        Worker::new(Box::new(sink), Box::new(reader), None)
     }));
     let desk = desktop();
     let started = Instant::now();
@@ -704,9 +745,187 @@ fn a_worker_that_hangs_past_its_time_is_dropped() {
     assert!(failure.1.contains("was killed"), "{}", failure.1);
     let took = started.elapsed();
     assert!(
-        took >= MIN_GRACE && took < MIN_GRACE + GRACE + Duration::from_secs(2),
+        took >= GRACE && took < GRACE + Duration::from_secs(2),
         "{took:?}"
     );
+}
+
+/// 코드를 받은 뒤 `act`로 그것을 하는 워커 (스레드). 데몬과의 파이프가 닫히면 끝난다
+fn misbehaving(
+    act: impl Fn(&mut Lines<io::PipeReader>, &mut io::PipeWriter) + Send + Sync + Clone + 'static,
+) -> Spawn {
+    Box::new(move || {
+        let (from_daemon, to_worker) = io::pipe()?;
+        let (from_worker, mut to_daemon) = io::pipe()?;
+        let act = act.clone();
+        thread::spawn(move || {
+            let mut lines = Lines::new(from_daemon, 1 << 30);
+            act(&mut lines, &mut to_daemon);
+        });
+        Worker::new(Box::new(to_worker), Box::new(from_worker), None)
+    })
+}
+
+/// 시간 상한을 넘긴 호출이 끝나기까지 걸린 시간과 그 오류
+fn time_to_kill(spawn: Spawn, code: String) -> (Duration, Failure) {
+    let repls = Repls::new(spawn);
+    let desk = desktop();
+    let started = Instant::now();
+    let failure = repls
+        .run(
+            &desk,
+            "claude",
+            ReplParams {
+                code,
+                timeout_ms: Some(100),
+                ..ReplParams::default()
+            },
+        )
+        .unwrap_err();
+    (started.elapsed(), failure)
+}
+
+#[test]
+fn a_worker_that_stops_reading_is_killed_in_time() {
+    // 코드를 읽지 않는 워커에 파이프 버퍼(64KiB)보다 긴 코드: 데몬은 쓰다가 멈추지 않는다
+    let (took, failure) = time_to_kill(
+        misbehaving(|lines, _| {
+            thread::sleep(Duration::from_secs(30));
+            let _ = lines.next(None);
+        }),
+        format!("/*{}*/ 1", "x".repeat(200_000)),
+    );
+    assert_eq!(failure.0, protocol::AGENT_ERROR);
+    assert!(failure.1.contains("it stopped reading"), "{}", failure.1);
+    assert!(
+        took >= GRACE && took < GRACE + Duration::from_secs(2),
+        "{took:?}"
+    );
+}
+
+#[test]
+fn a_worker_that_keeps_calling_is_killed_in_time() {
+    // 상한이 지난 뒤에도 1.5초마다 데스크톱 호출을 보내는 워커: 호출은 거절되고 기다림은 늘지 않는다
+    let (took, failure) = time_to_kill(
+        misbehaving(|lines, out| {
+            if lines.next(None).is_err() {
+                return;
+            }
+            loop {
+                if out
+                    .write_all(b"{\"call\":{\"method\":\"apps\",\"params\":{}}}\n")
+                    .is_err()
+                    || lines.next(None).is_err()
+                {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1500));
+            }
+        }),
+        "1".into(),
+    );
+    assert!(
+        failure.1.contains("did not stop at its time limit"),
+        "{}",
+        failure.1
+    );
+    assert!(
+        took >= GRACE && took < GRACE + Duration::from_secs(2),
+        "{took:?}"
+    );
+}
+
+#[test]
+fn a_call_waiting_for_its_repl_spends_its_own_time_limit() {
+    let repls = repls();
+    let desk = desktop();
+    run(&repls, &desk, "var kept = 1");
+    thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            run_with(
+                &repls,
+                &desk,
+                "await new Promise((r) => setTimeout(r, 1500)); 'first'",
+                |p| p.timeout_ms = Some(10_000),
+            )
+        });
+        thread::sleep(Duration::from_millis(300));
+        // 앞 호출이 상한 안에 끝나지 않으면 아무것도 돌리지 않는다
+        let started = Instant::now();
+        let busy = repls
+            .run(
+                &desk,
+                "claude",
+                ReplParams {
+                    code: "kept = 2".into(),
+                    timeout_ms: Some(500),
+                    ..ReplParams::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(busy.0, protocol::TIMEOUT);
+        assert!(busy.1.contains("busy with an earlier call"), "{}", busy.1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // 기다린 만큼 덜 돈다: 남은 1.3초 안에 1.5초 걸리는 코드는 상한에 멈추고 REPL은 산다 (검토: 워커는 상한을 다
+        // 받았는데 데몬은 일찍 끊어 REPL을 죽였다)
+        let late = run_with(
+            &repls,
+            &desk,
+            "await new Promise((r) => setTimeout(r, 1500)); 'late'",
+            |p| p.timeout_ms = Some(2_000),
+        );
+        let error = late.error.unwrap();
+        assert!(
+            error.starts_with("the code ran past its time limit (2000 ms; it waited"),
+            "{error}"
+        );
+        assert_eq!(first.join().unwrap().output, "first\n");
+    });
+    assert_eq!(run(&repls, &desk, "kept").output, "1\n");
+}
+
+/// 워커가 있는 REPL 수
+fn workers(repls: &Repls) -> usize {
+    lock(&repls.contexts)
+        .values()
+        .filter(|context| lock(&context.slot).worker.is_some())
+        .count()
+}
+
+#[test]
+fn the_reaper_collects_workers_that_ended() {
+    let repls = Repls::new(Box::new(|| {
+        let mut worker = Worker::in_thread()?;
+        // 쉬는 동안 스스로 끝나는 워커 프로세스를 흉내 낸다
+        worker.child = Some(std::process::Command::new("true").spawn()?);
+        Ok(worker)
+    }));
+    let desk = desktop();
+    run(&repls, &desk, "1");
+    assert_eq!(workers(&repls), 1);
+    let started = Instant::now();
+    while workers(&repls) == 1 && started.elapsed() < Duration::from_secs(5) {
+        thread::sleep(Duration::from_millis(20));
+        repls.reap();
+    }
+    assert_eq!(workers(&repls), 0);
+    // 다음 호출은 새 워커로 돈다
+    assert!(run(&repls, &desk, "1").fresh);
+}
+
+#[test]
+fn worker_errors_reach_the_log_bounded_and_escaped() {
+    let mut logged = Vec::new();
+    relay(&b"cannot sandbox\n<0>\x1b[31mforged\nlast"[..], |line| {
+        logged.push(line)
+    });
+    assert_eq!(logged, ["cannot sandbox", "<0>\\u{1b}[31mforged", "last"]);
+    let mut logged = Vec::new();
+    let flood = vec![b'x'; STDERR_LIMIT * 4];
+    relay(&flood[..], |line| logged.push(line));
+    assert_eq!(logged.len(), 2);
+    assert_eq!(logged[0].len(), STDERR_LIMIT);
+    assert!(logged[1].contains("is cut at"));
 }
 
 #[test]

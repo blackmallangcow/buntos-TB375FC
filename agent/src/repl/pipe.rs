@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 데몬과 REPL 워커 사이의 파이프: 한 줄에 JSON 하나. 읽기에 기한을 두고(poll) 한 줄의 길이에 상한을 둔다.
-//! 워커는 믿지 않는 JS를 돌리므로 데몬은 워커가 보낸 줄을 믿지 않는다(길이, JSON 꼴, 메서드를 본다).
+//! 데몬과 REPL 워커 사이의 파이프: 한 줄에 JSON 하나. 읽기와 쓰기에 기한을 두고(poll) 한 줄의 길이에 상한을 둔다.
+//! 워커는 믿지 않는 JS를 돌리므로 데몬은 워커가 보낸 줄을 믿지 않고(길이, JSON 꼴, 메서드를 본다), 워커가 읽지
+//! 않아도 쓰다가 멈추지 않는다(send_by).
 
 use std::{
     io::{self, Read, Write},
@@ -16,6 +17,11 @@ use serde::Serialize;
 pub trait ReadFd: Read + AsRawFd + Send {}
 
 impl<T: Read + AsRawFd + Send> ReadFd for T {}
+
+/// 쓰는 쪽 파이프 (데몬 쪽의 워커 표준 입력)
+pub trait WriteFd: Write + AsRawFd + Send {}
+
+impl<T: Write + AsRawFd + Send> WriteFd for T {}
 
 /// 어느 것이든 읽는 파이프 (데몬은 워커 프로세스의 표준 출력을, 시험은 스레드의 파이프를 읽는다)
 pub struct Source(pub Box<dyn ReadFd>);
@@ -92,7 +98,7 @@ impl<R: Read + AsRawFd> Lines<R> {
     }
 }
 
-/// 메시지 하나를 한 줄로 보낸다
+/// 메시지 하나를 한 줄로 보낸다 (워커가 데몬에게: 데몬이 읽지 않으면 기다린다)
 pub fn send(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
     let mut line = serde_json::to_vec(message)?;
     line.push(b'\n');
@@ -100,15 +106,59 @@ pub fn send(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()>
     writer.flush()
 }
 
+/// 파이프에 쓰다가 막히지 않게 한다: 건너편이 읽지 않아 차면 쓰기가 WouldBlock으로 돌아온다
+pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    // 안전: 이 프로세스가 연 fd의 상태 플래그만 읽고 바꾼다
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// 메시지 하나를 한 줄로 막히지 않는 파이프(set_nonblocking)에 보낸다(데몬이 워커에게). 건너편이 읽지 않으면
+/// 기한까지만 기다리고 TimedOut이다
+pub fn send_by(
+    writer: &mut dyn WriteFd,
+    message: &impl Serialize,
+    deadline: Instant,
+) -> io::Result<()> {
+    let mut line = serde_json::to_vec(message)?;
+    line.push(b'\n');
+    let mut sent = 0;
+    while sent < line.len() {
+        match writer.write(&line[sent..]) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => sent += written,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                if !ready(writer.as_raw_fd(), libc::POLLOUT, deadline)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "it stopped reading",
+                    ));
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
 /// 기한까지 읽을 것이 오는지 (건너편이 닫혀도 참: read가 0을 준다)
 fn readable(fd: RawFd, deadline: Instant) -> io::Result<bool> {
+    ready(fd, libc::POLLIN, deadline)
+}
+
+/// 기한까지 fd가 `events`(읽기나 쓰기)에 준비되는지. 건너편이 닫혀도 참이다 (읽기·쓰기가 그것을 알린다)
+fn ready(fd: RawFd, events: libc::c_short, deadline: Instant) -> io::Result<bool> {
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         // 1ms보다 짧게 남은 것을 0으로 내리면 기한까지 헛돌므로 올린다
         let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
         let mut poll = libc::pollfd {
             fd,
-            events: libc::POLLIN,
+            events,
             revents: 0,
         };
         // 안전: pollfd 하나를 넘긴다
@@ -178,5 +228,38 @@ mod tests {
         writer.write_all(b"\xff\xfe\n").unwrap();
         let err = Lines::new(reader, 16).next(None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn sending_to_a_reader_that_stopped_ends_at_the_deadline() {
+        let (_reader, mut writer) = io::pipe().unwrap();
+        set_nonblocking(writer.as_raw_fd()).unwrap();
+        // 파이프 버퍼(64KiB)보다 긴 줄: 읽지 않으면 기한에 그만둔다
+        let long = "x".repeat(1 << 20);
+        let started = Instant::now();
+        let soon = Instant::now() + Duration::from_millis(100);
+        let err = send_by(&mut writer, &long, soon).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(100) && took < Duration::from_secs(2));
+        // 읽으면 다 간다
+        let (reader, mut writer) = io::pipe().unwrap();
+        set_nonblocking(writer.as_raw_fd()).unwrap();
+        let reading = std::thread::spawn(move || {
+            Lines::new(reader, 2 << 20)
+                .next(None)
+                .unwrap()
+                .unwrap()
+                .len()
+        });
+        send_by(&mut writer, &long, Instant::now() + Duration::from_secs(10)).unwrap();
+        assert_eq!(reading.join().unwrap(), long.len() + 2);
+        // 건너편이 닫혔으면 바로 안다
+        let (reader, mut writer) = io::pipe().unwrap();
+        drop(reader);
+        set_nonblocking(writer.as_raw_fd()).unwrap();
+        let soon = Instant::now() + Duration::from_secs(10);
+        let err = send_by(&mut writer, &"x", soon).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
     }
 }
