@@ -26,7 +26,7 @@ use smithay::{
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
-        egl::{EGLContext, EGLDisplay},
+        egl::{EGLContext, EGLDisplay, context::ContextPriority},
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
@@ -233,7 +233,9 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
 
     // 안전: GBM 장치는 EGL 디스플레이보다 오래 산다 (둘 다 UdevData가 끝까지 가진다)
     let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
-    let egl_context = EGLContext::new(&egl_display)?;
+    // 앱의 GPU 작업이 많을 때도 컴포지터의 그리기가 먼저 돌게 높은 우선순위를 달라고 한다. EGL_IMG_context_priority가
+    // 없거나 드라이버가 권한(CAP_SYS_NICE 등)을 보고 거절하면 보통 우선순위로 만든다
+    let egl_context = EGLContext::new_with_priority(&egl_display, ContextPriority::High)?;
     let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
     // 렌더러가 CPU로 그리는지만 보던 것을, 앱이 GPU로 그릴 수 있는지까지 정하게 바꿨다 (gpu.rs)
     let renderer_name = renderer_name(&mut renderer);
