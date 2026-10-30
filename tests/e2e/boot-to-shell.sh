@@ -47,12 +47,14 @@ trap cleanup EXIT
 console() {
 	sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\r//g' "$log"
 }
+# grep -q는 찾자마자 끝나 콘솔 기록이 파이프 버퍼보다 크면 sed가 SIGPIPE로 끝나고, pipefail 때문에 찾았는데도
+# 못 찾은 것이 된다. 그래서 끝까지 읽어 센다
 wait_for() {
-	until console | grep -a -q -E "$1"; do
+	until (($(console | grep -a -c -E "$1") > 0)); do
 		if ! kill -0 "$vm_pid" 2>/dev/null || ((SECONDS >= deadline)); then
 			return 1
 		fi
-		sleep 1
+		sleep 0.2
 	done
 }
 fail() {
@@ -61,13 +63,31 @@ fail() {
 	console | tail -40 >&2
 	exit 1
 }
-# 저장소의 스크립트($1)를 게스트의 $2로 넣는다. 콘솔은 4KB 가까운 줄을 자르므로 base64를 1000자씩 나눠 보낸다
+# 저장소의 스크립트($1)를 게스트의 $2로 넣는다. 콘솔은 4KB 가까운 줄을 자르므로 base64를 1000자씩 나눠 보낸다.
+# 게스트가 바쁘면 잇달아 보낸 입력이 빠져 한 줄이 다음 명령과 섞였다(2026-10-30). 그래서 줄마다 게스트의 답을
+# 기다리고, 다 넣은 뒤 sha256을 견줘 다르면 두 번까지 다시 넣는다. 답은 산술 확장으로 만들어, 콘솔에 되비친
+# 명령 줄이 답으로 읽히지 않게 한다
+pushes=0
 push() {
-	echo "rm -f $2.b64" >&3
-	base64 -w 1000 "$repo/$1" | while IFS= read -r chunk; do
-		echo "echo $chunk >>$2.b64" >&3
+	local want n chunk
+	want=$(sha256sum "$repo/$1" | cut -c1-16)
+	for _ in 1 2 3; do
+		pushes=$((pushes + 1))
+		n=0
+		echo "rm -f $2.b64" >&3
+		while IFS= read -r chunk; do
+			n=$((n + 1))
+			echo "echo $chunk >>$2.b64; echo PUSH${pushes}_\$((0 + $n))" >&3
+			wait_for "^PUSH${pushes}_$n\$" || fail "$1을 게스트에 넣지 못했다"
+		done < <(base64 -w 1000 "$repo/$1")
+		echo "base64 -d $2.b64 >$2; echo PUSHED${pushes}_\$(sha256sum <$2 | cut -c1-16)" >&3
+		wait_for "^PUSHED${pushes}_[0-9a-f]{16}\$" || fail "$1을 게스트에 넣지 못했다"
+		if (($(console | grep -a -c -E "^PUSHED${pushes}_$want\$") > 0)); then
+			return
+		fi
+		echo "알림: $1의 sha256이 달라 다시 넣는다" >&2
 	done
-	echo "base64 -d $2.b64 >$2" >&3
+	fail "$1을 게스트에 넣지 못했다 (sha256이 다르다)"
 }
 
 # 테스트가 빌드한 이미지를 바꾸지 않게, 멈춘 상태로 띄워 디스크에 임시 덮어쓰기를 씌운 뒤 실행한다.
