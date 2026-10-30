@@ -7,7 +7,7 @@
 # 모드로 두고 글을 더 친다(글 입력으로 넣으므로 바뀌지 않아야 한다). ref가 없는 화면은 창 스크린샷에서 찾은
 # 픽셀을 누른다(계산기의 '=' 단추, Firefox 캔버스). Firefox 주소 막대에서는 fill이 실패를 성공으로 알리지
 # 않는지, 글 칸이 아닌 곳에 type하면 키로 바꿔 치지 않는지 본다. 긴 웹 페이지의 글과 화면 밖 단추, 휠 스크롤,
-# 다른 탭 페이지(시스템 정보)를 빼는지, 앱을 끝내는 동작을 알리는지, 시스템 설정 사이드바도 본다.
+# 다른 페이지(시스템 모니터)를 빼는지, 앱을 끝내는 동작을 알리는지, 시스템 설정 사이드바도 본다.
 # 직렬 콘솔의 root로 실행한다(boot-to-shell.sh가 넣어 돌린다). 마지막 줄은 "E2E5_RESULT 통과 실패"다
 set -u
 
@@ -113,7 +113,7 @@ wait_firefox() {
 # 다시 돌려도 같도록 이 시나리오가 쓰는 앱을 닫고 시작한다
 pkill -f /usr/bin/gnome-calculator
 pkill -f /usr/bin/gnome-text-editor
-pkill -f /usr/bin/gnome-system-monitor
+pkill -f /usr/bin/resources
 sleep 1
 
 # 계산기: 이름이 아니라 데스크톱 ID로 열어 언어와 상관없게 한다
@@ -160,14 +160,17 @@ check "ref와 다른 앱의 --app은 그렇다고 알린다" \
 check "닫기 단추를 누르면 앱이 끝났다고 알린다" \
 	"$(A click "$(ref 'button "\(닫기\|Close\)"' <<<"$calculator")" | grep -c 'then the app quit')" 1
 
-# 시스템 정보: 다른 탭 페이지로 넘긴 내용은 스냅샷에 나오지 않는다. GTK4는 숨긴 GtkStack 페이지의 내용을
-# 목록에 보이는 상태로 남긴다
-monitor=$(open_app org.gnome.SystemMonitor)
-A click "$(ref 'tab "\(자원\|Resources\)' <<<"$monitor")" >/dev/null
-A click "$(ref 'tab "\(파일\|File\)' <<<"$monitor")" >/dev/null
-check "다른 탭 페이지(자원)의 내용은 스냅샷에 나오지 않는다" \
-	"$(A snapshot --app org.gnome.SystemMonitor | grep -c 'CPU')" 0
-pkill -f /usr/bin/gnome-system-monitor
+# 시스템 모니터(Resources): 사이드바로 넘긴 다른 페이지의 내용은 스냅샷에 나오지 않는다. GTK4는 숨긴
+# GtkStack 페이지의 내용을 목록에 보이는 상태로 남긴다. 앱 페이지의 앱 목록 표가 GPU 페이지로 넘긴 뒤에는
+# 없어야 한다(번역과 상관없게 표의 수로 본다). Resources는 마지막에 본 페이지로 뜨므로 앱 페이지를 먼저 누른다
+monitor=$(open_app org.gnome.Resources)
+A click "$(ref 'listitem "\(Apps\|앱\)"' <<<"$monitor")" >/dev/null
+check "시스템 모니터의 사이드바에 GPU가 있고 앱 페이지에 앱 목록 표가 있다" \
+	"$(grep -c 'listitem "GPU"' <<<"$monitor") $(A snapshot --app org.gnome.Resources | grep -c 'treegrid')" "1 1"
+A click "$(ref 'listitem "GPU"' <<<"$monitor")" >/dev/null
+check "다른 페이지(앱)의 내용은 스냅샷에 나오지 않는다" \
+	"$(A snapshot --app org.gnome.Resources | grep -c 'treegrid')" 0
+pkill -f /usr/bin/resources
 sleep 1
 
 # Firefox: 후기에서 주소 막대의 fill은 성공했다고 알렸지만 비어 있었다. 이제는 글이 남았거나, 남지 않았으면

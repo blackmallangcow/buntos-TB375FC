@@ -39,7 +39,7 @@ app = "org.gnome.Loupe.desktop"
 app = "org.gnome.Papers.desktop"
 
 [[dock.items]]
-app = "org.gnome.SystemMonitor.desktop"
+app = "org.gnome.Resources.desktop"
 
 [[dock.items]]
 app = "org.buntos.Settings.desktop"
