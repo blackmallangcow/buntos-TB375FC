@@ -25,8 +25,8 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
 /// 다시 읽는 간격. 스냅샷 한 번은 수 ms다(ARCHITECTURE 8.3)
 const POLL: Duration = Duration::from_millis(100);
-/// 답에 싣는 맞는 요소 수 (strict 검사와 안내에 쓴다)
-const MATCHES_KEPT: usize = 10;
+/// 답에 싣는 맞는 요소 수 (REPL의 all(), strict 검사와 안내에 쓴다. all()이 쓰도록 10에서 늘렸다)
+const MATCHES_KEPT: usize = 50;
 /// 시간이 다 됐을 때 알리는 창 제목 수
 const WINDOWS_SHOWN: usize = 5;
 
@@ -319,7 +319,8 @@ fn found(lines: &[Line], at: usize) -> Found {
         line: line.text.clone(),
         role: line.role.clone(),
         name: line.name.clone(),
-        value: line.value().to_string(),
+        // 값 속성만 준다: REPL의 inputValue()가 이름을 값으로 읽지 않게 (값이 없으면 이름을 주던 것을 바꿨다)
+        value: line.prop("value").map(str::to_string),
         states: line.states.clone(),
         text: outline::text_content(lines, at),
     }
@@ -364,6 +365,8 @@ fn answer(condition: &Condition, params: &WaitParams, outcome: Outcome, ms: u64)
             matches,
             count,
         } => {
+            // 값을 기다렸으면 값(값이 없으면 이름)을 알린다
+            let now = found.value.as_deref().unwrap_or(&found.name);
             let done = match condition {
                 Condition::Element(matcher) if count > 1 => format!(
                     "{count} elements match {}{}",
@@ -372,7 +375,7 @@ fn answer(condition: &Condition, params: &WaitParams, outcome: Outcome, ms: u64)
                 ),
                 Condition::Element(matcher) => format!("{} is there", matcher.describe()),
                 Condition::Value(value) => format!("{target}'s value is {value:?}"),
-                Condition::Changed => format!("{target} changed to {:?}", found.value),
+                Condition::Changed => format!("{target} changed to {now:?}"),
                 _ => format!("{target} is there"),
             };
             Waited {
@@ -674,7 +677,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(waited.done, "e9's value is \"42\"");
-        assert_eq!(waited.found.unwrap().value, "42");
+        assert_eq!(waited.found.unwrap().value.as_deref(), Some("42"));
 
         let desk = Script::new(vec![field("6×7"), field("6×7"), field("42")]);
         let changed = run(

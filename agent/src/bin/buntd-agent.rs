@@ -10,6 +10,10 @@
 //!
 //! 트리에 나오지 않는 UI(캔버스, 직접 그리는 화면)는 창 스크린샷과 그 픽셀 좌표의 포인터 누르기로
 //! 다룬다. 컴포지터가 그 창만 따로 그리므로 다른 앱과 셸의 인증 창은 그림에 들지 않는다.
+//!
+//! 기다리기(`wait`)와 JS REPL(`repl`, bunt_agent::repl)은 호출 하나 안에서 데몬을 여러 번 부른다. 이것들은
+//! 데몬을 붙잡지 않고, 그 안의 호출마다 정책을 다시 읽어 클라이언트를 받는다(Gate). REPL은 클라이언트와 세션마다
+//! 띄운 워커 프로세스(`buntd-agent --repl-worker`, seccomp로 가둔다)에서 돈다.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -32,9 +36,10 @@ use bunt_agent::{
     desktop::{self, DesktopApp},
     diff,
     protocol::{
-        self, ActParams, Acted, Installed, LaunchParams, Launched, Request, Response, RpcError,
-        Screenshot, ScreenshotParams, Snapshot, SnapshotParams, Untracked, WaitParams,
+        self, ActParams, Acted, Installed, LaunchParams, Launched, ReplParams, Request, Response,
+        RpcError, Screenshot, ScreenshotParams, Snapshot, SnapshotParams, Untracked, WaitParams,
     },
+    repl::{Repls, Worker, worker},
     session::Sessions,
     tree::{self, Item, Options, Tree, iface, role, state},
     wait,
@@ -132,6 +137,10 @@ struct Agent {
 }
 
 fn main() {
+    // REPL 워커는 로그도 소켓도 쓰지 않는다. 무엇을 하기 전에 가른다
+    if std::env::args().nth(1).as_deref() == Some("--repl-worker") {
+        worker::main();
+    }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -148,6 +157,7 @@ fn main() {
         }
     };
     let agent = Arc::new(Mutex::new(Agent::default()));
+    let repls = Arc::new(Repls::new(Box::new(Worker::spawn)));
     loop {
         // 받기 전에 본다: 끝나면 기다리는 연결은 소켓에 남고 systemd가 새 데몬을 띄워 넘긴다
         wait_for_connection(&listener);
@@ -157,8 +167,8 @@ fn main() {
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                let agent = agent.clone();
-                std::thread::spawn(move || serve(stream, &agent));
+                let (agent, repls) = (agent.clone(), repls.clone());
+                std::thread::spawn(move || serve(stream, &agent, &repls));
             }
             Err(err) => tracing::warn!("accept failed: {err}"),
         }
@@ -229,7 +239,7 @@ fn listener() -> io::Result<UnixListener> {
 }
 
 /// 연결 하나: 한 줄 요청마다 한 줄로 답한다. 요청한 프로그램은 연결마다 한 번 알아본다
-fn serve(stream: UnixStream, agent: &Mutex<Agent>) {
+fn serve(stream: UnixStream, agent: &Mutex<Agent>, repls: &Repls) {
     let client = peer_pid(&stream).map(bunt_access::identify);
     let mut writer = &stream;
     for line in BufReader::new(&stream).lines() {
@@ -237,7 +247,8 @@ fn serve(stream: UnixStream, agent: &Mutex<Agent>) {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(mut reply) = serde_json::to_string(&handle(&line, agent, client.as_ref())) else {
+        let response = handle(&line, agent, repls, client.as_ref());
+        let Ok(mut reply) = serde_json::to_string(&response) else {
             return;
         };
         reply.push('\n');
@@ -355,7 +366,7 @@ fn blocked_app() -> Failure {
     )
 }
 
-fn handle(line: &str, agent: &Mutex<Agent>, client: Option<&Client>) -> Response {
+fn handle(line: &str, agent: &Mutex<Agent>, repls: &Repls, client: Option<&Client>) -> Response {
     let request: Request = match serde_json::from_str(line) {
         Ok(request) => request,
         Err(err) => {
@@ -368,37 +379,73 @@ fn handle(line: &str, agent: &Mutex<Agent>, client: Option<&Client>) -> Response
             );
         }
     };
-    // 허용하지 않은 AI는 무엇을 하기 전에(기다리기 전에도) 거절한다
-    let policy = Policy::load();
-    if let Err(failure) = admit(client, &policy) {
-        return reply(request.id, Err(failure));
-    }
     let started = Instant::now();
+    let method = request.method.clone();
     let dispatch =
         |policy: Policy, method: &str, params: Value| locked(agent, policy, method, params);
-    let gate = Gate {
-        client,
-        policy: &Policy::load,
-        dispatch: &dispatch,
-    };
-    let result = match request.method.as_str() {
-        // 데몬을 여러 번 부르며 기다리는 메서드는 데몬을 붙잡지 않고, 부를 때마다 정책을 다시 본다
-        "wait" => serde_json::from_value::<WaitParams>(request.params)
-            .map_err(|err| (protocol::INVALID_PARAMS, err.to_string()))
-            .and_then(|params| wait::run(&gate, &params))
-            .and_then(|waited| {
-                serde_json::to_value(waited).map_err(|err| agent_error(err.to_string()))
-            }),
-        method => locked(agent, policy, method, request.params),
-    };
+    let response = answer(request, client, &Policy::load, &dispatch, repls);
     tracing::info!(
         client = client.map_or("", |client| client.name.as_str()),
-        method = %request.method,
+        method = %method,
         ms = started.elapsed().as_millis() as u64,
-        ok = result.is_ok(),
+        ok = response.error.is_none(),
         "request"
     );
+    response
+}
+
+/// 요청 하나에 답한다. 허용하지 않은 AI는 무엇을 하기 전에(기다리거나 JS를 돌리기 전에도) 거절한다.
+/// 데몬을 여러 번 부르는 메서드(wait, repl)는 데몬을 붙잡지 않고, 부를 때마다 정책을 다시 본다(Gate)
+fn answer(
+    request: Request,
+    client: Option<&Client>,
+    policy: &dyn Fn() -> Policy,
+    dispatch: &dyn Fn(Policy, &str, Value) -> Result<Value, Failure>,
+    repls: &Repls,
+) -> Response {
+    let first = policy();
+    if let Err(failure) = admit(client, &first) {
+        return reply(request.id, Err(failure));
+    }
+    let gate = Gate {
+        client,
+        policy,
+        dispatch,
+    };
+    fn to_value<T: serde::Serialize>(value: Result<T, Failure>) -> Result<Value, Failure> {
+        value.and_then(|value| {
+            serde_json::to_value(value).map_err(|err| agent_error(err.to_string()))
+        })
+    }
+    let result = match request.method.as_str() {
+        "wait" => to_value(
+            serde_json::from_value::<WaitParams>(request.params)
+                .map_err(|err| (protocol::INVALID_PARAMS, err.to_string()))
+                .and_then(|params| wait::run(&gate, &params)),
+        ),
+        "repl" => to_value(
+            serde_json::from_value::<ReplParams>(request.params)
+                .map_err(|err| (protocol::INVALID_PARAMS, err.to_string()))
+                .and_then(|params| repls.run(&gate, &repl_owner(client), params)),
+        ),
+        method => dispatch(first, method, request.params),
+    };
     reply(request.id, result)
+}
+
+/// REPL의 주인: 같은 AI(실행 파일과 스크립트)의 호출만 같은 REPL의 변수를 본다
+fn repl_owner(client: Option<&Client>) -> String {
+    client.map_or_else(String::new, |client| {
+        format!(
+            "{}\n{}\n{}",
+            client.exe.display(),
+            client
+                .script
+                .as_deref()
+                .map_or_else(String::new, |script| script.display().to_string()),
+            client.admin
+        )
+    })
 }
 
 /// 데몬을 잡고 메서드 하나를 처리한다
@@ -2570,6 +2617,124 @@ mod tests {
         let refused = wait::run(&gate, &params).unwrap_err();
         assert_eq!(refused.0, protocol::NOT_ALLOWED);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    fn repl_request(code: &str) -> Request {
+        Request {
+            jsonrpc: "2.0".into(),
+            id: json!(7),
+            method: "repl".into(),
+            params: json!({ "code": code, "timeout_ms": 5_000 }),
+        }
+    }
+
+    #[test]
+    fn the_repl_runs_only_for_allowed_ais() {
+        let repls = Repls::new(Box::new(Worker::in_thread));
+        let client = claude();
+        let dispatch = |_: Policy, method: &str, _: Value| -> Result<Value, Failure> {
+            panic!("{method} reached the daemon")
+        };
+        // 꺼 둔 AI와 알아보지 못한 클라이언트는 JS를 돌리지 않는다 (REPL을 띄우지도 않는다)
+        let off = || policy_with(false);
+        for client in [Some(&client), None] {
+            let refused = answer(
+                repl_request("while (true) {}"),
+                client,
+                &off,
+                &dispatch,
+                &repls,
+            );
+            assert_eq!(refused.id, json!(7));
+            assert_eq!(refused.error.unwrap().code, protocol::NOT_ALLOWED);
+        }
+        assert!(repls.is_empty());
+        // 기다리기도 같다
+        let wait = Request {
+            method: "wait".into(),
+            params: json!({ "text": "x" }),
+            ..repl_request("")
+        };
+        let refused = answer(wait, Some(&client), &off, &dispatch, &repls);
+        assert_eq!(refused.error.unwrap().code, protocol::NOT_ALLOWED);
+    }
+
+    #[test]
+    fn every_desktop_call_of_a_repl_goes_through_the_policy() {
+        let repls = Repls::new(Box::new(Worker::in_thread));
+        let client = claude();
+        // 1: 요청을 받을 때, 2: 첫 데스크톱 호출 (허용). 3부터: 사용자가 이 AI를 껐다
+        let loads = Cell::new(0);
+        let policy = || {
+            loads.set(loads.get() + 1);
+            policy_with(loads.get() <= 2)
+        };
+        let reached = RefCell::new(Vec::new());
+        // 데몬은 막은 앱과 잠긴 화면을 거절한다
+        let dispatch = |_: Policy, method: &str, params: Value| -> Result<Value, Failure> {
+            reached.borrow_mut().push(method.to_string());
+            if params["app"] == json!("bank") {
+                return Err(blocked_app());
+            }
+            Err(screen_locked())
+        };
+        let code = "const seen = [];\n\
+                    for (const f of [() => desktop.app('bank').snapshot(), () => desktop.apps()]) {\n\
+                      try { await f() } catch (e) { seen.push(e.name) }\n\
+                    }\n\
+                    seen";
+        let ran = answer(
+            repl_request(code),
+            Some(&client),
+            &policy,
+            &dispatch,
+            &repls,
+        );
+        let repl: protocol::Repl = serde_json::from_value(ran.result.unwrap()).unwrap();
+        assert_eq!(repl.error, None);
+        assert_eq!(
+            repl.value,
+            Some(json!(["BlockedAppError", "NotAllowedError"]))
+        );
+        assert_eq!(*reached.borrow(), ["snapshot"]);
+        // 다시 켜면 같은 REPL이 이어진다 (변수가 남았다)
+        let on = || policy_with(true);
+        let again = answer(
+            repl_request("seen.length"),
+            Some(&client),
+            &on,
+            &dispatch,
+            &repls,
+        );
+        let repl: protocol::Repl = serde_json::from_value(again.result.unwrap()).unwrap();
+        assert_eq!((repl.output.as_str(), repl.fresh), ("2\n", false));
+        // 잠긴 화면은 REPL 안에서도 거절된다
+        let locked = answer(
+            repl_request("await desktop.snapshot()"),
+            Some(&client),
+            &on,
+            &dispatch,
+            &repls,
+        );
+        let repl: protocol::Repl = serde_json::from_value(locked.result.unwrap()).unwrap();
+        assert!(
+            repl.error
+                .as_deref()
+                .unwrap()
+                .starts_with("ScreenLockedError: the screen is locked"),
+            "{:?}",
+            repl.error
+        );
+    }
+
+    #[test]
+    fn repls_belong_to_one_ai() {
+        let mut other = claude();
+        other.script = Some(PathBuf::from("/opt/other/agent.js"));
+        assert_ne!(repl_owner(Some(&claude())), repl_owner(Some(&other)));
+        let mut admin = claude();
+        admin.admin = true;
+        assert_ne!(repl_owner(Some(&claude())), repl_owner(Some(&admin)));
     }
 
     #[test]

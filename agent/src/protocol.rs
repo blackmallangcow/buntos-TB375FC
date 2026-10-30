@@ -271,8 +271,8 @@ pub struct Found {
     pub line: String,
     pub role: String,
     pub name: String,
-    /// 값 (글 칸·막대의 value, 없으면 이름)
-    pub value: String,
+    /// 글 칸·막대의 값 (`value=`)
+    pub value: Option<String>,
     /// 줄 끝의 상태 (focused, checked, disabled …)
     pub states: Vec<String>,
     /// 그 요소와 아래 줄의 이름·글을 이은 것
@@ -292,6 +292,46 @@ pub struct Waited {
     pub matches: Vec<Found>,
     /// 창을 기다렸으면 그 창의 제목
     pub window: Option<String>,
+}
+
+/// `repl`의 인자: JavaScript를 이 클라이언트(AI)의 REPL에서 돌린다. 변수는 호출 사이에 남는다
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplParams {
+    pub code: String,
+    /// REPL과 ref·diff를 나누는 세션 (기본 "default"). 세션마다 변수가 따로다
+    pub session: Option<String>,
+    /// 실행 시간의 상한(ms). 없으면 30초, 많아야 120초
+    pub timeout_ms: Option<u64>,
+    /// 먼저 새 REPL로 바꾼다 (지난 변수를 버린다)
+    pub reset: bool,
+    /// 이번 호출에 찍은 스크린샷을 답에 base64 PNG로 넣는다 (MCP 어댑터가 그림으로 넘긴다)
+    pub images: bool,
+}
+
+/// `repl`의 답
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Repl {
+    /// console 출력과 마지막 식의 값을 `bunt agent`처럼 적은 글
+    pub output: String,
+    /// 코드가 던진 오류 (없으면 성공)
+    pub error: Option<String>,
+    /// 마지막 식의 값을 JSON으로 (바꿀 수 없거나 너무 크면 없다)
+    pub value: Option<Value>,
+    /// 새 REPL에서 돌았다 (지난 변수가 없다)
+    pub fresh: bool,
+    pub ms: u64,
+    /// 이번 호출에 찍은 스크린샷 (`images`일 때만 data가 있다)
+    pub images: Vec<ReplImage>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ReplImage {
+    pub path: String,
+    pub mime: String,
+    /// base64
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 /// 데몬에 요청 하나를 보내고 답을 기다린다

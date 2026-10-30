@@ -14,6 +14,7 @@ pub mod desktop;
 pub mod diff;
 pub mod outline;
 pub mod protocol;
+pub mod repl;
 pub mod session;
 pub mod tree;
 pub mod wait;

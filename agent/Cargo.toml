@@ -25,8 +25,10 @@ bunt-access = { path = "../access" }
 async-io = "2"
 # 접근성 버스에 여러 호출을 한꺼번에 보낸다
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-# 소켓 건너편 프로세스의 pid (SO_PEERCRED)
+# 소켓 건너편 프로세스의 pid (SO_PEERCRED), REPL 워커의 seccomp와 자원 상한
 libc = "0.2"
+# REPL의 JS 엔진 QuickJS-ng (MIT, C 소스를 함께 빌드한다). std·os 모듈(파일, 프로세스)은 넣지 않는다
+rquickjs = { version = "0.14", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 # 데몬과 CLI 사이의 JSON-RPC
 serde_json = "1"
