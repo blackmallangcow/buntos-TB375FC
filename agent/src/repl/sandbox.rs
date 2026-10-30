@@ -52,7 +52,7 @@ fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> io::Result<()> 
 }
 
 /// 허용하는 시스템 호출. 워커가 JS를 돌리며 쓰는 것뿐이다: 파이프(0, 1, 2) 읽고 쓰기, 기다리기, 메모리, 시간,
-/// 신호에서 돌아오기, 끝내기. strace로 본 워커의 호출에서 골랐다
+/// 신호에서 돌아오기, 자기 신호 처리기 바꾸기, 끝내기. strace로 본 워커의 호출에서 골랐다
 const ALLOWED: &[libc::c_long] = &[
     libc::SYS_read,
     libc::SYS_write,
@@ -80,6 +80,9 @@ const ALLOWED: &[libc::c_long] = &[
     libc::SYS_gettid,
     libc::SYS_rt_sigreturn,
     libc::SYS_rt_sigprocmask,
+    // 죽을 때 쓴다: abort와 Rust의 SIGSEGV 처리기는 처리기를 기본값으로 되돌려 프로세스를 끝낸다. 검토: 막혀 있으면
+    // 처리기가 되돌아와 같은 잘못을 끝없이 되풀이하며 CPU를 다 썼다. 이 프로세스 안의 일이라 밖에 닿지 않는다
+    libc::SYS_rt_sigaction,
     libc::SYS_sigaltstack,
     libc::SYS_restart_syscall,
     libc::SYS_exit,
@@ -173,10 +176,48 @@ mod tests {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
+        process::{Command, Stdio},
         time::{Duration, Instant},
     };
 
     use super::*;
+
+    /// 이것이 있으면 시험 프로세스가 갇힌 뒤 죽는다 (a_crash_after_confining_ends_the_process가 따로 띄운다)
+    const CRASH: &str = "BUNT_SANDBOX_CRASH";
+
+    /// 갇힌 뒤 죽으면(abort, 엔진의 잘못된 메모리 접근) 프로세스가 끝난다. seccomp는 프로세스에 남으므로 시험
+    /// 프로그램을 따로 띄워 이 시험만 돌린다
+    #[test]
+    fn a_crash_after_confining_ends_the_process() {
+        if std::env::var_os(CRASH).is_some() {
+            limit_resources().unwrap();
+            confine().unwrap();
+            std::process::abort();
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "repl::sandbox::tests::a_crash_after_confining_ends_the_process",
+            ])
+            .env(CRASH, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed() > Duration::from_secs(10) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the confined process kept running after it crashed");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!status.success(), "{status:?}");
+    }
 
     /// seccomp는 스레드마다 걸린다: 새 스레드만 가두고 시험 프로세스의 나머지는 그대로 둔다. 워커처럼 파이프로 말한다
     #[test]
