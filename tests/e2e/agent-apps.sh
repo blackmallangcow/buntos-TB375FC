@@ -8,7 +8,8 @@
 # 픽셀을 누른다(계산기의 '=' 단추, Firefox 캔버스). Firefox 주소 막대에서는 fill이 실패를 성공으로 알리지
 # 않는지, 글 칸이 아닌 곳에 type하면 키로 바꿔 치지 않는지 본다. 긴 웹 페이지의 글과 화면 밖 단추, 휠 스크롤,
 # 다른 페이지(시스템 모니터)를 빼는지, 앱을 끝내는 동작을 알리는지, 시스템 설정 사이드바도 본다. 끝으로
-# 셸의 메뉴 막대 단추를 포인터로 누르고, 메뉴를 Escape로 닫은 뒤 다른 메뉴 단추가 눌리는지 본다.
+# 셸의 메뉴 막대 단추를 포인터로 누르고, 메뉴를 Escape로 닫은 뒤 다른 메뉴 단추가 눌리는지 본다. JS REPL로
+# 계산기를 한 번에 다루고 그 변수가 다음 호출에 남는지도 본다.
 # 직렬 콘솔의 root로 실행한다(boot-to-shell.sh가 넣어 돌린다). 마지막 줄은 "E2E5_RESULT 통과 실패"다
 set -u
 
@@ -158,6 +159,20 @@ one=$(ref 'button "1"' <<<"$calculator")
 check "ref와 같은 앱의 --app은 받는다" "$(A click "$one" --app org.gnome.Calculator >/dev/null && echo ok)" ok
 check "ref와 다른 앱의 --app은 그렇다고 알린다" \
 	"$(A click "$one" --app org.gnome.TextEditor 2>&1 | grep -c 'drop --app')" 1
+# JS REPL(3단계): 떠 있는 계산기를 C로 비우고 6 × 7을 REPL 호출 한 번으로 계산해 읽고, 그 변수(calc)가 다음 호출에
+# 남는다. e2e 6번이 쓰는 앱 차례가 바뀌지 않도록 계산기를 닫기 전에 한다
+repl=$(A repl - 2>&1 <<'JS'
+const calc = await desktop.launch('org.gnome.Calculator');
+for (const key of ['C', '6', '×', '7', '=']) {
+  await calc.getByRole('button', { name: key, exact: true }).click();
+}
+await calc.getByRole('textbox').first().inputValue()
+JS
+)
+check "REPL 한 번으로 계산기의 6 × 7을 읽는다" "$(tail -1 <<<"$repl")" 42
+check "REPL의 변수가 다음 호출에 남는다" \
+	"$(A repl 'await calc.getByRole("textbox").first().inputValue()' 2>&1 | tail -1)" 42
+
 check "닫기 단추를 누르면 앱이 끝났다고 알린다" \
 	"$(A click "$(ref 'button "\(닫기\|Close\)"' <<<"$calculator")" | grep -c 'then the app quit')" 1
 
