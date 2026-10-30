@@ -117,10 +117,12 @@ fn surface_ids(layer: &LayerSurface) -> HashSet<Id> {
     ids
 }
 
-/// 위에서 아래로 이어지는 그라데이션 배경
+/// 위에서 아래로 이어지는 그라데이션 배경. 가로로는 색이 같으므로 폭 1픽셀로 만들고 그릴 때 화면 폭으로
+/// 늘린다(불투명 영역도 함께 늘어난다). 전에는 화면 크기 그대로 만들어 CPU 사본과 텍스처를 함께 들었다
+/// (2944×1840이면 약 43MB)
 pub fn wallpaper(top: [u8; 3], bottom: [u8; 3], size: Size<i32, Physical>) -> MemoryRenderBuffer {
-    let (width, height) = (size.w.max(1), size.h.max(1));
-    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    let height = size.h.max(1);
+    let mut pixels = Vec::with_capacity((height * 4) as usize);
     for y in 0..height {
         let t = if height > 1 {
             y as f32 / (height - 1) as f32
@@ -133,17 +135,15 @@ pub fn wallpaper(top: [u8; 3], bottom: [u8; 3], size: Size<i32, Physical>) -> Me
             mix(top[1], bottom[1]),
             mix(top[2], bottom[2]),
         ];
-        for _ in 0..width {
-            // Argb8888은 리틀 엔디언에서 B, G, R, A 순서다
-            pixels.extend_from_slice(&[b, g, r, 0xff]);
-        }
+        // Argb8888은 리틀 엔디언에서 B, G, R, A 순서다
+        pixels.extend_from_slice(&[b, g, r, 0xff]);
     }
     MemoryRenderBuffer::from_slice(
         &pixels,
         Fourcc::Argb8888,
-        (width, height),
+        (1, height),
         1,
         Transform::Normal,
-        Some(vec![Rectangle::from_size((width, height).into())]),
+        Some(vec![Rectangle::from_size((1, height).into())]),
     )
 }
