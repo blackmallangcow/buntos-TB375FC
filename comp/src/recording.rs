@@ -373,7 +373,7 @@ fn record(mut encoder: Child, frames: Receiver<Frame>, finish: Finish) {
     write_due(&mut input, &mut pacer, latest.as_ref(), interval);
     drop(input);
     let encoded = match encoder.wait() {
-        Ok(status) if status.success() => pacer.written > 0,
+        Ok(status) if status.success() => true,
         Ok(status) => {
             tracing::warn!("the screen recording encoder failed: {status}");
             false
@@ -383,7 +383,7 @@ fn record(mut encoder: Child, frames: Receiver<Frame>, finish: Finish) {
             false
         }
     };
-    finish.report(encoded, latest);
+    finish.report(encoded, pacer.written > 0, latest);
 }
 
 /// 지금까지 넘겼어야 할 프레임을 넘긴다. 부호기가 끝나 넘기지 못하면 false
@@ -421,11 +421,13 @@ struct Finish {
 }
 
 impl Finish {
-    /// 저장했으면 셸에 미리 보기를 띄우게 하거나(플로팅 썸네일) 알림을 띄우고, 아니면 실패를 알린다
-    fn report(self, encoded: bool, latest: Option<Frame>) {
-        let command = if !encoded {
-            // 한 프레임도 쓰지 못한 빈 파일은 남기지 않는다
-            if std::fs::metadata(&self.path).is_ok_and(|meta| meta.len() == 0) {
+    /// 저장했으면 셸에 미리 보기를 띄우게 하거나(플로팅 썸네일) 알림을 띄우고, 아니면 실패를 알린다.
+    /// `framed`는 부호기에 프레임을 하나라도 넘겼는지다
+    fn report(self, encoded: bool, framed: bool, latest: Option<Frame>) {
+        let command = if !encoded || !framed {
+            // 프레임을 하나도 넘기지 못한 파일(머리만 있거나 빈 파일)은 남기지 않는다. 도중에 부호기가 죽은
+            // 파일은 앞부분이라도 볼 수 있게 남긴다
+            if !framed {
                 let _ = std::fs::remove_file(&self.path);
             }
             Command::Notify {
@@ -561,10 +563,12 @@ impl BuntState {
                 tracing::warn!("cannot start the screen recording encoder {GST_LAUNCH}: {err}");
                 drop(file);
                 let _ = std::fs::remove_file(&path);
-                self.dbus.send(Command::Notify {
-                    title,
-                    body: tr.get("recording-unavailable"),
-                });
+                // 부호기가 깔리지 않았으면 그렇다고 알린다
+                let body = match err.kind() {
+                    io::ErrorKind::NotFound => tr.get("recording-unavailable"),
+                    _ => tr.get("recording-failed"),
+                };
+                self.dbus.send(Command::Notify { title, body });
                 return;
             }
         };
