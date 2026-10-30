@@ -185,6 +185,8 @@ pub struct BuntState {
     pub screenshot_capture: Option<Capture>,
     /// 셸이 알린 스크린샷 옵션 (저장 위치, 플로팅 썸네일)
     pub screenshot_options: screenshots::Options,
+    /// ⇧⌘5의 선택 부분에서 마지막으로 고른 영역. 다음 ⇧⌘5가 그 자리에 띄운다
+    pub screenshot_last_area: Option<Rectangle<i32, Logical>>,
 
     /// 시스템 설정에서 고른 값 (다음 로그인에도 쓴다)
     pub prefs: Prefs,
@@ -357,6 +359,7 @@ impl BuntState {
             screenshot_area: None,
             screenshot_capture: None,
             screenshot_options: screenshots::Options::default(),
+            screenshot_last_area: None,
             prefs,
             panels: Panels::default(),
             bars: [Reveal::default(); 2],
@@ -1616,6 +1619,7 @@ impl WlrLayerShellHandler for BuntState {
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        let mut screenshot_toolbar = false;
         for output in self.space.outputs() {
             let mut map = layer_map_for_output(output);
             let layer = map
@@ -1623,11 +1627,16 @@ impl WlrLayerShellHandler for BuntState {
                 .find(|layer| layer.layer_surface() == &surface)
                 .cloned();
             if let Some(layer) = layer {
+                screenshot_toolbar |= layer.namespace() == screenshots::TOOLBAR_NAMESPACE;
                 map.unmap_layer(&layer);
             }
         }
         self.refresh_layer_focus();
         self.watch_window_areas();
+        // ⇧⌘5 도구 막대가 사라지면 그 막대가 띄운 선택 영역을 거둔다
+        if screenshot_toolbar {
+            self.screenshot_toolbar_closed();
+        }
     }
 }
 
@@ -2046,7 +2055,9 @@ impl BuntState {
             Request::RestoreMinimized(id) => self.restore_minimized(id),
             Request::SelectSwitcher { index, activate } => self.select_switcher(index, activate),
             Request::ScreenshotOptions(options) => self.screenshot_options = options,
-            Request::Screenshot { mode, delay } => self.start_screenshot(mode, false, delay),
+            // 선택 부분은 ⇧⌘5의 선택 영역을 찍는다 (screenshot.rs). 전에는 ⇧⌘4처럼 끌어서 골랐다
+            Request::Screenshot { mode, delay } => self.toolbar_screenshot(mode, delay),
+            Request::ScreenshotArea(show) => self.show_screenshot_area(show),
             Request::Agent(request) => self.agent_request(request),
             // 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
             Request::Session(request) => self.session_request(request),

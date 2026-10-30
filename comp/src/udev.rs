@@ -34,7 +34,6 @@ use smithay::{
             element::{
                 Element, Id, Kind, RenderElementStates, default_primary_scanout_output_compare,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
-                solid::SolidColorRenderElement,
                 surface::render_elements_from_surface_tree,
             },
             gles::GlesRenderer,
@@ -80,7 +79,7 @@ use crate::{
     gpu::{GSK_RENDERER, Rendering, renderer_name},
     prefs::{ModePref, PointerPrefs},
     render::{self, OutputRenderElements},
-    screenshot::{self, AreaSelection},
+    screenshot,
     state::BuntState,
 };
 
@@ -1092,25 +1091,13 @@ impl BuntState {
             .map(|element| element.id().clone())
             .collect();
 
-        // ⇧⌘4로 고르는 영역: 커서 아래, 창과 막대 위
-        if let Some(parts) = self
+        // ⇧⌘4로 고르는 영역과 ⇧⌘5의 선택 영역: 창과 막대 위, ⇧⌘5 도구 막대 아래(screenshot.rs의
+        // place_overlay). 전에는 커서 바로 아래에 넣었는데, ⇧⌘5의 선택 영역 위에는 도구 막대가 남아야 한다
+        let selection = self
             .screenshot_area
             .as_mut()
-            .and_then(AreaSelection::layout)
-        {
-            for (location, buffer) in parts {
-                let location = (location - output_geo.loc).to_physical_precise_round(scale);
-                elements.push(OutputRenderElements::Solid(
-                    SolidColorRenderElement::from_buffer(
-                        buffer,
-                        location,
-                        scale,
-                        1.0,
-                        Kind::Unspecified,
-                    ),
-                ));
-            }
-        }
+            .map(|selection| selection.elements(renderer, output_geo, scale))
+            .unwrap_or_default();
 
         // 잠긴 동안에는 잠금 표면과 검은 바탕만 그린다. 창과 셸 막대는 넣지 않는다 (session_lock.rs)
         let lock_scene = self
@@ -1118,6 +1105,7 @@ impl BuntState {
             .scene(renderer, &output, output_geo.size, scale);
         let locked = lock_scene.is_some();
         elements.extend(lock_scene.into_iter().flatten());
+        let space_start = elements.len();
         match space_render_elements::<_, smithay::desktop::Window, _>(
             renderer,
             [&self.space],
@@ -1130,6 +1118,9 @@ impl BuntState {
                 elements.extend(space_elements.into_iter().map(OutputRenderElements::Space))
             }
             Err(err) => tracing::warn!("failed to collect windows: {err:?}"),
+        }
+        if !locked {
+            screenshot::place_overlay(&mut elements, space_start, selection, &output);
         }
 
         // 배경화면은 물리 픽셀 크기로 만들었으므로 논리 크기를 주어 배율과 상관없이 화면을 채운다

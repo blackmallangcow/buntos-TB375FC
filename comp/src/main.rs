@@ -30,6 +30,8 @@ mod windows;
 mod logind;
 mod session;
 mod session_lock;
+// ⇧⌘5의 고칠 수 있는 선택 영역
+mod selection;
 
 fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

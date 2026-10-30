@@ -359,11 +359,14 @@ pub enum Request {
     },
     /// 셸이 알린 스크린샷 옵션
     ScreenshotOptions(screenshot::Options),
-    /// ⇧⌘5 도구 막대의 찍기: 화면은 `delay`초 뒤에 찍고, 영역과 창은 고르기를 시작한다
+    /// ⇧⌘5 도구 막대의 찍기: 화면은 `delay`초 뒤에 찍고, 선택 부분은 고친 선택 영역을 찍고, 창은 고르기를
+    /// 시작한다
     Screenshot {
         mode: screenshot::Mode,
         delay: u32,
     },
+    /// ⇧⌘5 도구 막대의 선택 부분: 고칠 수 있는 선택 영역을 띄우거나(true) 거둔다
+    ScreenshotArea(bool),
     Agent(AgentRequest),
     /// 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
     Session(SessionRequest),
@@ -1199,8 +1202,9 @@ impl Api {
         }))
     }
 
-    /// ⇧⌘5 도구 막대의 찍기. `mode`는 screen(`delay`초 뒤에 포인터가 있는 화면), area(끌어서 고른
-    /// 영역), window(눌러서 고른 창)다. 영역과 창은 고른 뒤 `delay`초 기다린다. 셸만 부른다
+    /// ⇧⌘5 도구 막대의 찍기. `mode`는 screen(`delay`초 뒤에 포인터가 있는 화면), area(SelectScreenshotArea로
+    /// 띄워 고친 선택 영역. 띄운 적이 없으면 끌어서 고른다), window(눌러서 고른 창)다. 영역과 창은 고른 뒤
+    /// `delay`초 기다린다. 셸만 부른다
     async fn screenshot(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -1217,6 +1221,21 @@ impl Api {
             mode,
             delay: delay.min(60),
         })
+    }
+
+    /// ⇧⌘5 도구 막대의 선택 부분. `show`면 고칠 수 있는 선택 영역을 마지막으로 고른 자리(처음이면 포인터가
+    /// 있는 화면 가운데)에 띄우고, 아니면 거둔다. 띄운 동안 안쪽을 끌면 옮기고 테두리·모서리를 끌면 크기를
+    /// 바꾸며 바깥을 끌면 새로 고른다. 도구 막대는 영역 위에 남아 포인터와 키를 받고, 막대의 캡처
+    /// (Screenshot의 area)가 그 영역을 찍는다. 막대가 사라지면 컴포지터가 거둔다. 셸만 부른다
+    async fn select_screenshot_area(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        show: bool,
+    ) -> fdo::Result<()> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        self.request(Request::ScreenshotArea(show))
     }
 
     /// 키보드 단축키 (표 순서). 항목마다 id(s), category(s), kind(s: key, switch),

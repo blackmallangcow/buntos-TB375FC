@@ -25,6 +25,7 @@ use smithay::{
 use crate::{
     dbus::Command,
     prefs::KeyRepeat,
+    screenshot::AreaSelection,
     session_lock,
     shortcuts::{self, Accel, Builtin, Hit, Key, Mods, Place, SwitcherKey},
     state::BuntState,
@@ -147,8 +148,12 @@ impl BuntState {
                     };
                 }
                 // 스크린샷 영역을 고르는 동안에는 키를 앱에 보내지 않는다. Esc는 그만두고, 스페이스는 영역
-                // 고르기와 창 고르기를 바꾼다
-                if state.screenshot_area.is_some() {
+                // 고르기와 창 고르기를 바꾼다. ⇧⌘5의 선택 영역을 띄운 동안에는 도구 막대가 키를 받는다
+                if state
+                    .screenshot_area
+                    .as_ref()
+                    .is_some_and(AreaSelection::takes_keys)
+                {
                     state.suppressed_keys.push(code.raw());
                     let hit = match handle.modified_sym() {
                         Keysym::Escape => Hit::Run(Builtin::CancelScreenshot),
