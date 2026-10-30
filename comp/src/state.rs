@@ -1187,7 +1187,7 @@ pub struct ClientState {
     /// 컴포지터가 직접 띄운 잠금 화면. 화면 잠금 프로토콜(ext-session-lock)을 쓸 수 있다 (session_lock.rs)
     pub lock_screen: bool,
     /// 컴포지터가 띄운 프로그램(spawn_trusted)의 pid. 모르면 0. 미리 만든 연결(socketpair)은 SO_PEERCRED가
-    /// 그 쌍을 만든 컴포지터 자신이라, 셸의 표면이 컴포지터의 pid로 알려졌다 (agent.rs의 surface_pid)
+    /// 그 쌍을 만든 컴포지터 자신이라, 셸의 표면이 컴포지터의 pid로 알려졌다 (surface_pid)
     pub spawned_pid: AtomicU32,
 }
 
@@ -1667,14 +1667,26 @@ impl BuntState {
         self.dbus.update(|snapshot| snapshot.focus = focus);
     }
 
+    /// 표면을 만든 클라이언트의 pid. 모르면 0. 컴포지터가 띄운 셸·입력기·잠금 화면은 미리 만든
+    /// 연결(socketpair)로 붙어 SO_PEERCRED가 컴포지터 자신이므로, 띄울 때 적어 둔 pid를 쓴다
+    pub(crate) fn surface_pid(&self, surface: &WlSurface) -> u32 {
+        let Ok(client) = self.display_handle.get_client(surface.id()) else {
+            return 0;
+        };
+        let spawned = client
+            .get_data::<ClientState>()
+            .map_or(0, |data| data.spawned_pid.load(Ordering::Relaxed));
+        if spawned != 0 {
+            return spawned;
+        }
+        client
+            .get_credentials(&self.display_handle)
+            .map_or(0, |credentials| credentials.pid as u32)
+    }
+
     /// 키보드 포커스 표면의 클라이언트와 그 최상위 표면
     pub(crate) fn focus_info(&self, surface: &WlSurface) -> dbus::Focus {
-        let pid = self
-            .display_handle
-            .get_client(surface.id())
-            .ok()
-            .and_then(|client| client.get_credentials(&self.display_handle).ok())
-            .map_or(0, |credentials| credentials.pid as u32);
+        let pid = self.surface_pid(surface);
         let root = self.root_surface(surface);
         // 창이 공간에 놓이기 전에 포커스를 받을 수 있으므로 표면의 xdg 정보를 바로 읽는다
         let toplevel = with_states(&root, |states| {
