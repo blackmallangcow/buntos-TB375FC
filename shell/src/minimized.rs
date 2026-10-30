@@ -4,14 +4,23 @@
 //! Dock의 최소화 칸에 놓을 창. 컴포지터(org.buntos.Compositor1)가 최소화한 창의 번호, 앱, 제목과
 //! 내리기 전에 뜬 창 그림을 준다(GetMinimizedWindows). 창을 최소화하거나, 최소화한 창이 돌아오거나
 //! 닫히면 알린다(MinimizedWindowsChanged). Dock에서 누른 창은 컴포지터가 되돌린다(RestoreMinimized).
+//! 최소화 효과(지니, 크기 조절)는 컴포지터가 그린다. 셸은 고른 효과(SetMinimizeEffect)와 Dock의 칸 자리
+//! (SetMinimizedSlots)를 알린다.
 
 use std::rc::Rc;
 
 use gtk4::{gdk, gio, glib, prelude::*};
 
+use crate::dbus;
+
 const NAME: &str = "org.buntos.Compositor";
 const PATH: &str = "/org/buntos/Compositor";
 const INTERFACE: &str = "org.buntos.Compositor1";
+/// 셸 설정 키 (data/org.buntos.shell.gschema.xml)
+const EFFECT_KEY: &str = "minimize-effect";
+
+/// Dock의 최소화 칸 하나: 최소화 번호와 Dock 표면 안의 (x, y, 너비, 높이) 논리 좌표
+pub type Slot = (u32, i32, i32, i32, i32);
 
 /// 최소화한 창 하나
 pub struct Minimized {
@@ -49,6 +58,77 @@ pub fn follow(changed: impl Fn(Vec<Minimized>) + 'static) {
             // 셸이 끝날 때까지 받는다
             std::mem::forget(subscription);
             fetch(&connection, changed);
+        },
+    );
+}
+
+/// 컴포지터에 시스템 설정의 최소화 효과를 알린다. 컴포지터가 (다시) 뜰 때와 값이 바뀔 때마다 보낸다
+pub fn share_effect(settings: &gio::Settings) {
+    let settings = settings.clone();
+    gio::DBusProxy::for_bus(
+        gio::BusType::Session,
+        gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES | gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
+        None,
+        NAME,
+        PATH,
+        INTERFACE,
+        gio::Cancellable::NONE,
+        move |result| {
+            let proxy = match result {
+                Ok(proxy) => proxy,
+                Err(err) => {
+                    eprintln!("bunt-shell: {NAME}: {err}");
+                    return;
+                }
+            };
+            // 처리기가 프록시와 설정 객체를 붙들어 셸이 끝날 때까지 둔다
+            let changed = proxy.clone();
+            settings.connect_changed(Some(EFFECT_KEY), move |settings, _| {
+                send_effect(&changed, settings)
+            });
+            let keep_alive = settings.clone();
+            proxy.connect_notify_local(Some("g-name-owner"), move |proxy, _| {
+                send_effect(proxy, &keep_alive);
+            });
+            // 변경 알림은 처리기를 단 뒤 한 번 읽어야 온다
+            send_effect(&proxy, &settings);
+        },
+    );
+}
+
+fn send_effect(proxy: &gio::DBusProxy, settings: &gio::Settings) {
+    let args = (settings.string(EFFECT_KEY).to_string(),).to_variant();
+    if dbus::is_running(proxy) {
+        dbus::call(proxy, "SetMinimizeEffect", Some(&args));
+    }
+}
+
+/// Dock의 최소화 칸 자리를 컴포지터에 알린다. 최소화 효과가 창을 이 칸으로 보내고 이 칸에서 꺼낸다
+pub fn report_slots(slots: &[Slot]) {
+    let args = (slots.to_vec(),).to_variant();
+    gio::bus_get(
+        gio::BusType::Session,
+        gio::Cancellable::NONE,
+        move |result| {
+            let Ok(connection) = result else {
+                return;
+            };
+            connection.call(
+                Some(NAME),
+                PATH,
+                INTERFACE,
+                "SetMinimizedSlots",
+                Some(&args),
+                None,
+                gio::DBusCallFlags::NONE,
+                -1,
+                gio::Cancellable::NONE,
+                |result| {
+                    if let Err(err) = result {
+                        eprintln!("bunt-shell: {INTERFACE}.SetMinimizedSlots: {err}");
+                    }
+                },
+            );
         },
     );
 }
@@ -176,6 +256,25 @@ mod tests {
         assert!(windows[0].thumbnail.is_none());
         assert_eq!(windows[1].id, 9);
         assert!(windows[1].thumbnail.is_some());
+    }
+
+    #[test]
+    fn slots_go_out_as_the_compositor_reads_them() {
+        let slots: Vec<Slot> = vec![(3, 700, 20, 48, 48)];
+        let args = (slots,).to_variant();
+        assert_eq!(args.type_().as_str(), "(a(uiiii))");
+    }
+
+    #[test]
+    fn the_effect_key_is_in_the_settings_schema() {
+        let schema = include_str!("../data/org.buntos.shell.gschema.xml");
+        assert!(schema.contains(&format!("<key name=\"{EFFECT_KEY}\"")));
+        for value in ["genie", "scale"] {
+            assert!(
+                schema.contains(&format!("<choice value=\"{value}\"/>")),
+                "{value}"
+            );
+        }
     }
 
     #[test]

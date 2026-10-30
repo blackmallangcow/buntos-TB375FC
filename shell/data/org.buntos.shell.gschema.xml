@@ -77,6 +77,15 @@ bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock",
       <default>true</default>
       <summary>Dock에서 실행 중인 앱 아이콘 아래에 점 보기</summary>
     </key>
+    <key name="minimize-effect" type="s">
+      <choices>
+        <choice value="genie"/>
+        <choice value="scale"/>
+      </choices>
+      <default>'genie'</default>
+      <summary>최소화된 윈도우 애니메이션 (지니 효과, 크기 조절 효과)</summary>
+      <description>genie: 창이 휘며 Dock의 최소화 칸으로 빨려 든다(macOS의 기본값). scale: 창이 그대로 줄며 칸으로 간다. 칸에서 꺼낼 때는 거꾸로 나온다. 셸이 컴포지터에 알리고(SetMinimizeEffect) 컴포지터가 그린다</description>
+    </key>
     <key name="recent-apps" type="as">
       <default>[]</default>
       <summary>최근에 실행한 앱 (.desktop ID, 최근 것이 먼저). 모든 앱 패널의 첫 줄</summary>

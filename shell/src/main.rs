@@ -118,6 +118,7 @@ fn main() -> glib::ExitCode {
         if let Some(settings) = shell_settings() {
             compositor::share_panel_settings(&settings);
             screenshot::share_options(&settings);
+            minimized::share_effect(&settings);
         }
         compositor::follow_shortcuts(&launcher, &session, shell_settings(), &screenshot_toolbar);
         // ⌘⇥ 앱 전환 창. 키는 컴포지터가 받고 이 창은 보이기만 한다
