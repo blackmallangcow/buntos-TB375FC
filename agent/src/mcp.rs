@@ -101,13 +101,18 @@ impl<D: Daemon> Server<D> {
             return (!replies.is_empty()).then_some(Value::Array(replies));
         }
         let id = message.get("id").cloned();
-        let method = message.get("method").and_then(Value::as_str);
-        let (id, method) = match (id, method) {
-            (Some(id), Some(method)) => (id, method),
-            (None, Some(_)) | (Some(_), None) => return None,
-            (None, None) => {
+        let response = message.get("result").is_some() || message.get("error").is_some();
+        let (id, method) = match (id, message.get("method")) {
+            (Some(id), Some(Value::String(method))) => (id, method.as_str()),
+            // 알림
+            (None, Some(Value::String(_))) => return None,
+            // 클라이언트가 보낸 답 (서버는 요청을 보내지 않으므로 버린다)
+            (_, None) if response => return None,
+            // 그 밖은 잘못된 요청이다. id가 있으면 그것으로 답한다 (검토: id가 있고 method가 없거나 글이 아니면 답하지
+            // 않아 클라이언트가 끝없이 기다렸다)
+            (id, _) => {
                 return Some(error_reply(
-                    Value::Null,
+                    id.unwrap_or(Value::Null),
                     failure(INVALID_REQUEST, "not a JSON-RPC request"),
                 ));
             }
@@ -671,6 +676,17 @@ mod tests {
         assert_eq!(unknown["error"]["code"], protocol::METHOD_NOT_FOUND);
         let invalid = server.handle(json!({ "jsonrpc": "2.0" })).unwrap();
         assert_eq!(invalid["error"]["code"], INVALID_REQUEST);
+        // id가 있으면 method가 없거나 글이 아니어도 답한다 (클라이언트가 기다린다)
+        for (message, id) in [
+            (json!({ "jsonrpc": "2.0", "id": 5 }), 5),
+            (json!({ "jsonrpc": "2.0", "id": 6, "method": 7 }), 6),
+        ] {
+            let invalid = server.handle(message).unwrap();
+            assert_eq!(
+                (invalid["id"].as_u64(), &invalid["error"]["code"]),
+                (Some(id), &json!(INVALID_REQUEST))
+            );
+        }
         let batch = server
             .handle(json!([request("ping", json!({})), { "jsonrpc": "2.0", "method": "notifications/initialized" }]))
             .unwrap();
