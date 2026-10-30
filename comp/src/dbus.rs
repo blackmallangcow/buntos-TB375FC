@@ -1228,12 +1228,22 @@ impl Api {
     ) -> fdo::Result<()> {
         let shell_pid = self.snapshot.lock().unwrap().shell_pid;
         check_shell(connection, &header, shell_pid).await?;
+        // 화면 좌표에 더해도 넘치지 않게 잘라 둔다
+        let coordinate =
+            |value: i32| value.clamp(-minimize::MAX_COORDINATE, minimize::MAX_COORDINATE);
         let slots = slots
             .into_iter()
             .filter(|&(_, _, _, width, height)| width > 0 && height > 0)
             .take(minimize::MAX_SLOTS)
             .map(|(id, x, y, width, height)| {
-                (id, Rectangle::new((x, y).into(), (width, height).into()))
+                let size = (
+                    width.min(minimize::MAX_COORDINATE),
+                    height.min(minimize::MAX_COORDINATE),
+                );
+                (
+                    id,
+                    Rectangle::new((coordinate(x), coordinate(y)).into(), size.into()),
+                )
             })
             .collect();
         self.request(Request::MinimizedSlots(slots))

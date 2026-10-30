@@ -23,7 +23,7 @@ use smithay::{
             element::{AsRenderElements, Element, Id, Kind, RenderElement},
             gles::{
                 GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
-                UniformName, UniformType,
+                UniformName, UniformType, ffi,
             },
             utils::CommitCounter,
         },
@@ -54,6 +54,8 @@ const DOCK_RIGHT_CHROME: i32 = 28 + 10 + 1;
 const BOTTOM_GAP: i32 = 8;
 /// 셸이 알릴 수 있는 칸의 수. 넘는 것은 버린다
 pub const MAX_SLOTS: usize = 256;
+/// 셸이 알린 칸의 좌표와 크기의 한계 (Dock 표면 안 논리 픽셀). 화면 좌표에 더해도 넘치지 않는다
+pub const MAX_COORDINATE: i32 = 1 << 16;
 
 /// 그림을 휘는 셰이더 (smithay의 사용자 텍스처 셰이더 규칙: EXTERNAL, NO_ALPHA, DEBUG_FLAGS를 다룬다).
 /// v_coords는 그리는 사각형(효과가 덮는 범위) 안의 0..1 자리다. rows는 그림의 맨 윗줄·맨 아랫줄과 깔때기가
@@ -846,7 +848,25 @@ fn window_texture(
         .render_output(renderer, &mut framebuffer, 0, &elements, [0.0; 4])
         .map_err(|err| format!("{err:?}"))?;
     drop(framebuffer);
+    clamp_to_edge(renderer, &texture).map_err(|err| err.to_string())?;
     Ok(texture)
+}
+
+/// 텍스처를 가장자리 밖으로 읽으면 가장자리 픽셀을 쓰게 한다. smithay는 그리기 대상으로 만든 텍스처의 감싸기
+/// 방식을 정하지 않아 GL 기본값(REPEAT)이다. 그러면 셰이더가 0..1로 잘라 읽어도 선형 필터가 반대쪽 가장자리를
+/// 섞어 그림 둘레에 줄이 생기고, 2의 거듭제곱이 아닌 텍스처를 REPEAT로 읽지 못하는 GLES2에서는 검게 나온다
+fn clamp_to_edge(renderer: &mut GlesRenderer, texture: &GlesTexture) -> Result<(), GlesError> {
+    let id = texture.tex_id();
+    renderer.with_context(|gl| {
+        // 안전: 렌더러의 컨텍스트가 현재이고, 묶은 텍스처는 바로 풀어 smithay의 상태를 바꾸지 않는다
+        unsafe {
+            gl.BindTexture(ffi::TEXTURE_2D, id);
+            for parameter in [ffi::TEXTURE_WRAP_S, ffi::TEXTURE_WRAP_T] {
+                gl.TexParameteri(ffi::TEXTURE_2D, parameter, ffi::CLAMP_TO_EDGE as i32);
+            }
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1077,6 +1097,39 @@ mod tests {
         )
         .expect("on the screen");
         frames.render(renderer, &[OutputRenderElements::Minimize(element)])
+    }
+
+    /// 그리기 대상으로 만든 텍스처(창 그림)는 가장자리 밖을 가장자리 픽셀로 읽는다
+    #[test]
+    fn window_pictures_clamp_to_their_edges() {
+        let _gl = testing::gl_lock();
+        let Some(mut renderer) = testing::software_renderer() else {
+            eprintln!("no software EGL device; skipping");
+            return;
+        };
+        let texture: GlesTexture = renderer
+            .create_buffer(Fourcc::Abgr8888, (30, 20).into())
+            .expect("a texture to draw into");
+        let wrap = |renderer: &mut GlesRenderer| {
+            let id = texture.tex_id();
+            renderer
+                .with_context(|gl| {
+                    let mut values = [0; 2];
+                    // 안전: 위의 clamp_to_edge와 같다. 읽기만 한다
+                    unsafe {
+                        gl.BindTexture(ffi::TEXTURE_2D, id);
+                        gl.GetTexParameteriv(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, &mut values[0]);
+                        gl.GetTexParameteriv(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, &mut values[1]);
+                        gl.BindTexture(ffi::TEXTURE_2D, 0);
+                    }
+                    values
+                })
+                .unwrap()
+        };
+        // smithay가 만든 그대로는 REPEAT다
+        assert_eq!(wrap(&mut renderer), [ffi::REPEAT as i32; 2]);
+        clamp_to_edge(&mut renderer, &texture).unwrap();
+        assert_eq!(wrap(&mut renderer), [ffi::CLAMP_TO_EDGE as i32; 2]);
     }
 
     #[test]
