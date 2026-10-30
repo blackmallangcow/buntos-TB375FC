@@ -11,14 +11,14 @@
 # tests/e2e/hangul.sh), e2e 7번(화면 잠금, tests/e2e/session-lock.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는
 # 이미지(그래픽 세션이 없는 x86-64)에서는 5·6·4·7번을 건너뛴다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
-# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 900)
+# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 5·6·4·7번에 10분 넘게 걸린다)
 #            BUNTOS_IMAGE_DIR 띄울 이미지의 디렉터리 (tools/image/build.sh·vmctl.sh와 같다. 기본
 #            $BUNTOS_BUILD_DIR/<보드>, BUNTOS_BUILD_DIR의 기본은 ~/buntos-build)
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 board=${1:?"보드 이름이 필요하다 (bsp/ 아래 디렉터리 이름)"}
-deadline=$((SECONDS + ${E2E_TIMEOUT:-900}))
+deadline=$((SECONDS + ${E2E_TIMEOUT:-1200}))
 # 다른 사람이 기본 이미지로 VM을 띄워 둔 동안 따로 빌드한 이미지를 시험할 수 있게 build.sh와 같은 디렉터리를 쓴다
 image_dir="${BUNTOS_IMAGE_DIR:-${BUNTOS_BUILD_DIR:-$HOME/buntos-build}/$board}"
 if [[ ! -f "$image_dir/buntos.raw" ]]; then

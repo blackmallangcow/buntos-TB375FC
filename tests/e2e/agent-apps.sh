@@ -197,6 +197,11 @@ HTML
 chmod 644 "$page"
 url="file://$page"
 firefox=$(open_app firefox-esr)
+# 바쁜 VM에서는 Firefox가 첫 창을 띄우는 데 1분을 넘기기도 한다. 뜨는 중인 Firefox를 다시 띄우지 않고 창을 기다린다
+if ! grep -q 'ref=e' <<<"$firefox"; then
+	wait_firefox "Mozilla Firefox"
+	firefox=$(A snapshot --app firefox-esr -i)
+fi
 address=$(ref combobox <<<"$firefox")
 if filled=$(A fill "$address" "$url" 2>&1); then
 	echo "E2E5 알림: Firefox 주소 막대가 fill의 글을 지켰다"
