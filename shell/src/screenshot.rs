@@ -7,6 +7,8 @@
 //! 컴포지터에 알려 단축키(⇧⌘3, ⇧⌘4)로 찍은 것에도 쓴다(SetScreenshotOptions). 컴포지터가 파일을
 //! 저장했다고 알리면(ScreenshotSaved) 미리 보기를 5초 띄운다. 누르면 기본 앱으로 열고, 끌어서 다른
 //! 앱에 놓을 수 있다. 포인터가 올라가 있는 동안은 사라지지 않는다.
+//! 선택 부분을 고른 막대가 떠 있는 동안 컴포지터가 고칠 수 있는 선택 영역을 띄운다(SelectScreenshotArea).
+//! 막대는 그 영역 위에 남고, 캡처(Enter)가 그 영역을 찍는다.
 
 use std::{
     cell::{Cell, RefCell},
@@ -30,6 +32,8 @@ const MODE_KEY: &str = "screenshot-mode";
 const LOCATION_KEY: &str = "screenshot-location";
 const TIMER_KEY: &str = "screenshot-timer";
 const THUMBNAIL_KEY: &str = "screenshot-thumbnail";
+/// 선택 부분 (MODES의 설정 값). 고르면 컴포지터가 선택 영역을 띄운다
+const AREA_MODE: &str = "area";
 /// 도구 막대의 찍기 방식: (설정 값, 아이콘, 이름)
 const MODES: [(&str, &str, &str); 3] = [
     (
@@ -116,9 +120,18 @@ fn send_options(proxy: &gio::DBusProxy, settings: &gio::Settings) {
     }
 }
 
-/// 컴포지터에 찍게 한다: screen(`delay`초 뒤 화면), window(창 고르기), area(영역 고르기)
+/// 컴포지터에 찍게 한다: screen(`delay`초 뒤 화면), window(창 고르기), area(띄워 둔 선택 영역)
 fn capture(mode: &str, delay: u32) {
-    let mode = mode.to_owned();
+    call_compositor("Screenshot", (mode, delay).to_variant());
+}
+
+/// 컴포지터가 고칠 수 있는 선택 영역을 띄우거나(`show`) 거두게 한다
+fn select_area(show: bool) {
+    call_compositor("SelectScreenshotArea", (show,).to_variant());
+}
+
+/// 컴포지터의 메서드를 부른다. 답은 기다리지 않고 실패만 알린다. 같은 연결로 보내므로 부른 차례대로 닿는다
+fn call_compositor(method: &'static str, args: glib::Variant) {
     gio::bus_get(
         gio::BusType::Session,
         gio::Cancellable::NONE,
@@ -130,15 +143,15 @@ fn capture(mode: &str, delay: u32) {
                 Some(NAME),
                 PATH,
                 INTERFACE,
-                "Screenshot",
-                Some(&(mode, delay).to_variant()),
+                method,
+                Some(&args),
                 None,
                 gio::DBusCallFlags::NONE,
                 -1,
                 gio::Cancellable::NONE,
-                |result| {
+                move |result| {
                     if let Err(err) = result {
-                        eprintln!("bunt-shell: {INTERFACE}.Screenshot: {err}");
+                        eprintln!("bunt-shell: {INTERFACE}.{method}: {err}");
                     }
                 },
             );
@@ -154,7 +167,7 @@ struct ToolbarInner {
 }
 
 /// ⇧⌘5 도구 막대: 화면 아래 가운데의 유리 막대. [닫기] | [전체 화면] [선택한 윈도우] [선택 부분] |
-/// [옵션] [캡처]. 화면 기록은 아직 없다
+/// [옵션] [캡처]. 선택 부분을 고른 채 떠 있는 동안 컴포지터가 선택 영역을 띄운다. 화면 기록은 아직 없다
 #[derive(Clone)]
 pub struct Toolbar(Rc<ToolbarInner>);
 
@@ -222,14 +235,29 @@ impl Toolbar {
         for (index, button) in toolbar.0.modes.iter().enumerate() {
             let weak = Rc::downgrade(&toolbar.0);
             button.connect_toggled(move |button| {
-                if let (true, Some(inner)) = (button.is_active(), weak.upgrade())
-                    && let Some(settings) = &inner.settings
+                let (true, Some(inner)) = (button.is_active(), weak.upgrade()) else {
+                    return;
+                };
+                // 떠 있는 막대에서 방식을 바꾸면 선택 영역을 띄우거나 거둔다 (macOS)
+                if inner.window.is_visible() {
+                    select_area(MODES[index].0 == AREA_MODE);
+                }
+                if let Some(settings) = &inner.settings
                     && let Err(err) = settings.set_string(MODE_KEY, MODES[index].0)
                 {
                     eprintln!("bunt-shell: {MODE_KEY}: {err}");
                 }
             });
         }
+        // 선택 부분을 고른 막대가 뜨면 선택 영역을 띄우고, 막대가 숨으면(닫기, Esc, 캡처, ⇧⌘5) 거둔다.
+        // 캡처할 때는 거둔 영역을 컴포지터가 기억했다가 찍는다
+        let weak = Rc::downgrade(&toolbar.0);
+        toolbar.0.window.connect_map(move |_| {
+            if let Some(inner) = weak.upgrade() {
+                select_area(Toolbar(inner).mode() == AREA_MODE);
+            }
+        });
+        toolbar.0.window.connect_unmap(|_| select_area(false));
         let weak = Rc::downgrade(&toolbar.0);
         close.connect_clicked(move |_| {
             if let Some(inner) = weak.upgrade() {
@@ -283,20 +311,28 @@ impl Toolbar {
         inner.window.present();
     }
 
-    /// 막대를 숨기고, 화면에서 사라진 뒤에 고른 방식과 타이머로 찍는다
-    fn capture(&self) {
-        let inner = &self.0;
-        let index = inner
+    /// 막대에서 고른 찍기 방식 (MODES의 설정 값)
+    fn mode(&self) -> &'static str {
+        let index = self
+            .0
             .modes
             .iter()
             .position(|button| button.is_active())
             .unwrap_or(2);
+        MODES[index].0
+    }
+
+    /// 막대를 숨기고, 화면에서 사라진 뒤에 고른 방식과 타이머로 찍는다. 선택 부분은 막대가 숨으며 거둔
+    /// 선택 영역을 찍는다
+    fn capture(&self) {
+        let inner = &self.0;
+        let mode = self.mode();
         let delay = inner
             .settings
             .as_ref()
             .map_or(0, |settings| settings.int(TIMER_KEY).max(0) as u32);
         inner.window.set_visible(false);
-        glib::timeout_add_local_once(HIDE_BEFORE_CAPTURE, move || capture(MODES[index].0, delay));
+        glib::timeout_add_local_once(HIDE_BEFORE_CAPTURE, move || capture(mode, delay));
     }
 }
 
@@ -589,6 +625,7 @@ mod tests {
                 "{value}"
             );
         }
+        assert!(MODES.iter().any(|(value, _, _)| *value == AREA_MODE));
         for (value, _) in LOCATIONS {
             assert!(
                 schema.contains(&format!("<choice value=\"{value}\"/>")),
