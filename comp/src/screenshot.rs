@@ -74,6 +74,11 @@ const TRANSPARENT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 /// ⇧⌘5 도구 막대의 레이어 표면 이름 (shell/src/screenshot.rs). 고칠 수 있는 선택 영역은 이 막대 아래에
 /// 그리고, 막대 위의 포인터는 막대에 보낸다
 pub const TOOLBAR_NAMESPACE: &str = "bunt-screenshot";
+/// 선택 영역을 띄운 뒤 도구 막대가 나타나기를 기다리는 시간. 그때까지 막대가 없으면(셸이 띄우라고 한 뒤 막대가
+/// 사라졌다) 영역을 거둔다. 막대 없이 남은 영역은 앱의 포인터를 막는다
+const TOOLBAR_WAIT: Duration = Duration::from_secs(1);
+/// 도구 막대가 사라진 뒤 거두기까지 기다리는 시간. 그사이 막대가 다시 뜨면(⇧⌘5를 빨리 두 번) 그대로 둔다
+const TOOLBAR_GONE_WAIT: Duration = Duration::from_millis(300);
 
 /// 무엇을 찍는가 (⇧⌘5 도구 막대의 방식)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,8 +184,9 @@ struct Editable {
     rect: Rectangle<i32, Logical>,
     /// 영역이 놓인 화면. 옮기고 늘여도 이 밖으로 나가지 않는다
     bounds: Rectangle<i32, Logical>,
-    /// 누른 채 끄는 중
-    drag: Option<Drag>,
+    /// 누른 채 끄는 중과, 그 끌기가 영역을 둘 화면. 바깥을 눌러 새로 고르면 누른 화면이고, 새 영역을 고른
+    /// 뒤에야 `bounds`가 된다
+    drag: Option<(Drag, Rectangle<i32, Logical>)>,
     overlay: Overlay,
 }
 
@@ -377,6 +383,7 @@ impl BuntState {
         // 포인터를 앱에서 떼고 그 자리에 맞는 커서로 바꾼다 (도구 막대 위면 막대가 받는다)
         self.pointer_moved(pointer, time);
         self.queue_redraw_all();
+        self.watch_screenshot_toolbar(TOOLBAR_WAIT);
     }
 
     /// ⇧⌘5 도구 막대의 찍기. 선택 부분은 고친 선택 영역을(막대가 숨으며 거뒀으면 기억한 영역을) `delay`초 뒤에
@@ -388,7 +395,12 @@ impl BuntState {
         }
         let clipboard = self.screenshot_options.location == Location::Clipboard;
         match self.take_selected_area() {
-            Some(rect) if !self.session_lock.is_locked() && self.screenshot_area.is_none() => {
+            // 찍을 일이 이미 있으면(⇧⌘3을 막 눌렀다) 그것을 덮어쓰지 않는다 (start_screenshot과 같다)
+            Some(rect)
+                if !self.session_lock.is_locked()
+                    && self.screenshot_area.is_none()
+                    && self.screenshot_capture.is_none() =>
+            {
                 self.capture_area(rect, clipboard, delay)
             }
             Some(_) => {}
@@ -411,13 +423,31 @@ impl BuntState {
     }
 
     /// ⇧⌘5 도구 막대의 레이어 표면이 사라졌다(막대를 숨겼거나 셸이 끝났다). 막대 없이 남은 선택 영역은
-    /// 앱의 포인터를 막으므로 거둔다 (state.rs의 layer_destroyed가 부른다)
+    /// 앱의 포인터를 막으므로 잠시 뒤에도 막대가 없으면 거둔다 (state.rs의 layer_destroyed가 부른다). 전에는
+    /// 바로 거둬서, 막대를 빨리 숨겼다 띄우면 새 막대가 뜨기 전에 사라진 옛 막대 때문에 새 영역이 거둬졌다
     pub fn screenshot_toolbar_closed(&mut self) {
+        self.watch_screenshot_toolbar(TOOLBAR_GONE_WAIT);
+    }
+
+    /// `delay` 뒤에 ⇧⌘5 도구 막대 없이 남은 선택 영역을 거둔다
+    fn watch_screenshot_toolbar(&mut self, delay: Duration) {
+        let timer = Timer::from_duration(delay);
+        if let Err(err) = self.loop_handle.insert_source(timer, |_, _, state| {
+            state.check_screenshot_toolbar();
+            TimeoutAction::Drop
+        }) {
+            tracing::warn!("failed to watch the screenshot toolbar: {err}");
+        }
+    }
+
+    /// 선택 영역을 띄웠는데 셸의 도구 막대가 어느 화면에도 없으면 거둔다
+    fn check_screenshot_toolbar(&mut self) {
         let editing = self
             .screenshot_area
             .as_ref()
             .is_some_and(|selection| selection.editable.is_some());
         if editing && !self.space.outputs().any(|output| toolbar(output).is_some()) {
+            tracing::info!("the screenshot toolbar is gone; closing its selection");
             self.end_selection();
         }
     }
@@ -482,8 +512,8 @@ impl BuntState {
             }
             selection.current = pos;
             let (grip, changed) = match &editable.drag {
-                Some(drag) => {
-                    let rect = drag.rect_at(pos, editable.bounds);
+                Some((drag, bounds)) => {
+                    let rect = drag.rect_at(pos, *bounds);
                     let changed = rect != editable.rect;
                     editable.rect = rect;
                     (drag.grip, changed)
@@ -559,16 +589,26 @@ impl BuntState {
                 (BUTTON_LEFT, ButtonState::Pressed) if editable.drag.is_none() => {
                     let grip = selection::grip_at(editable.rect, pos);
                     // 바깥에서 새로 고르는 영역은 누른 화면 안에 둔다
-                    if grip == Grip::Outside
-                        && let Some(output) = self.space.output_under(pos).next()
-                        && let Some(bounds) = self.space.output_geometry(output)
+                    let bounds = match grip {
+                        Grip::Outside => self
+                            .space
+                            .output_under(pos)
+                            .next()
+                            .and_then(|output| self.space.output_geometry(output))
+                            .unwrap_or(editable.bounds),
+                        _ => editable.bounds,
+                    };
+                    editable.drag = Some((Drag::new(grip, pos, editable.rect), bounds));
+                }
+                (BUTTON_LEFT, ButtonState::Released) if editable.drag.is_some() => {
+                    // 새 영역을 고른 끌기만 영역이 놓인 화면을 바꾼다. 전에는 누르는 순간 바꿔서, 다른 화면을
+                    // 누르기만 해도 앞 화면에 남은 영역을 다음 끌기가 그 화면으로 끌어갔다
+                    if let Some((drag, bounds)) = editable.drag.take()
+                        && drag.grip == Grip::Outside
+                        && editable.rect != drag.started_with()
                     {
                         editable.bounds = bounds;
                     }
-                    editable.drag = Some(Drag::new(grip, pos, editable.rect));
-                }
-                (BUTTON_LEFT, ButtonState::Released) if editable.drag.is_some() => {
-                    editable.drag = None;
                     self.screenshot_last_area = Some(editable.rect);
                     let grip = selection::grip_at(editable.rect, pos);
                     self.cursor_status = CursorImageStatus::Named(grip.cursor());
@@ -673,8 +713,8 @@ impl BuntState {
     }
 
     /// ⇧⌘5의 선택 영역을 띄운 동안 포인터를 도구 막대(와 그 메뉴)에 보낼지: 끄는 중이 아니고, 막대의 메뉴가
-    /// 포인터를 잡았거나 포인터 아래가 막대다
-    fn toolbar_gets_pointer(&self, pos: Point<f64, Logical>) -> bool {
+    /// 포인터를 잡았거나 포인터 아래가 막대다. 휠도 이것으로 막대에 보낸다(input.rs)
+    pub(crate) fn toolbar_gets_pointer(&self, pos: Point<f64, Logical>) -> bool {
         let dragging = self
             .screenshot_area
             .as_ref()

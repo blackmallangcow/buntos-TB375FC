@@ -603,7 +603,9 @@ impl BuntState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        if self.screenshot_area.is_some() {
+        // 영역을 고르는 동안 휠은 앱에 보내지 않는다. ⇧⌘5의 선택 영역 위에 남은 도구 막대와 그 메뉴는 받는다
+        if self.screenshot_area.is_some() && !self.toolbar_gets_pointer(pointer.current_location())
+        {
             return;
         }
         let source = event.source();

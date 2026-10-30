@@ -149,9 +149,22 @@ fn recording_mode(mode: &str) -> Option<&str> {
     mode.strip_prefix("record-")
 }
 
-/// 컴포지터가 고칠 수 있는 선택 영역을 띄우거나(`show`) 거두게 한다
+thread_local! {
+    /// 마지막으로 보낸 SelectScreenshotArea의 번호
+    static AREA_SERIAL: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 컴포지터가 고칠 수 있는 선택 영역을 띄우거나(`show`) 거두게 한다. 막대를 빨리 숨겼다 띄우면 두 부름이
+/// 컴포지터에서 뒤바뀌어 닿을 수 있어, 늘 커지는 번호(단조 시계)를 붙여 늦게 닿은 옛 부름을 버리게 한다
 fn select_area(show: bool) {
-    call_compositor("SelectScreenshotArea", (show,).to_variant());
+    let serial = AREA_SERIAL.with(|last| {
+        let next = u64::try_from(glib::monotonic_time())
+            .unwrap_or(0)
+            .max(last.get() + 1);
+        last.set(next);
+        next
+    });
+    call_compositor("SelectScreenshotArea", (show, serial).to_variant());
 }
 
 /// 컴포지터의 메서드를 부른다. 답은 기다리지 않고 실패만 알린다. 같은 연결로 보내므로 부른 차례대로 닿는다
@@ -299,6 +312,7 @@ impl Toolbar {
             }
         });
         toolbar.0.window.connect_unmap(|_| select_area(false));
+        toolbar.close_when_locked();
         let weak = Rc::downgrade(&toolbar.0);
         close.connect_clicked(move |_| {
             if let Some(inner) = weak.upgrade() {
@@ -330,6 +344,38 @@ impl Toolbar {
 
     pub fn window(&self) -> &gtk::ApplicationWindow {
         &self.0.window
+    }
+
+    /// 화면을 잠그면 막대를 닫는다. 잠글 때 컴포지터가 선택 영역을 거두므로, 풀었을 때 막대만 남아 보이지 않는
+    /// 영역을 찍거나 기록하지 않게 한다
+    fn close_when_locked(&self) {
+        let weak = Rc::downgrade(&self.0);
+        gio::bus_get(
+            gio::BusType::Session,
+            gio::Cancellable::NONE,
+            move |result| {
+                let Ok(connection) = result else {
+                    return;
+                };
+                let subscription = connection.subscribe_to_signal(
+                    Some(NAME),
+                    Some(INTERFACE),
+                    Some("LockedChanged"),
+                    Some(PATH),
+                    None,
+                    gio::DBusSignalFlags::NONE,
+                    move |signal| {
+                        if let (Some((true,)), Some(inner)) =
+                            (signal.parameters.get::<(bool,)>(), weak.upgrade())
+                        {
+                            inner.window.set_visible(false);
+                        }
+                    },
+                );
+                // 셸이 끝날 때까지 받는다
+                std::mem::forget(subscription);
+            },
+        );
     }
 
     /// ⇧⌘5: 열려 있으면 닫고, 아니면 마지막으로 고른 방식으로 연다

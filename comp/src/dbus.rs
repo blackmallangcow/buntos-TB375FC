@@ -14,7 +14,11 @@
 use std::{
     collections::HashMap,
     os::unix::fs::MetadataExt,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
@@ -432,6 +436,7 @@ impl Service {
         let api = Api {
             snapshot: snapshot.clone(),
             requests: Mutex::new(requests),
+            area_serial: AtomicU64::new(0),
         };
         if let Err(err) = std::thread::Builder::new()
             .name("bunt-comp-dbus".into())
@@ -577,6 +582,8 @@ fn fcitx<B: serde::Serialize + DynamicType>(
 struct Api {
     snapshot: Arc<Mutex<Snapshot>>,
     requests: Mutex<LoopSender<Request>>,
+    /// 마지막으로 받은 SelectScreenshotArea의 번호 (셸의 단조 시계)
+    area_serial: AtomicU64,
 }
 
 impl Api {
@@ -1337,15 +1344,22 @@ impl Api {
     /// ⇧⌘5 도구 막대의 선택 부분. `show`면 고칠 수 있는 선택 영역을 마지막으로 고른 자리(처음이면 포인터가
     /// 있는 화면 가운데)에 띄우고, 아니면 거둔다. 띄운 동안 안쪽을 끌면 옮기고 테두리·모서리를 끌면 크기를
     /// 바꾸며 바깥을 끌면 새로 고른다. 도구 막대는 영역 위에 남아 포인터와 키를 받고, 막대의 캡처
-    /// (Screenshot의 area)가 그 영역을 찍는다. 막대가 사라지면 컴포지터가 거둔다. 셸만 부른다
+    /// (Screenshot의 area)가 그 영역을 찍는다. 막대가 사라지면 컴포지터가 거둔다. `serial`은 셸이 부를 때마다
+    /// 늘리는 번호(단조 시계)이고, 그보다 작거나 같은 번호의 부름은 버린다. 셸만 부른다
     async fn select_screenshot_area(
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
         show: bool,
+        serial: u64,
     ) -> fdo::Result<()> {
         let shell_pid = self.snapshot.lock().unwrap().shell_pid;
         check_shell(connection, &header, shell_pid).await?;
+        // zbus는 메서드마다 따로 작업을 띄우므로 막대를 빨리 숨겼다 띄우면 거두기와 띄우기가 뒤바뀌어 닿을 수
+        // 있다. 늦게 닿은 옛 부름은 버린다
+        if self.area_serial.fetch_max(serial, Ordering::SeqCst) >= serial {
+            return Ok(());
+        }
         self.request(Request::ScreenshotArea(show))
     }
 

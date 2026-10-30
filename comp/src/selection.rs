@@ -132,6 +132,11 @@ impl Drag {
         Self { grip, from, rect }
     }
 
+    /// 누를 때의 영역
+    pub fn started_with(&self) -> Rectangle<i32, Logical> {
+        self.rect
+    }
+
     /// 포인터가 `to`에 왔을 때의 영역. `bounds`(영역이 놓인 화면) 밖으로 나가지 않는다. 바깥에서 새로
     /// 고르는 중에 아직 가장 작은 변보다 작으면 누를 때의 영역 그대로다(누르기만 하면 바뀌지 않는다)
     pub fn rect_at(
@@ -314,6 +319,12 @@ impl Overlay {
         let screen = output.size.to_physical_precise_round(scale);
         let edges = Edges::of(rect, output, scale, screen);
         let mut elements = Vec::new();
+        // 영역이 없는 화면은 어둡게만 덮는다. 전에는 화면 끝으로 자른 변에 손잡이와 테두리를 그려, 영역이 없는
+        // 옆 화면 가장자리에 반쪽 손잡이가 보였다
+        if !rect.overlaps(output) {
+            elements.push(solid(&self.dim[0], Rectangle::from_size(screen), DIM));
+            return elements;
+        }
         let buffer_scale = scale.x.max(scale.y).ceil().max(1.0) as i32;
         let half = f64::from(HANDLE) * scale.x / 2.0;
         let handle_size = Size::from((HANDLE, HANDLE));
@@ -486,6 +497,8 @@ fn handle_pixels(size: i32, ring: f64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::backend::renderer::element::Element;
+
     use crate::testing::{self, Frames};
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
@@ -794,6 +807,38 @@ mod tests {
                 .iter()
                 .all(|band| band.size.w >= 0 && band.size.h >= 0)
         );
+    }
+
+    #[test]
+    fn screens_without_the_selection_are_only_dimmed() {
+        let _gl = testing::gl_lock();
+        let Some(mut renderer) = testing::software_renderer() else {
+            eprintln!("no software EGL device; skipping");
+            return;
+        };
+        let mut overlay = Overlay::default();
+        // 영역은 왼쪽 화면에 있고 오른쪽 화면(1280부터)에는 손잡이도 테두리도 없이 한 장으로 덮는다
+        let right = rect(1280, 0, 1024, 768);
+        let elements = overlay.elements(
+            &mut renderer,
+            rect(100, 100, 400, 300),
+            right,
+            Scale::from(1.0),
+        );
+        assert_eq!(elements.len(), 1);
+        assert!(matches!(elements[0], OutputRenderElements::Solid(_)));
+        assert_eq!(
+            elements[0].geometry(Scale::from(1.0)),
+            Rectangle::from_size((1024, 768).into())
+        );
+        // 맞닿기만 한 화면도 같다
+        let touching = overlay.elements(
+            &mut renderer,
+            rect(1180, 100, 100, 100),
+            right,
+            Scale::from(1.0),
+        );
+        assert_eq!(touching.len(), 1);
     }
 
     #[test]
