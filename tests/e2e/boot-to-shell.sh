@@ -7,17 +7,18 @@
 # 직렬 콘솔의 root 자동 로그인 뒤 셸에서 명령이 실행되는지 보고, 로그인 화면(bunt-greeter)에 QMP로
 # 암호를 쳐 그 계정으로 들어간다. sudo가 암호를 묻는지 보고, 그래픽 셸(메뉴 막대, Dock)이 떴는지는
 # 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에
-# 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키, tests/e2e/shortcuts.sh), e2e 7번(화면 잠금,
-# tests/e2e/session-lock.sh)을 돌린 뒤 끈다.
+# 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키, tests/e2e/shortcuts.sh), e2e 4번(한글 입력,
+# tests/e2e/hangul.sh), e2e 7번(화면 잠금, tests/e2e/session-lock.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는
+# 이미지(그래픽 세션이 없는 x86-64)에서는 5·6·4·7번을 건너뛴다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
-# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 600)
+# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 900)
 #            BUNTOS_IMAGE_DIR 띄울 이미지의 디렉터리 (tools/image/build.sh·vmctl.sh와 같다. 기본
 #            $BUNTOS_BUILD_DIR/<보드>, BUNTOS_BUILD_DIR의 기본은 ~/buntos-build)
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 board=${1:?"보드 이름이 필요하다 (bsp/ 아래 디렉터리 이름)"}
-deadline=$((SECONDS + ${E2E_TIMEOUT:-600}))
+deadline=$((SECONDS + ${E2E_TIMEOUT:-900}))
 # 다른 사람이 기본 이미지로 VM을 띄워 둔 동안 따로 빌드한 이미지를 시험할 수 있게 build.sh와 같은 디렉터리를 쓴다
 image_dir="${BUNTOS_IMAGE_DIR:-${BUNTOS_BUILD_DIR:-$HOME/buntos-build}/$board}"
 if [[ ! -f "$image_dir/buntos.raw" ]]; then
@@ -173,36 +174,46 @@ if [[ "$agent_refs" != NONE ]]; then
 	echo "e2e 5번(에이전트 앱 간 제어): ${SECONDS}초, ${passed}개 통과"
 fi
 
-# e2e 6번: 키보드 단축키. 키는 QMP로 가상 키보드에 넣어 실제 입력과 같은 길(libinput → 컴포지터 단축키 →
-# 앱)을 거치게 하고, 결과는 게스트 쪽 도우미(tests/e2e/shortcuts.sh)가 에이전트와 컴포지터 API로 읽는다.
-# e2e 5번이 연 계산기, 텍스트 편집기, 시스템 설정을 그대로 쓴다
+# e2e 6·4·7번은 키를 QMP로 가상 키보드에 넣고, 결과는 게스트 쪽 도우미가 읽는다. begin <번호> <도우미>로
+# 시작한다. guest는 도우미를 돌려 마지막 줄을 answer에 받는다. 답 줄은 입력 줄의 에코와 구분되도록 번호와
+# 차례 표시를 붙인다. 차례가 이어지도록 명령 치환($(...), 하위 셸) 없이 부른다. 답을 받은 뒤에야 다음 키를 넣는다
+scenario=
+helper=
+step=0
+answer=
+passed=0
+failed=0
+begin() {
+	scenario=$1
+	helper=$2
+	passed=0
+	failed=0
+}
+guest() {
+	step=$((step + 1))
+	echo "bash $helper $* 2>&1 | tail -1 | sed 's/^/E2E${scenario}_$step=/'" >&3
+	wait_for "^E2E${scenario}_$step=" || fail "e2e ${scenario}번: $*의 답을 받지 못했다"
+	answer=$(console | grep -a "^E2E${scenario}_$step=" | tail -1 | sed "s/^E2E${scenario}_$step=//")
+}
+keys() {
+	python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" "$@" || fail "e2e ${scenario}번: QMP로 키를 넣지 못했다"
+}
+check() {
+	if [[ "$2" == "$3" ]]; then
+		echo "e2e ${scenario}번 통과: $1"
+		passed=$((passed + 1))
+	else
+		echo "e2e ${scenario}번 실패: $1 (받은 값 '$2', 바란 값 '$3')"
+		failed=$((failed + 1))
+	fi
+}
+
+# e2e 6번: 키보드 단축키. 키는 실제 입력과 같은 길(libinput → 컴포지터 단축키 → 앱)을 거치고, 결과는 게스트 쪽
+# 도우미(tests/e2e/shortcuts.sh)가 에이전트와 컴포지터 API로 읽는다. e2e 5번이 연 계산기, 텍스트 편집기,
+# 시스템 설정을 그대로 쓴다
 if [[ "$agent_refs" != NONE ]]; then
 	push tests/e2e/shortcuts.sh /tmp/e2e-shortcuts.sh
-	step=0
-	# 도우미를 돌려 마지막 줄을 answer에 받는다. 답 줄은 입력 줄의 에코와 구분되도록 차례 표시를 붙인다.
-	# 차례가 이어지도록 명령 치환($(...), 하위 셸) 없이 부른다. 답을 받은 뒤에야 다음 키를 넣는다
-	answer=
-	guest() {
-		step=$((step + 1))
-		echo "bash /tmp/e2e-shortcuts.sh $1 2>&1 | tail -1 | sed 's/^/E2E6_$step=/'" >&3
-		wait_for "^E2E6_$step=" || fail "e2e 6번: $1의 답을 받지 못했다"
-		answer=$(console | grep -a "^E2E6_$step=" | tail -1 | sed "s/^E2E6_$step=//")
-	}
-	keys() {
-		python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" "$@" || fail "e2e 6번: QMP로 키를 넣지 못했다"
-	}
-	shortcut_passed=0
-	shortcut_failed=0
-	check() {
-		if [[ "$2" == "$3" ]]; then
-			echo "e2e 6번 통과: $1"
-			shortcut_passed=$((shortcut_passed + 1))
-		else
-			echo "e2e 6번 실패: $1 (받은 값 '$2', 바란 값 '$3')"
-			shortcut_failed=$((shortcut_failed + 1))
-		fi
-	}
-
+	begin 6 /tmp/e2e-shortcuts.sh
 	guest prepare
 	[[ "$answer" == ready ]] || fail "e2e 6번: 텍스트 편집기를 준비하지 못했다 ($answer)"
 	keys keys:meta_l+a sleep:0.3 keys:meta_l+c sleep:0.3 keys:meta_l+right sleep:0.3 keys:meta_l+v sleep:1
@@ -275,8 +286,120 @@ if [[ "$agent_refs" != NONE ]]; then
 	guest input-method
 	check "⌃⇧ 사이에 다른 키를 누르면 바뀌지 않는다" "$answer" hangul
 	guest chord-reset
-	((shortcut_failed == 0)) || fail "e2e 6번(키보드 단축키): ${shortcut_failed}개 실패"
-	echo "e2e 6번(키보드 단축키): ${SECONDS}초, ${shortcut_passed}개 통과"
+	((failed == 0)) || fail "e2e 6번(키보드 단축키): ${failed}개 실패"
+	echo "e2e 6번(키보드 단축키): ${SECONDS}초, ${passed}개 통과"
+fi
+
+# e2e 4번: 한글 입력. 키는 QMP로 넣어 libinput → 컴포지터 → fcitx5(input-method-v2, fcitx5-hangul) → 앱
+# (text-input-v3)의 실제 길로 조합하게 하고, 결과는 게스트 쪽 도우미(tests/e2e/hangul.sh)가 에이전트(앱의 글)와
+# 입력기 상태로 읽는다. 기대값은 macOS 한국어 2벌식과 fcitx5-hangul의 기본 동작이다. e2e 5·6번이 연 텍스트
+# 편집기와 시스템 설정을 그대로 쓰고, 터미널(foot)과 Firefox는 새로 띄운다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/hangul.sh /tmp/e2e-hangul.sh
+	begin 4 /tmp/e2e-hangul.sh
+	guest prepare
+	[[ "$answer" == ready ]] || fail "e2e 4번: 텍스트 편집기를 준비하지 못했다 ($answer)"
+	# 입력 소스 전환: ⌃스페이스와 한/영 키(QEMU lang1 → evdev KEY_HANGEUL → keysym Hangul)는 컴포지터가 받아
+	# fcitx5를 바꾸고, 메뉴 막대의 입력 소스 표시가 따라간다
+	keys keys:ctrl+spc sleep:0.5
+	guest state
+	check "⌃스페이스로 한글이 되고 메뉴 막대가 '한'이다" "$answer" "hangul 한"
+	keys keys:ctrl+spc sleep:0.5
+	guest state
+	check "⌃스페이스로 영문이 되고 메뉴 막대가 'A'다" "$answer" "keyboard-us A"
+	keys keys:lang1 sleep:0.5
+	guest state
+	check "한/영 키로 한글이 된다" "$answer" "hangul 한"
+	keys keys:lang1 sleep:0.5
+	guest state
+	check "한/영 키로 영문이 된다" "$answer" "keyboard-us A"
+	# 입력기가 키보드를 잡지 않았을 때(글 입력 칸 밖)도 바뀌면 컴포지터가 받은 한/영 키다
+	guest focus-list
+	check "글 입력 칸 밖으로 포커스를 옮기면 입력기가 키보드를 놓는다" "$answer" "org.buntos.Settings 0"
+	keys keys:lang1 sleep:0.5
+	guest state
+	check "글 입력 칸 밖에서도 한/영 키로 바뀐다" "$answer" "hangul 한"
+
+	# 텍스트 편집기에서 2벌식으로 조합한다. 칸마다 문서를 비우고 한글로 둔 뒤 QMP 동작($3…)을 넣는다
+	compose() {
+		local name=$1 want=$2
+		shift 2
+		guest clear hangul
+		[[ "$answer" == ready ]] || fail "e2e 4번: 텍스트 편집기를 비우지 못했다 ($answer)"
+		keys "$@" sleep:0.5
+		guest value
+		check "$name" "$answer" "$want"
+	}
+	compose "dkssudgktpdy와 마침표: 안녕하세요. (조합 중 문장 부호는 조합을 끝낸다)" "[안녕하세요.]" \
+		type:dkssudgktpdy keys:dot
+	compose "쌍자음 ⇧R(ㄲ)·⇧T(ㅆ)이 첫소리와 받침에 들어간다: 깎았다" "[깎았다 ]" \
+		keys:shift+r type:k keys:shift+r type:dk keys:shift+t type:ek keys:spc
+	compose "겹모음 ㅘ(ㅗ+ㅏ)·ㅢ(ㅡ+ㅣ): 과자 의사" "[과자 의사 ]" type:rhkwk keys:spc type:dmltk keys:spc
+	compose "받침 넘김: 각 다음에 ㅏ를 치면 가가" "[가가 ]" type:rkrk keys:spc
+	compose "조합 중 Backspace는 자모 하나를 지운다: 한 → 하" "[하 ]" type:gks keys:backspace keys:spc
+	compose "확정한 글자는 Backspace가 글자째 지운다: 안녕 → 안" "[안]" \
+		type:dkssud keys:spc keys:backspace keys:backspace
+	compose "조합 중 쉼표와 물음표(⇧/): 안녕, 한글?" "[안녕, 한글?]" \
+		type:dkssud keys:comma keys:spc type:gksrmf keys:shift+slash
+	compose "왼쪽 Shift만 눌렀다 떼도 조합이 이어진다: 한 다음 ㅏ는 하나" "[하나 ]" \
+		type:gks keys:shift type:k keys:spc
+	guest state
+	check "왼쪽 Shift만 눌렀다 떼도 입력 소스가 그대로다" "$answer" "hangul 한"
+
+	# 조합 중에 입력 소스를 바꾸거나 포커스를 옮겨도 조합하던 글자는 사라지거나 두 번 들어가지 않는다
+	compose "조합 중 ⌃스페이스로 영문으로 바꾸면 조합하던 글자가 확정된다: 한abc" "[한abc]" \
+		type:gks keys:ctrl+spc sleep:0.3 type:abc
+	compose "조합 중 한/영 키로 바꿔도 확정된다: 안녕hi" "[안녕hi]" type:dkssud keys:lang1 sleep:0.3 type:hi
+	guest clear hangul
+	[[ "$answer" == ready ]] || fail "e2e 4번: 텍스트 편집기를 비우지 못했다 ($answer)"
+	keys type:gks sleep:0.3
+	guest focus-other
+	check "조합 중 다른 창의 칸을 누르면 조합하던 글자가 원래 칸에 확정된다" "$answer" "[한] [] org.buntos.Settings"
+	keys type:dkssud keys:spc sleep:0.5
+	guest other-value
+	check "옮겨 간 칸에서는 새로 조합한다 (앞 글자가 따라오지 않는다)" "$answer" "[안녕 ]"
+
+	# 한글, 영어(대문자 포함), 숫자를 섞어 친다. 숫자는 한글 모드에서도 그대로 들어간다
+	guest clear english
+	[[ "$answer" == ready ]] || fail "e2e 4번: 텍스트 편집기를 비우지 못했다 ($answer)"
+	keys type:bunt keys:shift+o keys:shift+s keys:spc type:2026 keys:ctrl+spc sleep:0.3 type:sus keys:spc \
+		type:gksrmf keys:spc keys:ctrl+spc sleep:0.3 type:ok sleep:0.5
+	guest value
+	check "한글·영어·숫자를 섞어 친다: buntOS 2026년 한글 ok" "$answer" "[buntOS 2026년 한글 ok]"
+
+	# 터미널(foot): Phase 1 종료 조건의 터미널 창. 조합하는 중에 띄우면 새 창이 포커스를 가져가므로 조합하던
+	# 글자가 편집기에 확정되어야 한다. foot에서 친 한글은 cat이 받은 바이트(UTF-8)로 본다. 조합 중 Enter는
+	# 조합을 끝내고 줄을 바꾸며, Ctrl+D로 cat이 끝나면 foot도 닫힌다
+	guest clear hangul
+	[[ "$answer" == ready ]] || fail "e2e 4번: 텍스트 편집기를 비우지 못했다 ($answer)"
+	keys type:gks sleep:0.3
+	guest foot-prepare
+	check "조합 중 새 창(터미널)이 뜨면 조합하던 글자가 원래 칸에 확정되고 터미널이 포커스를 받는다" \
+		"$answer" "[한] ready"
+	[[ "$answer" == *ready ]] || fail "e2e 4번: 터미널을 띄우지 못했다 ($answer)"
+	keys type:dkssudgktpdy keys:ret sleep:0.3 keys:ctrl+d sleep:0.5
+	guest foot
+	check "터미널(foot)에 친 '안녕하세요'와 Enter가 그 차례의 UTF-8 바이트로 프로그램에 간다" "$answer" \
+		"ec9588eb8595ed9598ec84b8ec9a940a 0"
+
+	# Firefox(GTK3, text-input-v3)의 글 칸: 조합 중 Tab으로 다음 칸에 가면 조합하던 글자는 앞 칸에 남고, 같은
+	# 창의 다른 칸을 눌러도 남는다
+	guest firefox-prepare
+	check "Firefox에서 칸 둘인 페이지를 열고 첫 칸에 포커스를 준다" "$answer" ready
+	if [[ "$answer" == ready ]]; then
+		keys type:dkssud keys:tab
+		guest firefox-wait second
+		keys type:gksrmf keys:spc sleep:1
+		guest firefox-values
+		check "Firefox: 조합 중 Tab으로 다음 칸에 가면 조합하던 글자가 앞 칸에 남고 다음 칸에서 새로 조합한다" \
+			"$answer" "[안녕][한글 ]"
+		keys type:gks sleep:0.5
+		guest firefox-focus first
+		check "Firefox: 조합 중 같은 창의 다른 칸에 포커스를 옮겨도 조합하던 글자가 남는다" "$answer" "[안녕][한글 한]"
+	fi
+	guest cleanup
+	((failed == 0)) || fail "e2e 4번(한글 입력): ${failed}개 실패"
+	echo "e2e 4번(한글 입력): ${SECONDS}초, ${passed}개 통과"
 fi
 
 # e2e 7번: 화면 잠금(ARCHITECTURE 6.5). ⌃⌘Q로 잠그면 잠금 화면이 뜨고, 잠긴 동안 에이전트의 화면 읽기와 앱
@@ -284,58 +407,35 @@ fi
 # 게스트 쪽 도우미(tests/e2e/session-lock.sh)가 컴포지터 API(GetLocked)와 저널로 읽는다
 if [[ "$agent_refs" != NONE ]]; then
 	push tests/e2e/session-lock.sh /tmp/e2e-session-lock.sh
-	lock_step=0
-	# 도우미를 돌려 마지막 줄을 lock_answer에 받는다 (e2e 6번의 guest와 같다)
-	lock_answer=
-	lock_guest() {
-		lock_step=$((lock_step + 1))
-		echo "bash /tmp/e2e-session-lock.sh $1 2>&1 | tail -1 | sed 's/^/E2E7_$lock_step=/'" >&3
-		wait_for "^E2E7_$lock_step=" || fail "e2e 7번: $1의 답을 받지 못했다"
-		lock_answer=$(console | grep -a "^E2E7_$lock_step=" | tail -1 | sed "s/^E2E7_$lock_step=//")
-	}
-	lock_keys() {
-		python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" "$@" || fail "e2e 7번: QMP로 키를 넣지 못했다"
-	}
-	lock_passed=0
-	lock_failed=0
-	lock_check() {
-		if [[ "$2" == "$3" ]]; then
-			echo "e2e 7번 통과: $1"
-			lock_passed=$((lock_passed + 1))
-		else
-			echo "e2e 7번 실패: $1 (받은 값 '$2', 바란 값 '$3')"
-			lock_failed=$((lock_failed + 1))
-		fi
-	}
-
-	lock_guest locked
-	lock_check "처음에는 잠기지 않았다" "$lock_answer" false
-	lock_keys keys:ctrl+meta_l+q sleep:2
-	lock_guest ready
-	lock_check "⌃⌘Q로 잠그면 잠금 화면이 뜬다" "$lock_answer" "true 1"
-	lock_guest agent
-	lock_check "잠긴 동안 에이전트의 화면 읽기와 앱 목록을 거절한다" "$lock_answer" 2
-	lock_keys keys:esc sleep:0.5 type:wrong1 sleep:0.5 keys:ret sleep:4
-	lock_guest locked
-	lock_check "틀린 암호로는 풀리지 않는다" "$lock_answer" true
+	begin 7 /tmp/e2e-session-lock.sh
+	guest locked
+	check "처음에는 잠기지 않았다" "$answer" false
+	keys keys:ctrl+meta_l+q sleep:2
+	guest ready
+	check "⌃⌘Q로 잠그면 잠금 화면이 뜬다" "$answer" "true 1"
+	guest agent
+	check "잠긴 동안 에이전트의 화면 읽기와 앱 목록을 거절한다" "$answer" 2
+	keys keys:esc sleep:0.5 type:wrong1 sleep:0.5 keys:ret sleep:4
+	guest locked
+	check "틀린 암호로는 풀리지 않는다" "$answer" true
 	# 키가 잠금 화면보다 먼저 가거나 VM이 바빠 몇 개가 빠지면 풀리지 않으므로 Esc(친 암호를 지운다)를 누르고
 	# 세 번까지 다시 친다 (로그인 화면과 같다)
 	for attempt in 1 2 3; do
-		lock_keys keys:esc sleep:0.5 "type:$password" sleep:0.5 keys:ret sleep:4
-		lock_guest locked
-		if [[ "$lock_answer" == false ]]; then
+		keys keys:esc sleep:0.5 "type:$password" sleep:0.5 keys:ret sleep:4
+		guest locked
+		if [[ "$answer" == false ]]; then
 			break
 		fi
 	done
-	lock_check "잠금 화면에 친 암호로 풀린다" "$lock_answer" false
-	lock_guest journal
+	check "잠금 화면에 친 암호로 풀린다" "$answer" false
+	guest journal
 	# 틀린 암호는 한 번 넘게 남을 수 있다(다시 친 횟수만큼)
-	lock_check "잠금 화면이 틀린 암호와 잠금 해제를 남긴다" \
-		"$(awk '{print ($1 >= 1) " " $2}' <<<"$lock_answer")" "1 1"
-	lock_guest agent
-	lock_check "풀린 뒤에는 에이전트가 다시 읽는다" "$lock_answer" 0
-	((lock_failed == 0)) || fail "e2e 7번(화면 잠금): ${lock_failed}개 실패"
-	echo "e2e 7번(화면 잠금): ${SECONDS}초, ${lock_passed}개 통과"
+	check "잠금 화면이 틀린 암호와 잠금 해제를 남긴다" \
+		"$(awk '{print ($1 >= 1) " " $2}' <<<"$answer")" "1 1"
+	guest agent
+	check "풀린 뒤에는 에이전트가 다시 읽는다" "$answer" 0
+	((failed == 0)) || fail "e2e 7번(화면 잠금): ${failed}개 실패"
+	echo "e2e 7번(화면 잠금): ${SECONDS}초, ${passed}개 통과"
 fi
 
 echo 'systemctl poweroff' >&3
