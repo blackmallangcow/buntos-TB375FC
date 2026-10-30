@@ -46,9 +46,12 @@ jobs:
           persist-credentials: false
 
       - name: 러너 확인
+        # 결과 요약에 다시 적는다 (작업 기록의 끝에서 읽히게)
         run: |
-          echo "CPU $(nproc)개, 메모리 $(free -h | awk '/^Mem:/ {print $2}'), 커널 $(uname -r)"
-          df -h / /mnt 2>/dev/null || df -h /
+          {
+            echo "러너: CPU $(nproc)개, 메모리 $(free -h | awk '/^Mem:/ {print $2}'), 커널 $(uname -r)"
+            df -h / /mnt 2>/dev/null || true
+          } | tee "$RUNNER_TEMP/runner.txt"
           if [[ ! -e /dev/kvm ]]; then
             echo "::error::러너에 /dev/kvm이 없다. e2e는 KVM에서 돈다"
             exit 1
@@ -74,14 +77,15 @@ jobs:
           echo "작업 디렉터리: $work (빈자리 $(free_gb "$work")GB)"
 
       - name: 디스크 비우기
-        # 빈자리가 30GB보다 적으면 쓰지 않는, 미리 깔린 도구를 지운다
+        # 빈자리가 30GB보다 적으면 쓰지 않는, 미리 깔린 도구를 지운다. 지우는 데 2분쯤 걸려 뒤에서 지우고 이미지 빌드 앞에서
+        # 기다린다(도구 트리와 자체 컴포넌트 빌드는 자리를 적게 쓴다). docker 이미지는 우리 이미지를 만들기 전에 지운다
         run: |
           if (($(df --output=avail -BG "$WORK" | tail -n 1 | tr -dc 0-9) < 30)); then
-            sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
-              /opt/hostedtoolcache/CodeQL
             docker image prune --all --force >/dev/null
+            setsid nohup sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
+              /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &
+            echo $! >"$WORK/cleanup.pid"
           fi
-          df -h "$WORK"
 
       - name: KVM과 사용자 이름공간
         run: |
@@ -169,7 +173,15 @@ jobs:
         # build.sh가 자체 컴포넌트를 다시 cargo로 모은다. 앞 단계의 컨테이너와 산출물을 그대로 쓴다.
         # mkosi는 BUNTOS_TOOLS_TREE(도구 트리)의 도구로 이미지를 만든다. e2e의 mkosi vm도 같다
         run: |
+          if [[ -f "$WORK/cleanup.pid" ]]; then
+            while ps -p "$(cat "$WORK/cleanup.pid")" >/dev/null; do sleep 2; done
+          fi
+          df -h "$WORK"
+          # 빌드하는 동안 가장 적었던 빈자리를 결과 요약에 적는다 (디스크 비우기의 기준을 정하는 데 쓴다)
+          (while sleep 5; do df --output=avail -BM "$WORK" | tail -n 1; done >"$RUNNER_TEMP/free.log") &
+          sampler=$!
           BUNTOS_CARGO="$PWD/tools/image/cargo-debian.sh" tools/image/build.sh "$BOARD"
+          kill "$sampler"
           ls -l "$BUNTOS_BUILD_DIR/$BOARD"
           df -h "$WORK"
 
@@ -199,6 +211,12 @@ jobs:
             if [[ -f "$E2E_LOG_DIR/journal.log" ]]; then
               grep -E 'bunt[-_](comp|greeter).*((renderer|apps|linux-dmabuf): |using GPU )' "$E2E_LOG_DIR/journal.log" | head -n 20
             fi
+            cat "$RUNNER_TEMP/runner.txt"
+            if [[ -s "$RUNNER_TEMP/free.log" ]]; then
+              echo "이미지 빌드 중 가장 적은 빈자리: $(tr -dc '0-9\n' <"$RUNNER_TEMP/free.log" | sort -n | head -n 1)MB"
+            fi
+            df -h "$WORK"
+            du -sh "$WORK"/* 2>/dev/null || true
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
