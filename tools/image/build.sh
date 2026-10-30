@@ -13,6 +13,9 @@
 # 다른 소스 트리(git worktree)에서 빌드할 때는 따로 준다. cargo는 작업 공간 안의 경로를 상대 경로로
 # 기억하므로, 두 소스 트리가 한 디렉터리를 쓰면 서로의 산출물을 다시 빌드하거나 소스가 더 오래된 쪽이
 # 다른 트리의 바이너리를 그대로 쓴다.
+# 자체 컴포넌트는 BUNTOS_CARGO의 명령으로 빌드한다(기본은 이 컴퓨터의 cargo). 빌드 환경의 라이브러리가 이미지와
+# 맞지 않는 곳(CI의 Ubuntu 러너)에서는 이미지와 같은 Debian 스냅숏의 컨테이너에서 빌드하는
+# tools/image/cargo-debian.sh를 준다.
 # 이 파일은 실행 중에도 bash가 이어 읽으므로, 빌드가 도는 동안 고칠 때는 새 파일로 바꿔 넣는다.
 set -euo pipefail
 
@@ -49,7 +52,8 @@ stage_components() {
 		return
 	fi
 	local cargo target
-	cargo=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
+	# BUNTOS_CARGO가 있으면 그 명령으로 빌드한다 (CI: tools/image/cargo-debian.sh, 머리말 참고)
+	cargo=${BUNTOS_CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 	target="${CARGO_TARGET_DIR:-$build_root/cargo-target}"
 	(cd "$repo" && CARGO_TARGET_DIR="$target" "$cargo" build --release --locked --workspace)
 	rm -rf "$out/stage"
