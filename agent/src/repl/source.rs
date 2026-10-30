@@ -8,8 +8,10 @@
 //!   브라우저 콘솔처럼 다시 선언할 수 있게 한다. 글자 수가 같게 바꿔(`const`는 `var  `) 오류의 줄·칸 번호가 그대로다.
 //! - [`complete`]: 괄호, 따옴표, 주석, 템플릿 글이 다 닫혔는지. 대화형 `bunt agent repl`이 여러 줄 입력을 모은다.
 //!
-//! 문법 분석기가 아니라 토큰만 훑는다. 정규식과 나누기는 앞 토큰으로 가린다. 틀리게 가리면 바꾸지 않을 뿐이다
-//! (QuickJS가 다시 선언을 거절한다). 정규식은 줄을 넘지 못하므로 잘못 본 정규식도 그 줄에서 끝난다.
+//! 문법 분석기가 아니라 토큰만 훑는다. 정규식과 나누기는 앞 토큰으로 가린다(JS 토큰 분석기가 흔히 쓰는 규칙: 뒤에
+//! 붙은 `++`, `.` 뒤의 속성 이름, if·while·for의 `( … )`, 식 자리의 `{ … }`를 본다). 그래도 틀리게 가리면 따옴표
+//! 글의 처음과 끝을 잘못 짚어, 선언을 바꾸지 않거나(QuickJS가 다시 선언을 거절한다) 드물게는 글 안의 `let`·`const`를
+//! 바꿀 수 있다. 정규식과 따옴표 글은 줄을 넘지 못하므로 잘못 짚어도 그 줄에서 끝난다.
 
 /// 바꿀 자리: 블록·괄호 밖에서 문장을 시작하는 `let`·`const`
 #[derive(Debug, Default)]
@@ -24,8 +26,14 @@ struct Scan {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Frame {
-    Brace,
-    Paren,
+    /// `{`. 식 자리에서 열었으면(객체 글자) 닫은 뒤는 식이 끝난 것이다
+    Brace {
+        literal: bool,
+    },
+    /// `(`. if·while·for·with 뒤의 것이면 닫은 뒤 문장이 온다
+    Paren {
+        head: bool,
+    },
     Bracket,
     /// 템플릿 글의 글 부분
     Template,
@@ -37,20 +45,28 @@ enum Frame {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Prev {
     Start,
-    /// 식을 끝낼 수 있는 것: 이름, 수, 글, `)`, `]`, 정규식
+    /// 식을 끝낼 수 있는 것: 이름, 수, 글, `)`, `]`, 정규식, 객체 글자의 `}`, 뒤에 붙은 `++`·`--`
     Operand,
-    /// 뒤에 정규식이 올 수 있는 낱말 (return, typeof …)
+    /// 뒤에 정규식이나 객체 글자가 올 수 있는 낱말 (return, typeof …)
     Keyword,
+    /// 뒤에 블록이 오는 낱말 (else, do). 정규식도 올 수 있다
+    BlockKeyword,
     /// `;`
     Semicolon,
-    /// `}`
+    /// 블록의 `}`
     CloseBrace,
+    /// if·while·for·with의 `( … )`: 뒤에 문장(정규식, 블록)이 온다
+    Head,
+    /// `=>`: 뒤에 함수 몸(블록)이나 식이 온다
+    Arrow,
+    /// `.`·`?.`: 뒤의 낱말은 예약어여도 속성 이름이다 (`size.in / 2`)
+    Dot,
     /// 그 밖의 기호
     Punct,
 }
 
-/// 뒤에 오는 `/`가 정규식인 낱말
-const REGEX_KEYWORDS: [&str; 15] = [
+/// 뒤에 오는 `/`가 정규식인 낱말 (else와 do는 BlockKeyword)
+const REGEX_KEYWORDS: [&str; 13] = [
     "return",
     "typeof",
     "instanceof",
@@ -61,8 +77,6 @@ const REGEX_KEYWORDS: [&str; 15] = [
     "void",
     "throw",
     "case",
-    "do",
-    "else",
     "yield",
     "await",
     "extends",
@@ -77,6 +91,8 @@ fn scan(code: &str) -> Scan {
     let mut scan = Scan::default();
     let mut stack: Vec<Frame> = Vec::new();
     let mut prev = Prev::Start;
+    // 앞 토큰이 속성 이름이 아닌 낱말이었으면 그 낱말 (if·while·for·with의 괄호를 가린다)
+    let mut word_before: Option<&str> = None;
     // 앞 토큰 뒤에 줄바꿈이 있었다 (자동 세미콜론)
     let mut newline = false;
     let mut at = 0;
@@ -101,6 +117,13 @@ fn scan(code: &str) -> Scan {
             continue;
         }
         let byte = bytes[at];
+        // 토큰(공백과 주석 말고)마다 앞 낱말을 넘겨받는다. 낱말이면 다시 적는다
+        let comment = byte == b'/' && matches!(bytes.get(at + 1), Some(b'/' | b'*'));
+        let last_word = if matches!(byte, b'\n' | b' ' | b'\t' | b'\r') || comment {
+            word_before
+        } else {
+            word_before.take()
+        };
         match byte {
             b'\n' => {
                 newline = true;
@@ -122,7 +145,14 @@ fn scan(code: &str) -> Scan {
             },
             b'/' if matches!(
                 prev,
-                Prev::Start | Prev::Keyword | Prev::Semicolon | Prev::CloseBrace | Prev::Punct
+                Prev::Start
+                    | Prev::Keyword
+                    | Prev::BlockKeyword
+                    | Prev::Semicolon
+                    | Prev::CloseBrace
+                    | Prev::Head
+                    | Prev::Arrow
+                    | Prev::Punct
             ) =>
             {
                 at = regex_end(bytes, at + 1);
@@ -146,8 +176,13 @@ fn scan(code: &str) -> Scan {
             }
             b'{' | b'(' | b'[' => {
                 stack.push(match byte {
-                    b'{' => Frame::Brace,
-                    b'(' => Frame::Paren,
+                    // 식 자리(기호, return 같은 낱말 뒤)의 `{`는 객체 글자다. 문장 자리, `)`, `=>`, else 뒤는 블록이다
+                    b'{' => Frame::Brace {
+                        literal: matches!(prev, Prev::Punct | Prev::Keyword),
+                    },
+                    b'(' => Frame::Paren {
+                        head: matches!(last_word, Some("if" | "while" | "for" | "with")),
+                    },
                     _ => Frame::Bracket,
                 });
                 prev = Prev::Punct;
@@ -155,19 +190,22 @@ fn scan(code: &str) -> Scan {
                 at += 1;
             }
             b'}' | b')' | b']' => {
-                let wanted = match byte {
-                    b'}' => [Frame::Brace, Frame::Hole],
-                    b')' => [Frame::Paren, Frame::Paren],
-                    _ => [Frame::Bracket, Frame::Bracket],
-                };
+                let top = stack.last().copied();
+                let paired = matches!(
+                    (byte, top),
+                    (b'}', Some(Frame::Brace { .. } | Frame::Hole))
+                        | (b')', Some(Frame::Paren { .. }))
+                        | (b']', Some(Frame::Bracket))
+                );
                 // 짝이 틀린 닫는 기호는 무시한다 (QuickJS가 오류를 낸다)
-                if stack.last().is_some_and(|top| wanted.contains(top)) {
+                if paired {
                     stack.pop();
                 }
-                prev = if byte == b'}' {
-                    Prev::CloseBrace
-                } else {
-                    Prev::Operand
+                prev = match (byte, top.filter(|_| paired)) {
+                    (b'}', Some(Frame::Brace { literal: true })) => Prev::Operand,
+                    (b'}', _) => Prev::CloseBrace,
+                    (b')', Some(Frame::Paren { head: true })) => Prev::Head,
+                    _ => Prev::Operand,
                 };
                 newline = false;
                 at += 1;
@@ -204,18 +242,38 @@ fn scan(code: &str) -> Scan {
                 if stack.is_empty() && starts_statement && declares(word, &bytes[at..]) {
                     scan.declarations.push((start, word.len()));
                 }
-                prev = if REGEX_KEYWORDS.contains(&word) {
-                    Prev::Keyword
-                } else {
-                    Prev::Operand
+                // `.` 뒤의 낱말은 속성 이름이다 (검토: `bytes.in / total`의 나누기를 정규식으로 보았다)
+                let property = prev == Prev::Dot;
+                prev = match word {
+                    _ if property => Prev::Operand,
+                    "else" | "do" => Prev::BlockKeyword,
+                    _ if REGEX_KEYWORDS.contains(&word) => Prev::Keyword,
+                    _ => Prev::Operand,
                 };
+                word_before = (!property).then_some(word);
                 newline = false;
                 continue;
             }
             _ => {
-                prev = Prev::Punct;
+                let rest = &bytes[at..];
+                let (length, next) = if rest.starts_with(b"...") {
+                    (3, Prev::Punct)
+                } else if byte == b'.'
+                    || (rest.starts_with(b"?.") && !rest.get(2).is_some_and(u8::is_ascii_digit))
+                {
+                    (if byte == b'.' { 1 } else { 2 }, Prev::Dot)
+                } else if rest.starts_with(b"=>") {
+                    (2, Prev::Arrow)
+                } else if rest.starts_with(b"++") || rest.starts_with(b"--") {
+                    // 뒤에 붙은 `i++`는 식을 끝낸다 (검토: `i++ / 2`를 정규식으로 보았다). 줄이 바뀌었으면 앞에 붙는다
+                    let postfix = prev == Prev::Operand && !newline;
+                    (2, if postfix { Prev::Operand } else { Prev::Punct })
+                } else {
+                    (1, Prev::Punct)
+                };
+                prev = next;
                 newline = false;
-                at += 1;
+                at += length;
             }
         }
     }
@@ -360,6 +418,57 @@ mod tests {
             replify("x = typeof /a/; const d = 1"),
             "x = typeof /a/; var   d = 1"
         );
+    }
+
+    #[test]
+    fn a_division_is_not_read_as_a_regex_that_hides_a_string() {
+        // 검토: 나누기를 정규식으로 보아 따옴표 글의 처음을 놓치고 글 안의 선언을 바꿨다
+        for code in [
+            "x = i++ / 2; s = '/; const t = 1'",
+            "x = i-- / 2; s = '/; let t = [1]'",
+            "r = bytes.in / total; s = 'a/b; let q = 1'",
+            "r = stats?.of / n; s = '/; const t = 1'",
+            "x = {a: 1} / 2; s = '/; const t = 1'",
+            "if (ok) /'/.test(s); x = 'a; const q = 1'",
+        ] {
+            assert_eq!(replify(code), code);
+        }
+        // 정규식은 정규식이다: 앞에 붙은 `++`, 블록, 화살표, if의 괄호, else 뒤
+        assert_eq!(
+            replify("++i; /'/.test(s); const z = 1"),
+            "++i; /'/.test(s); var   z = 1"
+        );
+        assert_eq!(
+            replify("x = i\n++j\nconst z = /'/"),
+            "x = i\n++j\nvar   z = /'/"
+        );
+        assert_eq!(
+            replify("if (a) {} else /'/.test(s); const z = 1"),
+            "if (a) {} else /'/.test(s); var   z = 1"
+        );
+        assert_eq!(
+            replify("f = () => /'/; const z = 1"),
+            "f = () => /'/; var   z = 1"
+        );
+        // 블록과 객체 글자 뒤의 줄바꿈은 문장을 끝낸다
+        for (code, out) in [
+            (
+                "for (const k of ks) {}\nconst n = 1",
+                "for (const k of ks) {}\nvar   n = 1",
+            ),
+            ("x = () => {}\nconst y = 1", "x = () => {}\nvar   y = 1"),
+            ("f({})\nconst a = 1", "f({})\nvar   a = 1"),
+            (
+                "o = { a: { b: 1 } }\nlet c = [o]",
+                "o = { a: { b: 1 } }\nvar c = [o]",
+            ),
+            (
+                "if (a) {} else {}\nlet b = [1]",
+                "if (a) {} else {}\nvar b = [1]",
+            ),
+        ] {
+            assert_eq!(replify(code), out, "{code}");
+        }
     }
 
     #[test]
