@@ -163,6 +163,10 @@ impl BuntState {
         self.hidden = keep;
         let minimized = restore.iter().any(|hidden| hidden.minimized.is_some());
         for hidden in restore {
+            // 최소화한 창은 칸에서 나와 제자리로 가는 효과를 그린다. 창은 바로 놓여 입력을 받는다 (minimize.rs)
+            if let Some((id, _)) = &hidden.minimized {
+                self.start_restore_effect(&hidden.window, *id, hidden.location);
+            }
             set_hidden(&hidden.window, false);
             self.space
                 .map_element(hidden.window.clone(), hidden.location, false);
@@ -233,6 +237,10 @@ impl BuntState {
                 self.thumbnail(window),
             )
         });
+        // 최소화 효과도 같은 모습에서 칸으로 빨려 든다 (minimize.rs)
+        if let Some((id, _)) = &minimized {
+            self.start_minimize_effect(window, *id);
+        }
         if let Some(toplevel) = window.toplevel() {
             for (popup, _) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
                 if let PopupKind::Xdg(popup) = popup {

@@ -109,6 +109,7 @@ use crate::{
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, handle_resize_commit},
     ime::{InputMethodProcess, Preedit},
     input::ModifierChord,
+    minimize,
     panels::{self, Bar, BarInput, Edge, Fill, Panels, Reveal},
     prefs::{KeyRepeat, PointerPrefs, Prefs},
     render,
@@ -187,6 +188,8 @@ pub struct BuntState {
     pub screenshot_options: screenshots::Options,
     /// ⇧⌘5의 선택 부분에서 마지막으로 고른 영역. 다음 ⇧⌘5가 그 자리에 띄운다
     pub screenshot_last_area: Option<Rectangle<i32, Logical>>,
+    /// 창 최소화 효과 (minimize.rs)
+    pub minimize_effects: minimize::Effects,
 
     /// 시스템 설정에서 고른 값 (다음 로그인에도 쓴다)
     pub prefs: Prefs,
@@ -360,6 +363,7 @@ impl BuntState {
             screenshot_capture: None,
             screenshot_options: screenshots::Options::default(),
             screenshot_last_area: None,
+            minimize_effects: minimize::Effects::default(),
             prefs,
             panels: Panels::default(),
             bars: [Reveal::default(); 2],
@@ -929,7 +933,8 @@ impl BuntState {
                 covered: self.bar_mode(bar).hides(maximized, fullscreen),
                 at_edge,
                 inside: geo.to_f64().contains(pointer),
-                menu_open,
+                // 최소화 효과가 도는 동안에는 숨은 Dock을 꺼내 둔다 (minimize.rs)
+                menu_open: menu_open || (bar == Bar::Dock && self.minimize_effects.reveals_dock()),
             };
             if let Some(at) = panels::decide(&mut self.bars[bar.index()], input, now) {
                 next = Some(next.map_or(at, |next| next.min(at)));
@@ -2058,6 +2063,8 @@ impl BuntState {
             // 선택 부분은 ⇧⌘5의 선택 영역을 찍는다 (screenshot.rs). 전에는 ⇧⌘4처럼 끌어서 골랐다
             Request::Screenshot { mode, delay } => self.toolbar_screenshot(mode, delay),
             Request::ScreenshotArea(show) => self.show_screenshot_area(show),
+            Request::MinimizeEffect(effect) => self.set_minimize_effect(effect),
+            Request::MinimizedSlots(slots) => self.set_minimized_slots(slots),
             Request::Agent(request) => self.agent_request(request),
             // 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
             Request::Session(request) => self.session_request(request),

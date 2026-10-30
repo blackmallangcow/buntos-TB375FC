@@ -805,7 +805,7 @@ fn insert_below(
 }
 
 /// 표면과 그 하위 표면, 팝업의 렌더 요소 ID (render.rs의 surface_ids와 같다)
-fn surface_ids(root: &WlSurface) -> Vec<Id> {
+pub(crate) fn surface_ids(root: &WlSurface) -> Vec<Id> {
     let mut ids = Vec::new();
     let mut add_tree = |root: &WlSurface| {
         with_surface_tree_downward(

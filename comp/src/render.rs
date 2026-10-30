@@ -35,6 +35,8 @@ smithay::backend::renderer::element::render_elements! {
     Uncovered = Uncovered,
     // 스크린샷 영역 고르기 (screenshot.rs)
     Solid = SolidColorRenderElement,
+    // 창 최소화 효과 (minimize.rs)
+    Minimize = crate::minimize::EffectElement,
 }
 
 impl std::fmt::Debug for OutputRenderElements {
@@ -46,6 +48,7 @@ impl std::fmt::Debug for OutputRenderElements {
             Self::Blur(element) => f.debug_tuple("Blur").field(element).finish(),
             Self::Uncovered(element) => f.debug_tuple("Uncovered").field(element).finish(),
             Self::Solid(element) => f.debug_tuple("Solid").field(element).finish(),
+            Self::Minimize(element) => f.debug_tuple("Minimize").field(element).finish(),
             Self::_GenericCatcher(_) => f.write_str("GenericCatcher"),
         }
     }

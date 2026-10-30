@@ -18,10 +18,15 @@ use std::{
     time::Duration,
 };
 
-use smithay::{input::keyboard::xkb, reexports::calloop::channel::Sender as LoopSender};
+use smithay::{
+    input::keyboard::xkb,
+    reexports::calloop::channel::Sender as LoopSender,
+    utils::{Logical, Rectangle},
+};
 
 use crate::{
     cursor,
+    minimize::{self, Effect},
     panels::{Autohide, Panels},
     prefs::PointerPrefs,
     session::SessionRequest,
@@ -367,6 +372,10 @@ pub enum Request {
     },
     /// ⇧⌘5 도구 막대의 선택 부분: 고칠 수 있는 선택 영역을 띄우거나(true) 거둔다
     ScreenshotArea(bool),
+    /// 창을 최소화할 때 쓸 효과 (시스템 설정)
+    MinimizeEffect(Effect),
+    /// Dock의 최소화 칸: 최소화 번호와 Dock 표면 안 논리 좌표
+    MinimizedSlots(Vec<(u32, Rectangle<i32, Logical>)>),
     Agent(AgentRequest),
     /// 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
     Session(SessionRequest),
@@ -1163,6 +1172,44 @@ impl Api {
         let shell_pid = self.snapshot.lock().unwrap().shell_pid;
         check_shell(connection, &header, shell_pid).await?;
         self.request(Request::RestoreMinimized(id))
+    }
+
+    /// 셸이 시스템 설정의 "최소화된 윈도우 애니메이션"(org.buntos.shell의 minimize-effect)을 알린다.
+    /// `effect`는 genie(지니 효과), scale(크기 조절 효과)이다. 다음 로그인에는 셸이 다시 알린다. 셸만 부른다
+    async fn set_minimize_effect(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        effect: &str,
+    ) -> fdo::Result<()> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        let effect = Effect::parse(effect).ok_or_else(|| {
+            fdo::Error::InvalidArgs(format!("effect must be genie or scale (got {effect})"))
+        })?;
+        self.request(Request::MinimizeEffect(effect))
+    }
+
+    /// 셸이 Dock의 최소화 칸 자리를 알린다: 항목마다 (최소화 번호(GetMinimizedWindows의 id), x, y, 너비,
+    /// 높이)이고 Dock 표면 안의 논리 좌표다. 최소화 효과가 창을 이 칸으로 보내고 이 칸에서 꺼낸다. 칸을
+    /// 바꿀 때마다 모두 다시 보낸다. 크기가 없는 칸은 버리고 MAX_SLOTS개까지만 받는다. 셸만 부른다
+    async fn set_minimized_slots(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        slots: Vec<(u32, i32, i32, i32, i32)>,
+    ) -> fdo::Result<()> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        let slots = slots
+            .into_iter()
+            .filter(|&(_, _, _, width, height)| width > 0 && height > 0)
+            .take(minimize::MAX_SLOTS)
+            .map(|(id, x, y, width, height)| {
+                (id, Rectangle::new((x, y).into(), (width, height).into()))
+            })
+            .collect();
+        self.request(Request::MinimizedSlots(slots))
     }
 
     /// 셸의 앱 전환 창에서 포인터로 가리킨 앱(AppSwitcherChanged의 차례). `activate`면 전환을 마치고

@@ -998,8 +998,9 @@ impl BuntState {
         };
 
         // 막대를 숨길지 다시 보고(앞의 창이 최대화했을 수 있다), 다 보이지 않는 막대의 자리를 정한다.
-        // 숨기고 꺼낼 때의 미끄러짐은 이 렌더 루프가 프레임마다 그린다
+        // 숨기고 꺼낼 때의 미끄러짐은 이 렌더 루프가 프레임마다 그린다. 최소화 효과는 칸의 자리를 새로 본다
         self.update_bars(None);
+        self.update_minimize_effects();
         let bar_places = match self.backend.outputs.get(&crtc) {
             Some(surface) => self.bar_places(&surface.output),
             None => Vec::new(),
@@ -1105,6 +1106,10 @@ impl BuntState {
             .scene(renderer, &output, output_geo.size, scale);
         let locked = lock_scene.is_some();
         elements.extend(lock_scene.into_iter().flatten());
+        // 최소화 효과 (minimize.rs): 창과 막대 위. 잠긴 동안에는 그리지 않는다
+        if !locked {
+            elements.extend(self.minimize_effects.elements(output_geo, scale));
+        }
         let space_start = elements.len();
         match space_render_elements::<_, smithay::desktop::Window, _>(
             renderer,
@@ -1115,6 +1120,8 @@ impl BuntState {
             Ok(_) if locked => {}
             Ok(mut space_elements) => {
                 render::place_bars(renderer, &mut space_elements, &bar_places, scale);
+                // 최소화 칸에서 나오는 창은 효과가 그리는 동안 공간에서 빼 둔다
+                self.minimize_effects.hide_restoring(&mut space_elements);
                 elements.extend(space_elements.into_iter().map(OutputRenderElements::Space))
             }
             Err(err) => tracing::warn!("failed to collect windows: {err:?}"),
@@ -1544,9 +1551,9 @@ impl BuntState {
         self.schedule_redraw_after(crtc, delay);
     }
 
-    /// 컴포지터가 그리는 애니메이션(막대 미끄러짐)이 도는 중이다. 그동안은 프레임마다 그린다
+    /// 컴포지터가 그리는 애니메이션(막대 미끄러짐, 최소화 효과)이 도는 중이다. 그동안은 프레임마다 그린다
     pub fn is_animating(&self) -> bool {
-        self.bars_sliding()
+        self.bars_sliding() || self.minimize_effects.is_running()
     }
 }
 
