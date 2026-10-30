@@ -767,15 +767,40 @@ impl Agent {
             }
         };
 
+        // ref의 앱이 끝났으면 그렇다고 알린다: 기다리기(wait)는 이것을 사라진 것으로 읽는다. 검토: 접근성 버스의 오류로
+        // 알려 ref로 사라지기를 기다리면 끝나지 않았다. 막은 앱 검사는 pid를 모르면 막은 앱으로 보므로 그보다 먼저 본다.
+        // pid를 모르는 앱(샌드박스)일 수도 있어 트리도 읽어 본다
+        let app_quit = |reference: &str| {
+            agent_error(format!(
+                "{reference} is gone: {}; take a new snapshot",
+                protocol::APP_QUIT
+            ))
+        };
+        if let Some(reference) = &params.scope
+            && a11y.pid(&bus).await.is_none()
+            && a11y.tree(&bus).await.is_err()
+        {
+            return Err(app_quit(reference));
+        }
         self.check_app(&a11y, &bus).await?;
 
         let options = Options {
             interactive: params.interactive,
             hidden: params.hidden,
         };
-        let rendered = self
+        let rendered = match self
             .render(&a11y, &session_name, &bus, &roots, options)
-            .await?;
+            .await
+        {
+            Ok(rendered) => rendered,
+            Err(failure) => match &params.scope {
+                // 읽는 사이에 끝났다
+                Some(reference) if a11y.pid(&bus).await.is_none() => {
+                    return Err(app_quit(reference));
+                }
+                _ => return Err(failure),
+            },
+        };
         let key = scope_key(&scope, options);
         // 기다리기(wait)가 다시 읽는 것(peek)은 지난 트리를 바꾸지 않는다: 다음 스냅샷의 diff는 AI가 지난번에 본
         // 트리와 견준 것이어야 한다

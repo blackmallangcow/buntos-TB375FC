@@ -64,6 +64,8 @@ pub const TIMEOUT: i64 = -32004;
 pub const NO_APP_MATCHES: &str = "no app matches";
 /// 데몬 알림의 일부: `app`이 여러 앱에 맞는다. 기다리기는 기다려도 하나로 정해지지 않으므로 바로 알린다
 pub const BE_MORE_SPECIFIC: &str = "be more specific";
+/// 데몬 알림의 일부: ref가 가리키던 요소의 앱이 끝났다. 기다리기는 이것도 그 앱이 없는 것으로 읽는다
+pub const APP_QUIT: &str = "its app quit";
 
 /// `snapshot`의 인자
 #[derive(Debug, Default, Serialize, Deserialize)]

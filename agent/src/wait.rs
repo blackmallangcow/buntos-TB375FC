@@ -186,10 +186,11 @@ fn observe(
     }
 }
 
-/// 데몬이 범위를 읽지 못한 까닭: 앱이 없다, 앱 이름이 여럿에 맞는다(기다려도 하나로 정해지지 않아 바로 알린다), 그
-/// 밖은 보지 못한 것이다. 데몬의 알림은 buntd-agent의 find_app이 쓴다 (그 시험이 이 글을 본다)
+/// 데몬이 범위를 읽지 못한 까닭: 앱이 없다(ref의 앱이 끝났다), 앱 이름이 여럿에 맞는다(기다려도 하나로 정해지지
+/// 않아 바로 알린다), 그 밖은 보지 못한 것이다. 데몬의 알림은 buntd-agent의 find_app과 snapshot이 쓴다 (find_app의
+/// 시험이 이 글을 본다)
 fn unseen(message: String) -> Result<Seen, Failure> {
-    if message.starts_with(protocol::NO_APP_MATCHES) {
+    if message.starts_with(protocol::NO_APP_MATCHES) || message.contains(protocol::APP_QUIT) {
         Ok(Seen::Absent(message))
     } else if message.contains(protocol::BE_MORE_SPECIFIC) {
         Err((protocol::AGENT_ERROR, message))
@@ -825,6 +826,36 @@ mod tests {
         assert_eq!(failure.0, protocol::AGENT_ERROR);
         assert!(failure.1.ends_with("be more specific"));
         assert_eq!(desk.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn what_a_ref_held_is_gone_when_its_app_quits() {
+        // 검토: 앱이 끝나 ref의 트리를 읽지 못하는 것을 보지 못한 것으로 보아, ref로 사라지기를 기다리면 끝나지 않았다
+        let quit = || -> Result<Value, Failure> {
+            Err((
+                protocol::AGENT_ERROR,
+                format!("e1 is gone: {}; take a new snapshot", protocol::APP_QUIT),
+            ))
+        };
+        let gone = run(
+            &Script::new(vec![tree("- window \"편집기\" [ref=e1]\n"), quit()]),
+            &params(|p| {
+                p.scope = Some("e1".into());
+                p.gone = true;
+            }),
+        )
+        .unwrap();
+        assert_eq!(gone.done, "e1 is gone");
+        let below = run(
+            &Script::new(vec![quit()]),
+            &params(|p| {
+                p.scope = Some("e1".into());
+                p.role = Some("button".into());
+                p.gone = true;
+            }),
+        )
+        .unwrap();
+        assert_eq!(below.done, "button below e1 is gone");
     }
 
     #[test]
