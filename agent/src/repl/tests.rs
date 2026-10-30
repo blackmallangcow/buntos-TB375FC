@@ -392,6 +392,14 @@ fn get_by_role_finds_one_ref_or_says_which() {
     );
     let error = loose.error.unwrap();
     assert!(error.contains("nothing that holds it has a ref"), "{error}");
+    // check()도 같은 알림이다 (검토: ref 없는 로케이터로 "wait needs something to wait for"가 났다)
+    let checked = run(
+        &repls,
+        &desk,
+        "await desktop.app('a').getByText('안내').check()",
+    );
+    let error = checked.error.unwrap();
+    assert!(error.contains("nothing that holds it has a ref"), "{error}");
     let info = run(
         &repls,
         &desk,

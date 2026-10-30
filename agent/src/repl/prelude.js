@@ -710,7 +710,11 @@
     /** 동작할 ref */
     resolve(timeout) {
       if (this.selector.ref) return this.selector.ref;
-      const found = this.find(timeout ?? ACTION_TIMEOUT).found;
+      return this.refOf(this.find(timeout ?? ACTION_TIMEOUT).found);
+    }
+
+    /** 찾은 요소를 누를 ref. 그것도, 그것을 담은 요소도 ref가 없으면 동작할 수 없다 */
+    refOf(found) {
       if (!found.ref) {
         throw new DesktopError(
           `${this[INSPECT]()} matched ${found.line}, and nothing that holds it has a ref; ` +
@@ -813,7 +817,8 @@
       if (element.states.includes('checked') === wanted) {
         return new Action({ done: `it is already ${wanted ? 'checked' : 'unchecked'}`, observed: false }, element.ref);
       }
-      return new Locator(this.scope, null, { ref: element.ref }).click({ settle: o.settle });
+      // ref가 없는 요소는 resolve처럼 알린다 (검토: ref 없는 로케이터를 만들어 "wait needs something to wait for"가 났다)
+      return new Locator(this.scope, null, { ref: this.refOf(element) }).click({ settle: o.settle });
     }
 
     /** 이 요소 아래만 읽은 트리 */
