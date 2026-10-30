@@ -17,6 +17,9 @@ gtk-update-icon-cache --quiet --force /usr/share/icons/hicolor
 # 네트워크는 NetworkManager가 맡는다. 설정 없이 켜져 있던 systemd-networkd는 끈다
 systemctl disable systemd-networkd.service systemd-networkd.socket
 
+# 가상 기기에서는 잠자기를 끈다. 잠든 VM을 깨울 장치가 없다 (buntos-vm-sleep.service)
+systemctl enable buntos-vm-sleep.service
+
 # 에이전트 데몬은 처음 붙을 때 뜬다 (소켓 활성화). 자체 컴포넌트를 빌드하지 않은 이미지에는 없다
 if [[ -e /usr/lib/systemd/user/buntd-agent.socket ]]; then
 	systemctl --global enable buntd-agent.socket

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 가상 기기에서는 잠자기를 끈다. 잠든 VM은 키보드·마우스로 깨울 수 없어 검은 화면에서 멈춘다: QEMU virt
+# (aarch64)에는 S3가 없어 커널이 s2idle로 잠들고, virtio 입력 장치는 깨우는 장치가 아니다. 실기기는 잠들고
+# 깨어나야 하므로 이미지에 늘 두지 않고, VM일 때만 잠자기 설정(/usr/share/buntos/vm-sleep.conf)을 /run에
+# 놓는다. logind는 잠자기를 묻거나 요청받을 때마다 설정을 읽으므로 CanSuspend가 na가 되고, 셸의 로고 메뉴는
+# 잠자기를 흐리게 둔다(shell/src/session.rs). systemctl suspend와 잠자기 키도 거절된다
+
+[Unit]
+Description=Disable sleep in virtual machines
+ConditionVirtualization=vm
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target systemd-logind.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/install -D -m 0644 /usr/share/buntos/vm-sleep.conf /run/systemd/sleep.conf.d/50-buntos-vm.conf
+
+[Install]
+WantedBy=sysinit.target
