@@ -101,6 +101,15 @@ print(f"{(min(xs) + max(xs)) // 2},{(min(ys) + max(ys)) // 2}")
 PY
 }
 
+# Firefox 창 제목이 그 정규식에 맞을 때까지 2초마다 본다. Mac이 바쁘면 빌드 VM 안의 시험 VM에서 Firefox가 새로
+# 연 페이지를 그리기까지 1분 넘게 걸리기도 한다. 90초가 지나면 그대로 두어 뒤의 확인이 실패로 알린다
+wait_firefox() {
+	for _ in $(seq 45); do
+		A apps 2>/dev/null | grep -q -E "window \"$1" && return
+		sleep 2
+	done
+}
+
 # 다시 돌려도 같도록 이 시나리오가 쓰는 앱을 닫고 시작한다
 pkill -f /usr/bin/gnome-calculator
 pkill -f /usr/bin/gnome-text-editor
@@ -200,10 +209,24 @@ fi
 check "주소 막대에 주소가 들어간다" \
 	"$(A snapshot --app firefox-esr -i | grep -m1 "ref=$address\]" | value)" "$url"
 A press Return --settle 2000 >/dev/null
+wait_firefox "e2e canvas"
 check "글 칸이 아닌 곳에는 type이 치지 않고 알린다" "$(A type abc 2>&1 | grep -c 'nothing was typed')" 1
-shot=$(A screenshot --app firefox-esr)
-clicked=$(A click --at "$(png red "$(tail -1 <<<"$shot")")" --app firefox-esr)
-check "스크린샷에서 찾은 캔버스의 빨간 칸을 누른다" "$(grep -c '^+ *- text: "hit"$' <<<"$clicked")" 1
+# 제목이 바뀐 뒤에도 캔버스는 조금 늦게 그려질 수 있어, 빨간 칸이 보일 때까지 다시 찍는다
+point=
+for _ in $(seq 15); do
+	shot=$(A screenshot --app firefox-esr)
+	point=$(png red "$(tail -1 <<<"$shot")" 2>/dev/null) && break
+	sleep 2
+done
+clicked=$(A click --at "$point" --app firefox-esr)
+# 바쁜 VM에서는 Firefox가 접근성 트리를 늦게 고쳐 누르기의 diff에 "hit"이 빠질 수 있다. 그때는 트리를 다시 본다
+hit=$(grep -c '^+ *- text: "hit"$' <<<"$clicked")
+for _ in $(seq 10); do
+	((hit > 0)) && break
+	sleep 2
+	hit=$(A snapshot --app firefox-esr | grep -c -m1 'text: "hit"')
+done
+check "스크린샷에서 찾은 캔버스의 빨간 칸을 누른다" "$hit" 1
 
 # 긴 웹 페이지: 문단의 글은 링크 사이에 차례대로 나오고(Firefox가 자식 자리에 둔 U+FFFC 없이), 화면 밖 단추는
 # [offscreen]으로 나온다. 휠로 내리고, 화면 밖 단추를 누르면 먼저 보이게 스크롤해 누른다
@@ -225,6 +248,7 @@ chmod 644 "$long"
 A press ctrl+a --ref "$address" >/dev/null
 A type "file://$long" --ref "$address" >/dev/null
 A press Return --settle 2000 >/dev/null
+wait_firefox top
 text=$(A snapshot --app firefox-esr)
 check "문단의 글이 링크 사이에 차례대로 나온다" \
 	"$(grep -A2 -- '- text: "첫 문단: 오늘 서울은"' <<<"$text" | grep -c -e 'link "흐림"' -e 'text: "이고 밤부터 비가 옵니다."')" 2
@@ -232,8 +256,10 @@ check "글에 자식 자리 표시(U+FFFC)가 없다" "$(grep -c $'\xef\xbf\xbc'
 bottom=$(A snapshot --app firefox-esr -i | grep -m1 '맨 아래 단추.*\[offscreen\]' | grep -o 'ref=e[0-9]*' | cut -d= -f2)
 check "화면 밖 단추는 [offscreen]으로 나온다" "$((${#bottom} > 0))" 1
 A scroll down 5 --app firefox-esr >/dev/null
+wait_firefox "y=[1-9]"
 check "휠로 페이지를 내린다" "$(A snapshot --app firefox-esr | grep -c -m1 'window "y=[1-9]')" 1
 check "화면 밖 단추를 누르면 먼저 보이게 스크롤한다" "$(A click "$bottom" | grep -c 'scrolled it into view')" 1
+wait_firefox bottom-clicked
 check "그 단추가 눌린다" "$(A snapshot --app firefox-esr | grep -c -m1 'window "bottom-clicked')" 1
 pkill -f /usr/lib/firefox-esr/firefox-esr
 sleep 1
