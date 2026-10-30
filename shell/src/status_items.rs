@@ -154,6 +154,10 @@ fn register_watcher(inner: &Rc<Inner>, connection: &gio::DBusConnection) {
 }
 
 fn emit(connection: &gio::DBusConnection, signal: &str, args: Option<&glib::Variant>) {
+    // 버스가 끊겨 항목을 모두 치울 때는 알릴 곳이 없다
+    if connection.is_closed() {
+        return;
+    }
     if let Err(err) = connection.emit_signal(None, WATCHER_PATH, WATCHER_NAME, signal, args) {
         eprintln!("bunt-shell: {signal}: {err}");
     }
@@ -197,22 +201,22 @@ fn add_item(inner: &Rc<Inner>, connection: &gio::DBusConnection, address: Addres
             Some(&(address.id(),).to_variant()),
         );
 
-        // 앱이 끝나면 항목을 치운다
+        // 앱이 끝나면 항목을 치운다. gio-rs의 이름 감시를 그대로 쓰면 버스 데몬이 갑자기 끝날 때 GLib이
+        // 사라짐 처리기에 준 NULL 연결을 unwrap해 셸이 죽었다. 그 일을 막는 dbus::watch_name으로 옮겼다
         let weak = Rc::downgrade(&inner);
-        let gone = address.clone();
-        let watcher = gio::bus_watch_name_on_connection(
+        let (gone, bus) = (address.clone(), connection.clone());
+        let watch = crate::dbus::watch_name(
             &connection,
             &address.bus,
-            gio::BusNameWatcherFlags::NONE,
-            |_, _, _| {},
-            move |connection, _| {
+            |_| {},
+            move || {
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
                 if let Some(widget) = inner.items.borrow_mut().remove(&gone) {
                     inner.container.remove(&widget);
                     emit(
-                        &connection,
+                        &bus,
                         "StatusNotifierItemUnregistered",
                         Some(&(gone.id(),).to_variant()),
                     );
@@ -220,13 +224,8 @@ fn add_item(inner: &Rc<Inner>, connection: &gio::DBusConnection, address: Addres
             },
         );
         // 이름 감시는 항목이 사라질 때 함께 멈춘다
-        let stop = std::cell::Cell::new(Some(watcher));
         if let Some(widget) = inner.items.borrow().get(&address) {
-            widget.connect_destroy(move |_| {
-                if let Some(watcher) = stop.take() {
-                    gio::bus_unwatch_name(watcher);
-                }
-            });
+            widget.connect_destroy(move |_| watch.stop());
         }
     });
 }

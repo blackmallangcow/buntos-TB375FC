@@ -717,12 +717,13 @@ pub fn start(app: &gtk::Application, tr: &Rc<Translations>) {
             return;
         }
         let (appeared, vanished) = (agent.clone(), agent.clone());
-        // 감시는 셸이 끝날 때까지 둔다
-        let _watch = gio::bus_watch_name_on_connection(
+        // 감시는 셸이 끝날 때까지 둔다. gio-rs의 이름 감시를 그대로 쓰면 버스 데몬이 갑자기 끝날 때 GLib이
+        // 사라짐 처리기에 준 NULL 연결을 unwrap해 셸이 죽었다. 그 일을 막는 dbus::watch_name_owner로 옮겼다
+        crate::dbus::watch_name_owner(
             &bus,
             NM_NAME,
             gio::BusNameWatcherFlags::NONE,
-            move |bus, _, owner| {
+            move |bus, owner| {
                 appeared.manager.replace(Some(owner.to_owned()));
                 glib::spawn_future_local(async move {
                     match register(&bus).await {
@@ -733,7 +734,7 @@ pub fn start(app: &gtk::Application, tr: &Rc<Translations>) {
                     }
                 });
             },
-            move |_, _| {
+            move || {
                 REGISTERED.with(|registered| registered.set(false));
                 vanished.manager.replace(None);
                 vanished.forget_all();

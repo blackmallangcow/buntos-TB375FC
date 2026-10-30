@@ -53,20 +53,40 @@ pub fn watch(
 /// vanished_closure). GLib은 버스에 붙지 못했을 때(gio::bus_watch_name)와 지켜보던 연결이 닫혔을 때
 /// (버스 데몬이 끝나거나 다시 시작할 때) NULL을 준다. 앞의 것은 연결을 먼저 얻어 피하고, 뒤의 것은
 /// 연결이 닫히면 GLib보다 먼저 감시를 멈춰 피한다. 공유 버스 연결은 닫히면 GLib이 셸을 SIGTERM으로
-/// 끝낸다(exit-on-close).
+/// 끝낸다(exit-on-close). 셸에서는 gio-rs의 이름 감시를 직접 쓰지 않고 이것이나 watch_name_owner를 쓴다.
+/// 돌려준 감시는 놓아도 멈추지 않는다(stop으로 멈춘다)
 pub fn watch_name(
     bus: &gio::DBusConnection,
     name: &str,
     appeared: impl Fn(gio::DBusConnection) + 'static,
     vanished: impl Fn() + 'static,
-) {
+) -> NameWatch {
+    // 시스템 서비스 에이전트가 쓰도록 감시 방식과 이름 주인을 받는 watch_name_owner로 옮겼다
+    watch_name_owner(
+        bus,
+        name,
+        gio::BusNameWatcherFlags::NONE,
+        move |connection, _| appeared(connection),
+        vanished,
+    )
+}
+
+/// watch_name과 같되 감시 방식(AUTO_START 등)을 고르고, appeared에 이름을 가진 연결의 고유 이름(owner)도
+/// 준다. 시스템 서비스 에이전트(polkit, NetworkManager, BlueZ)는 이 이름으로 부른 쪽을 확인한다
+pub fn watch_name_owner(
+    bus: &gio::DBusConnection,
+    name: &str,
+    flags: gio::BusNameWatcherFlags,
+    appeared: impl Fn(gio::DBusConnection, &str) + 'static,
+    vanished: impl Fn() + 'static,
+) -> NameWatch {
     let vanished = Rc::new(vanished);
-    let watcher = Rc::new(Cell::new(None));
-    let (stop, on_close) = (watcher.clone(), vanished.clone());
+    let unwatch: Rc<Unwatch> = Rc::default();
+    let (stop, on_close) = (unwatch.clone(), vanished.clone());
     // 신호 처리기는 단 순서대로 불리므로, GLib이 감시를 시작하며 다는 closed 처리기보다 먼저 단다
-    bus.connect_local("closed", false, move |_| {
-        if let Some(id) = stop.take() {
-            gio::bus_unwatch_name(id);
+    let closed = bus.connect_local("closed", false, move |_| {
+        if let Some(unwatch) = stop.take() {
+            unwatch();
             on_close();
         }
         None
@@ -74,11 +94,40 @@ pub fn watch_name(
     let id = gio::bus_watch_name_on_connection(
         bus,
         name,
-        gio::BusNameWatcherFlags::NONE,
-        move |connection, _, _| appeared(connection),
+        flags,
+        move |connection, _, owner| appeared(connection, owner),
         move |_, _| vanished(),
     );
-    watcher.set(Some(id));
+    unwatch.set(Some(Box::new(move || gio::bus_unwatch_name(id))));
+    NameWatch {
+        bus: bus.clone(),
+        unwatch,
+        closed: Cell::new(Some(closed)),
+    }
+}
+
+/// 이름 감시를 멈추는 일. 멈췄으면 None이다. gio의 이름 감시 번호(gio::dbus::WatcherId)는 밖에서 형
+/// 이름으로 쓸 수 없어(gio::WatcherId는 다른 형이다) 그 번호를 쥔 닫힘으로 갖고 있는다
+type Unwatch = Cell<Option<Box<dyn FnOnce()>>>;
+
+/// watch_name, watch_name_owner의 감시
+pub struct NameWatch {
+    bus: gio::DBusConnection,
+    unwatch: Rc<Unwatch>,
+    /// 연결이 닫힐 때 감시를 멈추는 처리기
+    closed: Cell<Option<glib::SignalHandlerId>>,
+}
+
+impl NameWatch {
+    /// 감시를 멈춘다. 그 뒤로는 appeared도 vanished도 부르지 않는다. 여러 번 불러도 된다
+    pub fn stop(&self) {
+        if let Some(unwatch) = self.unwatch.take() {
+            unwatch();
+        }
+        if let Some(handler) = self.closed.take() {
+            self.bus.disconnect(handler);
+        }
+    }
 }
 
 /// 캐시된 속성 값
@@ -271,6 +320,52 @@ mod tests {
                 assert!(watcher.is_closed());
                 while context.iteration(false) {}
                 assert_eq!(events.borrow().as_slice(), all);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn name_watches_give_the_owner_and_stop_when_asked() {
+        let Some(mut bus) = Bus::start() else {
+            eprintln!("dbus-daemon is not installed; skipping the name watch test");
+            return;
+        };
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let (watcher, service) = (bus.connect(), bus.connect());
+                let owner = service.unique_name().expect("a unique name").to_string();
+                let events = Rc::new(RefCell::new(Vec::<String>::new()));
+                let (appeared, vanished) = (events.clone(), events.clone());
+                let watch = watch_name_owner(
+                    &watcher,
+                    NAME,
+                    gio::BusNameWatcherFlags::NONE,
+                    move |_, owner| appeared.borrow_mut().push(format!("appeared {owner}")),
+                    move || vanished.borrow_mut().push("vanished".into()),
+                );
+                let pump_until = |done: &dyn Fn() -> bool| {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while !done() {
+                        assert!(Instant::now() < deadline, "{:?}", events.borrow());
+                        if !context.iteration(false) {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                };
+                pump_until(&|| events.borrow().len() == 1);
+                call_bus(&service, "RequestName", (NAME, 0u32).to_variant());
+                pump_until(&|| events.borrow().len() == 2);
+                let expected = ["vanished".to_owned(), format!("appeared {owner}")];
+                assert_eq!(events.borrow().as_slice(), expected);
+                // 앱 항목이 사라지면 감시를 멈춘다. 그 뒤로는 서비스가 끝나도, 버스 데몬이 끝나도 부르지 않는다
+                watch.stop();
+                watch.stop();
+                call_bus(&service, "ReleaseName", (NAME,).to_variant());
+                bus.kill();
+                pump_until(&|| watcher.is_closed());
+                while context.iteration(false) {}
+                assert_eq!(events.borrow().as_slice(), expected);
             })
             .unwrap();
     }
