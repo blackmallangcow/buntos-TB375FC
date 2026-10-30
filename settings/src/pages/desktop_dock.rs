@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 데스크탑 및 Dock (macOS 26과 같은 순서): Dock 크기, 투명도, 자동으로 Dock 가리기, 실행 중
-//! 표시, 기본 웹 브라우저. bunt-shell이 같은 설정(org.buntos.shell)을 바로 따른다. 투명도는
-//! macOS에 없고 buntOS에서 더했다. 자동으로 Dock 가리기는 macOS의 켜고 끄는 "자동으로 Dock
-//! 가리기와 보기" 대신 숨는 때를 고른다. 기본 웹 브라우저는 기본 앱 페이지와 같은 값이다
+//! 데스크탑 및 Dock (macOS 26과 같은 순서): Dock 크기, 투명도, 최소화된 윈도우 애니메이션,
+//! 자동으로 Dock 가리기, 실행 중 표시, 기본 웹 브라우저. bunt-shell이 같은 설정(org.buntos.shell)을
+//! 바로 따른다(최소화 효과는 셸이 컴포지터에 알린다). 투명도는 macOS에 없고 buntOS에서 더했다.
+//! 자동으로 Dock 가리기는 macOS의 켜고 끄는 "자동으로 Dock 가리기와 보기" 대신 숨는 때를 고른다.
+//! 기본 웹 브라우저는 기본 앱 페이지와 같은 값이다
 
 use std::rc::Rc;
 
@@ -25,6 +26,9 @@ const AUTOHIDE_LABELS: [&str; 3] = [
 ];
 /// dock-icon-size의 범위 (셸 스키마)
 const SIZE_RANGE: (f64, f64) = (32.0, 96.0);
+/// 드롭다운 항목 순서대로의 minimize-effect 값 (지니 효과, 크기 조절 효과. macOS의 차례)
+const MINIMIZE_EFFECTS: [&str; 2] = ["genie", "scale"];
+const MINIMIZE_LABELS: [&str; 2] = ["desktop-dock-minimize-genie", "desktop-dock-minimize-scale"];
 
 pub fn build(context: &Rc<Context>) -> gtk::Widget {
     let tr = &context.tr;
@@ -60,6 +64,14 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
                 &transparency,
                 &tr.get("desktop-dock-opaque"),
                 &tr.get("desktop-dock-clear"),
+            ));
+            let labels = MINIMIZE_LABELS.map(|id| tr.get(id));
+            let effect = gtk::DropDown::from_strings(&labels.each_ref().map(String::as_str));
+            effect.set_valign(gtk::Align::Center);
+            bind_choice(&settings, "minimize-effect", &effect, &MINIMIZE_EFFECTS);
+            dock.append(&widgets::row(
+                &tr.get("desktop-dock-minimize-effect"),
+                &effect,
             ));
             let labels = AUTOHIDE_LABELS.map(|id| tr.get(id));
             let autohide = gtk::DropDown::from_strings(&labels.each_ref().map(String::as_str));
@@ -98,4 +110,32 @@ fn slider((low, high): (f64, f64), step: f64) -> gtk::Scale {
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, low, high, step);
     scale.set_draw_value(false);
     scale
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 드롭다운이 고르는 값이 셸 스키마의 선택지에 있다 (없으면 GSettings가 값을 받지 않는다)
+    #[test]
+    fn choices_match_the_shell_schema() {
+        let schema = include_str!("../../../shell/data/org.buntos.shell.gschema.xml");
+        for (key, values) in [
+            ("dock-autohide", &AUTOHIDE[..]),
+            ("minimize-effect", &MINIMIZE_EFFECTS[..]),
+        ] {
+            let start = schema
+                .find(&format!("<key name=\"{key}\""))
+                .unwrap_or_else(|| panic!("{key} is not in the schema"));
+            let end = start + schema[start..].find("</key>").unwrap();
+            for value in values {
+                assert!(
+                    schema[start..end].contains(&format!("<choice value=\"{value}\"/>")),
+                    "{key}: {value}"
+                );
+            }
+        }
+        assert_eq!(MINIMIZE_EFFECTS.len(), MINIMIZE_LABELS.len());
+        assert_eq!(AUTOHIDE.len(), AUTOHIDE_LABELS.len());
+    }
 }
