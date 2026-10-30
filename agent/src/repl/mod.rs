@@ -285,10 +285,10 @@ impl Context {
         }
     }
 
-    /// 워커를 빌린다. 앞 호출이 쓰고 있으면 `deadline`까지 기다리고, 그때까지 돌려놓지 않으면 None
+    /// 워커를 빌린다. 부르는 호출은 이미 기다리는 수에 들어 있다(Repls::context). 앞 호출이 쓰고 있으면 `deadline`까지
+    /// 기다리고, 그때까지 돌려놓지 않으면 None
     fn lease(&self, deadline: Instant) -> Option<Lease<'_>> {
         let mut slot = lock(&self.slot);
-        slot.waiting += 1;
         while slot.busy {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -460,32 +460,16 @@ impl Repls {
     }
 
     /// 열쇠의 REPL. 없으면 자리를 만든다: 오래 쓰지 않은 REPL은 끝내고, 자리가 모자라면 쉬고 있는 REPL 가운데
-    /// 가장 오래 쓰지 않은 것(클라이언트가 너무 많이 띄웠으면 그 클라이언트의 것)을 끝낸다
+    /// 가장 오래 쓰지 않은 것(클라이언트가 너무 많이 띄웠으면 그 클라이언트의 것)을 끝낸다. 부른 호출은 그 REPL을
+    /// 빌리기를 기다리는 것으로 센다: 목록의 자물쇠를 쥔 채 세므로, 빌리기 전에 다른 호출이 이 REPL을 끝내지 못한다
     fn context(&self, key: &Key) -> Result<Arc<Context>, Failure> {
         let mut contexts = lock(&self.contexts);
         contexts.retain(|_, context| !context.end_if_idle(IDLE));
-        if let Some(context) = contexts.get(key) {
-            return Ok(context.clone());
-        }
-        let mine = contexts
-            .keys()
-            .filter(|known| known.client == key.client)
-            .count();
-        if mine >= PER_CLIENT {
-            evict(&mut contexts, |known| known.client == key.client).ok_or_else(|| {
-                agent_error(format!(
-                    "this AI already runs {PER_CLIENT} REPL sessions and all are busy; wait for one"
-                ))
-            })?;
-        } else if contexts.len() >= TOTAL {
-            evict(&mut contexts, |_| true).ok_or_else(|| {
-                agent_error(format!(
-                    "{TOTAL} REPL sessions are busy; try again when one finishes"
-                ))
-            })?;
-        }
-        let context = Arc::new(Context::new());
-        contexts.insert(key.clone(), context.clone());
+        let context = match contexts.get(key) {
+            Some(context) => context.clone(),
+            None => make_room(&mut contexts, key)?,
+        };
+        lock(&context.slot).waiting += 1;
         Ok(context)
     }
 
@@ -513,6 +497,33 @@ impl Repls {
             })?;
         Ok(())
     }
+}
+
+/// 새 REPL의 자리를 만들어 넣는다
+fn make_room(
+    contexts: &mut HashMap<Key, Arc<Context>>,
+    key: &Key,
+) -> Result<Arc<Context>, Failure> {
+    let mine = contexts
+        .keys()
+        .filter(|known| known.client == key.client)
+        .count();
+    if mine >= PER_CLIENT {
+        evict(contexts, |known| known.client == key.client).ok_or_else(|| {
+            agent_error(format!(
+                "this AI already runs {PER_CLIENT} REPL sessions and all are busy; wait for one"
+            ))
+        })?;
+    } else if contexts.len() >= TOTAL {
+        evict(contexts, |_| true).ok_or_else(|| {
+            agent_error(format!(
+                "{TOTAL} REPL sessions are busy; try again when one finishes"
+            ))
+        })?;
+    }
+    let context = Arc::new(Context::new());
+    contexts.insert(key.clone(), context.clone());
+    Ok(context)
 }
 
 /// 고른 것 가운데 가장 오래 쓰지 않은, 쉬고 있는 REPL을 끝내고 뺀다
