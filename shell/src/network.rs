@@ -8,7 +8,8 @@
 //! (secret_agent.rs)에게 묻는다. 사용자 이름이 필요한 회사·학교 네트워크(802.1X)나 에이전트가 없을 때는
 //! 시스템 설정의 Wi-Fi 페이지를 연다. NetworkManager가 없으면 항목을 숨긴다.
 //! Wi-Fi 장치가 여럿이면 시스템 설정처럼 핫스팟으로 쓰지 않는 장치를 쓰고, 이 기기의 핫스팟 연결은
-//! 알고 있는 네트워크에 넣지 않는다.
+//! 알고 있는 네트워크에 넣지 않는다. 연결된 Wi-Fi는 유선이 함께 연결돼 있어도 맨 위에 보인다(macOS와
+//! 같다). 메뉴 막대 아이콘은 주 연결을 따른다.
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
@@ -37,6 +38,8 @@ const WIRELESS: &str = "802-11-wireless";
 const DEVICE_TYPE_WIFI: u32 = 2;
 /// NM80211Mode: 접속 지점(이 기기가 여는 핫스팟)
 const MODE_AP: u32 = 3;
+/// NMDeviceState: 연결을 마쳤다
+const DEVICE_ACTIVATED: u32 = 100;
 /// NM80211ApSecurityFlags: 802.1X 키 관리 (회사·학교 네트워크)
 const KEY_MGMT_802_1X: u32 = 0x200;
 
@@ -149,6 +152,21 @@ fn choose_wifi_device(devices: &[(String, bool)]) -> Option<&str> {
         .map(|(path, _)| path.as_str())
 }
 
+/// 연결된 Wi-Fi의 접속 지점: Wi-Fi 장치의 상태(NMDeviceState), 방식(NM80211Mode), 쓰는 접속
+/// 지점(ActiveAccessPoint)으로 고른다. 연결을 마쳤고 핫스팟이 아니면 그 접속 지점이다. 주 연결이 무엇인지
+/// (유선이 함께 연결돼 있는지)는 보지 않는다
+fn connected_access_point(
+    state: Option<u32>,
+    mode: Option<u32>,
+    active: Option<String>,
+) -> Option<String> {
+    if state != Some(DEVICE_ACTIVATED) || mode == Some(MODE_AP) {
+        return None;
+    }
+    // 접속 지점이 없으면 NetworkManager는 "/"를 준다
+    active.filter(|path| path != "/")
+}
+
 /// 저장된 연결(GetSettings)이 알고 있는 Wi-Fi 네트워크면 그 이름. 이 기기가 여는 핫스팟 연결(mode
 /// "ap")은 알고 있는 네트워크가 아니다(시스템 설정의 Wi-Fi 페이지와 같다)
 fn known_ssid(settings: &HashMap<String, HashMap<String, glib::Variant>>) -> Option<String> {
@@ -177,10 +195,13 @@ pub struct Network(Rc<Inner>);
 
 struct Inner {
     manager: RefCell<Option<gio::DBusProxy>>,
-    /// 주 연결이 Wi-Fi일 때 그 접속 지점. 신호 세기가 바뀌면 알려 준다
+    /// 메뉴가 쓰는 Wi-Fi 장치가 연결된 접속 지점(connected_access_point). 유선이 주 연결이어도 따른다.
+    /// 신호 세기가 바뀌면 알려 준다
     access_point: RefCell<Option<gio::DBusProxy>>,
     /// 메뉴가 쓰는 Wi-Fi 장치의 경로(choose_wifi_device). 없으면 None
     wifi_device: RefCell<Option<String>>,
+    /// 그 장치의 속성 변경 구독(watch_device). 장치가 바뀌면 다시 구독한다
+    device_changes: RefCell<Option<gio::SignalSubscription>>,
     listeners: Listeners<Network>,
 }
 
@@ -190,6 +211,7 @@ impl Network {
             manager: RefCell::default(),
             access_point: RefCell::default(),
             wifi_device: RefCell::default(),
+            device_changes: RefCell::default(),
             listeners: RefCell::default(),
         }));
         let weak = Rc::downgrade(&network.0);
@@ -204,8 +226,8 @@ impl Network {
                 };
                 inner.manager.replace(Some(proxy.clone()));
                 let network = Network(inner);
-                network.follow_access_point();
-                network.find_wifi_device();
+                // 접속 지점은 고른 장치의 것이므로 장치를 먼저 고른다
+                network.follow_wifi();
                 network.notify();
             },
         );
@@ -266,86 +288,137 @@ impl Network {
         }
     }
 
-    /// 주 연결(Wi-Fi)이 쓰는 접속 지점을 찾아 신호 세기를 받는다
-    fn follow_access_point(&self) {
-        let Some(manager) = self.manager() else {
-            self.0.access_point.replace(None);
-            return;
-        };
-        let kind: String = dbus::property(&manager, "PrimaryConnectionType").unwrap_or_default();
-        let primary: Option<glib::variant::ObjectPath> =
-            dbus::property(&manager, "PrimaryConnection");
-        let Some(primary) = primary.filter(|_| kind == WIRELESS) else {
-            self.0.access_point.replace(None);
-            return;
-        };
-        let connection = manager.connection();
-        let weak = Rc::downgrade(&self.0);
-        glib::spawn_future_local(async move {
-            let Some(ap_path) = object_property(
-                &connection,
-                primary.as_str(),
-                ACTIVE_INTERFACE,
-                "SpecificObject",
-            )
-            .await
-            else {
-                return;
-            };
-            let Ok(access_point) = gio::DBusProxy::new_future(
-                &connection,
-                gio::DBusProxyFlags::NONE,
-                None,
-                Some(NM_NAME),
-                &ap_path,
-                ACCESS_POINT_INTERFACE,
-            )
-            .await
-            else {
-                return;
-            };
-            let Some(inner) = weak.upgrade() else {
-                return;
-            };
-            let same = inner
-                .access_point
-                .borrow()
-                .as_ref()
-                .is_some_and(|current| current.object_path() == access_point.object_path());
-            if same {
-                return;
-            }
-            let weak = Rc::downgrade(&inner);
-            access_point.connect_local("g-properties-changed", false, move |_| {
-                if let Some(inner) = weak.upgrade() {
-                    Network(inner).notify();
-                }
-                None
-            });
-            inner.access_point.replace(Some(access_point));
-            Network(inner).notify();
-        });
-    }
-
-    /// NetworkManager가 바뀌면 메뉴가 쓸 Wi-Fi 장치를 다시 고른다
-    fn find_wifi_device(&self) {
+    /// NetworkManager가 바뀌면 메뉴가 쓸 Wi-Fi 장치와 그 장치가 연결된 접속 지점을 다시 읽는다
+    fn follow_wifi(&self) {
         let weak = Rc::downgrade(&self.0);
         glib::spawn_future_local(async move {
             if let Some(inner) = weak.upgrade() {
-                Network(inner).refresh_wifi_device().await;
+                let network = Network(inner);
+                network.refresh_wifi_device().await;
+                network.refresh_access_point().await;
             }
         });
     }
 
-    /// 메뉴가 쓸 Wi-Fi 장치를 고르고, 바뀌었으면 알린다. 예전에는 첫 Wi-Fi 장치를 써서, 장치가 여럿이고
-    /// 첫 장치가 핫스팟이면 그 장치로 연결하려다 핫스팟을 끊었다. 이제 핫스팟이 아닌 장치를 고른다
+    /// 메뉴가 쓸 Wi-Fi 장치를 고르고, 바뀌었으면 그 장치를 지켜보고 알린다. 예전에는 첫 Wi-Fi 장치를 써서,
+    /// 장치가 여럿이고 첫 장치가 핫스팟이면 그 장치로 연결하려다 핫스팟을 끊었다. 이제 핫스팟이 아닌 장치를
+    /// 고른다
     async fn refresh_wifi_device(&self) {
-        let found = match self.manager() {
-            Some(manager) => wifi_device(&manager).await,
+        let manager = self.manager();
+        let found = match &manager {
+            Some(manager) => wifi_device(manager).await,
             None => None,
         };
-        if *self.0.wifi_device.borrow() != found {
-            self.0.wifi_device.replace(found);
+        if *self.0.wifi_device.borrow() == found {
+            return;
+        }
+        let changes = manager
+            .zip(found.as_deref())
+            .map(|(manager, device)| self.watch_device(&manager.connection(), device));
+        self.0.device_changes.replace(changes);
+        self.0.wifi_device.replace(found);
+        self.notify();
+    }
+
+    /// 장치의 연결 상태, 방식(핫스팟), 접속 지점이 바뀌면 연결된 접속 지점을 다시 읽는다. 유선이 주 연결이면
+    /// Wi-Fi가 연결되거나 끊겨도 NetworkManager 전체의 속성은 그대로일 수 있어 장치를 따로 지켜본다
+    fn watch_device(
+        &self,
+        connection: &gio::DBusConnection,
+        device: &str,
+    ) -> gio::SignalSubscription {
+        let weak = Rc::downgrade(&self.0);
+        connection.subscribe_to_signal(
+            Some(NM_NAME),
+            Some("org.freedesktop.DBus.Properties"),
+            Some("PropertiesChanged"),
+            Some(device),
+            None,
+            gio::DBusSignalFlags::NONE,
+            move |signal| {
+                let changed: HashMap<String, glib::Variant> = signal
+                    .parameters
+                    .try_child_value(1)
+                    .and_then(|changed| changed.get())
+                    .unwrap_or_default();
+                // 검색 시각(LastScan) 같은 잦은 변경은 건너뛴다
+                let relevant = ["State", "Mode", "ActiveAccessPoint"]
+                    .iter()
+                    .any(|name| changed.contains_key(*name));
+                if relevant && let Some(inner) = weak.upgrade() {
+                    glib::spawn_future_local(async move {
+                        Network(inner).refresh_access_point().await;
+                    });
+                }
+            },
+        )
+    }
+
+    /// 메뉴가 쓰는 Wi-Fi 장치가 연결된 접속 지점을 따라가 이름과 신호 세기를 받는다. 예전에는 주 연결이
+    /// Wi-Fi일 때만 따라가, 유선이 함께 연결돼 있으면 연결된 Wi-Fi가 메뉴 맨 위에 오지 않고 알고 있는
+    /// 네트워크 사이에 섞였다(macOS는 연결된 Wi-Fi를 늘 위에 보인다). 메뉴 막대 아이콘은 그대로 주 연결을 따른다
+    async fn refresh_access_point(&self) {
+        let device = self.0.wifi_device.borrow().clone();
+        let (Some(manager), Some(device)) = (self.manager(), device) else {
+            self.clear_access_point();
+            return;
+        };
+        let connection = manager.connection();
+        let state = property_value(&connection, &device, DEVICE_INTERFACE, "State")
+            .await
+            .and_then(|value| value.get::<u32>());
+        let mode = property_value(&connection, &device, WIRELESS_INTERFACE, "Mode")
+            .await
+            .and_then(|value| value.get::<u32>());
+        let active = object_property(
+            &connection,
+            &device,
+            WIRELESS_INTERFACE,
+            "ActiveAccessPoint",
+        )
+        .await;
+        // 읽는 사이에 장치를 다시 골랐으면 그쪽이 읽는다
+        if self.0.wifi_device.borrow().as_deref() != Some(device.as_str()) {
+            return;
+        }
+        let Some(path) = connected_access_point(state, mode, active) else {
+            self.clear_access_point();
+            return;
+        };
+        let same = self
+            .0
+            .access_point
+            .borrow()
+            .as_ref()
+            .is_some_and(|current| current.object_path() == path.as_str());
+        if same {
+            return;
+        }
+        let Ok(access_point) = gio::DBusProxy::new_future(
+            &connection,
+            gio::DBusProxyFlags::NONE,
+            None,
+            Some(NM_NAME),
+            &path,
+            ACCESS_POINT_INTERFACE,
+        )
+        .await
+        else {
+            return;
+        };
+        let weak = Rc::downgrade(&self.0);
+        access_point.connect_local("g-properties-changed", false, move |_| {
+            if let Some(inner) = weak.upgrade() {
+                Network(inner).notify();
+            }
+            None
+        });
+        self.0.access_point.replace(Some(access_point));
+        self.notify();
+    }
+
+    fn clear_access_point(&self) {
+        if self.0.access_point.replace(None).is_some() {
             self.notify();
         }
     }
@@ -722,8 +795,10 @@ fn fill_menu(menu: &Menu, tr: &Rc<Translations>, network: &Network) {
         let (menu, tr, network) = (menu.clone(), tr.clone(), network.clone());
         glib::spawn_future_local(async move {
             // 열 때마다 장치를 다시 고른다. 핫스팟을 막 켠 장치의 Mode는 NetworkManager의 활성 연결
-            // 목록이 바뀐 뒤에 바뀌어, 그 알림으로 고른 장치가 핫스팟일 수 있다
+            // 목록이 바뀐 뒤에 바뀌어, 그 알림으로 고른 장치가 핫스팟일 수 있다. 맨 위에 둘 연결된
+            // 네트워크도 그 장치에서 다시 읽는다
             network.refresh_wifi_device().await;
+            network.refresh_access_point().await;
             network.request_scan();
             let points = network.access_points().await;
             let saved = network.saved_networks().await;
@@ -743,6 +818,25 @@ fn fill_menu(menu: &Menu, tr: &Rc<Translations>, network: &Network) {
         menu.separator();
         menu.action(&tr.get("wifi-settings"), || open_settings(Some("wifi")));
     }
+}
+
+/// 메뉴의 네트워크 차례: 연결된 네트워크(맨 위), 알고 있는 네트워크, 기타 네트워크. 연결된 네트워크는
+/// 알고 있는 네트워크여도 아래에 다시 넣지 않는다
+fn arrange<'a>(
+    points: &'a [AccessPoint],
+    saved: &HashMap<String, String>,
+    current: Option<&str>,
+) -> (
+    Option<&'a AccessPoint>,
+    Vec<&'a AccessPoint>,
+    Vec<&'a AccessPoint>,
+) {
+    let connected = current.and_then(|ssid| points.iter().find(|point| point.ssid == ssid));
+    let (known, unknown) = points
+        .iter()
+        .filter(|point| Some(point.ssid.as_str()) != current)
+        .partition(|point| saved.contains_key(&point.ssid));
+    (connected, known, unknown)
 }
 
 fn fill_networks(
@@ -795,14 +889,10 @@ fn fill_networks(
         list.append(&row);
     };
 
-    if let Some(point) = current.and_then(|ssid| points.iter().find(|p| p.ssid == ssid)) {
+    let (connected, known, unknown) = arrange(points, saved, current);
+    if let Some(point) = connected {
         add(point, true);
     }
-    let others = points
-        .iter()
-        .filter(|point| Some(point.ssid.as_str()) != current);
-    let (known, unknown): (Vec<&AccessPoint>, Vec<&AccessPoint>) =
-        others.partition(|point| saved.contains_key(&point.ssid));
     if !known.is_empty() {
         section(&tr.get("wifi-known"));
         for point in known.iter().take(MAX_NETWORKS) {
@@ -927,6 +1017,56 @@ mod tests {
             known_ssid(&saved(&[("mode", "infrastructure".to_variant())])),
             None
         );
+    }
+
+    #[test]
+    fn the_connected_wifi_is_followed_whatever_the_primary_connection() {
+        let ap = || Some("/org/freedesktop/NetworkManager/AccessPoint/3".to_owned());
+        // 연결을 마친 장치의 접속 지점. 유선이 주 연결이어도 같다(주 연결은 보지 않는다)
+        assert_eq!(
+            connected_access_point(Some(DEVICE_ACTIVATED), Some(2), ap()),
+            ap()
+        );
+        // 연결 중, 끊김, 핫스팟, 접속 지점 없음("/")
+        assert_eq!(connected_access_point(Some(70), Some(2), ap()), None);
+        assert_eq!(connected_access_point(Some(30), Some(2), None), None);
+        assert_eq!(
+            connected_access_point(Some(DEVICE_ACTIVATED), Some(MODE_AP), ap()),
+            None
+        );
+        assert_eq!(
+            connected_access_point(Some(DEVICE_ACTIVATED), Some(2), Some("/".into())),
+            None
+        );
+        assert_eq!(connected_access_point(None, None, ap()), None);
+    }
+
+    #[test]
+    fn the_connected_network_comes_first_and_only_once() {
+        let named = |ssid: &str, strength| AccessPoint {
+            path: format!("/ap/{ssid}"),
+            ssid: ssid.into(),
+            strength,
+            secure: true,
+            enterprise: false,
+        };
+        // 신호가 센 순서. 연결된 Office는 Home보다 약하다
+        let points = [named("Cafe", 90), named("Home", 80), named("Office", 40)];
+        let saved = HashMap::from([
+            ("Home".to_owned(), "/settings/1".to_owned()),
+            ("Office".to_owned(), "/settings/2".to_owned()),
+        ]);
+        let ssids = |points: Vec<&AccessPoint>| -> Vec<String> {
+            points.into_iter().map(|point| point.ssid.clone()).collect()
+        };
+        let (connected, known, unknown) = arrange(&points, &saved, Some("Office"));
+        assert_eq!(connected.map(|point| point.ssid.as_str()), Some("Office"));
+        assert_eq!(ssids(known), ["Home"]);
+        assert_eq!(ssids(unknown), ["Cafe"]);
+        // 연결된 Wi-Fi가 없으면(꺼짐, 유선만) 알고 있는 네트워크 사이에 둔다
+        let (connected, known, _) = arrange(&points, &saved, None);
+        assert!(connected.is_none());
+        assert_eq!(ssids(known), ["Home", "Office"]);
     }
 
     #[test]
