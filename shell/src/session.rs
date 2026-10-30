@@ -9,6 +9,7 @@
 //! - 응용 프로그램 강제 종료 창(⌥⌘⎋, "강제 종료…"): 창을 가진 앱과 응답 여부(GetApps)를 보이고, 고른 앱을 확인한
 //!   뒤 끝낸다(ForceQuit, SIGKILL). 열려 있는 동안 목록을 다시 읽어 응답 없는 앱을 빨간 글로 알린다.
 //! - 화면 잠금은 컴포지터(Lock), 잠자기는 logind(Suspend)에 맡긴다. 잠자기 직전에는 컴포지터가 화면을 잠근다.
+//!   logind가 잠자기를 받지 않으면(CanSuspend, 가상 기기) 잠자기를 흐리게 둔다.
 //!
 //! 셸 전용 컴포지터 메서드(LogOut, GetApps, ForceQuit)는 컴포지터가 띄운 이 셸 프로세스만 부를 수 있다.
 
@@ -82,6 +83,7 @@ impl Session {
             .activate(move |_, _, _| on_log_out.confirm_log_out())
             .build();
         app.add_action_entries([force_quit, sleep, lock_screen, log_out]);
+        dim_sleep_if_unavailable(app);
         session
     }
 
@@ -180,29 +182,60 @@ fn call_compositor(
     });
 }
 
+/// logind 관리자 메서드를 부른다
+async fn call_logind(
+    method: &str,
+    args: Option<glib::Variant>,
+) -> Result<glib::Variant, glib::Error> {
+    let bus = gio::bus_get_future(gio::BusType::System).await?;
+    bus.call_future(
+        Some("org.freedesktop.login1"),
+        "/org/freedesktop/login1",
+        "org.freedesktop.login1.Manager",
+        method,
+        args.as_ref(),
+        None,
+        gio::DBusCallFlags::NONE,
+        -1,
+    )
+    .await
+}
+
 /// logind에 잠자기를 요청한다. 허용 여부는 polkit이 정하고, 잠들기 직전에 컴포지터가 화면을 잠근다
 fn suspend() {
     glib::spawn_future_local(async {
-        let result = async {
-            let bus = gio::bus_get_future(gio::BusType::System).await?;
-            bus.call_future(
-                Some("org.freedesktop.login1"),
-                "/org/freedesktop/login1",
-                "org.freedesktop.login1.Manager",
-                "Suspend",
-                // interactive: polkit이 인증을 물을 수 있게 한다
-                Some(&(true,).to_variant()),
-                None,
-                gio::DBusCallFlags::NONE,
-                -1,
-            )
-            .await
-        }
-        .await;
-        if let Err(err) = result {
+        // interactive: polkit이 인증을 물을 수 있게 한다
+        if let Err(err) = call_logind("Suspend", Some((true,).to_variant())).await {
             eprintln!("bunt-shell: Suspend failed: {}", err.message());
         }
     });
+}
+
+/// logind가 잠자기를 받지 않으면 로고 메뉴의 잠자기를 흐리게 둔다. 가상 기기에서는 이미지가 잠자기를 끈다
+/// (buntos-vm-sleep.service): 전에는 잠든 VM을 깨울 수 없어 검은 화면에서 멈췄다
+fn dim_sleep_if_unavailable(app: &gtk::Application) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let answer = match call_logind("CanSuspend", None).await {
+            Ok(reply) => reply.child_value(0).str().map(str::to_owned),
+            Err(err) => {
+                eprintln!("bunt-shell: CanSuspend failed: {}", err.message());
+                None
+            }
+        };
+        if !sleep_available(answer.as_deref())
+            && let Some(action) = app
+                .lookup_action("sleep")
+                .and_downcast::<gio::SimpleAction>()
+        {
+            action.set_enabled(false);
+        }
+    });
+}
+
+/// logind의 CanSuspend 답으로 잠자기를 고를 수 있는지. challenge는 polkit이 인증을 물은 뒤 잠든다
+fn sleep_available(answer: Option<&str>) -> bool {
+    matches!(answer, Some("yes" | "challenge"))
 }
 
 /// 셸의 대화 창: 화면 가운데의 overlay 레이어. 키보드를 독점한다(Esc, Enter, 화살표). 어둡게를 따른다
@@ -822,5 +855,16 @@ mod tests {
         assert_eq!(alias_in(passwd, "nobody"), None);
         // 이름이 다른 계정의 앞부분만 같으면 맞지 않는다
         assert_eq!(alias_in(passwd, "bunt"), None);
+    }
+
+    #[test]
+    fn sleep_is_offered_only_when_logind_can_suspend() {
+        assert!(sleep_available(Some("yes")));
+        assert!(sleep_available(Some("challenge")));
+        // 가상 기기(buntos-vm-sleep.service)와 잠들 수 없는 커널
+        assert!(!sleep_available(Some("na")));
+        assert!(!sleep_available(Some("no")));
+        // logind에 묻지 못했으면 Suspend도 실패한다
+        assert!(!sleep_available(None));
     }
 }
