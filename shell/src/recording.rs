@@ -25,11 +25,9 @@ pub fn stop_button(tr: &Translations) -> gtk::Button {
         .visible(false)
         .build();
     button.update_property(&[gtk::accessible::Property::Label(&label)]);
-    button.connect_clicked(|button| {
-        // 컴포지터가 멈췄다고 알리기 전에 두 번 누르지 않게 바로 숨긴다
-        button.set_visible(false);
-        call("StopRecording", None, |_| {});
-    });
+    // 컴포지터가 멈췄다고 알리면(RecordingChanged) 숨긴다. 미리 숨기면 부르기가 실패했을 때 멈출 길이 없다.
+    // 두 번 눌러도 두 번째는 아무것도 하지 않는다
+    button.connect_clicked(|_| call("StopRecording", None, |_| {}));
     follow(&button);
     button
 }

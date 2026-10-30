@@ -16,6 +16,7 @@
 //!   클립보드를 골랐으면 동영상 폴더에 둔다
 
 use std::{
+    ffi::OsString,
     fs::{File, OpenOptions},
     io::{self, BufWriter, Write},
     os::{
@@ -105,6 +106,8 @@ pub struct Recording {
     frames: SyncSender<Frame>,
     /// 마지막으로 읽은 때. FRAME_RATE보다 자주 읽지 않는다
     read_at: Option<Instant>,
+    /// 너무 일러 읽지 않고 건너뛴 프레임이 있다. 그 뒤로 화면이 그대로면 그 프레임을 놓치므로 다시 그리게 한다
+    pending: bool,
     /// 읽지 못했거나 기록 스레드가 끝났다. 다음 프레임 전에 멈춘다
     failed: bool,
 }
@@ -114,18 +117,34 @@ impl Recording {
         &self.output
     }
 
+    /// 건너뛴 프레임을 읽으려면 다음 프레임을 그려야 한다 (렌더 루프 계약의 is_animating)
+    pub fn wants_frame(&self) -> bool {
+        self.pending && !self.failed
+    }
+
+    /// 화면 배율이 바뀌었다. 장면의 요소가 새 배율로 만들어지므로 새 배율로 다시 그린다. 화면의 물리 크기는
+    /// 그대로라 영상은 이어진다
+    fn rescale(&mut self, scale: f64) {
+        self.scale = scale;
+        self.target = None;
+    }
+
     /// 그리는 장면(앞의 요소부터)에서 기록할 영역을 읽어 기록 스레드에 넘긴다. FRAME_RATE보다 자주 읽지
     /// 않고, 지난번에 읽은 뒤 바뀐 것이 없으면 읽지 않는다(기록 스레드가 마지막 프레임을 되풀이한다)
     pub fn capture(&mut self, renderer: &mut GlesRenderer, elements: &[&OutputRenderElements]) {
         let now = Instant::now();
         let interval = frame_interval();
-        if self.failed
-            || self
-                .read_at
-                .is_some_and(|at| now.saturating_duration_since(at) < interval)
-        {
+        if self.failed {
             return;
         }
+        if self
+            .read_at
+            .is_some_and(|at| now.saturating_duration_since(at) < interval)
+        {
+            self.pending = true;
+            return;
+        }
+        self.pending = false;
         match self.read(renderer, elements) {
             Ok(Some(frame)) => {
                 self.read_at = Some(now);
@@ -290,19 +309,59 @@ fn spawn_encoder(program: &Path, args: &[String], file: &File) -> io::Result<Chi
     let mut command = Process::new(program);
     command
         .args(args)
+        .env_clear()
+        .envs(encoder_env())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    // 안전: fork 뒤 exec 전에는 비동기 신호에 안전한 dup2만 부른다. dup2로 만든 fd는 CLOEXEC가 아니다
+    // 안전: fork 뒤 exec 전에는 비동기 신호에 안전한 시스템 호출(dup2, close_range)만 부른다. dup2로 만든 fd는
+    // CLOEXEC가 아니다. 그 위의 fd(컴포지터가 연 장치나 소켓 가운데 CLOEXEC가 아닌 것)는 exec에서 닫히게 해
+    // 부호기에 넘기지 않는다. 바로 닫으면 Rust가 exec 실패를 알리는 파이프까지 닫혀 없는 부호기도 띄운 것처럼
+    // 보인다. 오래된 커널(5.11 전)이면 실패하고, 그때는 각 fd의 CLOEXEC에 맡긴다
     unsafe {
         command.pre_exec(move || {
             if libc::dup2(raw, OUTPUT_FD) < 0 {
                 return Err(io::Error::last_os_error());
             }
+            libc::close_range(
+                OUTPUT_FD as libc::c_uint + 1,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC as libc::c_int,
+            );
             Ok(())
         });
     }
     command.spawn()
+}
+
+/// 부호기의 환경. 컴포지터의 환경은 넘기지 않는다. 플러그인은 시스템 폴더에서만 읽어(사용자 폴더의 플러그인이
+/// 화면 프레임을 보지 못하게), 플러그인 목록 캐시는 세션의 런타임 폴더에 둔다
+fn encoder_env() -> Vec<(&'static str, OsString)> {
+    let mut env = Vec::new();
+    if let Some(dir) = system_plugin_dir() {
+        env.push(("GST_PLUGIN_SYSTEM_PATH_1_0", dir.into_os_string()));
+    }
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        let registry = Path::new(&runtime).join("bunt-comp-gstreamer-registry.bin");
+        env.push(("GST_REGISTRY_1_0", registry.into_os_string()));
+        env.push(("XDG_RUNTIME_DIR", runtime));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        env.push(("HOME", home));
+    }
+    env
+}
+
+/// Debian의 GStreamer 플러그인 폴더 (다중 아키텍처 경로). 모르는 아키텍처이거나 없으면 None이고, 그때는
+/// GStreamer가 스스로 찾는다
+fn system_plugin_dir() -> Option<PathBuf> {
+    let triplet = match std::env::consts::ARCH {
+        "x86_64" => "x86_64-linux-gnu",
+        "aarch64" => "aarch64-linux-gnu",
+        _ => return None,
+    };
+    let dir = PathBuf::from(format!("/usr/lib/{triplet}/gstreamer-1.0"));
+    dir.is_dir().then_some(dir)
 }
 
 /// 고른 간격으로 넘길 프레임 수를 센다. 첫 프레임을 받은 때부터 잰다
@@ -556,23 +615,6 @@ impl BuntState {
             }
         };
         let (width, height) = (region.size.w as u32, region.size.h as u32);
-        let args = pipeline(width, height, encoder_threads());
-        let encoder = match spawn_encoder(Path::new(GST_LAUNCH), &args, &file) {
-            Ok(encoder) => encoder,
-            Err(err) => {
-                tracing::warn!("cannot start the screen recording encoder {GST_LAUNCH}: {err}");
-                drop(file);
-                let _ = std::fs::remove_file(&path);
-                // 부호기가 깔리지 않았으면 그렇다고 알린다
-                let body = match err.kind() {
-                    io::ErrorKind::NotFound => tr.get("recording-unavailable"),
-                    _ => tr.get("recording-failed"),
-                };
-                self.dbus.send(Command::Notify { title, body });
-                return;
-            }
-        };
-        drop(file);
         let file_name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -589,12 +631,48 @@ impl BuntState {
             commands: self.dbus.sender(),
         };
         let (frames, receiver) = mpsc::sync_channel(QUEUE);
+        // 기록 스레드를 먼저 띄우고 부호기는 그다음에 띄워 넘긴다. 전에는 부호기를 먼저 띄워, 스레드를 띄우지
+        // 못하면 끝을 기다리는 쪽 없이 부호기 프로세스가 남았다. 부호기를 띄우지 못하면 넘길 것이 없어 스레드가 끝난다
+        let (hand_over, encoder) = mpsc::channel::<Child>();
         if let Err(err) = std::thread::Builder::new()
             .name("bunt-comp-recording".into())
-            .spawn(move || record(encoder, receiver, finish))
+            .spawn(move || {
+                if let Ok(encoder) = encoder.recv() {
+                    record(encoder, receiver, finish);
+                }
+            })
         {
-            // 스레드와 함께 부호기의 표준 입력이 닫혀 부호기도 끝난다
             tracing::warn!("failed to start the screen recording thread: {err}");
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            self.dbus.send(Command::Notify {
+                title,
+                body: tr.get("recording-failed"),
+            });
+            return;
+        }
+        let args = pipeline(width, height, encoder_threads());
+        let encoder = spawn_encoder(Path::new(GST_LAUNCH), &args, &file);
+        drop(file);
+        let encoder = match encoder {
+            Ok(encoder) => encoder,
+            Err(err) => {
+                tracing::warn!("cannot start the screen recording encoder {GST_LAUNCH}: {err}");
+                let _ = std::fs::remove_file(&path);
+                // 부호기가 깔리지 않았으면 그렇다고 알린다
+                let body = match err.kind() {
+                    io::ErrorKind::NotFound => tr.get("recording-unavailable"),
+                    _ => tr.get("recording-failed"),
+                };
+                self.dbus.send(Command::Notify { title, body });
+                return;
+            }
+        };
+        if let Err(mpsc::SendError(mut encoder)) = hand_over.send(encoder) {
+            // 기록 스레드가 벌써 끝났다. 부호기를 끝내고 기다려 남기지 않는다
+            let _ = encoder.kill();
+            let _ = encoder.wait();
+            let _ = std::fs::remove_file(&path);
             self.dbus.send(Command::Notify {
                 title,
                 body: tr.get("recording-failed"),
@@ -615,6 +693,7 @@ impl BuntState {
             target: None,
             frames,
             read_at: None,
+            pending: false,
             failed: false,
         });
         self.dbus.update(|snapshot| snapshot.recording = true);
@@ -649,8 +728,14 @@ impl BuntState {
                 .current_transform()
                 .transform_size(mode.size)
         });
+        let scale = recording.output.current_scale().fractional_scale();
         if gone || screen != Some(recording.screen) || recording.failed {
             self.stop_recording();
+        } else if scale != recording.scale
+            && let Some(recording) = &mut self.recording
+        {
+            // 전에는 배율이 바뀌어도 처음 배율로 그려, 그 뒤의 프레임이 어긋나게 그려졌다
+            recording.rescale(scale);
         }
     }
 }
@@ -766,6 +851,26 @@ mod tests {
     }
 
     #[test]
+    fn the_encoder_gets_only_system_plugins_and_no_session_secrets() {
+        let env = encoder_env();
+        let names: Vec<&str> = env.iter().map(|(name, _)| *name).collect();
+        assert!(names.iter().all(|name| {
+            [
+                "GST_PLUGIN_SYSTEM_PATH_1_0",
+                "GST_REGISTRY_1_0",
+                "XDG_RUNTIME_DIR",
+                "HOME",
+            ]
+            .contains(name)
+        }));
+        // 이 기계의 아키텍처면 시스템 플러그인 폴더를 고른다 (Debian·Ubuntu의 다중 아키텍처 경로)
+        if let Some(dir) = system_plugin_dir() {
+            assert!(dir.ends_with("gstreamer-1.0") && dir.starts_with("/usr/lib"));
+            assert!(names.contains(&"GST_PLUGIN_SYSTEM_PATH_1_0"));
+        }
+    }
+
+    #[test]
     fn a_missing_encoder_fails_without_leaving_a_process() {
         let path =
             std::env::temp_dir().join(format!("bunt-recording-missing-{}", std::process::id()));
@@ -840,6 +945,7 @@ mod tests {
             target: None,
             frames,
             read_at: None,
+            pending: false,
             failed: false,
         };
         // 위 절반은 초록, 아래 절반은 파랑인 화면
@@ -864,13 +970,22 @@ mod tests {
         assert_eq!(&frame[15 * row..15 * row + 4], [10, 200, 30, 255]);
         assert_eq!(&frame[16 * row..16 * row + 4], [0, 0, 255, 255]);
         assert_eq!(&frame[frame.len() - 4..], [0, 0, 255, 255]);
-        // 간격 안에는 다시 읽지 않고, 간격이 지나도 바뀐 것이 없으면 넘기지 않는다
+        // 간격 안에는 다시 읽지 않고, 그 프레임을 읽으려고 다음 프레임을 그리게 한다(is_animating)
+        assert!(!recording.wants_frame());
         recording.capture(&mut renderer, &[&background]);
         assert!(receiver.try_recv().is_err());
+        assert!(recording.wants_frame());
+        // 간격이 지나면 읽고, 바뀐 것이 없으면 넘기지 않는다. 다시 그릴 까닭도 없어진다
         recording.read_at = Some(Instant::now() - frame_interval());
         recording.capture(&mut renderer, &[&background]);
         assert!(receiver.try_recv().is_err());
+        assert!(!recording.wants_frame());
         assert!(!recording.failed);
+        // 배율이 바뀌면 새 배율로 처음부터 다시 그려 읽는다
+        recording.rescale(2.0);
+        recording.read_at = None;
+        recording.capture(&mut renderer, &[&background]);
+        assert!(receiver.try_recv().is_ok());
 
         if !Path::new(GST_LAUNCH).exists() {
             eprintln!("no {GST_LAUNCH}; skipping the encoder");

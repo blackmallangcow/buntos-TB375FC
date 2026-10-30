@@ -1561,9 +1561,15 @@ impl BuntState {
         self.schedule_redraw_after(crtc, delay);
     }
 
-    /// 컴포지터가 그리는 애니메이션(막대 미끄러짐, 최소화 효과)이 도는 중이다. 그동안은 프레임마다 그린다
+    /// 컴포지터가 그리는 애니메이션(막대 미끄러짐, 최소화 효과)이 도는 중이거나, 화면 기록이 건너뛴 프레임을
+    /// 읽으려고 다음 프레임을 그려야 한다. 그동안은 프레임마다 그린다
     pub fn is_animating(&self) -> bool {
-        self.bars_sliding() || self.minimize_effects.is_running()
+        self.bars_sliding()
+            || self.minimize_effects.is_running()
+            || self
+                .recording
+                .as_ref()
+                .is_some_and(crate::recording::Recording::wants_frame)
     }
 }
 
