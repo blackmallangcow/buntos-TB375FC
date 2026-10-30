@@ -2,6 +2,9 @@
 # KVM에서 돌린다. 설계안 9.4절의 x86-64 e2e이고, Phase 0·1 종료 조건(같은 레시피로 셸 도달, 한글 입력 e2e)의
 # x86-64 쪽이다. 빌드 VM(docs/dev/environment.md 2·4장)과 같게 한다:
 # - mkosi는 tools/devvm/setup.sh에 고정한 판, 이미지 꾸러미는 image/mkosi.conf의 스냅숏
+# - mkosi가 부르는 이미지 도구(systemd, systemd-repart·ukify, bootctl, mkfs, QEMU, OVMF)는 빌드 VM과 같은 Debian 13의
+#   도구 트리에서 쓴다(tools/image/tools-tree.sh). 러너(Ubuntu 26.04)의 systemd 259는 systemctl preset-all이 이미지에서
+#   실패한다(마스크된 getty@tty1과 기본 프리셋의 getty@.service)
 # - 자체 컴포넌트는 같은 스냅숏의 Debian 컨테이너에서 rust-toolchain.toml의 툴체인으로 빌드한다
 #   (tools/image/cargo-debian.sh). 러너(Ubuntu)의 라이브러리는 이미지(Debian)와 다르다
 # 비공개 저장소의 Actions 시간(한 달 2000분 안팎)을 아끼려고, 개발하는 동안은 이 브랜치의 push와 수동 실행만 받는다.
@@ -95,21 +98,36 @@ jobs:
           sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_unconfined=0
           sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_userns=0
 
-      - name: 빌드 도구
-        # tools/devvm/setup.sh의 이미지 도구 중 x86-64 이미지에 쓰는 것. systemd-boot 꾸러미는 러너의 부트로더를
-        # 고치려 하므로 넣지 않는다(mkosi는 bootctl과 이미지 안의 systemd-boot를 쓴다)
+      - name: mkosi
+        # 판은 tools/devvm/setup.sh에 고정한 것. 이미지 도구는 아래의 도구 트리에서 쓴다
         run: |
-          sudo apt-get -q update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -q -y install --no-install-recommends \
-            qemu-system-x86 qemu-utils ovmf \
-            systemd-repart systemd-ukify systemd-boot-tools systemd-container \
-            debian-archive-keyring dosfstools mtools e2fsprogs btrfs-progs erofs-utils squashfs-tools cpio zstd xz-utils
           mkosi_version=$(sed -n 's/^MKOSI_VERSION=//p' tools/devvm/setup.sh)
           pipx install "git+https://github.com/systemd/mkosi.git@$mkosi_version"
           bin=$(pipx environment --value PIPX_BIN_DIR)
           echo "$bin" >>"$GITHUB_PATH"
           "$bin/mkosi" --version
-          qemu-system-x86_64 --version | head -n 1
+
+      - name: 캐시 복원 (도구 트리 꾸러미)
+        id: tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.WORK }}/tools.apt
+          key: tools-x86-64-${{ hashFiles('tools/image/tools-tree.sh', 'tools/image/debian-snapshot.sh', 'image/mkosi.conf') }}
+          restore-keys: tools-x86-64-
+
+      - name: 도구 트리 (Debian 13)
+        id: tools
+        timeout-minutes: 20
+        run: |
+          tools/image/tools-tree.sh "$WORK/tools"
+          echo "BUNTOS_TOOLS_TREE=$WORK/tools" >>"$GITHUB_ENV"
+
+      - name: 캐시 저장 (도구 트리 꾸러미)
+        if: ${{ !cancelled() && steps.tools.outcome != 'skipped' && steps.tools-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.WORK }}/tools.apt
+          key: ${{ steps.tools-cache.outputs.cache-primary-key }}
 
       - name: 캐시 복원 (이미지 꾸러미)
         id: mkosi-cache
@@ -148,7 +166,8 @@ jobs:
       - name: 이미지 빌드
         id: image
         timeout-minutes: 60
-        # build.sh가 자체 컴포넌트를 다시 cargo로 모은다. 앞 단계의 컨테이너와 산출물을 그대로 쓴다
+        # build.sh가 자체 컴포넌트를 다시 cargo로 모은다. 앞 단계의 컨테이너와 산출물을 그대로 쓴다.
+        # mkosi는 BUNTOS_TOOLS_TREE(도구 트리)의 도구로 이미지를 만든다. e2e의 mkosi vm도 같다
         run: |
           BUNTOS_CARGO="$PWD/tools/image/cargo-debian.sh" tools/image/build.sh "$BOARD"
           ls -l "$BUNTOS_BUILD_DIR/$BOARD"
@@ -169,7 +188,7 @@ jobs:
 
       - name: e2e 결과 요약
         if: ${{ !cancelled() }}
-        # e2e의 걸린 시간과 통과·실패, 컴포지터가 고른 렌더러(게스트 저널의 renderer:, apps:, linux-dmabuf: 줄)
+        # e2e의 걸린 시간과 통과·실패, 컴포지터가 고른 GPU와 렌더러(게스트 저널의 using GPU, renderer:, apps:, linux-dmabuf: 줄)
         run: |
           {
             echo '### e2e (x86_64-generic)'
@@ -178,7 +197,7 @@ jobs:
               grep -E '초|통과|실패|이미지:|상태' "$E2E_LOG_DIR/e2e.log" | head -n 200
             fi
             if [[ -f "$E2E_LOG_DIR/journal.log" ]]; then
-              grep -E 'bunt[-_](comp|greeter).*(renderer|apps|linux-dmabuf): ' "$E2E_LOG_DIR/journal.log" | head -n 20
+              grep -E 'bunt[-_](comp|greeter).*((renderer|apps|linux-dmabuf): |using GPU )' "$E2E_LOG_DIR/journal.log" | head -n 20
             fi
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
