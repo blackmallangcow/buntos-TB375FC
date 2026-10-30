@@ -242,11 +242,20 @@ fn lines(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<
     Ok(Seen::Lines { lines, cut })
 }
 
-/// 창 제목. 앱을 주었으면 그 앱의 창만: 처음에 스냅샷의 머리줄로 pid를 알아 두고, 앱 목록(`apps`)에서 그 pid의 창을
+/// 창 제목. 앱을 주었으면 그 앱의 창만: 스냅샷의 머리줄로 앱의 pid를 알아 두고, 앱 목록(`apps`)에서 그 pid의 창을
 /// 본다. 검토: 트리의 맨 위 줄로 창을 읽어, 트리가 2000줄에서 잘리면 뒤의 창(웹 페이지 뒤에 뜬 대화 상자)을 닫힌
 /// 것으로 보았다
 fn windows(desk: &dyn Desk, params: &WaitParams, pid: &mut Option<u32>) -> Result<Seen, Failure> {
-    if let Some(query) = &params.app {
+    let Some(query) = &params.app else {
+        let reply = desk.call("apps", Value::Null)?;
+        return Ok(Seen::Windows {
+            titles: all_windows(&reply, None),
+            complete: true,
+        });
+    };
+    // 앱 목록에서 그 pid가 사라지면 스냅샷으로 다시 찾는다: 앱이 끝났으면 데몬이 "no app matches"로 알리고(Absent),
+    // 다시 떴으면 새 pid를 안다. 목록만 보고 끝났다고 하지 않는다 (pid를 잠깐 읽지 못했을 수 있다)
+    for _ in 0..2 {
         if pid.is_none() {
             let reply = desk.call("snapshot", snapshot(params, false))?;
             let tree = reply["tree"].as_str().unwrap_or_default();
@@ -265,24 +274,17 @@ fn windows(desk: &dyn Desk, params: &WaitParams, pid: &mut Option<u32>) -> Resul
         }
         let reply = desk.call("apps", Value::Null)?;
         let titles = all_windows(&reply, *pid);
-        if titles.is_empty() && !runs(&reply, *pid) {
-            // 앱이 끝났다. 다시 띄웠을 수 있으므로 다음에 다시 찾는다
-            *pid = None;
-            return Ok(Seen::Absent(format!(
-                "{} {query:?} (it quit)",
-                protocol::NO_APP_MATCHES
-            )));
+        if !titles.is_empty() || runs(&reply, *pid) {
+            return Ok(Seen::Windows {
+                titles,
+                complete: true,
+            });
         }
-        return Ok(Seen::Windows {
-            titles,
-            complete: true,
-        });
+        *pid = None;
     }
-    let reply = desk.call("apps", Value::Null)?;
-    Ok(Seen::Windows {
-        titles: all_windows(&reply, None),
-        complete: true,
-    })
+    Ok(Seen::Unknown(format!(
+        "the app list does not show the windows of {query:?}"
+    )))
 }
 
 /// 이 pid의 앱이 `apps`의 답에 있는가 (창이 없어도)
@@ -969,11 +971,15 @@ mod tests {
             .map(|(method, _)| method.clone())
             .collect();
         assert_eq!(methods, ["snapshot", "apps", "apps"]);
-        // 앱이 끝나면 그 창도 닫혔다
+        // 앱이 끝나면(목록에서 사라지고 데몬도 찾지 못하면) 그 창도 닫혔다
         let desk = Script::new(vec![
             tree("- window \"편집기\" [ref=e1]\n"),
             editor(&["편집기"]),
             Ok(json!({ "apps": [], "untracked": [] })),
+            Err((
+                protocol::AGENT_ERROR,
+                "no app matches \"editor\"; see `bunt agent apps`".into(),
+            )),
         ]);
         let closed = run(
             &desk,
@@ -985,6 +991,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(closed.done, "the window \"편집기\" is gone");
+        // 목록에서만 잠깐 사라졌으면 닫혔다고 하지 않는다
+        let desk = Script::new(vec![
+            tree("- window \"편집기\" [ref=e1]\n"),
+            Ok(json!({ "apps": [], "untracked": [] })),
+            tree("- window \"편집기\" [ref=e1]\n"),
+            editor(&["편집기"]),
+        ]);
+        let failure = run(
+            &desk,
+            &params(|p| {
+                p.app = Some("editor".into());
+                p.window = Some("편집기".into());
+                p.gone = true;
+                p.timeout_ms = Some(0);
+            }),
+        )
+        .unwrap_err();
+        assert!(failure.1.ends_with("; open: \"편집기\""), "{}", failure.1);
         // 아직 뜨지 않은 앱의 첫 창도 새 창이다
         let desk = Script::new(vec![
             Err((
