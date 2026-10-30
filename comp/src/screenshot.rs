@@ -508,6 +508,13 @@ pub fn capture_scene(
     let mode = output.current_mode().ok_or("the output has no mode")?;
     let scale = output.current_scale().fractional_scale();
     let size = output.current_transform().transform_size(mode.size);
+    let region = match area {
+        Some(area) => area
+            .to_physical_precise_round(scale)
+            .intersection(Rectangle::from_size(size))
+            .ok_or("the area is outside the screen")?,
+        None => Rectangle::from_size(size),
+    };
     let mut texture: GlesTexture = renderer
         .create_buffer(
             Fourcc::Abgr8888,
@@ -520,10 +527,14 @@ pub fn capture_scene(
         damage
             .render_output(renderer, &mut framebuffer, 0, elements, clear)
             .map_err(|err| format!("{err:?}"))?;
+        // 고른 영역(창 하나)만 되읽는다. 전에는 화면 전체를 되읽고 CPU에서 잘랐다
         renderer
             .copy_framebuffer(
                 &framebuffer,
-                Rectangle::from_size(size.to_logical(1).to_buffer(1, Transform::Normal)),
+                Rectangle::new(
+                    (region.loc.x, region.loc.y).into(),
+                    (region.size.w, region.size.h).into(),
+                ),
                 Fourcc::Abgr8888,
             )
             .map_err(|err| err.to_string())?
@@ -533,23 +544,12 @@ pub fn capture_scene(
     let pixels = renderer
         .map_texture(&mapping)
         .map_err(|err| err.to_string())?;
-    let (width, height) = (size.w as usize, size.h as usize);
-    let stride = width * 4;
-    if pixels.len() < stride * height {
+    let (width, height) = (region.size.w as usize, region.size.h as usize);
+    let length = width * height * 4;
+    if pixels.len() < length {
         return Err(format!("read {} bytes for {width}x{height}", pixels.len()));
     }
-    let region = match area {
-        Some(area) => area
-            .to_physical_precise_round(scale)
-            .intersection(Rectangle::from_size(size))
-            .ok_or("the area is outside the screen")?,
-        None => Rectangle::from_size(size),
-    };
-    let mut rgba = Vec::with_capacity(region.size.w as usize * region.size.h as usize * 4);
-    for row in region.loc.y as usize..(region.loc.y + region.size.h) as usize {
-        let start = row * stride + region.loc.x as usize * 4;
-        rgba.extend_from_slice(&pixels[start..start + region.size.w as usize * 4]);
-    }
+    let rgba = pixels[..length].to_vec();
     Ok(Image {
         width: region.size.w as u32,
         height: region.size.h as u32,
