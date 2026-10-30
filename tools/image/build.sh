@@ -16,6 +16,8 @@
 # 자체 컴포넌트는 BUNTOS_CARGO의 명령으로 빌드한다(기본은 이 컴퓨터의 cargo). 빌드 환경의 라이브러리가 이미지와
 # 맞지 않는 곳(CI의 Ubuntu 러너)에서는 이미지와 같은 Debian 스냅숏의 컨테이너에서 빌드하는
 # tools/image/cargo-debian.sh를 준다.
+# BUNTOS_TOOLS_TREE를 주면 mkosi가 이 컴퓨터의 도구 대신 그 도구 트리(ToolsTree=)의 도구로 이미지를 만들고 띄운다.
+# 빌드 VM(Debian 13)이 아닌 곳에서 같은 판의 도구를 쓰려고 tools/image/tools-tree.sh로 만든 트리를 준다(CI).
 # 이 파일은 실행 중에도 bash가 이어 읽으므로, 빌드가 도는 동안 고칠 때는 새 파일로 바꿔 넣는다.
 set -euo pipefail
 
@@ -37,6 +39,10 @@ extra=()
 # mkosi의 기본 이름(image)은 빌드 VM 안에서 하나만 돈다("Another virtual machine named image")
 if [[ $# -gt 0 ]]; then
 	extra+=(--machine="buntos-$(basename "$out")")
+fi
+# 도구 트리 (머리말 참고). 빌드와 vm(e2e) 모두 같은 트리의 도구를 쓴다
+if [[ -n "${BUNTOS_TOOLS_TREE:-}" ]]; then
+	extra+=(--tools-tree="$BUNTOS_TOOLS_TREE")
 fi
 
 # 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, buntd-agent와 bunt, bunt-greeter와 bunt-lock)를 빌드해
