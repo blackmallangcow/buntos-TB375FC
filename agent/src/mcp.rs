@@ -349,8 +349,8 @@ fn tools() -> Value {
     ])
 }
 
-/// 표준 입출력으로 MCP를 말한다. tools/call은 따로 된 스레드에서 들어온 차례로 돌려, 긴 REPL 호출 동안에도
-/// 다른 요청(ping, tools/list)에 답한다. 도구 호출은 모두 같은 REPL로 가고 데몬이 어차피 차례로 돌리므로 한꺼번에
+/// 표준 입출력으로 MCP를 말한다. tools/call(과 그것을 담을 수 있는 묶음)은 따로 된 스레드에서 들어온 차례로 돌려,
+/// 긴 REPL 호출 동안에도 다른 요청(ping, tools/list)에 답한다. 도구 호출은 모두 같은 REPL로 가고 데몬이 어차피 차례로 돌리므로 한꺼번에
 /// 돌리지 않는다: 차례를 지켜야 앞 호출이 둔 변수를 뒤 호출이 쓴다. 입력이 끝나면 남은 호출을 마치고 돌아온다
 pub fn serve<D: Daemon>(
     input: impl BufRead,
@@ -393,7 +393,9 @@ pub fn serve<D: Daemon>(
                     continue;
                 }
             };
-            if message["method"] == "tools/call" {
+            // 묶음(배열)도 도구 호출을 담을 수 있어 같은 줄에 세운다 (검토: 묶음의 도구 호출은 읽는 스레드에서 돌아
+            // 앞의 도구 호출과 한꺼번에 돌았다)
+            if message["method"] == "tools/call" || message.is_array() {
                 // 받는 스레드는 이 함수가 끝날 때까지 산다
                 let _ = calls.send(message);
             } else if let Some(reply) = server.handle(message) {
@@ -406,7 +408,10 @@ pub fn serve<D: Daemon>(
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, Instant},
+    };
 
     use super::*;
 
@@ -715,5 +720,47 @@ mod tests {
         );
         assert_eq!(replies[4]["result"]["content"][0]["text"], "done");
         assert!(started.elapsed() >= Duration::from_millis(600));
+    }
+
+    #[test]
+    fn tool_calls_in_a_batch_wait_their_turn() {
+        // 데몬의 repl이 한꺼번에 몇 번 불렸는지
+        static RUNNING: AtomicUsize = AtomicUsize::new(0);
+        static MOST: AtomicUsize = AtomicUsize::new(0);
+        let slow = server(|method, _| {
+            if method == "repl" {
+                let now = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+                MOST.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(200));
+                RUNNING.fetch_sub(1, Ordering::SeqCst);
+            }
+            Ok(json!({ "output": "done\n", "fresh": false, "ms": 200, "images": [] }))
+        });
+        let call = |id: u64| json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "repl", "arguments": { "code": "x" } } });
+        let input = format!(
+            "{}\n{}\n{}\n",
+            call(1),
+            json!([
+                call(2),
+                json!({ "jsonrpc": "2.0", "id": 4, "method": "ping" })
+            ]),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "ping" }),
+        );
+        let mut output = Vec::new();
+        serve(input.as_bytes(), &mut output, &slow).unwrap();
+        let replies: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(MOST.load(Ordering::SeqCst), 1, "tool calls ran at once");
+        // 홀로 온 ping이 먼저, 도구 호출은 들어온 차례로 (묶음은 묶음으로 답한다)
+        assert_eq!(replies[0]["id"], 3);
+        assert_eq!(replies[1]["id"], 1);
+        let batch = replies[2].as_array().unwrap();
+        assert_eq!(
+            (batch[0]["id"].as_u64(), batch[1]["id"].as_u64()),
+            (Some(2), Some(4))
+        );
     }
 }
