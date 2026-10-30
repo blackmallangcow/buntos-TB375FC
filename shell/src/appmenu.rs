@@ -136,6 +136,9 @@ fn rebuild(state: &AppMenuState, active: Option<Toplevel>) {
         menu_model(&state.tr, &active, &app_name(&active.app_id), &has)
     });
     state.menubar.set_menu_model(model.as_ref());
+    // 펼친 메뉴의 항목도 로고 메뉴처럼 이름 없이 나왔다(GTK 4.24의 GtkModelButton). 막대는 모델을 바꿀 때마다
+    // 메뉴를 새로 만든다
+    crate::menu_names::follow_bar(&state.menubar);
 }
 
 fn menu_model(

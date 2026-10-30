@@ -1141,6 +1141,34 @@ mod tests {
     }
 
     #[test]
+    fn menu_items_show_their_names_and_disabled_ones_say_so() {
+        // 로고 메뉴: 흐린 잠자기(가상 기기), 이름이 빈 항목(GTK 4.24의 GtkModelButton이 알리던 모양)
+        let mut sleep = item("/sleep", "/menu", 1, role::MENU_ITEM, "잠자기");
+        sleep.states = state::VISIBLE | state::SHOWING;
+        let items = vec![
+            item("/menu", "", 0, role::MENU, ""),
+            item("/about", "/menu", 0, role::MENU_ITEM, "이 시스템에 관하여"),
+            sleep,
+            item("/blank", "/menu", 2, role::MENU_ITEM, ""),
+        ];
+        let tree = Tree::new(&items);
+        let options = Options {
+            interactive: true,
+            hidden: false,
+        };
+        let lines = render(&tree, &["/menu"], &options, &mut refs());
+        assert_eq!(
+            lines,
+            [
+                "- menu [ref=e1]:",
+                "  - menuitem \"이 시스템에 관하여\" [ref=e2]",
+                "  - menuitem \"잠자기\" [ref=e3] [disabled]",
+                "  - menuitem [ref=e4]",
+            ]
+        );
+    }
+
+    #[test]
     fn editable_comboboxes_show_their_text() {
         // Firefox 주소 막대: 글을 쓰는 콤보 상자
         let mut bar = item("/bar", "", 0, role::COMBO_BOX, "검색 또는 주소 입력");

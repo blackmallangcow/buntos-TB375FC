@@ -19,7 +19,7 @@ use crate::{
     appmenu, bluetooth, control_center,
     control_center::Services,
     input_source::{self, InputSources},
-    interface_settings, layer_window, network, notification_center,
+    interface_settings, layer_window, menu_names, network, notification_center,
     notifications::Notifications,
     power, session, shell_settings, sound, status_items,
     toplevels::Toplevels,
@@ -157,6 +157,10 @@ fn logo_menu(tr: &Rc<Translations>) -> gtk::MenuButton {
         .tooltip_text(tr.get("menubar-logo"))
         .css_classes(["logo"])
         .build();
+    // 항목이 접근성 트리에 이름 없이 menuitem으로만 나와 에이전트가 순서로만 골랐다(GTK 4.24의 GtkModelButton)
+    if let Some(popover) = button.popover().and_downcast::<gtk::PopoverMenu>() {
+        menu_names::follow(&popover);
+    }
     // 메뉴를 열 때마다 "<별칭> 로그아웃…"의 별칭을 다시 읽는다 (시스템 설정의 사용자 및 그룹에서 바뀐다)
     let tr = tr.clone();
     let shown = std::cell::RefCell::new(log_out);

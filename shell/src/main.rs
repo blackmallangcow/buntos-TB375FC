@@ -15,6 +15,8 @@ mod extras;
 mod input_source;
 mod launcher;
 mod menubar;
+// GTK 메뉴 항목의 접근성 이름 (GTK 4.24까지 비어 있다)
+mod menu_names;
 mod minimized;
 mod network;
 mod notification_center;
