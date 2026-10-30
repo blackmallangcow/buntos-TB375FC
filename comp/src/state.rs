@@ -55,11 +55,13 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, SurfaceData,
-            TraversalAction, get_parent, is_sync_subsurface, send_surface_state, with_states,
+            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
+            SurfaceAttributes, SurfaceData, TraversalAction, add_blocker, add_pre_commit_hook,
+            get_parent, is_sync_subsurface, send_surface_state, with_states,
             with_surface_tree_downward,
         },
         cursor_shape::CursorShapeManagerState,
+        dmabuf::get_dmabuf,
         fractional_scale::{
             FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
         },
@@ -1214,6 +1216,43 @@ impl CompositorHandler for BuntState {
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
         &client.get_data::<ClientState>().unwrap().compositor_state
+    }
+
+    /// 앱이 GPU로 그린 버퍼(dmabuf)는 그 GPU 작업이 끝난 뒤에 커밋을 받는다. 바로 받으면 컴포지터의 프레임이
+    /// 그 앱의 GPU 작업을 기다리게 되어, 느린 앱 하나 때문에 화면 전체가 프레임을 놓친다. 그동안 화면에는
+    /// 그 표면의 앞 버퍼가 남는다
+    fn new_surface(&mut self, surface: &WlSurface) {
+        add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
+            let dmabuf = with_states(surface, |states| {
+                match states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .pending()
+                    .buffer
+                    .as_ref()
+                {
+                    Some(BufferAssignment::NewBuffer(buffer)) => get_dmabuf(buffer).cloned().ok(),
+                    _ => None,
+                }
+            });
+            let (Some(dmabuf), Some(client)) = (dmabuf, surface.client()) else {
+                return;
+            };
+            // 이미 다 그린 버퍼는 기다리지 않는다
+            let Ok((blocker, ready)) = dmabuf.generate_blocker(Interest::READ) else {
+                return;
+            };
+            let watched = state.loop_handle.insert_source(ready, move |_, _, state| {
+                let display = state.display_handle.clone();
+                state
+                    .client_compositor_state(&client)
+                    .blocker_cleared(state, &display);
+                Ok(())
+            });
+            if watched.is_ok() {
+                add_blocker(surface, blocker);
+            }
+        });
     }
 
     fn commit(&mut self, surface: &WlSurface) {
