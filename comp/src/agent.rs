@@ -7,7 +7,10 @@
 //! 셸의 레이어 표면(메뉴 막대, Dock, 모든 앱 패널과 그 열린 메뉴)도 목록과 포인터 누르기로 다룬다.
 //! 사람만 답하는 창(AUTH_NAMESPACES)은 목록에 들지 않고 누를 수도 없다
 
-use std::{sync::mpsc, time::Duration};
+use std::{
+    sync::{atomic::Ordering, mpsc},
+    time::Duration,
+};
 
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
@@ -28,7 +31,7 @@ use smithay::{
 
 use crate::{
     dbus::{AgentRequest, Chord, LayerInfo, Refused, Typed, WindowInfo},
-    state::BuntState,
+    state::{BuntState, ClientState},
 };
 // 셸의 레이어 표면(메뉴 막대, Dock 등)과 그 열린 메뉴 누르기
 use smithay::{
@@ -195,12 +198,20 @@ impl BuntState {
             .map_or(0, |toplevel| self.surface_pid(toplevel.wl_surface()))
     }
 
-    /// 표면을 만든 클라이언트의 pid. 모르면 0
+    /// 표면을 만든 클라이언트의 pid. 모르면 0. 컴포지터가 띄운 셸·입력기·잠금 화면은 미리 만든
+    /// 연결(socketpair)로 붙어 SO_PEERCRED가 컴포지터 자신이므로, 띄울 때 적어 둔 pid를 쓴다
     fn surface_pid(&self, surface: &WlSurface) -> u32 {
-        self.display_handle
-            .get_client(surface.id())
-            .ok()
-            .and_then(|client| client.get_credentials(&self.display_handle).ok())
+        let Ok(client) = self.display_handle.get_client(surface.id()) else {
+            return 0;
+        };
+        let spawned = client
+            .get_data::<ClientState>()
+            .map_or(0, |data| data.spawned_pid.load(Ordering::Relaxed));
+        if spawned != 0 {
+            return spawned;
+        }
+        client
+            .get_credentials(&self.display_handle)
             .map_or(0, |credentials| credentials.pid as u32)
     }
 

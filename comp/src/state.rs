@@ -11,7 +11,10 @@ use std::{
         fd::{AsRawFd, OwnedFd},
         unix::net::UnixStream,
     },
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::Instant,
 };
 
@@ -413,10 +416,13 @@ impl BuntState {
                 return None;
             }
         };
-        if let Err(err) = self.display_handle.insert_client(ours, Arc::new(client)) {
-            tracing::warn!("failed to add {program} as a client: {err}");
-            return None;
-        }
+        let connection = match self.display_handle.insert_client(ours, Arc::new(client)) {
+            Ok(connection) => connection,
+            Err(err) => {
+                tracing::warn!("failed to add {program} as a client: {err}");
+                return None;
+            }
+        };
         // 자식 프로세스가 연결을 물려받도록 close-on-exec를 끈다. 부모 쪽 사본은 실행 뒤 닫힌다
         if let Err(err) = fcntl_setfd(&theirs, FdFlags::empty()) {
             tracing::warn!("failed to pass the socket to {program}: {err}");
@@ -433,7 +439,12 @@ impl BuntState {
             process.env("PATH", session::TRUSTED_PATH);
         }
         match process.spawn() {
-            Ok(child) => Some(child),
+            Ok(child) => {
+                if let Some(data) = connection.get_data::<ClientState>() {
+                    data.spawned_pid.store(child.id(), Ordering::Relaxed);
+                }
+                Some(child)
+            }
             Err(err) => {
                 tracing::warn!("failed to start {program}: {err}");
                 None
@@ -1175,6 +1186,9 @@ pub struct ClientState {
     pub input_method: bool,
     /// 컴포지터가 직접 띄운 잠금 화면. 화면 잠금 프로토콜(ext-session-lock)을 쓸 수 있다 (session_lock.rs)
     pub lock_screen: bool,
+    /// 컴포지터가 띄운 프로그램(spawn_trusted)의 pid. 모르면 0. 미리 만든 연결(socketpair)은 SO_PEERCRED가
+    /// 그 쌍을 만든 컴포지터 자신이라, 셸의 표면이 컴포지터의 pid로 알려졌다 (agent.rs의 surface_pid)
+    pub spawned_pid: AtomicU32,
 }
 
 fn is_input_method_client(client: &Client) -> bool {
