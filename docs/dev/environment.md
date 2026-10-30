@@ -67,7 +67,12 @@ VM 안에서 다음을 확인한다.
 limactl shell buntos-dev tools/image/build.sh qemu-aarch64
 ```
 
-e2e 1번(부팅 → 로그인 화면 → 셸), e2e 5번(에이전트의 앱 간 제어), e2e 6번(키보드 단축키)을 돌린다. 시험 계정을 자격 증명으로 넘겨 부팅하고, 로그인 화면에 QMP로 암호를 쳐 들어간 뒤 sudo가 암호를 묻는지 보고, 에이전트로 그래픽 셸을 확인한 다음 e2e 5번(`tests/e2e/agent-apps.sh`)을 돌린다. e2e 6번은 QMP로 단축키를 넣고 게스트 쪽 도우미(`tests/e2e/shortcuts.sh`)로 결과를 읽는다:
+e2e 1번(부팅 → 로그인 화면 → 셸), e2e 5번(에이전트의 앱 간 제어), e2e 6번(키보드 단축키), e2e 4번(한글 입력), e2e 7번(화면 잠금)을 이 차례로 한 부팅에서 돌린다.
+- 시험 계정을 자격 증명으로 넘겨 부팅하고, 로그인 화면에 QMP로 암호를 쳐 들어간 뒤 sudo가 암호를 묻는지 보고, 에이전트로 그래픽 셸을 확인한 다음 e2e 5번(`tests/e2e/agent-apps.sh`)을 돌린다.
+- e2e 6번은 QMP로 단축키를 넣고 게스트 쪽 도우미(`tests/e2e/shortcuts.sh`)로 결과를 읽는다.
+- e2e 4번은 QMP로 2벌식 자판의 키를 쳐(`dkssud` → 안녕) fcitx5가 조합하게 하고, 게스트 쪽 도우미(`tests/e2e/hangul.sh`)가 앱의 글(에이전트), 입력기 상태(`fcitx5-remote`, fcitx5 D-Bus `DebugInfo`), 메뉴 막대의 입력 소스 표시, 터미널(foot)의 cat이 받은 바이트를 읽는다. 텍스트 편집기, 시스템 설정, foot, Firefox(새 프로필)를 쓴다.
+- e2e 7번은 QMP로 ⌃⌘Q를 넣어 화면을 잠그고 잠금 화면에 암호를 쳐 푼다. 게스트 쪽 도우미(`tests/e2e/session-lock.sh`)가 컴포지터 API(`GetLocked`)와 저널로 잠김과 에이전트 거절을 읽는다.
+- 자체 컴포넌트를 넣지 않은 이미지(그래픽 세션이 없는 지금의 x86-64)에서는 e2e 5·6·4·7번을 건너뛴다.
 
 ```bash
 limactl shell buntos-dev tests/e2e/boot-to-shell.sh qemu-aarch64
@@ -107,11 +112,18 @@ VMCTL_ID=mine tools/image/vmctl.sh stop
 **여럿이 함께 쓸 때.**
 - 같은 이미지는 한 번에 하나만 빌드한다(`<이미지 디렉터리>.lock`). vmctl은 빌드가 끝나기를 기다렸다 띄운다.
 - 띄운 뒤에는 빌드가 이미지를 새로 만들어도 VM은 이미 연 파일을 계속 쓴다.
-- 다른 사람이 기본 이미지로 VM을 띄워 둔 동안 자기 변경을 따로 시험하려면 `BUNTOS_IMAGE_DIR`로 다른 디렉터리에 빌드하고 같은 변수로 띄운다:
+- 다른 사람이 기본 이미지로 VM을 띄워 둔 동안 자기 변경을 따로 시험하려면 `BUNTOS_IMAGE_DIR`로 다른 디렉터리에 빌드하고 같은 변수로 띄운다. e2e도 같은 변수의 이미지를 띄운다:
 
   ```bash
   BUNTOS_IMAGE_DIR=~/buntos-build/mine tools/image/build.sh qemu-aarch64
   BUNTOS_IMAGE_DIR=~/buntos-build/mine VMCTL_ID=mine tools/image/vmctl.sh start &
+  BUNTOS_IMAGE_DIR=~/buntos-build/mine tests/e2e/boot-to-shell.sh qemu-aarch64
+  ```
+
+- 다른 소스 트리(git worktree)에서 빌드할 때는 cargo 대상 디렉터리도 `CARGO_TARGET_DIR`로 따로 준다(기본은 함께 쓰는 `~/buntos-build/cargo-target`). cargo는 작업 공간 안의 경로를 상대 경로로 기억하므로, 두 소스 트리가 한 디렉터리를 쓰면 서로의 산출물을 다시 빌드하거나 소스가 더 오래된 쪽이 다른 트리의 바이너리를 그대로 이미지에 넣는다. 처음 빌드는 2분쯤 걸리고 디렉터리는 약 2GB다:
+
+  ```bash
+  BUNTOS_IMAGE_DIR=~/buntos-build/mine CARGO_TARGET_DIR=~/buntos-build/mine-cargo tools/image/build.sh qemu-aarch64
   ```
 
 - mkosi `vm`(e2e, `screenshot.sh`)은 도는 동안 이미지를 잠가서, 그동안의 빌드는 2분까지 기다린 뒤 실패한다.
@@ -365,3 +377,7 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 메뉴 막대 메뉴가 Esc로 닫히지 않음 | 글자 칸에 포커스가 있으면 입력기(fcitx5)가 키보드를 잡고 있는데, 컴포지터가 이것을 다른 그랩으로 보고 메뉴의 키보드 그랩을 거절했다. 레이어 포커스 정리가 열린 팝업의 포커스를 창으로 되돌리기도 했다 | 입력기 그랩은 팝업 그랩을 막지 않고, 열린 팝업의 포커스는 건드리지 않는다(`comp/src/state.rs`) |
 | 메뉴 막대와 제어 센터에서 Bluetooth·Wi-Fi를 켜고 끄거나 전원 모드를 골라도 바뀌지 않음 | 셸의 `dbus::set_property`가 값을 v로 두 번 감싸 보냈다. 서비스가 "Expected type 'b' but got 'v'"로 거절했다(GDBus 시험 버스로 재현). QEMU에 Wi-Fi·Bluetooth 장치가 없어 드러나지 않았다 | 값을 한 번만 감싼다(`shell/src/dbus.rs`, 2026-10-29). 전원 모드는 VM에서 다시 확인한다 |
 | 시스템 버스나 세션 버스가 없는 곳(dbus-daemon이 없는 컨테이너, 이미지 밖)에서 셸이 뜨자마자 죽음(`gio-0.22.10/src/dbus.rs:44`의 panic, `UnexpectedNone`) | GLib의 `g_bus_watch_name()`은 버스에 붙지 못하면 사라짐 처리기를 연결 없이(NULL) 부르는데, gio-rs의 이름 감시가 그 연결을 unwrap한다(gtk-rs-core main도 같다). 지켜보던 연결이 닫힐 때(버스 데몬이 끝나거나 다시 시작할 때)도 GLib은 NULL을 주므로 `bus_watch_name_on_connection`만으로는 막지 못한다. 시험용 버스 데몬을 SIGKILL로 끝내 재현했다 | Bluetooth와 입력 소스는 버스 연결을 먼저 얻고(`gio::bus_get_future`), 얻지 못하면 기록만 남기고 항목을 끈다. 이름은 `shell/src/dbus.rs`의 `watch_name`으로 지켜보며, 연결이 닫히면 GLib보다 먼저 감시를 멈춘다. 버스가 끊기면 셸은 GLib의 exit-on-close로 SIGTERM을 받아 끝나고 컴포지터는 다시 띄우지 않는다. polkit 인증 에이전트, Wi-Fi 비밀 에이전트, Bluetooth 페어링 에이전트, 앱 항목의 이름 감시는 아직 gio-rs를 그대로 써서, 버스 데몬이 갑자기 끝나면 같은 자리에서 죽는다(설계안 11장 다음 작업) |
+| 한글을 조합하는 중에 다른 창을 누르면 조합하던 글자가 사라짐 | GTK는 text-input-v3의 leave를 받으면 조합 글자를 버리고, fcitx5는 input-method-v2에서 확정을 앱 쪽에 맡긴다(ClientUnfocusCommit). 아무도 확정하지 않았다 | 컴포지터가 입력기의 조합 글자를 기억해 두었다가 키보드 포커스를 다른 표면으로 옮기기 직전에 확정한다(`comp/src/ime.rs`, 2026-10-30) |
+| GTK4 앱의 한 창 안에서 조합 중에 다른 칸을 누르면 조합하던 글자가 사라짐 | GTK4는 칸이 포커스를 잃으면 조합 글자를 버리고(gtkimcontextwayland.c의 disable) 다음 칸에서 글 입력을 다시 켠다. 컴포지터가 확정을 보내도 GTK는 이미 다음 칸으로 옮겨 그 칸에 들어간다. Firefox(GTK3)는 칸을 떠날 때 스스로 확정한다 | 조합을 끝낸 뒤(스페이스, Enter, Tab, 방향키, 입력 소스 전환) 옮긴다. 다른 창을 누를 때는 확정된다. GTK 쪽 고침이 필요하다 |
+| 터미널(foot)에서 조합 중 Enter를 누르면 가끔 마지막 글자가 줄바꿈 뒤로 감 | 입력기가 commit을 보낼 때 그사이 컴포지터가 보낸 done을 아직 받지 못했으면 serial이 어긋나고, smithay는 그때 앱에 done(0)을 보냈다. foot은 serial이 다른 done을 버리고 확정 글자를 다음 done까지 미룬다(빠르게 치면 줄마다 done(0)이 보였다) | 입력기의 commit은 늘 그 글 입력의 serial로 done을 보낸다(`comp/src/ime.rs`, 2026-10-30). input-method-v2 명세대로 serial이 달라도 바뀐 것을 적용한다 |
+| 왼쪽 Shift만 눌렀다 떼면 입력 소스가 영문으로 바뀜 | fcitx5의 AltTriggerKeys(첫 입력 소스와 지금 입력 소스 오가기) 기본값이 Shift_L이다 | 기본 설정(`/etc/xdg/fcitx5/config`)에서 빈 목록으로 끈다(2026-10-30) |
