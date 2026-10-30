@@ -7,7 +7,8 @@
 # 모드로 두고 글을 더 친다(글 입력으로 넣으므로 바뀌지 않아야 한다). ref가 없는 화면은 창 스크린샷에서 찾은
 # 픽셀을 누른다(계산기의 '=' 단추, Firefox 캔버스). Firefox 주소 막대에서는 fill이 실패를 성공으로 알리지
 # 않는지, 글 칸이 아닌 곳에 type하면 키로 바꿔 치지 않는지 본다. 긴 웹 페이지의 글과 화면 밖 단추, 휠 스크롤,
-# 다른 페이지(시스템 모니터)를 빼는지, 앱을 끝내는 동작을 알리는지, 시스템 설정 사이드바도 본다.
+# 다른 페이지(시스템 모니터)를 빼는지, 앱을 끝내는 동작을 알리는지, 시스템 설정 사이드바도 본다. 끝으로
+# 셸의 메뉴 막대 단추를 포인터로 누르고, 메뉴를 Escape로 닫은 뒤 다른 메뉴 단추가 눌리는지 본다.
 # 직렬 콘솔의 root로 실행한다(boot-to-shell.sh가 넣어 돌린다). 마지막 줄은 "E2E5_RESULT 통과 실패"다
 set -u
 
@@ -279,5 +280,16 @@ A click "$(ref 'listitem "Wi-Fi"' <<<"$settings")" >/dev/null
 page=$(ref 'listitem "\(디스플레이\|Displays\)"' <<<"$settings")
 shown=$(A click "$page" | grep -c -E '^\+ *- text: "(디스플레이|Displays)"$')
 check "설정 사이드바를 누르면 디스플레이 페이지가 나온다" "$((shown > 0))" 1
+
+# 셸: 메뉴 막대 단추는 접근성 동작이 없어 포인터로 누른다. 키보드로 닫힌 메뉴의 포인터 잡기는 다음 움직임
+# 하나를 먹어, 전에는 Escape 뒤에 누른 제어 센터 대신 방금 닫은 네트워크 메뉴가 다시 열렸다
+expanded() { A snapshot --app bunt-shell -i | grep -c -E "button \"($1)\".*\[expanded\]"; }
+shell=$(A snapshot --app bunt-shell -i)
+A click "$(ref 'button "\(네트워크\|Network\)"' <<<"$shell")" --app bunt-shell >/dev/null
+check "메뉴 막대의 네트워크 단추를 누르면 그 메뉴가 열린다" "$(expanded '네트워크|Network')" 1
+A press Escape --app bunt-shell >/dev/null
+A click "$(ref 'button "\(제어 센터\|Control Center\)"' <<<"$shell")" --app bunt-shell >/dev/null
+check "메뉴를 Escape로 닫은 뒤 제어 센터를 누르면 제어 센터가 열린다" "$(expanded '제어 센터|Control Center')" 1
+A press Escape --app bunt-shell >/dev/null
 
 echo "E2E5_RESULT $passed $failed"

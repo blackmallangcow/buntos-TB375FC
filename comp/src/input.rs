@@ -515,13 +515,27 @@ impl BuntState {
         let under = self.surface_under(pos);
         pointer.motion(
             self,
-            under,
+            under.clone(),
             &MotionEvent {
                 location: pos,
                 serial,
                 time,
             },
         );
+        // 키보드(Escape)나 앱이 닫은 메뉴의 포인터 잡기(smithay의 PopupPointerGrab)는 다음 움직임을 받아
+        // 풀리면서 그 움직임을 버리고 포인터를 전 자리에 둔다. 사람은 이어 움직여 바로잡히지만, 한 번 옮기고
+        // 바로 누르는 에이전트는 전 자리(방금 닫은 메뉴의 단추)를 누르게 되므로 한 번 더 보낸다
+        if pointer.current_location() != pos {
+            pointer.motion(
+                self,
+                under,
+                &MotionEvent {
+                    location: pos,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                },
+            );
+        }
         pointer.frame(self);
     }
 
