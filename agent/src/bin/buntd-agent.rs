@@ -41,6 +41,7 @@ use bunt_agent::{
     },
     repl::{Repls, Worker, worker},
     session::Sessions,
+    skills,
     tree::{self, Item, Options, Tree, iface, role, state},
     wait,
 };
@@ -428,6 +429,8 @@ fn answer(
                 .map_err(|err| (protocol::INVALID_PARAMS, err.to_string()))
                 .and_then(|params| repls.run(&gate, &repl_owner(client), params)),
         ),
+        // 사용 안내는 데스크톱을 읽지 않으므로 데몬을 잡지 않는다
+        "skills" => skills::answer(request.params),
         method => dispatch(first, method, request.params),
     };
     reply(request.id, result)

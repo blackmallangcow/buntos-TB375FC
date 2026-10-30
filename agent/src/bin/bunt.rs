@@ -3,11 +3,20 @@
 
 //! bunt: buntOS 명령줄 도구. 지금은 에이전트 데몬(buntd-agent)에 묻는 `bunt agent`만 있다.
 
-use std::{path::Path, process::ExitCode};
+use std::{
+    io::{self, BufRead, Read, Write},
+    path::Path,
+    process::ExitCode,
+};
 
-use bunt_agent::protocol::{
-    self, ActParams, Acted, App, Installed, LaunchParams, Launched, Screenshot, ScreenshotParams,
-    Snapshot, SnapshotParams, Untracked, WaitParams, Waited,
+use bunt_agent::{
+    protocol::{
+        self, ActParams, Acted, App, Installed, LaunchParams, Launched, Repl, ReplParams,
+        Screenshot, ScreenshotParams, Skill, Snapshot, SnapshotParams, Untracked, WaitParams,
+        Waited,
+    },
+    repl::source,
+    skills,
 };
 use serde_json::Value;
 
@@ -17,6 +26,10 @@ Usage: bunt agent <command> [options]
 Read and control the desktop through accessibility trees (buntd-agent).
 
 Commands:
+  repl [<code>]            Run JavaScript that reads and controls the apps (Playwright-like:
+                           desktop.app('Calculator').getByRole('button', { name: '7' }).click()).
+                           Variables stay between calls. See `bunt agent repl --help`
+  skills [<name>]          List the usage guides, or print one (repl, desktop)
   apps [--installed]       List running apps and their windows, or the installed apps
   launch <app>             Open an installed app (name or desktop ID) and print its window
   snapshot [options]       Print the active window as a compact tree with refs
@@ -111,6 +124,8 @@ fn main() -> ExitCode {
         ["agent", action @ ("press" | "type"), keys, rest @ ..] => press(action, keys, rest),
         ["agent", "scroll", rest @ ..] => scroll(rest),
         ["agent", "wait", rest @ ..] => wait(rest),
+        ["agent", "repl", rest @ ..] => repl(rest),
+        ["agent", "skills", rest @ ..] => skills(rest),
         ["agent", "launch", app, rest @ ..] => launch(app, rest),
         []
         | ["help" | "-h" | "--help", ..]
@@ -233,6 +248,208 @@ fn scroll_params(args: &[&str]) -> Result<(ActParams, bool), String> {
     params.amount = Some([x * count, y * count]);
     let json = act_options(&mut params, &rest)?;
     Ok((params, json))
+}
+
+const REPL_USAGE: &str = "\
+Usage: bunt agent repl [options] [<code>...]
+       bunt agent repl [options] < script.js
+
+Run JavaScript in your REPL on buntd-agent. `desktop` reads and controls the apps of this
+desktop like Playwright drives a browser; variables stay between calls. The code comes from
+the arguments, from standard input (`-` or a pipe), or line by line when standard input is a
+terminal (.help, .reset, .exit there).
+
+Options:
+  --session <name>         Your REPL and refs of this session (default: default)
+  --timeout <ms>           Stop the code after this long (default 30000, at most 120000)
+  --reset                  Start from a new REPL (forget the variables) before running
+  --json                   Print the reply as JSON
+  --                       Everything after it is code
+
+The exit status is 1 when the code throws or the daemon refuses.
+
+";
+
+/// `repl`의 선택지
+#[derive(Debug, Default, PartialEq)]
+struct ReplOptions {
+    session: Option<String>,
+    timeout_ms: Option<u64>,
+    reset: bool,
+    json: bool,
+    help: bool,
+    /// 코드를 표준 입력에서 읽는다 (`-`)
+    stdin: bool,
+    /// 인자로 받은 코드
+    code: Vec<String>,
+}
+
+fn repl_options(args: &[&str]) -> Result<ReplOptions, String> {
+    let mut options = ReplOptions::default();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let mut value = |name: &str| {
+            rest.next()
+                .map(|value| value.to_string())
+                .ok_or(format!("{name} needs a value"))
+        };
+        match *arg {
+            "--session" => options.session = Some(value("--session")?),
+            "--timeout" => {
+                let ms = value("--timeout")?;
+                options.timeout_ms = Some(
+                    ms.parse()
+                        .map_err(|_| format!("--timeout needs milliseconds, not {ms:?}"))?,
+                );
+            }
+            "--reset" => options.reset = true,
+            "--json" => options.json = true,
+            "-h" | "--help" => options.help = true,
+            "-" => options.stdin = true,
+            "--" => {
+                options
+                    .code
+                    .extend(rest.by_ref().map(|arg| arg.to_string()));
+            }
+            other if other.starts_with("--") => {
+                return Err(format!(
+                    "unknown option: {other} (put code that starts with -- after --)"
+                ));
+            }
+            code => options.code.push(code.to_string()),
+        }
+    }
+    if options.stdin && !options.code.is_empty() {
+        return Err("give the code as arguments or on standard input (-), not both".into());
+    }
+    Ok(options)
+}
+
+/// `repl`: 인자나 표준 입력의 코드를 한 번 돌리거나, 터미널이면 한 줄씩 받는다
+fn repl(args: &[&str]) -> Result<(), String> {
+    let options = repl_options(args)?;
+    if options.help {
+        let guide = skills::find("repl").map_or("", |guide| guide.content());
+        print!("{REPL_USAGE}{guide}");
+        return Ok(());
+    }
+    if !options.code.is_empty() {
+        return run_repl(&options, options.code.join(" "), options.reset);
+    }
+    // 안전: 표준 입력이 터미널인지만 묻는다
+    if !options.stdin && unsafe { libc::isatty(0) } == 1 {
+        return interactive(&options);
+    }
+    let mut code = String::new();
+    io::stdin()
+        .read_to_string(&mut code)
+        .map_err(|err| format!("cannot read the code from standard input: {err}"))?;
+    run_repl(&options, code, options.reset)
+}
+
+/// 코드를 데몬의 REPL에서 돌리고 출력을 적는다. 코드가 던진 오류는 실패다
+fn run_repl(options: &ReplOptions, code: String, reset: bool) -> Result<(), String> {
+    let params = ReplParams {
+        code,
+        session: options.session.clone(),
+        timeout_ms: options.timeout_ms,
+        reset,
+        images: false,
+    };
+    let params = serde_json::to_value(&params).map_err(|err| err.to_string())?;
+    let reply = protocol::call("repl", params)?;
+    if options.json {
+        println!("{reply:#}");
+        return Ok(());
+    }
+    let repl: Repl = serde_json::from_value(reply)
+        .map_err(|err| format!("bad reply from buntd-agent: {err}"))?;
+    print!("{}", repl.output);
+    let _ = io::stdout().flush();
+    match repl.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// 터미널에서 한 줄씩: 괄호와 따옴표가 다 닫히면 그때까지의 줄을 한 번에 보낸다
+fn interactive(options: &ReplOptions) -> Result<(), String> {
+    let session = options.session.as_deref().unwrap_or("default");
+    eprintln!(
+        "# buntOS REPL (session {session}): desktop, console and setTimeout. .help, .reset, .exit"
+    );
+    let mut reset = options.reset;
+    let mut code = String::new();
+    let mut lines = io::stdin().lock();
+    loop {
+        eprint!("{}", if code.is_empty() { "bunt> " } else { "....> " });
+        let mut line = String::new();
+        match lines.read_line(&mut line) {
+            Ok(0) => {
+                eprintln!();
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(err) => return Err(format!("cannot read the terminal: {err}")),
+        }
+        if code.is_empty() {
+            match line.trim() {
+                "" => continue,
+                ".exit" => return Ok(()),
+                ".help" => {
+                    eprintln!(
+                        "# JavaScript with top-level await. Try: await desktop.apps()\n# The \
+                         API: bunt agent skills repl. .reset forgets the variables, .exit (or \
+                         Ctrl-D) leaves"
+                    );
+                    continue;
+                }
+                ".reset" => {
+                    reset = true;
+                    eprintln!("# the next code runs in a new REPL");
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        code.push_str(&line);
+        if !source::complete(&code) {
+            continue;
+        }
+        let ran = run_repl(options, std::mem::take(&mut code), reset);
+        reset = false;
+        if let Err(message) = ran {
+            eprintln!("bunt: {message}");
+        }
+    }
+}
+
+/// `skills`: 사용 안내의 목록이나 글 하나
+fn skills(args: &[&str]) -> Result<(), String> {
+    let (name, json) = match args {
+        [] => (None, false),
+        ["--json"] => (None, true),
+        [name] => (Some(*name), false),
+        [name, "--json"] | ["--json", name] => (Some(*name), true),
+        _ => return Err("skills takes one name (bunt agent skills repl)".into()),
+    };
+    let reply = protocol::call("skills", serde_json::json!({ "name": name }))?;
+    if json {
+        println!("{reply:#}");
+        return Ok(());
+    }
+    if name.is_some() {
+        let skill: Skill = serde_json::from_value(reply)
+            .map_err(|err| format!("bad reply from buntd-agent: {err}"))?;
+        print!("{}", skill.content.unwrap_or_default());
+        return Ok(());
+    }
+    let list: Vec<Skill> = serde_json::from_value(reply["skills"].clone())
+        .map_err(|err| format!("bad reply from buntd-agent: {err}"))?;
+    for skill in list {
+        println!("{}  {}", skill.name, skill.description);
+    }
+    Ok(())
 }
 
 /// `wait`: 조건이 맞을 때까지 기다려 본 것을 적는다
@@ -608,6 +825,39 @@ mod tests {
         // --app은 ref가 없으면 그 앱의 창에 하고, 있으면 ref가 그 앱의 것인지 본다
         assert!(params("click", "e3", &["--app", "계산기"]).is_ok());
         assert!(params("press", "", &["--app", "firefox"]).is_ok());
+    }
+
+    #[test]
+    fn repl_takes_code_from_arguments_or_standard_input() {
+        let options = repl_options(&[
+            "--session",
+            "s1",
+            "await",
+            "desktop.apps()",
+            "--timeout",
+            "500",
+            "--reset",
+        ])
+        .unwrap();
+        assert_eq!(options.code, ["await", "desktop.apps()"]);
+        assert_eq!(
+            (
+                options.session.as_deref(),
+                options.timeout_ms,
+                options.reset
+            ),
+            (Some("s1"), Some(500), true)
+        );
+        // -- 뒤는 모두 코드다
+        let dashed = repl_options(&["--json", "--", "--x", "-1"]).unwrap();
+        assert!(dashed.json);
+        assert_eq!(dashed.code, ["--x", "-1"]);
+        assert!(repl_options(&["-"]).unwrap().stdin);
+        assert!(repl_options(&["-", "1"]).is_err());
+        assert!(repl_options(&["--timeout", "soon"]).is_err());
+        assert!(repl_options(&["--frobnicate"]).is_err());
+        assert!(repl_options(&["--help"]).unwrap().help);
+        assert_eq!(repl_options(&[]).unwrap(), ReplOptions::default());
     }
 
     #[test]

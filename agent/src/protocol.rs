@@ -334,6 +334,22 @@ pub struct ReplImage {
     pub data: Option<String>,
 }
 
+/// `skills`의 인자: 이름이 없으면 목록, 있으면 그 안내 글
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsParams {
+    pub name: Option<String>,
+}
+
+/// 사용 안내 하나 (Markdown)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
 /// 데몬에 요청 하나를 보내고 답을 기다린다
 pub fn call(method: &str, params: Value) -> Result<Value, String> {
     request(method, params).map_err(|error| error.message)

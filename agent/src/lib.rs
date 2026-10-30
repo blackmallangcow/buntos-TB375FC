@@ -16,5 +16,6 @@ pub mod outline;
 pub mod protocol;
 pub mod repl;
 pub mod session;
+pub mod skills;
 pub mod tree;
 pub mod wait;
