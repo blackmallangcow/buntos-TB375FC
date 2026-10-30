@@ -498,7 +498,7 @@ impl BuntState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        // 커서를 옮겨 그린다 (에이전트가 옮긴 포인터도 여기로 온다)
+        // 커서를 옮겨 그린다 (에이전트가 옮긴 포인터도 여기로 온다). 화면 기록에도 커서가 들어간다(recording.rs)
         self.queue_redraw_all();
         let serial = SERIAL_COUNTER.next_serial();
         // 스크린샷 영역을 고르는 동안에는 포인터만 옮기고 앱에는 보내지 않는다
@@ -514,10 +514,6 @@ impl BuntState {
             );
             pointer.frame(self);
             return;
-        }
-        // 화면 기록에는 커서도 들어가므로 포인터만 움직여도 다시 그린다 (recording.rs)
-        if self.recording.is_some() {
-            self.queue_redraw_all();
         }
         // 화면 가장자리에 닿으면 숨은 막대를 꺼내고, 꺼낸 막대를 떠나면 숨길 때를 잰다
         self.update_bars(Some(pos));
