@@ -1665,7 +1665,9 @@ async fn perform(
                     .map_err(|err| failed("selecting", err))?;
                 return Ok(Some("selected it in its list".into()));
             }
-            if let Some(name) = actions.first() {
+            // 누르기 이름이 아닌 동작은 그것 하나뿐일 때만 쓴다. 여럿이면(동작 묶음을 단 GTK 위젯은 그 묶음의
+            // 동작을 모두 내보낸다) 무엇이 일어날지 몰라 사람처럼 포인터로 누른다
+            if let [name] = actions.as_slice() {
                 a11y.do_action(bus, &target.path, 0)
                     .await
                     .map_err(|err| failed("the accessible action", err))?;
