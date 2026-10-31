@@ -578,7 +578,14 @@ impl BuntState {
                     .map(|(window, _)| window.clone())
                 {
                     Some(window) => self.focus_window(&window, serial),
-                    None => self.clear_focus(serial),
+                    // 창이 없는 곳(데스크탑)이면 창의 활성화를 풀고, 키보드를 받는 데스크탑 항목 창이
+                    // 있으면 그 창에 준다(macOS에서 데스크탑을 누르면 Finder가 앞으로 오듯이)
+                    None => {
+                        self.clear_focus(serial);
+                        if let Some(desktop) = self.desktop_layer_under(pos) {
+                            self.focus_layer(&desktop, serial);
+                        }
+                    }
                 }
             }
         }

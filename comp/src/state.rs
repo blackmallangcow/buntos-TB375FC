@@ -1922,6 +1922,22 @@ impl BuntState {
             .map(|(layer, ..)| layer.wl_surface().clone())
     }
 
+    /// 아래층(bottom, background) 레이어 가운데 그 점에서 키보드를 받는 표면. 셸의 데스크탑 항목 창이다.
+    /// 창이 없는 곳을 누를 때만 쓴다(위층 레이어와 창이 먼저다)
+    pub fn desktop_layer_under(&self, pos: Point<f64, Logical>) -> Option<WlSurface> {
+        let output = self.space.output_under(pos).next()?;
+        let output_geo = self.space.output_geometry(output)?;
+        let map = layer_map_for_output(output);
+        let relative = pos - output_geo.loc.to_f64();
+        [Layer::Bottom, Layer::Background]
+            .into_iter()
+            .find_map(|kind| map.layer_under(kind, relative))
+            .filter(|layer| {
+                layer.cached_state().keyboard_interactivity != KeyboardInteractivity::None
+            })
+            .map(|layer| layer.wl_surface().clone())
+    }
+
     /// 레이어 표면에 키보드 포커스를 준다 (on_demand 레이어를 눌렀을 때)
     pub fn focus_layer(&mut self, surface: &WlSurface, serial: Serial) {
         // 잠긴 동안에는 레이어 표면이 키보드를 받지 않는다 (session_lock.rs)
