@@ -503,14 +503,26 @@ impl BuntState {
     /// 아니고 포인터가 도구 막대 위에 있으면 막대가 받게 false를 돌려준다
     pub fn screenshot_pointer_moved(&mut self, pos: Point<f64, Logical>) -> bool {
         let to_toolbar = self.toolbar_gets_pointer(pos);
-        let Some(selection) = &mut self.screenshot_area else {
+        let Some(selection) = &self.screenshot_area else {
             return false;
         };
+        if selection.editable.is_some() && to_toolbar {
+            return false;
+        }
+        // ⇧⌘5의 선택 영역에서는 포인터가 그 자리에서 잡을 것의 커서가 된다
+        if let Some(grip) = self.move_selection(pos) {
+            self.cursor_status = CursorImageStatus::Named(grip.cursor());
+        }
+        true
+    }
+
+    /// 고르기를 `pos`로 옮긴다: ⇧⌘5의 선택 영역은 끄는 중이면 영역을 고치고, ⇧⌘4는 끄는 영역이나 가리킨 창을 바꾼다.
+    /// ⇧⌘5의 선택 영역이면 그 자리에서 잡을 것을 돌려준다(포인터의 커서 모양). 포인터와 손가락(touch.rs)이 함께 쓴다.
+    /// 전에는 screenshot_pointer_moved 안에 있었다
+    fn move_selection(&mut self, pos: Point<f64, Logical>) -> Option<Grip> {
+        let selection = self.screenshot_area.as_mut()?;
+        selection.current = pos;
         if let Some(editable) = &mut selection.editable {
-            if to_toolbar {
-                return false;
-            }
-            selection.current = pos;
             let (grip, changed) = match &editable.drag {
                 Some((drag, bounds)) => {
                     let rect = drag.rect_at(pos, *bounds);
@@ -520,19 +532,17 @@ impl BuntState {
                 }
                 None => (selection::grip_at(editable.rect, pos), false),
             };
-            self.cursor_status = CursorImageStatus::Named(grip.cursor());
             if changed {
                 self.queue_redraw_all();
             }
-            return true;
+            return Some(grip);
         }
-        selection.current = pos;
         if selection.window {
             self.hover_window(pos);
         }
         // 끄는 영역이나 가리킨 창이 바뀌었다
         self.queue_redraw_all();
-        true
+        None
     }
 
     /// 창 고르기: 포인터 아래의 창을 칠한다 (메뉴 막대·Dock 같은 셸 표면은 고르지 않는다)
@@ -577,14 +587,31 @@ impl BuntState {
             .get_pointer()
             .map(|pointer| pointer.current_location());
         let to_toolbar = pos.is_some_and(|pos| self.toolbar_gets_pointer(pos));
-        let Some(selection) = &mut self.screenshot_area else {
+        let Some(selection) = &self.screenshot_area else {
             return false;
         };
+        if selection.editable.is_some() && to_toolbar {
+            return false;
+        }
+        let pos = pos.unwrap_or(selection.current);
+        if let Some(grip) = self.press_selection(pos, button, state) {
+            self.cursor_status = CursorImageStatus::Named(grip.cursor());
+        }
+        true
+    }
+
+    /// `pos`에서 누르거나 뗀 단추 하나를 고르기에 준다. 왼쪽 단추를 눌러 끌고 떼면 찍는다(창 고르기는 누른 창을 찍는다).
+    /// 다른 단추는 그만둔다. ⇧⌘5의 선택 영역은 왼쪽 단추로 옮기거나 크기를 고치기만 하고 다른 단추는 듣지 않으며, 끌기를
+    /// 마치면 그 자리에서 잡을 것을 돌려준다(포인터의 커서 모양). 포인터와 손가락(touch.rs)이 함께 쓴다. 전에는
+    /// screenshot_button 안에 있었다
+    fn press_selection(
+        &mut self,
+        pos: Point<f64, Logical>,
+        button: u32,
+        state: ButtonState,
+    ) -> Option<Grip> {
+        let selection = self.screenshot_area.as_mut()?;
         if let Some(editable) = &mut selection.editable {
-            if to_toolbar {
-                return false;
-            }
-            let pos = pos.unwrap_or(selection.current);
             match (button, state) {
                 (BUTTON_LEFT, ButtonState::Pressed) if editable.drag.is_none() => {
                     let grip = selection::grip_at(editable.rect, pos);
@@ -610,12 +637,11 @@ impl BuntState {
                         editable.bounds = bounds;
                     }
                     self.screenshot_last_area = Some(editable.rect);
-                    let grip = selection::grip_at(editable.rect, pos);
-                    self.cursor_status = CursorImageStatus::Named(grip.cursor());
+                    return Some(selection::grip_at(editable.rect, pos));
                 }
                 _ => {}
             }
-            return true;
+            return None;
         }
         match (button, state) {
             (BUTTON_LEFT, ButtonState::Pressed) if !selection.window => {
@@ -628,7 +654,7 @@ impl BuntState {
             }
             _ => {}
         }
-        true
+        None
     }
 
     /// Esc: 영역 고르기를 그만둔다
@@ -730,6 +756,11 @@ impl BuntState {
         {
             return true;
         }
+        self.toolbar_under(pos)
+    }
+
+    /// 그 자리 아래가 ⇧⌘5 도구 막대나 그 메뉴인지. 손가락(touch.rs)도 쓰면서 toolbar_gets_pointer에서 뺐다
+    pub(crate) fn toolbar_under(&self, pos: Point<f64, Logical>) -> bool {
         let Some((surface, _)) = self.surface_under(pos) else {
             return false;
         };

@@ -1190,6 +1190,32 @@ impl BuntState {
         }
         self.refresh_window_info(&window);
     }
+
+    /// 끌어 옮기기를 시작할 때 창의 자리. 최대화된 창을 끌면 원래 크기로 되돌리고, 누른 자리(`grab_x`, 전역 좌표)가 제목
+    /// 표시줄의 같은 비율 위치에 오게 한다. 포인터와 손가락(touch.rs)의 옮기기가 함께 쓴다. 전에는 move_request 안에 있었다
+    pub(crate) fn start_moving(
+        &mut self,
+        surface: &ToplevelSurface,
+        window: &Window,
+        grab_x: f64,
+    ) -> Option<Point<i32, Logical>> {
+        let mut initial_window_location = self.space.element_location(window)?;
+        if Self::has_state(surface, xdg_toplevel::State::Maximized) {
+            let maximized_width = window.geometry().size.w.max(1);
+            let restored_width = window
+                .user_data()
+                .get::<RestoreGeometry>()
+                .and_then(|restore| *restore.0.borrow())
+                .map_or(maximized_width, |geo| geo.size.w);
+            self.set_window_state(surface, xdg_toplevel::State::Maximized, false);
+            let ratio =
+                (grab_x - f64::from(initial_window_location.x)) / f64::from(maximized_width);
+            initial_window_location.x = (grab_x - ratio * f64::from(restored_width)).round() as i32;
+            self.space
+                .map_element(window.clone(), initial_window_location, true);
+        }
+        Some(initial_window_location)
+    }
 }
 
 #[derive(Default)]
@@ -1397,26 +1423,13 @@ impl XdgShellHandler for BuntState {
         else {
             return;
         };
-        let Some(mut initial_window_location) = self.space.element_location(&window) else {
+        // 최대화된 창을 끌면 원래 크기로 되돌리고, 포인터가 제목 표시줄의 같은 비율 위치에 오게 한다.
+        // 손가락의 옮기기도 쓰면서 start_moving으로 옮겼다
+        let Some(initial_window_location) =
+            self.start_moving(&surface, &window, start_data.location.x)
+        else {
             return;
         };
-
-        // 최대화된 창을 끌면 원래 크기로 되돌리고, 포인터가 제목 표시줄의 같은 비율 위치에 오게 한다
-        if Self::has_state(&surface, xdg_toplevel::State::Maximized) {
-            let maximized_width = window.geometry().size.w.max(1);
-            let restored_width = window
-                .user_data()
-                .get::<RestoreGeometry>()
-                .and_then(|restore| *restore.0.borrow())
-                .map_or(maximized_width, |geo| geo.size.w);
-            self.set_window_state(&surface, xdg_toplevel::State::Maximized, false);
-            let ratio = (start_data.location.x - f64::from(initial_window_location.x))
-                / f64::from(maximized_width);
-            initial_window_location.x =
-                (start_data.location.x - ratio * f64::from(restored_width)).round() as i32;
-            self.space
-                .map_element(window.clone(), initial_window_location, true);
-        }
 
         let grab = MoveSurfaceGrab {
             start_data,
@@ -1448,10 +1461,8 @@ impl XdgShellHandler for BuntState {
         let Some(initial_rect) = self.space.element_geometry(&window) else {
             return;
         };
-        surface.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Resizing);
-        });
-        surface.send_pending_configure();
+        // 창에 크기를 바꾸는 중(resizing)이라고 알리는 것은 ResizeSurfaceGrab::start가 한다. 손가락의 크기 조절도 쓰면서
+        // grabs.rs로 옮겼다
         if let Some(grab) = ResizeSurfaceGrab::start(start_data, window, edges.into(), initial_rect)
         {
             pointer.set_grab(self, grab, serial, Focus::Clear);

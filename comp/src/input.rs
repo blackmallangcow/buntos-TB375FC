@@ -18,7 +18,7 @@ use smithay::{
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     reexports::calloop::timer::{TimeoutAction, Timer},
-    utils::{Logical, Point, SERIAL_COUNTER},
+    utils::{Logical, Point, SERIAL_COUNTER, Serial},
     wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
 };
 
@@ -565,29 +565,8 @@ impl BuntState {
             self.focus_lock_surface_at(pointer.current_location());
         }
 
-        // 키보드를 받는 레이어 표면(on_demand)을 누르면 그 표면에 포커스를 준다.
-        // 메뉴바·Dock처럼 키보드를 받지 않는 레이어를 누를 때는 창 포커스를 바꾸지 않는다
         if state == ButtonState::Pressed && !pointer.is_grabbed() {
-            let pos = pointer.current_location();
-            if let Some(layer) = self.keyboard_layer_under(pos) {
-                self.focus_layer(&layer, serial);
-            } else if !self.is_over_top_layer(pos) {
-                match self
-                    .space
-                    .element_under(pos)
-                    .map(|(window, _)| window.clone())
-                {
-                    Some(window) => self.focus_window(&window, serial),
-                    // 창이 없는 곳(데스크탑)이면 창의 활성화를 풀고, 키보드를 받는 데스크탑 항목 창이
-                    // 있으면 그 창에 준다(macOS에서 데스크탑을 누르면 Finder가 앞으로 오듯이)
-                    None => {
-                        self.clear_focus(serial);
-                        if let Some(desktop) = self.desktop_layer_under(pos) {
-                            self.focus_layer(&desktop, serial);
-                        }
-                    }
-                }
-            }
+            self.focus_at(pointer.current_location(), serial);
         }
 
         pointer.button(
@@ -600,6 +579,30 @@ impl BuntState {
             },
         );
         pointer.frame(self);
+    }
+
+    /// 누른 자리에 키보드 포커스를 준다. 키보드를 받는 레이어 표면(on_demand)이면 그 표면에, 메뉴바·Dock처럼 키보드를
+    /// 받지 않는 레이어를 누를 때는 창 포커스를 바꾸지 않고, 그 밖에는 그 자리의 창이다. 창이 없는 곳(데스크탑)이면
+    /// 창의 활성화를 풀고, 키보드를 받는 데스크탑 항목 창이 있으면 그 창에 준다(macOS에서 데스크탑을 누르면 Finder가
+    /// 앞으로 오듯이). 포인터 누르기와 손가락(touch.rs)이 함께 쓴다. 전에는 press_button 안에 있었다
+    pub(crate) fn focus_at(&mut self, pos: Point<f64, Logical>, serial: Serial) {
+        if let Some(layer) = self.keyboard_layer_under(pos) {
+            self.focus_layer(&layer, serial);
+        } else if !self.is_over_top_layer(pos) {
+            match self
+                .space
+                .element_under(pos)
+                .map(|(window, _)| window.clone())
+            {
+                Some(window) => self.focus_window(&window, serial),
+                None => {
+                    self.clear_focus(serial);
+                    if let Some(desktop) = self.desktop_layer_under(pos) {
+                        self.focus_layer(&desktop, serial);
+                    }
+                }
+            }
+        }
     }
 
     fn on_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
