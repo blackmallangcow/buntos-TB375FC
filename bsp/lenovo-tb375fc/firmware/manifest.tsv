@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 기기에서 뽑을 펌웨어와 보정값 (docs/tb375fc/DESIGN.md 7장). extract.sh가 읽는다. 탭으로 나눈 다섯 칸:
+#   종류      partition(파티션 백업 partitions/<이름>.bin, A/B면 _a를 먼저 찾는다) 또는 file(원천 아래 경로, 글롭 가능)
+#   원천      파티션 이름이나 원천 디렉터리 아래의 경로 (vendor/는 vendor 파티션, nvdata/는 nvdata 파일 시스템)
+#   목적지    출력 아래 경로. -면 쓸 드라이버가 아직 없어 이름을 정하지 않은 것이고 unsorted/<원천 이름>에 둔다
+#   쓰는 곳   그것을 읽는 쪽과 단계
+#   확인      확인함 / 확인 필요(이름이나 자리를 기기에서 본다)
+# Mali CSF(arm/mali/arch11.8/mali_csffw.bin)는 linux-firmware에서 오므로 여기 없다. GPUEB(gpueb.img)는 LK가 올린다.
+partition	gpueb	-	LK가 올린다. 리눅스에는 필요 없고 기록으로만 둔다	확인함(펌웨어 묶음의 gpueb.img)
+partition	scp	-	센서 허브 SCP(3단계)	확인 필요(파티션 이름)
+partition	connsys_wifi	-	Wi-Fi soc7_0(2d)	확인함(펌웨어 묶음의 connsys_wifi.img), 파티션 이름 확인 필요
+partition	connsys_bt	-	Bluetooth soc7_0(2d)	확인함(펌웨어 묶음의 connsys_bt.img), 파티션 이름 확인 필요
+partition	nvdata	-	Wi-Fi·BT 보정값과 MAC이 든 ext4 원본(2d). 기기마다 다르다	확인함(원래 fstab의 /mnt/vendor/nvdata)
+partition	nvcfg	-	보정값 둘레(2d)	확인함(원래 fstab의 /mnt/vendor/nvcfg)
+partition	persist	-	보정값 둘레(2d)	확인함(원래 fstab의 /mnt/vendor/persist)
+file	nvdata/APCFG/APRDEB/WIFI	-	Wi-Fi NVRAM(보정값·MAC), mt76 soc7_0(2d)	확인 필요(MediaTek 관례 경로)
+file	nvdata/APCFG/APRDEB/WIFI_CUSTOM	-	Wi-Fi NVRAM 덧값(2d)	확인 필요(MediaTek 관례 경로)
+file	nvdata/APCFG/APRDEB/BT_Addr	-	Bluetooth 주소(2d)	확인 필요(MediaTek 관례 경로)
+file	vendor/firmware/novatek_ts_fw_boe.bin	-	NT36532 SPI 터치, BOE 패널(2c). 부팅마다 내려 준다	확인함(설계안 7장)
+file	vendor/firmware/novatek_ts_fw_tm.bin	-	NT36532 SPI 터치, Tianma 패널(2c)	확인함(설계안 7장)
+file	vendor/firmware/*soc7_0*	-	Wi-Fi·BT soc7_0 ROM 패치, RAM 코드(2d)	확인 필요(파일 이름)
+file	vendor/firmware/*aw883*	-	스마트 앰프 AW883xx ACF(3단계)	확인 필요(파일 이름)
