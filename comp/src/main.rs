@@ -34,6 +34,8 @@ mod session_lock;
 mod minimize;
 mod recording;
 mod selection;
+// 터치 화면: 손가락마다의 포커스, 손가락의 창 끌기, 가장자리 스와이프
+mod touch;
 
 fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

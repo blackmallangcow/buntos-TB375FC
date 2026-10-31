@@ -4,23 +4,31 @@
 //
 // Smithay smallvil의 grabs/move_grab.rs와 grabs/resize_grab.rs(MIT)를 바탕으로 했다.
 
-//! 창 이동·크기 조절 포인터 그랩 (xdg_toplevel.move, xdg_toplevel.resize)
+//! 창 이동·크기 조절 그랩 (xdg_toplevel.move, xdg_toplevel.resize). 앱이 포인터로 누른 serial로 청하면 포인터 그랩이,
+//! 손가락으로 누른 serial로 청하면 그 손가락의 터치 그랩이 받는다(touch.rs). 옮길 자리와 새 크기의 셈은 둘이 함께 쓴다
 
 use std::cell::RefCell;
 
 use smithay::{
     desktop::{Space, Window},
-    input::pointer::{
-        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
-        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
-        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
-        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
+    input::{
+        pointer::{
+            AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent,
+            GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
+            GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
+            GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab, PointerInnerHandle,
+            RelativeMotionEvent,
+        },
+        touch::{
+            DownEvent, GrabStartData as TouchGrabStartData, MotionEvent as TouchMotionEvent,
+            OrientationEvent, ShapeEvent, TouchGrab, TouchInnerHandle, UpEvent,
+        },
     },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::protocol::wl_surface::WlSurface,
     },
-    utils::{Logical, Point, Rectangle, Size},
+    utils::{Logical, Point, Rectangle, Serial, Size},
     wayland::{compositor::with_states, shell::xdg::SurfaceCachedState},
 };
 
@@ -133,6 +141,81 @@ macro_rules! forward_other_events {
     };
 }
 
+/// 창을 옮기거나 크기를 바꾸는 터치 그랩이 따로 다루지 않는 이벤트를 그대로 넘긴다. 그랩을 연 손가락이 아닌, 그 전부터 닿아
+/// 있던 손가락은 제 표면이 계속 받는다
+macro_rules! forward_other_touch_events {
+    () => {
+        /// 옮기거나 크기를 바꾸는 동안 새로 닿은 손가락은 받지 않는다. touch.rs가 보내지도 않는다
+        fn down(
+            &mut self,
+            _data: &mut BuntState,
+            _handle: &mut TouchInnerHandle<'_, BuntState>,
+            _focus: Option<(WlSurface, Point<f64, Logical>)>,
+            _event: &DownEvent,
+            _seq: Serial,
+        ) {
+        }
+
+        /// 앱이 손가락의 끝을 알도록 떼기는 모두 보낸다. 그랩을 연 손가락을 떼면 그랩이 끝난다
+        fn up(
+            &mut self,
+            data: &mut BuntState,
+            handle: &mut TouchInnerHandle<'_, BuntState>,
+            event: &UpEvent,
+            seq: Serial,
+        ) {
+            handle.up(data, event, seq);
+            if event.slot == self.start_data.slot {
+                handle.unset_grab(self, data);
+            }
+        }
+
+        fn frame(
+            &mut self,
+            data: &mut BuntState,
+            handle: &mut TouchInnerHandle<'_, BuntState>,
+            seq: Serial,
+        ) {
+            handle.frame(data, seq);
+        }
+
+        /// touch.rs는 손가락을 거둘 때 이 그랩을 먼저 풀므로 여기로 오지 않는다. 와도 그랩을 끝낸다
+        fn cancel(
+            &mut self,
+            data: &mut BuntState,
+            handle: &mut TouchInnerHandle<'_, BuntState>,
+            seq: Serial,
+        ) {
+            handle.cancel(data, seq);
+            handle.unset_grab(self, data);
+        }
+
+        fn shape(
+            &mut self,
+            data: &mut BuntState,
+            handle: &mut TouchInnerHandle<'_, BuntState>,
+            event: &ShapeEvent,
+            seq: Serial,
+        ) {
+            handle.shape(data, event, seq);
+        }
+
+        fn orientation(
+            &mut self,
+            data: &mut BuntState,
+            handle: &mut TouchInnerHandle<'_, BuntState>,
+            event: &OrientationEvent,
+            seq: Serial,
+        ) {
+            handle.orientation(data, event, seq);
+        }
+
+        fn start_data(&self) -> &TouchGrabStartData<BuntState> {
+            &self.start_data
+        }
+    };
+}
+
 pub struct MoveSurfaceGrab {
     pub start_data: PointerGrabStartData<BuntState>,
     pub window: Window,
@@ -170,6 +253,39 @@ impl PointerGrab<BuntState> for MoveSurfaceGrab {
     }
 
     forward_other_events!();
+
+    fn unset(&mut self, _data: &mut BuntState) {}
+}
+
+/// 손가락으로 창을 옮기는 그랩 (앱이 터치 serial로 xdg_toplevel.move를 청했다, touch.rs). 그랩을 연 손가락만 창을 옮긴다
+pub struct TouchMoveSurfaceGrab {
+    pub start_data: TouchGrabStartData<BuntState>,
+    pub window: Window,
+    pub initial_window_location: Point<i32, Logical>,
+}
+
+impl TouchGrab<BuntState> for TouchMoveSurfaceGrab {
+    fn motion(
+        &mut self,
+        data: &mut BuntState,
+        handle: &mut TouchInnerHandle<'_, BuntState>,
+        focus: Option<(WlSurface, Point<f64, Logical>)>,
+        event: &TouchMotionEvent,
+        seq: Serial,
+    ) {
+        if event.slot != self.start_data.slot {
+            handle.motion(data, focus, event, seq);
+            return;
+        }
+        drag_window(
+            data,
+            &self.window,
+            self.initial_window_location,
+            event.location - self.start_data.location,
+        );
+    }
+
+    forward_other_touch_events!();
 
     fn unset(&mut self, _data: &mut BuntState) {}
 }
@@ -389,6 +505,50 @@ impl PointerGrab<BuntState> for ResizeSurfaceGrab {
     }
 
     forward_other_events!();
+
+    fn unset(&mut self, _data: &mut BuntState) {
+        self.resize.finish();
+    }
+}
+
+/// 손가락으로 창 크기를 바꾸는 그랩 (앱이 터치 serial로 xdg_toplevel.resize를 청했다, touch.rs)
+pub struct TouchResizeSurfaceGrab {
+    start_data: TouchGrabStartData<BuntState>,
+    resize: Resize,
+}
+
+impl TouchResizeSurfaceGrab {
+    pub fn start(
+        start_data: TouchGrabStartData<BuntState>,
+        window: Window,
+        edges: ResizeEdges,
+        initial_rect: Rectangle<i32, Logical>,
+    ) -> Option<Self> {
+        Some(Self {
+            start_data,
+            resize: Resize::start(window, edges, initial_rect)?,
+        })
+    }
+}
+
+impl TouchGrab<BuntState> for TouchResizeSurfaceGrab {
+    fn motion(
+        &mut self,
+        data: &mut BuntState,
+        handle: &mut TouchInnerHandle<'_, BuntState>,
+        focus: Option<(WlSurface, Point<f64, Logical>)>,
+        event: &TouchMotionEvent,
+        seq: Serial,
+    ) {
+        if event.slot != self.start_data.slot {
+            handle.motion(data, focus, event, seq);
+            return;
+        }
+        self.resize
+            .update(data, event.location - self.start_data.location);
+    }
+
+    forward_other_touch_events!();
 
     fn unset(&mut self, _data: &mut BuntState) {
         self.resize.finish();

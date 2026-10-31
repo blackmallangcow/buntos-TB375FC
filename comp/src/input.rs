@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 키보드·포인터 입력 처리와 컴포지터 단축키 (단축키 표는 shortcuts.rs)
+//! 키보드·포인터 입력 처리와 컴포지터 단축키 (단축키 표는 shortcuts.rs, 터치 화면은 touch.rs)
 
 use std::time::Duration;
 
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-            KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+            AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
+            InputBackend, InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent,
+            PointerButtonEvent, PointerMotionEvent,
         },
         session::Session,
     },
@@ -103,6 +104,23 @@ impl BuntState {
             }
             InputEvent::PointerButton { event } => self.on_button::<I>(event),
             InputEvent::PointerAxis { event } => self.on_axis::<I>(event),
+            // 터치 화면. 입력 모드와 상관없이 늘 받는다 (touch.rs)
+            InputEvent::TouchDown { event } => self.on_touch_down::<I>(event),
+            InputEvent::TouchMotion { event } => self.on_touch_motion::<I>(event),
+            InputEvent::TouchUp { event } => self.on_touch_up::<I>(event),
+            InputEvent::TouchCancel { event } => self.on_touch_cancel::<I>(event),
+            InputEvent::TouchFrame { event } => self.on_touch_frame::<I>(event),
+            // 터치 화면이 붙고 빠지면 seat의 터치를 열고 닫는다. 빠지면 닿아 있던 손가락의 떼기가 오지 않는다
+            InputEvent::DeviceAdded { device }
+                if device.has_capability(DeviceCapability::Touch) =>
+            {
+                self.touch_device_added(device.id())
+            }
+            InputEvent::DeviceRemoved { device }
+                if device.has_capability(DeviceCapability::Touch) =>
+            {
+                self.touch_device_removed(&device.id())
+            }
             _ => {}
         }
     }

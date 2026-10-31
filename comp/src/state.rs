@@ -218,6 +218,8 @@ pub struct BuntState {
     pub session_lock: SessionLock,
     /// 셸 프로세스, 로그아웃, logind (session.rs)
     pub session: Session,
+    /// 화면에 닿은 손가락, 가장자리 스와이프, 손가락으로 꺼낸 막대 (touch.rs)
+    pub touch: crate::touch::Touch,
 }
 
 impl BuntState {
@@ -279,6 +281,7 @@ impl BuntState {
             repeat.rate as i32,
         )?;
         seat.add_pointer();
+        // 터치(wl_touch)는 터치 화면이 붙을 때 연다 (touch.rs의 touch_device_added)
 
         let (requests, request_channel): (_, Channel<Request>) = channel::channel();
         loop_handle
@@ -384,6 +387,7 @@ impl BuntState {
             backend,
             session_lock,
             session,
+            touch: crate::touch::Touch::default(),
         })
     }
 
@@ -1414,6 +1418,10 @@ impl XdgShellHandler for BuntState {
         let Some(seat) = Seat::<Self>::from_resource(&seat) else {
             return;
         };
+        // 손가락으로 누른 serial이면 그 손가락으로 옮긴다 (touch.rs)
+        if self.touch_move_request(&surface, serial) {
+            return;
+        }
         let wl_surface = surface.wl_surface();
         let Some(start_data) = check_grab(&seat, wl_surface, serial) else {
             return;
@@ -1449,6 +1457,10 @@ impl XdgShellHandler for BuntState {
         let Some(seat) = Seat::<Self>::from_resource(&seat) else {
             return;
         };
+        // 손가락으로 누른 serial이면 그 손가락으로 크기를 바꾼다 (touch.rs)
+        if self.touch_resize_request(&surface, serial, edges.into()) {
+            return;
+        }
         let wl_surface = surface.wl_surface();
         let Some(start_data) = check_grab(&seat, wl_surface, serial) else {
             return;
@@ -1584,6 +1596,8 @@ impl XdgShellHandler for BuntState {
             }
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
+        // 손가락으로 메뉴 밖을 누르면 닫도록 그랩을 둔다 (touch.rs)
+        self.note_popup_grab(grab);
     }
 }
 

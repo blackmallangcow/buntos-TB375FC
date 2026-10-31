@@ -12,8 +12,9 @@
 //! - 푸는 길은 잠금 화면이 사람이 친 암호를 PAM으로 확인하고 unlock_and_destroy를 보내는 것뿐이다. 컴포지터의
 //!   D-Bus에는 푸는 메서드가 없고, logind의 Unlock 신호도 듣지 않는다.
 //! - 잠금 화면이 죽어도 화면은 잠긴 채로 남는다(프로토콜 규칙). 컴포지터가 잠금 화면을 다시 띄운다.
-//! - 잠긴 동안 화면마다 그 화면의 잠금 표면과 검은 바탕만 그린다. 키보드는 잠금 표면에만, 포인터는 그 아래의
-//!   잠금 표면에만 간다. 컴포지터 단축키는 가상 터미널 전환, 입력 소스 전환, 세션 끝내기만 남는다.
+//! - 잠긴 동안 화면마다 그 화면의 잠금 표면과 검은 바탕만 그린다. 키보드는 잠금 표면에만, 포인터와 손가락은 그 아래의
+//!   잠금 표면에만 간다(잠글 때 닿아 있던 손가락은 앱에서 거둔다, touch.rs). 컴포지터 단축키는 가상 터미널 전환, 입력 소스
+//!   전환, 세션 끝내기만 남는다.
 //! - 에이전트의 요청은 모두 거절한다(agent.rs). 잠긴 상태는 D-Bus(GetLocked, LockedChanged)와 logind의
 //!   LockedHint로 알린다.
 
@@ -315,6 +316,9 @@ impl BuntState {
         {
             pointer.unset_grab(self, serial, time);
         }
+        // 닿아 있던 손가락은 앱에서 거두고(wl_touch.cancel) 손가락의 창 끌기도 푼다. 뗄 때까지 아무에게도 보내지 않는다
+        // (touch.rs)
+        self.cancel_touches();
         self.session_lock.locked = Some(Locked {
             since: Instant::now(),
             lock: None,

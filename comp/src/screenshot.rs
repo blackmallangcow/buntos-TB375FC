@@ -657,6 +657,42 @@ impl BuntState {
         None
     }
 
+    /// 영역을 고르는 동안 손가락 하나가 닿았다 (touch.rs). 왼쪽 단추를 누른 포인터처럼 받는다. ⇧⌘5의 도구 막대(와 그
+    /// 메뉴)를 누른 손가락은 막대가 받게 false를 돌려준다. 손가락에는 커서가 없으므로 커서 모양은 그대로 둔다
+    pub(crate) fn screenshot_touch_down(&mut self, pos: Point<f64, Logical>) -> bool {
+        if self.screenshot_area.is_none() || self.toolbar_under(pos) {
+            return false;
+        }
+        self.move_selection(pos);
+        self.press_selection(pos, BUTTON_LEFT, ButtonState::Pressed);
+        true
+    }
+
+    /// 고르기를 받은 손가락이 움직였다
+    pub(crate) fn screenshot_touch_motion(&mut self, pos: Point<f64, Logical>) {
+        self.move_selection(pos);
+    }
+
+    /// 고르기를 받은 손가락을 뗐다: ⇧⌘4는 고른 영역(창 고르기는 누른 창)을 찍고, ⇧⌘5의 선택 영역은 끌기를 마친다
+    pub(crate) fn screenshot_touch_up(&mut self, pos: Point<f64, Logical>) {
+        self.move_selection(pos);
+        self.press_selection(pos, BUTTON_LEFT, ButtonState::Released);
+    }
+
+    /// 고르기를 받은 손가락을 장치가 거뒀다(떼기는 오지 않는다): ⇧⌘4는 찍지 않고 그만두고, ⇧⌘5의 선택 영역은 끌던
+    /// 자리에서 끌기를 마친다
+    pub(crate) fn screenshot_touch_cancel(&mut self) {
+        let Some(selection) = &self.screenshot_area else {
+            return;
+        };
+        if selection.editable.is_some() {
+            let pos = selection.current;
+            self.press_selection(pos, BUTTON_LEFT, ButtonState::Released);
+        } else {
+            self.cancel_screenshot();
+        }
+    }
+
     /// Esc: 영역 고르기를 그만둔다
     pub fn cancel_screenshot(&mut self) {
         self.end_selection();
