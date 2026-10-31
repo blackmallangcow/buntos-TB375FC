@@ -41,6 +41,8 @@ mod secret_agent;
 mod service_dialog;
 // 시스템 설정의 알림 페이지가 정한 앱마다의 알림 설정
 mod notification_policy;
+// 포인터 모드와 터치 모드(컴포지터가 정한다). 터치 모드에서 누를 영역을 넓힌다
+mod input_mode;
 
 use std::rc::Rc;
 
@@ -78,6 +80,8 @@ fn main() -> glib::ExitCode {
         let config = Config::load();
         let tr = Rc::new(Translations::load(TRANSLATIONS));
         load_style();
+        // 터치 모드면 창에 touch 클래스를 단다. 창을 만들기 전에 불러 뒤에 뜨는 창도 모두 따르게 한다
+        input_mode::follow();
         let toplevels =
             gtk::gdk::Display::default().and_then(|display| Toplevels::connect(&display));
         if toplevels.is_none() {

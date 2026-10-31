@@ -121,6 +121,9 @@ fn card(notification: &Notification, notifications: &Notifications, tr: &Transla
             // 줄바꿈하는 글의 자연 너비는 한 줄로 쓴 너비라, 내용에 크기를 맞추는 배너가 옆으로 늘었다.
             // 너비는 카드가 정한다
             .max_width_chars(1)
+            // 글은 누르기를 받지 않는다(누르면 카드가 받는다). GTK는 뒤에 놓인 위젯을 먼저 고르므로, 받으면 터치
+            // 모드에서 위의 더 보기·닫기가 아래로 넓힌 누를 영역(style.css)을 이 글이 가로챈다
+            .can_target(false)
             .css_classes([class])
             .build()
     };
