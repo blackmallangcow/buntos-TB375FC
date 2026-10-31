@@ -17,6 +17,10 @@ monospace-font-name='Noto Sans Mono CJK KR 11'
 # 입힌다(theme/gtk4-apps.css, 세션 스크립트가 ~/.config/gtk-4.0/gtk.css에서 읽게 한다)
 button-layout='close,minimize,maximize:'
 
+[org.gnome.desktop.sound]
+# buntOS 사운드 테마(tools/sounds/generate.py로 만든 경고음과 시동음). 없는 소리는 freedesktop 테마에서 찾는다
+theme-name='buntos'
+
 [org.gnome.desktop.background]
 # 기본 배경화면 (tools/wallpapers/generate.py). 그리는 것은 bunt-shell이다
 picture-uri='file:///usr/share/backgrounds/buntos/buntos-dawn.png'

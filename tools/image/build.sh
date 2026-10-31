@@ -104,6 +104,18 @@ stage_components() {
 	fi
 	install -d "$out/stage/usr/share/backgrounds/buntos"
 	install -m 0644 "$wallpapers"/*.png "$out/stage/usr/share/backgrounds/buntos/"
+	# 경고음과 시동음: XDG 사운드 테마 buntos (tools/sounds/generate.py). 배경화면처럼 생성기가 바뀌었을 때만
+	# 다시 만든다
+	local sounds="$build_root/sounds"
+	stamp=$(sha256sum "$repo/tools/sounds/generate.py" | cut -d' ' -f1)
+	if [[ "$(cat "$sounds/.stamp" 2>/dev/null)" != "$stamp" ]]; then
+		rm -rf "$sounds"
+		python3 -I "$repo/tools/sounds/generate.py" "$sounds"
+		echo "$stamp" >"$sounds/.stamp"
+	fi
+	install -D -m 0644 "$sounds/index.theme" "$out/stage/usr/share/sounds/buntos/index.theme"
+	install -d "$out/stage/usr/share/sounds/buntos/stereo"
+	install -m 0644 "$sounds"/stereo/*.wav "$out/stage/usr/share/sounds/buntos/stereo/"
 	local icon
 	for icon in "$repo"/shell/data/icons/*.svg "$repo/settings/data/org.buntos.Settings.svg"; do
 		install -D -m 0644 "$icon" "$out/stage/usr/share/icons/hicolor/scalable/apps/$(basename "$icon")"
