@@ -260,6 +260,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
+ "wayland-scanner",
  "xcursor",
  "zbus",
 ]
@@ -292,7 +293,11 @@ name = "bunt-keyboard"
 version = "0.1.0"
 dependencies = [
  "bunt-i18n",
+ "gdk4-wayland",
  "gtk4",
+ "wayland-client",
+ "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]

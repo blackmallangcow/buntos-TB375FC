@@ -92,7 +92,7 @@ mod tests {
         // 가린 동안 모드가 바뀌었다 돌아와도 다시 뜨지 않는다
         rules.mode(InputMode::Pointer);
         assert_eq!(rules.mode(InputMode::Touch), Decision::Stay);
-        // 켠 칸을 다시 누르면 다시 켜지고(셸은 컴포지터의 TextInputChanged(true)) 다시 뜬다
+        // 켠 칸을 다시 누르면 다시 켜지고(셸은 컴포지터가 다시 보낸 text_input 1) 다시 뜬다
         assert_eq!(rules.text_input(true), Decision::Show);
     }
 }

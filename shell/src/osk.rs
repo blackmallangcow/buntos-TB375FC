@@ -7,11 +7,13 @@
 //! - 창: overlay 레이어로 아래·왼쪽·오른쪽에 붙고, 배타 영역 없이(-1) Dock 위를 덮는다. 키보드 포커스를 받지 않는다
 //!   (포커스를 가진 글 칸이 포커스를 지킨다). 판 위에는 글자 미리 보기가 뜰 투명한 띠가 있다. 창의 입력 영역은 판뿐이라
 //!   띠를 누르면 아래 창이 받는다. 컴포지터는 입력 영역 위까지만 창 자리로 준다(comp/src/osk.rs).
-//! - 뜬다: 입력 모드가 터치이고, 컴포지터가 키보드 포커스를 가진 앱이 글 입력을 켰다고 알릴 때(TextInputChanged(true),
-//!   켠 칸을 다시 눌렀을 때도 온다).
+//! - 뜬다: 입력 모드가 터치이고, 컴포지터가 키보드 포커스를 가진 앱이 글 입력을 켰다고 알릴 때(셸 전용 프로토콜
+//!   bunt_osk_v1의 text_input 1. 켠 칸을 다시 눌렀을 때도 온다).
 //! - 숨는다: 글 입력이 꺼지면 0.25초 뒤(칸을 옮기면 꺼졌다 바로 켜진다), 포인터 모드가 되거나 키보드 가리기 키를 누르면
 //!   바로. 가리기 키로 숨기면 칸을 다시 눌러야 뜬다.
-//! - 키: 컴포지터의 셸 전용 메서드로 실제 키보드처럼 넣어 입력기(fcitx5)가 한글을 조합한다.
+//! - 키: 같은 프로토콜의 press로 컴포지터가 실제 키보드처럼 넣어 입력기(fcitx5)가 한글을 조합한다. 키와 글 입력 상태는
+//!   셸의 Wayland 연결로만 오간다(keyboard/src/compositor.rs). 전에는 세션 버스로 오가 같은 사용자의 프로그램이 엿볼 수
+//!   있었다.
 //! - 배열은 메뉴 막대의 입력 소스를 따른다(한글이면 2벌식, 그 밖은 QWERTY). 지구본 키는 다음 입력 소스다.
 //! - 셸의 다른 창(관리자 인증 창, Wi-Fi 암호 창, 모든 앱)은 키보드 위로 비킨다([`avoid_keyboard`]).
 
@@ -22,21 +24,22 @@ use std::{
 };
 
 use bunt_keyboard::{
-    CompositorKeys, Keyboard, Room,
+    CompositorKeyboard, InputMode, Keyboard, Room,
     fcitx::script_of,
     mode,
     rules::{Decision, Rules},
 };
-use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
+use gtk4::{self as gtk, gdk, glib, prelude::*};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 
 use crate::input_source::InputSources;
 
 /// 레이어 이름이자 창의 접근성 이름 (comp/src/osk.rs의 KEYBOARD_NAMESPACE, agent/src/atspi.rs의 KEYBOARD_WINDOW)
 const NAMESPACE: &str = "bunt-osk";
-const NAME: &str = "org.buntos.Compositor";
-const PATH: &str = "/org/buntos/Compositor";
-const INTERFACE: &str = "org.buntos.Compositor1";
+/// 컴포지터가 알린 글 입력 상태를 처리하는 간격. GTK가 소켓에서 읽어 둔 이벤트를 이 간격으로 처리한다
+/// (toplevels.rs와 같은 방법). 포인터 모드에서는 키보드가 뜨지 않으므로 쌓인 것만 가끔 비운다
+const READ_TOUCH: Duration = Duration::from_millis(50);
+const READ_POINTER: Duration = Duration::from_secs(1);
 /// 글 입력이 꺼진 뒤 숨기까지 기다리는 시간. 다른 칸으로 옮기면 꺼졌다가 바로 켜진다
 const HIDE_DELAY: Duration = Duration::from_millis(250);
 /// 키보드 위로 비킨 창과 키보드 사이의 틈
@@ -45,17 +48,30 @@ const DIALOG_GAP: i32 = 16;
 struct Inner {
     window: gtk::ApplicationWindow,
     keyboard: Keyboard,
+    /// 컴포지터의 셸 전용 화면 키보드 프로토콜: 키를 보내고 글 입력 상태를 받는다
+    compositor: CompositorKeyboard,
     sources: InputSources,
     rules: Cell<Rules>,
     hide_timer: RefCell<Option<glib::SourceId>>,
+    /// 글 입력 상태를 처리하는 타이머 (입력 모드마다 간격이 다르다)
+    reader: RefCell<Option<glib::SourceId>>,
 }
 
 #[derive(Clone)]
 pub struct Osk(Rc<Inner>);
 
 impl Osk {
-    pub fn start(app: &gtk::Application, sources: &InputSources) -> Self {
-        let keyboard = Keyboard::new(Rc::new(CompositorKeys::new()), Room::Window);
+    /// 컴포지터가 화면 키보드 프로토콜을 주지 않으면(컴포지터가 셸로 띄우지 않았다) 키를 넣을 수 없으므로 띄우지 않는다
+    pub fn start(app: &gtk::Application, sources: &InputSources) -> Option<Self> {
+        let Some(compositor) =
+            gdk::Display::default().and_then(|display| CompositorKeyboard::connect(&display))
+        else {
+            eprintln!(
+                "bunt-shell: the compositor has no on-screen keyboard protocol for this shell"
+            );
+            return None;
+        };
+        let keyboard = Keyboard::new(Rc::new(compositor.clone()), Room::Window);
         // layer_window가 키보드를 받지 않게(KeyboardMode::None) 둔다
         let window = crate::layer_window(app, NAMESPACE);
         window.set_layer(Layer::Overlay);
@@ -68,18 +84,21 @@ impl Osk {
         let osk = Self(Rc::new(Inner {
             window,
             keyboard,
+            compositor,
             sources: sources.clone(),
             rules: Cell::default(),
             hide_timer: RefCell::default(),
+            reader: RefCell::default(),
         }));
         osk.follow_sources();
         osk.connect_keyboard();
         osk.clip_input();
-        // 입력 모드 구독도 화면 키보드를 붙든다(셸이 끝날 때까지 받는다)
+        osk.0.compositor.watch_text_input();
+        osk.read_every(READ_POINTER);
+        // 입력 모드 구독이 화면 키보드를 셸이 끝날 때까지 붙든다(main은 Osk를 들고 있지 않는다)
         let on_mode = osk.clone();
-        mode::watch(move |mode| on_mode.decide(|rules| rules.mode(mode)));
-        osk.watch_text_input();
-        osk
+        mode::watch(move |mode| on_mode.mode_changed(mode));
+        Some(osk)
     }
 
     pub fn window(&self) -> &gtk::ApplicationWindow {
@@ -161,52 +180,34 @@ impl Osk {
         surface.set_input_region(Some(&region));
     }
 
-    /// 컴포지터가 알리는 글 입력 상태를 받는다. 신호는 WatchTextInput을 부른 셸에만 오므로, 컴포지터의 버스 이름이
-    /// (다시) 생길 때마다 부른다
-    fn watch_text_input(&self) {
-        // 이 처리기와 아래의 신호 처리기가 화면 키보드를 셸이 끝날 때까지 붙든다(main은 Osk를 들고 있지 않는다)
-        let osk = self.clone();
-        gio::DBusProxy::for_bus(
-            gio::BusType::Session,
-            gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
-                | gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
-            None,
-            NAME,
-            PATH,
-            INTERFACE,
-            gio::Cancellable::NONE,
-            move |result| {
-                let proxy = match result {
-                    Ok(proxy) => proxy,
-                    Err(err) => {
-                        eprintln!("bunt-shell: {NAME}: {err}");
-                        return;
-                    }
-                };
-                let on_signal = osk.clone();
-                let subscription = proxy.connection().subscribe_to_signal(
-                    Some(NAME),
-                    Some(INTERFACE),
-                    Some("TextInputChanged"),
-                    Some(PATH),
-                    None,
-                    gio::DBusSignalFlags::NONE,
-                    move |signal| {
-                        if let Some((active,)) = signal.parameters.get::<(bool,)>() {
-                            on_signal.decide(|rules| rules.text_input(active));
-                        }
-                    },
-                );
-                // 셸이 끝날 때까지 받는다
-                std::mem::forget(subscription);
-                let weak = Rc::downgrade(&osk.0);
-                let on_owner = weak.clone();
-                proxy.connect_notify_local(Some("g-name-owner"), move |proxy, _| {
-                    watch(proxy, on_owner.clone());
-                });
-                watch(&proxy, weak);
-            },
-        );
+    /// 입력 모드가 바뀌었다. 그사이 쌓인 글 입력 상태를 먼저 처리해 지금 글 칸이 켜졌는지 안 뒤에 정한다
+    fn mode_changed(&self, mode: InputMode) {
+        self.read_text_input();
+        self.decide(|rules| rules.mode(mode));
+        self.read_every(match mode {
+            InputMode::Touch => READ_TOUCH,
+            InputMode::Pointer => READ_POINTER,
+        });
+    }
+
+    /// 컴포지터가 알린 글 입력 상태를 받은 차례로 규칙에 넣는다 (꺼졌다 바로 켜지면 숨기려던 것을 그만둔다)
+    fn read_text_input(&self) {
+        for active in self.0.compositor.take_text_input() {
+            self.decide(|rules| rules.text_input(active));
+        }
+    }
+
+    fn read_every(&self, interval: Duration) {
+        let weak = Rc::downgrade(&self.0);
+        let timer = glib::timeout_add_local(interval, move || {
+            let Some(inner) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            Osk(inner).read_text_input();
+            glib::ControlFlow::Continue
+        });
+        cancel(&self.0.reader);
+        self.0.reader.replace(Some(timer));
     }
 
     /// 규칙에 따라 띄우거나 숨긴다
@@ -263,31 +264,6 @@ impl Osk {
         self.apply_input_region();
         set_inset(0);
     }
-}
-
-/// WatchTextInput: 지금 상태를 받고 신호를 받기 시작한다. 셸 전용이라 컴포지터가 띄운 셸만 부를 수 있다
-fn watch(proxy: &gio::DBusProxy, osk: std::rc::Weak<Inner>) {
-    if !crate::dbus::is_running(proxy) {
-        return;
-    }
-    proxy.call(
-        "WatchTextInput",
-        None,
-        gio::DBusCallFlags::NONE,
-        -1,
-        gio::Cancellable::NONE,
-        move |result| match result {
-            Ok(reply) => {
-                if let (Some(inner), Some(active)) =
-                    (osk.upgrade(), reply.child_value(0).get::<bool>())
-                {
-                    Osk(inner).decide(|rules| rules.text_input(active));
-                }
-            }
-            // 화면 키보드 이전의 컴포지터
-            Err(err) => eprintln!("bunt-shell: {INTERFACE}.WatchTextInput: {err}"),
-        },
-    );
 }
 
 fn cancel(timer: &RefCell<Option<glib::SourceId>>) {

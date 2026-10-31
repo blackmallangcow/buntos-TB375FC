@@ -3,14 +3,20 @@
 
 //! 화면 키보드(셸의 `bunt-osk` 레이어, shell/src/osk.rs)를 위한 컴포지터 쪽 (ARCHITECTURE 5.1·5.2).
 //!
-//! - 글 입력 상태: 키보드 포커스를 가진 앱이 글 입력(text-input-v3)을 켰는지만 셸에 알린다(`TextInputChanged`,
-//!   `WatchTextInput`을 부른 셸의 버스 이름으로만 보낸다). 글 내용은 알리지 않는다. 에이전트의 `TextInputActive`와
-//!   같은 상태다. 켠 칸을 다시 눌러 앱이 글 입력을 다시 켜도 알린다(가린 키보드를 다시 띄운다).
-//! - 키: 셸이 누른 키를 실제 키보드와 같은 길(`KeyboardHandle::input`)로 seat에 넣는다(`PressOnScreenKeys`).
-//!   입력기(fcitx5)가 키보드를 잡고 있으면 그 잡기로 가서 한글이 조합된다. 가상 키보드 프로토콜(virtual-keyboard-v1)을
-//!   셸에 여는 길은 쓰지 않았다: smithay의 가상 키보드는 키를 포커스를 가진 앱에 바로 보내 입력기 잡기를 거치지 않는다
-//!   (입력기가 쓰지 않은 키를 돌려보내는 길이라서다). 셸 전용 메서드는 컴포지터가 띄운 셸의 pid만 부르고, 앱과 AI
-//!   에이전트는 부르지 못한다(에이전트에는 정책을 보는 `PressKeys`·`TypeText`가 따로 있다).
+//! - 통로: 셸 전용 Wayland 프로토콜 `bunt_osk_v1`(protocols/bunt-osk-v1.xml, 클라이언트 쪽은
+//!   keyboard/src/compositor.rs). 컴포지터가 셸로 띄운 특권 클라이언트만 이 전역을 본다(창 목록 프로토콜과 같다).
+//!   앱과 AI 에이전트는 쓰지 못한다(에이전트에는 정책을 보는 `PressKeys`·`TypeText`가 따로 있다). 키와 글 입력
+//!   상태가 셸의 Wayland 연결로만 오가므로 다른 프로그램이 엿보지 못한다.
+//!   - 바꾼 점: 처음에는 세션 버스의 셸 전용 메서드(`PressOnScreenKeys`, 셸에만 보내는 신호 `TextInputChanged`)였다.
+//!     부르는 쪽은 셸의 pid로 막았지만, 세션 버스는 같은 사용자의 프로그램이 모두 엿볼 수 있어(BecomeMonitor,
+//!     dbus-monitor) 화면 키보드로 친 암호(Wi-Fi 암호 창, 관리자 인증 창, 앱의 암호 칸)가 그대로 보였다
+//! - 글 입력 상태: 키보드 포커스를 가진 앱이 글 입력(text-input-v3)을 켰는지만 알린다(`text_input`, `watch_text_input`을
+//!   보낸 객체에만). 글 내용은 알리지 않는다. 에이전트의 `TextInputActive`와 같은 상태다. 켠 칸을 다시 눌러 앱이 글
+//!   입력을 다시 켜도 알린다(가린 키보드를 다시 띄운다).
+//! - 키: 셸이 누른 키(`press`)를 실제 키보드와 같은 길(`KeyboardHandle::input`)로 seat에 넣는다. 입력기(fcitx5)가
+//!   키보드를 잡고 있으면 그 잡기로 가서 한글이 조합된다. 가상 키보드 프로토콜(virtual-keyboard-v1)을 셸에 여는 길은
+//!   쓰지 않았다: smithay의 가상 키보드는 키를 포커스를 가진 앱에 바로 보내 입력기 잡기를 거치지 않는다(입력기가 쓰지
+//!   않은 키를 돌려보내는 길이라서다).
 //! - 자리: 키보드는 화면 맨 아래의 overlay 레이어이고 배타 영역을 쓰지 않는다(-1). Dock보다 먼저 놓여야 하는데
 //!   smithay는 배타 영역을 놓인 차례대로 쌓아 키보드를 Dock 위에 올리기 때문이다. 대신 창 자리(window_area)를
 //!   키보드가 키를 받는 영역(입력 영역)의 위쪽 끝까지로 줄인다. 앱(GTK)은 가려진 글 칸이 보이게 스스로 스크롤하지
@@ -19,31 +25,51 @@
 //! - 에이전트는 키보드를 누르지 못한다: 레이어 목록(`GetLayers`)에 들지 않고, `ClickLayer`와 화면 좌표 `Click`이
 //!   키보드 위면 거절한다(agent.rs). 그러지 않으면 막은 앱에 키보드로 글을 칠 수 있다.
 
-use std::{sync::mpsc, time::Duration};
-
 use smithay::{
     backend::input::KeyState,
     backend::renderer::utils::with_renderer_surface_state,
     desktop::layer_map_for_output,
     input::keyboard::{FilterResult, Keycode, Keysym, xkb},
     output::Output,
-    reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
+    reexports::wayland_server::{
+        Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
+        backend::ClientId, protocol::wl_surface::WlSurface,
+    },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::compositor::{RectangleKind, RegionAttributes, SurfaceAttributes, with_states},
 };
-use zbus::fdo;
 
-use crate::{
-    dbus::Command,
-    state::{BuntState, ClientState},
-};
+use crate::state::{BuntState, ClientState};
+
+use protocol::bunt_osk_v1::{self, BuntOskV1};
+
+/// 셸 전용 프로토콜 bunt_osk_v1의 서버 쪽 (wayland-protocols처럼 XML에서 만든다)
+mod protocol {
+    #![allow(dead_code, non_camel_case_types, unused_unsafe, unused_variables)]
+    #![allow(non_upper_case_globals, non_snake_case, unused_imports)]
+    #![allow(missing_docs, clippy::all)]
+
+    use smithay::reexports::wayland_server;
+    use smithay::reexports::wayland_server::protocol::*;
+
+    pub mod __interfaces {
+        // 만든 코드가 wayland_backend::protocol을 부른다. wayland-server가 그 모듈을 다시 내보낸다
+        use smithay::reexports::wayland_server::backend as wayland_backend;
+        use smithay::reexports::wayland_server::protocol::__interfaces::*;
+        wayland_scanner::generate_interfaces!("protocols/bunt-osk-v1.xml");
+    }
+    use self::__interfaces::*;
+
+    wayland_scanner::generate_server_code!("protocols/bunt-osk-v1.xml");
+
+    // XML을 고치면 다시 빌드한다. proc macro가 읽은 파일은 cargo가 모른다
+    const _: &str = include_str!("../protocols/bunt-osk-v1.xml");
+}
 
 /// 셸의 화면 키보드 레이어 이름 (shell/src/osk.rs, agent/src/atspi.rs의 KEYBOARD_WINDOW)
 pub const KEYBOARD_NAMESPACE: &str = "bunt-osk";
-/// 한 번에 받는 키 수. 셸은 앞 요청의 답을 기다리는 동안 누른 키를 모아 보낸다
-pub const MAX_KEYS: usize = 64;
-/// 이벤트 루프가 키를 다 넣기를 기다리는 시간 (에이전트 요청과 같다, dbus.rs의 AGENT_REPLY)
-const REPLY: Duration = Duration::from_secs(2);
+/// bunt_osk_v1의 판
+const VERSION: u32 = 1;
 /// evdev 키 코드 + 8 (xkb 키 코드)의 범위 (agent.rs와 같다)
 const KEYCODES: std::ops::RangeInclusive<u32> = 8..=255;
 
@@ -75,49 +101,52 @@ pub fn parse_key(text: &str) -> Result<OskKey, String> {
     }
 }
 
-pub fn parse_keys(keys: &[String]) -> Result<Vec<OskKey>, String> {
-    if keys.len() > MAX_KEYS {
-        return Err(format!("send at most {MAX_KEYS} keys at a time"));
+impl OskKey {
+    /// 칠 수 없다고 알릴 때의 글자
+    fn character(self) -> char {
+        match self {
+            OskKey::Char(character) => character,
+            OskKey::BackSpace => '\u{8}',
+            OskKey::Return => '\r',
+        }
     }
-    keys.iter().map(|key| parse_key(key)).collect()
 }
 
-/// 셸의 키를 넣지 않은 까닭
+/// 셸의 키를 넣지 않은 까닭. 셸에 답하지 않고 기록만 남긴다(사람이 누른 키라 다시 보낼 것이 없다)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeysRefused {
+enum KeysRefused {
     /// 화면이 잠겼다. 잠금 화면은 제 창 안의 키보드를 쓴다 (greeter/src/lock)
     Locked,
     /// 지금 키 배열에 없는 글자
     NotOnLayout(char),
 }
 
-/// D-Bus에서 이벤트 루프로 넘기는 화면 키보드 요청 (dbus.rs의 Request::Keyboard)
-#[derive(Debug)]
-pub enum KeyboardRequest {
-    /// 키를 차례로 누른다. 하나라도 칠 수 없으면 아무것도 치지 않는다
-    Keys {
-        keys: Vec<OskKey>,
-        reply: mpsc::Sender<Result<(), KeysRefused>>,
-    },
+/// 화면 키보드 프로토콜의 상태 (BuntState의 osk)
+pub struct OskState {
+    /// watch_text_input을 보낸 셸의 객체. 글 입력 상태를 이 객체에만 보낸다
+    watchers: Vec<BuntOskV1>,
+    text_input: TextInputState,
 }
 
-/// 이벤트 루프의 답을 기다려 D-Bus 답으로 바꾼다
-pub fn answer(receiver: mpsc::Receiver<Result<(), KeysRefused>>) -> fdo::Result<()> {
-    match receiver.recv_timeout(REPLY) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(KeysRefused::Locked)) => Err(fdo::Error::AccessDenied(
-            "the screen is locked; the lock screen has its own keyboard".into(),
-        )),
-        Ok(Err(KeysRefused::NotOnLayout(missing))) => Err(fdo::Error::InvalidArgs(format!(
-            "{missing:?} is not on the keyboard layout"
-        ))),
-        Err(_) => Err(fdo::Error::Failed("the compositor did not answer".into())),
+impl OskState {
+    /// bunt_osk_v1 전역을 만든다. 컴포지터가 셸로 띄운 클라이언트만 본다 ([`may_use`])
+    pub fn new(display: &DisplayHandle) -> Self {
+        display.create_global::<BuntState, BuntOskV1, ()>(VERSION, ());
+        Self {
+            watchers: Vec::new(),
+            text_input: TextInputState::default(),
+        }
+    }
+
+    /// 포커스를 가진 앱이 글 입력을 켜는 요청(enable)을 보냈다 (ime.rs)
+    pub fn enable_requested(&mut self) {
+        self.text_input.enable_requested();
     }
 }
 
-/// 셸에 알린 글 입력 상태 (BuntState의 osk)
+/// 셸에 알린 글 입력 상태
 #[derive(Debug, Default)]
-pub struct TextInputState {
+struct TextInputState {
     /// 마지막으로 알린 값
     published: bool,
     /// 포커스를 가진 앱이 이번 루프에서 글 입력을 (다시) 켰다. 이미 켜진 칸을 누르면 GTK가 다시 켠다
@@ -126,8 +155,7 @@ pub struct TextInputState {
 }
 
 impl TextInputState {
-    /// 포커스를 가진 앱이 글 입력을 켜는 요청(enable)을 보냈다 (ime.rs)
-    pub fn enable_requested(&mut self) {
+    fn enable_requested(&mut self) {
         self.enabled_again = true;
     }
 
@@ -160,10 +188,10 @@ fn find_key(keymap: &xkb::Keymap, layout: u32, keysym: Keysym, level: u32) -> Op
 
 /// 셸의 키를 지금 키 배열의 키로 바꾼다. 글자가 배열에 없으면 그 글자
 fn resolve(keymap: &xkb::Keymap, layout: u32, key: OskKey) -> Result<Press, char> {
-    let (keysym, character) = match key {
-        OskKey::Char(character) => (xkb::utf32_to_keysym(u32::from(character)), character),
-        OskKey::BackSpace => (Keysym::BackSpace, '\u{8}'),
-        OskKey::Return => (Keysym::Return, '\r'),
+    let keysym = match key {
+        OskKey::Char(character) => xkb::utf32_to_keysym(u32::from(character)),
+        OskKey::BackSpace => Keysym::BackSpace,
+        OskKey::Return => Keysym::Return,
     };
     if let Some(code) = find_key(keymap, layout, keysym, 0) {
         return Ok(Press { code, shift: false });
@@ -171,32 +199,83 @@ fn resolve(keymap: &xkb::Keymap, layout: u32, key: OskKey) -> Result<Press, char
     match key {
         OskKey::Char(_) => find_key(keymap, layout, keysym, 1)
             .map(|code| Press { code, shift: true })
-            .ok_or(character),
-        _ => Err(character),
+            .ok_or(key.character()),
+        _ => Err(key.character()),
     }
 }
 
-/// 키를 모두 지금 키 배열의 키로 바꾸고 Shift 키를 찾는다. 칠 수 없는 글자가 하나라도 있으면 그 글자다. Shift 키가
-/// 없는 배열에서 Shift 글자(대문자, !)를 그냥 누르면 다른 글자가 되므로 그것도 칠 수 없다
+/// 키를 지금 키 배열의 키 코드로 바꾸고, Shift가 필요하면 함께 누를 Shift 키를 찾는다. 칠 수 없으면 그 글자다.
+/// Shift 키가 없는 배열에서 Shift 글자(대문자, !)를 그냥 누르면 다른 글자가 되므로 그것도 칠 수 없다
 fn plan(
     keymap: &xkb::Keymap,
     layout: u32,
-    keys: &[OskKey],
-) -> Result<(Vec<Press>, Option<Keycode>), char> {
-    let shift = find_key(keymap, layout, Keysym::Shift_L, 0);
-    let mut presses = Vec::with_capacity(keys.len());
-    for key in keys {
-        let press = resolve(keymap, layout, *key)?;
-        if press.shift && shift.is_none() {
-            return Err(match key {
-                OskKey::Char(character) => *character,
-                OskKey::BackSpace => '\u{8}',
-                OskKey::Return => '\r',
-            });
-        }
-        presses.push(press);
+    key: OskKey,
+) -> Result<(Keycode, Option<Keycode>), char> {
+    let press = resolve(keymap, layout, key)?;
+    if !press.shift {
+        return Ok((press.code, None));
     }
-    Ok((presses, shift))
+    find_key(keymap, layout, Keysym::Shift_L, 0)
+        .map(|shift| (press.code, Some(shift)))
+        .ok_or(key.character())
+}
+
+/// 화면 키보드 프로토콜을 쓸 수 있는 클라이언트: 컴포지터가 셸로 띄운 특권 클라이언트(bunt-shell, 로그인 화면의
+/// bunt-greeter). 입력기와 잠금 화면도 컴포지터가 띄우지만 셸이 아니다
+fn may_use(client: Option<&ClientState>) -> bool {
+    client.is_some_and(|data| data.privileged)
+}
+
+impl GlobalDispatch<BuntOskV1, ()> for BuntState {
+    fn bind(
+        _state: &mut Self,
+        _display: &DisplayHandle,
+        _client: &Client,
+        resource: New<BuntOskV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        may_use(client.get_data::<ClientState>())
+    }
+}
+
+impl Dispatch<BuntOskV1, ()> for BuntState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &BuntOskV1,
+        request: bunt_osk_v1::Request,
+        _data: &(),
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            bunt_osk_v1::Request::Press { key } => match parse_key(&key) {
+                Ok(key) => {
+                    if let Err(refused) = state.on_screen_key(key) {
+                        tracing::debug!("on-screen keyboard: dropped {key:?}: {refused:?}");
+                    }
+                }
+                Err(err) => tracing::warn!("on-screen keyboard: {err}"),
+            },
+            bunt_osk_v1::Request::WatchTextInput => {
+                if !state.osk.watchers.contains(resource) {
+                    // 지금 상태를 바로 알린다. 이벤트 루프가 돌 때마다 정하므로 마지막으로 정한 값이 지금 값이다
+                    resource.text_input(u32::from(state.osk.text_input.published));
+                    state.osk.watchers.push(resource.clone());
+                }
+            }
+            bunt_osk_v1::Request::Destroy => {}
+        }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &BuntOskV1, _data: &()) {
+        state.osk.watchers.retain(|watcher| watcher != resource);
+    }
 }
 
 /// 창이 놓일 영역(`area`, 전역 좌표)의 아래쪽을 화면 키보드의 위쪽 끝(`top`, 전역 y, keyboard_top)까지로 줄인다.
@@ -222,17 +301,10 @@ fn input_top(region: Option<&RegionAttributes>) -> Option<i32> {
 }
 
 impl BuntState {
-    pub fn keyboard_request(&mut self, request: KeyboardRequest) {
-        match request {
-            KeyboardRequest::Keys { keys, reply } => {
-                let _ = reply.send(self.on_screen_keys(&keys));
-            }
-        }
-    }
-
-    /// 셸이 누른 키를 실제 키보드처럼 넣는다: 키를 모두 찾은 뒤 Shift가 필요한 키는 Shift를 누른 채 눌렀다 뗀다.
-    /// 컴포지터 단축키는 거치지 않는다(에이전트의 PressKeys와 같다). 입력기가 키보드를 잡고 있으면 그 잡기로 간다
-    fn on_screen_keys(&mut self, keys: &[OskKey]) -> Result<(), KeysRefused> {
+    /// 셸이 누른 키 하나를 실제 키보드처럼 넣는다: Shift가 필요하면 Shift를 누른 채 눌렀다 뗀다. 컴포지터 단축키는
+    /// 거치지 않는다(에이전트의 PressKeys와 같다). 입력기가 키보드를 잡고 있으면 그 잡기로 간다. 요청은 셸이 보낸
+    /// 차례로 오므로 키도 누른 차례로 들어간다
+    fn on_screen_key(&mut self, key: OskKey) -> Result<(), KeysRefused> {
         // 잠긴 동안 키는 잠금 화면으로 간다. 셸의 키보드는 그리지도 않으므로 받지 않는다
         if self.session_lock.is_locked() {
             return Err(KeysRefused::Locked);
@@ -245,9 +317,9 @@ impl BuntState {
             let layout = xkb.active_layout().0;
             // 안전: 키맵의 참조를 이 닫힘 밖으로 내보내지 않는다
             let keymap = unsafe { xkb.keymap() };
-            plan(keymap, layout, keys)
+            plan(keymap, layout, key)
         });
-        let (presses, shift) = planned.map_err(KeysRefused::NotOnLayout)?;
+        let (code, shift) = planned.map_err(KeysRefused::NotOnLayout)?;
         // 앱에 옮겨 보내며 되풀이하던 단축키는 다른 키를 누르면 멈춘다 (input.rs의 on_keyboard와 같다)
         self.stop_key_repeat();
         let time = self.start_time.elapsed().as_millis() as u32;
@@ -261,28 +333,26 @@ impl BuntState {
                 |_, _, _| FilterResult::Forward,
             );
         };
-        for press in presses {
-            let shift = shift.filter(|_| press.shift);
-            if let Some(code) = shift {
-                send(self, code, KeyState::Pressed);
-            }
-            send(self, press.code, KeyState::Pressed);
-            send(self, press.code, KeyState::Released);
-            if let Some(code) = shift {
-                send(self, code, KeyState::Released);
-            }
+        if let Some(shift) = shift {
+            send(self, shift, KeyState::Pressed);
+        }
+        send(self, code, KeyState::Pressed);
+        send(self, code, KeyState::Released);
+        if let Some(shift) = shift {
+            send(self, shift, KeyState::Released);
         }
         Ok(())
     }
 
-    /// 이벤트 루프가 한 바퀴 돌 때마다 부른다(udev.rs): 글 입력 상태가 바뀌었거나 다시 켜졌으면 셸에 알린다.
-    /// 잠긴 동안에는 끈 것으로 알린다. 잠금 화면의 암호 칸에 셸의 키보드를 띄우지 않는다
+    /// 이벤트 루프가 한 바퀴 돌 때마다 부른다(udev.rs, 클라이언트에 보내기 전): 글 입력 상태가 바뀌었거나 다시
+    /// 켜졌으면 셸에 알린다. 잠긴 동안에는 끈 것으로 알린다. 잠금 화면의 암호 칸에 셸의 키보드를 띄우지 않는다
     pub fn publish_text_input(&mut self) {
         let active = !self.session_lock.is_locked() && self.text_input_active();
-        if let Some(active) = self.osk.decide(active) {
+        if let Some(active) = self.osk.text_input.decide(active) {
             tracing::debug!("text input {}", if active { "on" } else { "off" });
-            self.dbus.update(|snapshot| snapshot.text_input = active);
-            self.dbus.send(Command::TextInputChanged(active));
+            for watcher in &self.osk.watchers {
+                watcher.text_input(u32::from(active));
+            }
         }
     }
 
@@ -406,12 +476,6 @@ mod tests {
         ] {
             assert!(parse_key(refused).is_err(), "{refused:?}");
         }
-        let many = vec!["a".to_owned(); MAX_KEYS + 1];
-        assert!(parse_keys(&many).is_err());
-        assert_eq!(
-            parse_keys(&many[..MAX_KEYS]).map(|keys| keys.len()),
-            Ok(MAX_KEYS)
-        );
     }
 
     #[test]
@@ -460,27 +524,79 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_is_planned_whole_or_not_at_all() {
+    fn shifted_keys_are_pressed_with_the_shift_key() {
         let Some(keymap) = us_keymap() else {
             eprintln!("xkeyboard-config is not installed; skipping the key plan test");
             return;
         };
-        let keys = [
-            OskKey::Char('h'),
-            OskKey::Char('I'),
-            OskKey::Char('!'),
-            OskKey::BackSpace,
-            OskKey::Return,
-        ];
-        let (presses, shift) = plan(&keymap, 0, &keys).unwrap();
-        assert_eq!(presses.len(), keys.len());
-        assert_eq!(presses.iter().filter(|press| press.shift).count(), 2);
+        let shift = find_key(&keymap, 0, Keysym::Shift_L, 0);
         assert!(shift.is_some());
-        // 하나라도 칠 수 없으면 아무것도 치지 않는다
+        let code = |evdev: u32| Keycode::new(evdev + 8);
+        assert_eq!(plan(&keymap, 0, OskKey::Char('a')), Ok((code(KEY_A), None)));
         assert_eq!(
-            plan(&keymap, 0, &[OskKey::Char('a'), OskKey::Char('€')]),
-            Err('€')
+            plan(&keymap, 0, OskKey::Char('Q')),
+            Ok((code(KEY_Q), shift))
         );
+        assert_eq!(
+            plan(&keymap, 0, OskKey::Char('!')),
+            Ok((code(KEY_1), shift))
+        );
+        assert_eq!(
+            plan(&keymap, 0, OskKey::BackSpace),
+            Ok((code(KEY_BACKSPACE), None))
+        );
+        assert_eq!(plan(&keymap, 0, OskKey::Char('€')), Err('€'));
+    }
+
+    /// Shift 키가 없는 배열에서는 Shift 글자를 치지 않는다. 그냥 누르면 다른 글자(q)가 되기 때문이다
+    #[test]
+    fn shifted_keys_are_refused_without_a_shift_key() {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let Some(keymap) = xkb::Keymap::new_from_string(
+            &context,
+            "xkb_keymap {
+                xkb_keycodes { minimum = 8; maximum = 255; <AD01> = 24; };
+                xkb_types { include \"complete\" };
+                xkb_compat { include \"complete\" };
+                xkb_symbols { key <AD01> { [ q, Q ] }; };
+            };"
+            .to_owned(),
+            xkb::KEYMAP_FORMAT_TEXT_V1,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        ) else {
+            eprintln!("xkeyboard-config is not installed; skipping the no-shift test");
+            return;
+        };
+        assert_eq!(
+            plan(&keymap, 0, OskKey::Char('q')),
+            Ok((Keycode::new(KEY_Q + 8), None))
+        );
+        assert_eq!(plan(&keymap, 0, OskKey::Char('Q')), Err('Q'));
+        assert_eq!(plan(&keymap, 0, OskKey::Return), Err('\r'));
+    }
+
+    /// 화면 키보드 프로토콜은 컴포지터가 셸로 띄운 클라이언트만 쓴다. 앱(컴포지터가 띄우지 않았다), 입력기, 잠금
+    /// 화면은 전역을 보지 못한다
+    #[test]
+    fn only_the_shell_may_use_the_keyboard_protocol() {
+        let shell = ClientState {
+            privileged: true,
+            ..ClientState::default()
+        };
+        let input_method = ClientState {
+            input_method: true,
+            ..ClientState::default()
+        };
+        let lock_screen = ClientState {
+            lock_screen: true,
+            ..ClientState::default()
+        };
+        assert!(may_use(Some(&shell)));
+        assert!(!may_use(Some(&ClientState::default())));
+        assert!(!may_use(Some(&input_method)));
+        assert!(!may_use(Some(&lock_screen)));
+        // 컴포지터가 모르는 클라이언트 데이터 (붙지 않은 클라이언트)
+        assert!(!may_use(None));
     }
 
     #[test]
@@ -537,22 +653,5 @@ mod tests {
             )],
         };
         assert_eq!(input_top(Some(&subtract_only)), None);
-    }
-
-    #[test]
-    fn refusals_name_the_reason() {
-        let refusal = |why: KeysRefused| {
-            let (reply, receiver) = mpsc::channel();
-            reply.send(Err(why)).unwrap();
-            answer(receiver).unwrap_err()
-        };
-        assert!(matches!(
-            refusal(KeysRefused::Locked),
-            fdo::Error::AccessDenied(_)
-        ));
-        match refusal(KeysRefused::NotOnLayout('€')) {
-            fdo::Error::InvalidArgs(message) => assert!(message.contains('€'), "{message}"),
-            other => panic!("{other:?}"),
-        }
     }
 }

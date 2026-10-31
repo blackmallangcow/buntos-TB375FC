@@ -108,7 +108,7 @@ fn main() -> glib::ExitCode {
             sound: Sound::start(),
         };
         let input_sources = InputSources::start();
-        // 화면 키보드는 메뉴 막대의 입력 소스를 따른다
+        // 화면 키보드는 메뉴 막대의 입력 소스를 따른다. 컴포지터가 셸로 띄우지 않았으면 없다
         let keyboard = osk::Osk::start(app, &input_sources);
         // 로고 메뉴의 강제 종료…, 잠자기, 화면 잠금, 로그아웃… 동작. 메뉴 막대보다 먼저 단다
         let session = session::Session::new(app, &tr);
@@ -145,10 +145,11 @@ fn main() -> glib::ExitCode {
             switcher.window().clone(),
             screenshot_toolbar.window().clone(),
             screenshot_preview.window().clone(),
-            keyboard.window().clone(),
         ];
         // 데스크탑의 단축 메뉴도 밝게·어둡게를 따른다
         windows.extend(desktop.map(|desktop| desktop.window().clone()));
+        // 화면 키보드 창은 있을 때만 다크 모드를 따른다
+        windows.extend(keyboard.map(|keyboard| keyboard.window().clone()));
         follow_color_scheme(windows);
     });
     app.run()

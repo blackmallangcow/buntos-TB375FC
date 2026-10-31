@@ -39,8 +39,6 @@ use crate::{
 };
 // 에이전트의 창 스크린샷, 셸의 ⇧⌘5 도구 막대
 use crate::screenshot::{self, Image, write_png};
-// 셸의 화면 키보드: 셸이 누른 키, 셸에만 알리는 글 입력 상태
-use crate::osk;
 use zbus::{
     Message, blocking, fdo, interface,
     message::Header,
@@ -159,10 +157,6 @@ pub struct Snapshot {
     pub recording: bool,
     /// 포인터 모드와 터치 모드 (input_mode.rs)
     pub input_mode: crate::input_mode::InputMode,
-    /// 키보드 포커스를 가진 앱이 글 입력(text-input-v3)을 켰다. 잠긴 동안에는 거짓이다 (osk.rs)
-    pub text_input: bool,
-    /// TextInputChanged를 받는 셸의 (pid, 버스 이름). WatchTextInput을 부른 셸이고, 그 셸이 끝나면 보내지 않는다
-    pub text_input_watcher: Option<(u32, String)>,
 }
 
 /// 에이전트가 보는 창 하나 (GetWindows)
@@ -408,8 +402,6 @@ pub enum Request {
     Agent(AgentRequest),
     /// 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
     Session(SessionRequest),
-    /// 셸의 화면 키보드에서 누른 키 (osk.rs)
-    Keyboard(osk::KeyboardRequest),
 }
 
 /// 컴포지터가 D-Bus 스레드에 시키는 일
@@ -441,8 +433,6 @@ pub enum Command {
     RecordingSaved { path: String, preview: String },
     /// InputModeChanged 신호를 보낸다: 포인터 모드와 터치 모드가 바뀌었다 (input_mode.rs)
     InputModeChanged(crate::input_mode::InputMode),
-    /// TextInputChanged 신호를 WatchTextInput을 부른 셸에만 보낸다 (osk.rs)
-    TextInputChanged(bool),
 }
 
 pub struct Service {
@@ -484,8 +474,6 @@ impl Service {
 }
 
 fn run(api: Api, commands: mpsc::Receiver<Command>) {
-    // 셸에만 보내는 신호(TextInputChanged)의 받는 쪽을 사본에서 읽는다
-    let snapshot = api.snapshot.clone();
     let connection = blocking::connection::Builder::session()
         .and_then(|builder| builder.name(BUS_NAME))
         .and_then(|builder| builder.serve_at(OBJECT_PATH, api))
@@ -521,18 +509,6 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
             Command::InputModeChanged(mode) => {
                 emit(&connection, "InputModeChanged", &(mode.as_str(),))
             }
-            Command::TextInputChanged(active) => {
-                let watcher = {
-                    let snapshot = snapshot.lock().unwrap();
-                    snapshot
-                        .text_input_watcher
-                        .clone()
-                        .filter(|(pid, _)| *pid != 0 && *pid == snapshot.shell_pid)
-                };
-                if let Some((_, name)) = watcher {
-                    emit_to(&connection, &name, "TextInputChanged", &(active,));
-                }
-            }
         }
     }
 }
@@ -567,19 +543,6 @@ fn emit<B: serde::Serialize + DynamicType>(
 ) {
     if let Err(err) = connection.emit_signal(None::<&str>, OBJECT_PATH, INTERFACE, name, body) {
         tracing::warn!("failed to emit {name}: {err}");
-    }
-}
-
-/// 신호를 한 연결(버스 이름)에만 보낸다. 셸만 받을 상태(글 입력)를 다른 프로그램이 듣지 못하게 한다
-fn emit_to<B: serde::Serialize + DynamicType>(
-    connection: &blocking::Connection,
-    destination: &str,
-    name: &str,
-    body: &B,
-) {
-    if let Err(err) = connection.emit_signal(Some(destination), OBJECT_PATH, INTERFACE, name, body)
-    {
-        tracing::warn!("failed to send {name} to {destination}: {err}");
     }
 }
 
@@ -1537,45 +1500,6 @@ impl Api {
             .map_err(fdo::Error::InvalidArgs)
     }
 
-    /// 셸 전용: 키보드 포커스를 가진 앱이 글 입력(text-input-v3)을 켰는지 (화면 키보드, osk.rs). 부른 셸의 버스
-    /// 이름으로 TextInputChanged를 보내기 시작한다(셸만 받는다). 글 내용은 알리지 않는다. 잠긴 동안에는 거짓이다
-    async fn watch_text_input(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &zbus::Connection,
-    ) -> fdo::Result<bool> {
-        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
-        check_shell(connection, &header, shell_pid).await?;
-        let sender = header
-            .sender()
-            .map(|sender| sender.to_string())
-            .ok_or_else(|| fdo::Error::Failed("the call has no sender".into()))?;
-        let mut snapshot = self.snapshot.lock().unwrap();
-        snapshot.text_input_watcher = Some((shell_pid, sender));
-        Ok(snapshot.text_input)
-    }
-
-    /// 셸 전용: 화면 키보드에서 누른 키를 실제 키보드처럼 넣는다 (osk.rs). 입력기(fcitx5)가 키보드를 잡고 있으면 그
-    /// 잡기를 거쳐 한글이 조합된다. 키는 지금 키 배열에 있는 인쇄할 수 있는 ASCII 글자 하나(대문자와 Shift 기호는
-    /// Shift를 함께 누른다)나 "BackSpace", "Return"이고 한 번에 64개까지다. 컴포지터 단축키는 거치지 않는다. 하나라도
-    /// 칠 수 없으면 아무것도 치지 않는다. 잠긴 동안에는 거절한다
-    async fn press_on_screen_keys(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &zbus::Connection,
-        keys: Vec<String>,
-    ) -> fdo::Result<()> {
-        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
-        check_shell(connection, &header, shell_pid).await?;
-        let keys = osk::parse_keys(&keys).map_err(fdo::Error::InvalidArgs)?;
-        let (reply, receiver) = mpsc::channel();
-        self.request(Request::Keyboard(osk::KeyboardRequest::Keys {
-            keys,
-            reply,
-        }))?;
-        osk::answer(receiver)
-    }
-
     /// 화면을 잠갔거나(true) 풀었다(false)
     #[zbus(signal)]
     async fn locked_changed(emitter: &SignalEmitter<'_>, locked: bool) -> zbus::Result<()>;
@@ -1634,11 +1558,6 @@ impl Api {
     /// 입력 모드가 바뀐 뒤 보낸다. 모드가 그대로이면 장치가 붙고 떨어져도 보내지 않는다
     #[zbus(signal)]
     async fn input_mode_changed(emitter: &SignalEmitter<'_>, mode: &str) -> zbus::Result<()>;
-
-    /// WatchTextInput을 부른 셸에만 보낸다: 키보드 포커스를 가진 앱이 글 입력을 켰거나(true) 껐다(false). 켠 칸을
-    /// 다시 눌러 앱이 글 입력을 다시 켜도 true를 보낸다(가린 화면 키보드를 다시 띄운다). 잠그면 false다
-    #[zbus(signal)]
-    async fn text_input_changed(emitter: &SignalEmitter<'_>, active: bool) -> zbus::Result<()>;
 }
 
 #[cfg(test)]

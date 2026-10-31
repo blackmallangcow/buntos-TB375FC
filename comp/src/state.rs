@@ -222,8 +222,8 @@ pub struct BuntState {
     pub touch: crate::touch::Touch,
     /// 붙은 입력 장치와 입력 모드 (input_mode.rs)
     pub input_devices: crate::input_mode::InputDevices,
-    /// 셸의 화면 키보드에 알린 글 입력 상태 (osk.rs)
-    pub osk: crate::osk::TextInputState,
+    /// 셸 전용 화면 키보드 프로토콜(bunt_osk_v1)과 셸에 알린 글 입력 상태 (osk.rs)
+    pub osk: crate::osk::OskState,
 }
 
 impl BuntState {
@@ -344,6 +344,8 @@ impl BuntState {
         let session = Session::new(&loop_handle, &config)?;
         // 입력 모드: 장치가 붙기 전에는 comp.toml의 덮어쓰기만 본다
         let input_devices = crate::input_mode::InputDevices::start(config.input.mode, &dbus);
+        // 셸의 화면 키보드(bunt_osk_v1): 컴포지터가 셸로 띄운 클라이언트만 본다 (osk.rs)
+        let osk = crate::osk::OskState::new(&dh);
 
         Ok(Self {
             config,
@@ -395,7 +397,7 @@ impl BuntState {
             session,
             touch: crate::touch::Touch::default(),
             input_devices,
-            osk: Default::default(),
+            osk,
         })
     }
 
@@ -2167,8 +2169,6 @@ impl BuntState {
             Request::Agent(request) => self.agent_request(request),
             // 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
             Request::Session(request) => self.session_request(request),
-            // 셸의 화면 키보드에서 누른 키 (osk.rs)
-            Request::Keyboard(request) => self.keyboard_request(request),
         }
     }
 

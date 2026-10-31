@@ -33,7 +33,7 @@ pub enum Output {
 }
 
 impl Output {
-    /// 컴포지터의 PressOnScreenKeys가 받는 이름 (comp/src/osk.rs의 parse_key)
+    /// 컴포지터의 화면 키보드 프로토콜(bunt_osk_v1의 press)이 받는 이름 (comp/src/osk.rs의 parse_key)
     pub fn key_name(self) -> String {
         match self {
             Output::Char(character) => character.to_string(),

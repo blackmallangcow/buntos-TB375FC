@@ -21,6 +21,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 셸 전용 화면 키보드 프로토콜(protocols/bunt-osk-v1.xml)의 코드를 만든다. wayland-protocols와 같은 판
+wayland-scanner = "0.31"
 xcursor = "0.3"
 # 시스템 설정이 화면과 키 반복을 바꾸는 D-Bus 서비스, 입력 소스 전환(fcitx5 호출)
 zbus = "5"
