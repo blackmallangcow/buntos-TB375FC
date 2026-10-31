@@ -1,0 +1,19 @@
+From: buntOS contributors
+Subject: [PATCH] arm64: dts: mediatek: build Lenovo TB375FC and TB373FU device trees
+
+Add the MediaTek MT6897 (Dimensity 8300) tablets Lenovo Xiaoxin Pad Pro 12.7
+(2025, TB375FC) and Lenovo Idea Tab Pro (TB373FU) to the MediaTek dtb list.
+buntOS kernel/tb375fc/build.sh copies the device tree sources into the tree.
+
+---
+--- a/arch/arm64/boot/dts/mediatek/Makefile
++++ b/arch/arm64/boot/dts/mediatek/Makefile
+@@ -6,6 +6,8 @@
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6795-sony-xperia-m5.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6797-evb.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6797-x20-dev.dtb
++dtb-$(CONFIG_ARCH_MEDIATEK) += mt6897-lenovo-tb373fu.dtb
++dtb-$(CONFIG_ARCH_MEDIATEK) += mt6897-lenovo-tb375fc.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7622-rfb1.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7622-bananapi-bpi-r64.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7981b-cudy-wr3000-v1.dtb

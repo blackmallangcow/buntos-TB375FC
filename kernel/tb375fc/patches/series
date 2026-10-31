@@ -1,0 +1,13 @@
+# TB375FC 커널 패치 대기열. 위에서부터 차례로 Linux 7.2.x에 얹는다(build.sh prepare).
+# 업스트림에 들어가면 빼고, 업스트림 판으로 바꾼다. 들어갈 차례는 docs/tb375fc/DESIGN.md 4절과 같다.
+0001-arm64-dts-mediatek-build-Lenovo-TB375FC-and-TB373FU.patch
+# 다음 차례(아직 없음):
+#  - pinctrl: mediatek: add MT6897 (pinctrl-mt6878 틀)
+#  - pmdomain: mediatek: add MT6897 power domains (mtk-pm-domains의 MT8196 데이터 틀)
+#  - clk: mediatek: add MT6897 clocks
+#  - mfd: mtk-spmi-pmic (업스트림 v12, MT6363 regulator·키와 MT6685가 의존)
+#  - input: touchscreen: Novatek NT36532 SPI TDDI와 펜
+#  - input: OnePlus/OPPO Pad pogo-pin 키보드 v6 + TB375FC 프레이밍
+#  - pmdomain: mediatek: mtk-mfg MT6897 GPUEB 변형
+#  - wifi: mt76: mt7921 SoC(soc7_0) 버스 + conninfra
+#  - drm/panel: novatek-nt36532 백포트(7.4)와 BOE·Tianma·Tianma 무광 패널
