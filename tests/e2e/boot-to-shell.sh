@@ -6,12 +6,13 @@
 # 빌드한 이미지를 시험 계정과 함께 띄운다(systemd 자격 증명 buntos.account를 SMBIOS로 넘긴다).
 # 직렬 콘솔의 root 자동 로그인 뒤 셸에서 명령이 실행되는지 보고, 로그인 화면(bunt-greeter)에 QMP로
 # 암호를 쳐 그 계정으로 들어간다. sudo가 암호를 묻는지 보고, 그래픽 셸(메뉴 막대, Dock)이 떴는지는
-# 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에
-# 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키, tests/e2e/shortcuts.sh), e2e 4번(한글 입력,
-# tests/e2e/hangul.sh), e2e 7번(화면 잠금과 VM의 잠자기, tests/e2e/session-lock.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는
-# 이미지(그래픽 세션이 없는 x86-64)에서는 5·6·4·7번을 건너뛴다.
+# 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 8번(데스크탑 항목, tests/e2e/desktop.sh),
+# e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키,
+# tests/e2e/shortcuts.sh), e2e 4번(한글 입력, tests/e2e/hangul.sh), e2e 7번(화면 잠금과 VM의 잠자기,
+# tests/e2e/session-lock.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는 이미지(그래픽 세션이 없는 x86-64)에서는
+# 8·5·6·4·7번을 건너뛴다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
-# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 5·6·4·7번에 10분 넘게 걸린다)
+# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 8·5·6·4·7번에 10분 넘게 걸린다)
 #            BUNTOS_IMAGE_DIR 띄울 이미지의 디렉터리 (tools/image/build.sh·vmctl.sh와 같다. 기본
 #            $BUNTOS_BUILD_DIR/<보드>, BUNTOS_BUILD_DIR의 기본은 ~/buntos-build)
 #            E2E_LOG_DIR 기록을 남길 디렉터리. 주면 끝날 때(실패해도) 직렬 콘솔 기록(console.log)과 게스트의 저널
@@ -103,7 +104,8 @@ push() {
 
 # 테스트가 빌드한 이미지를 바꾸지 않게, 멈춘 상태로 띄워 디스크에 임시 덮어쓰기를 씌운 뒤 실행한다.
 # mkosi는 이미지를 -blockdev로 붙여 QEMU의 -snapshot이 효과가 없고, --ephemeral은 이미지 전체를 복사한다
-# 그래픽 세션이 뜨도록 가상 GPU를 붙이고(화면은 내보내지 않는다), 로그인 화면에 암호를 치도록 가상 키보드를 붙인다
+# 그래픽 세션이 뜨도록 가상 GPU를 붙이고(화면은 내보내지 않는다), 로그인 화면에 암호를 치도록 가상 키보드를,
+# 데스크탑을 누르고 드래그하도록(e2e 8번) 가상 태블릿을 붙인다
 # E2E_LOG_DIR이 있으면 게스트 저널을 받을 virtio 직렬 포트를 더한다(셸에 들어간 뒤 journalctl -f를 이 포트로 보낸다)
 journal_port=()
 if [[ -n "${E2E_LOG_DIR:-}" ]]; then
@@ -112,7 +114,7 @@ if [[ -n "${E2E_LOG_DIR:-}" ]]; then
 		-device "virtserialport,bus=e2e-serial.0,chardev=e2e-journal,name=org.buntos.e2e.journal")
 fi
 BUNTOS_IMAGE_DIR="$image_dir" "$repo/tools/image/build.sh" "$board" vm -- -S -qmp "unix:$work/qmp.sock,server=on,wait=off" \
-	-device virtio-gpu-pci -device virtio-keyboard-pci "${journal_port[@]}" \
+	-device virtio-gpu-pci -device virtio-keyboard-pci -device virtio-tablet-pci "${journal_port[@]}" \
 	-smbios "type=11,value=io.systemd.credential:buntos.account=$account" \
 	<"$work/console.in" >"$log" 2>&1 &
 vm_pid=$!
@@ -128,10 +130,6 @@ sleep 2
 echo 'echo "E2E_SHELL_$((6*7))"; systemctl is-system-running' >&3
 wait_for "^E2E_SHELL_42$" || fail "셸에서 명령 실행 결과를 받지 못했다"
 echo "셸: ${SECONDS}초"
-if [[ -n "${E2E_LOG_DIR:-}" ]]; then
-	# 게스트 저널을 부팅부터 끝까지 저널 포트로 보낸다. 시험이 어디서 멈춰도 그때까지의 저널이 남는다
-	echo 'setsid -f sh -c "exec journalctl -b -f -o short-monotonic --no-pager >/dev/virtio-ports/org.buntos.e2e.journal 2>&1"' >&3
-fi
 wait_for "^(running|degraded|starting|maintenance)$" || true
 system_state=$(console | grep -a -E "^(running|degraded|starting|maintenance)$" | tail -1)
 echo "시스템 상태: $system_state"
@@ -140,6 +138,12 @@ if [[ "$system_state" == degraded ]]; then
 	echo 'systemctl --failed --no-legend --plain | sed "s/^/E2E_$((1 + 1))F /"; echo "E2E_DONE_$((2 * 3))"' >&3
 	wait_for "^E2E_DONE_6$" || true
 	console | grep -a "^E2E_2F " | sed 's/^E2E_2F /실패한 유닛: /'
+fi
+if [[ -n "${E2E_LOG_DIR:-}" ]]; then
+	# 게스트 저널을 부팅부터 끝까지 저널 포트로 보낸다. 시험이 어디서 멈춰도 그때까지의 저널이 남는다. 시스템
+	# 상태를 읽은 뒤에 보낸다(바로 보내면 이 명령의 메아리가 systemctl의 답 줄에 끼어 상태 줄을 찾지 못하고
+	# 제한 시간까지 기다렸다)
+	echo 'setsid -f sh -c "exec journalctl -b -f -o short-monotonic --no-pager >/dev/virtio-ports/org.buntos.e2e.journal 2>&1"' >&3
 fi
 
 # 로그인 화면: 계정은 부팅 때 자격 증명으로 만들어졌다(buntos-account.service). 로그인 화면이 뜨면 QMP로
@@ -203,20 +207,7 @@ else
 	fail "에이전트가 읽은 셸에 메뉴 막대 항목과 Dock이 없다 (요소 ${agent_refs}개)"
 fi
 
-# e2e 5번: 에이전트가 앱 A(계산기)의 값을 읽어 앱 B(텍스트 편집기)에 넣고, 창 스크린샷의 픽셀을 누르며,
-# fill이 실패를 성공으로 알리지 않는지 본다(tests/e2e/agent-apps.sh).
-# 스크립트를 직렬 콘솔로 넣어 root로 돌린다. 결과 줄은 입력 줄의 에코와 구분되도록 앞에 표시를 붙인다
-if [[ "$agent_refs" != NONE ]]; then
-	push tests/e2e/agent-apps.sh /tmp/e2e-agent-apps.sh
-	echo 'bash /tmp/e2e-agent-apps.sh 2>&1 | sed "s/^/E2E5: /"' >&3
-	wait_for "^E2E5: E2E5_RESULT [0-9]+ [0-9]+$" || fail "e2e 5번(에이전트 앱 간 제어)이 끝나지 않았다"
-	console | grep -a "^E2E5: E2E5 " | sed 's/^E2E5: E2E5 /e2e 5번 /'
-	read -r passed failed < <(console | grep -a -E "^E2E5: E2E5_RESULT" | tail -1 | sed 's/^E2E5: E2E5_RESULT //')
-	((failed == 0 && passed > 0)) || fail "e2e 5번(에이전트 앱 간 제어): ${failed}개 실패"
-	echo "e2e 5번(에이전트 앱 간 제어): ${SECONDS}초, ${passed}개 통과"
-fi
-
-# e2e 6·4·7번은 키를 QMP로 가상 키보드에 넣고, 결과는 게스트 쪽 도우미가 읽는다. begin <번호> <도우미>로
+# e2e 8·6·4·7번은 키와 포인터를 QMP로 넣고, 결과는 게스트 쪽 도우미가 읽는다. begin <번호> <도우미>로
 # 시작한다. guest는 도우미를 돌려 마지막 줄을 answer에 받는다. 답 줄은 입력 줄의 에코와 구분되도록 번호와
 # 차례 표시를 붙인다. 차례가 이어지도록 명령 치환($(...), 하위 셸) 없이 부른다. 답을 받은 뒤에야 다음 키를 넣는다
 scenario=
@@ -249,6 +240,57 @@ check() {
 		failed=$((failed + 1))
 	fi
 }
+
+# e2e 8번: 데스크탑 항목(ARCHITECTURE 5.2). 앱 창이 데스크탑을 가리기 전에 돈다(e2e 5번 앞). 결과는 게스트 쪽
+# 도우미(tests/e2e/desktop.sh)가 에이전트와 데스크탑 폴더로 읽는다. 항목은 화면 오른쪽 끝 열(가운데 x 1218)에
+# 위에서부터 놓인다. 칸은 메뉴 막대(28px) 아래 8px에서 시작해 104px마다이고, 아이콘 가운데는 y 76, 180, 284, 388이다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/desktop.sh /tmp/e2e-desktop.sh
+	begin 8 /tmp/e2e-desktop.sh
+	guest prepare
+	check "데스크탑 폴더의 항목을 이름 차례(수는 크기 차례)로 보인다" "$answer" "메모.txt|문서 1.txt|문서 2.txt|문서 10.txt|프로젝트"
+	keys click:1218,76 sleep:0.5
+	guest selected
+	check "항목을 누르면 고른다" "$answer" "메모.txt"
+	guest focus
+	check "창이 없는 곳을 누르면 데스크탑이 키보드를 받는다" "$answer" bunt-desktop
+	# 빈 곳(옆 열)에서 시작해 첫 두 행에 걸치게 드래그한다
+	keys drag:1100,60,1250,200 sleep:0.5
+	guest selected
+	check "빈 곳에서 드래그하면 사각형에 걸친 항목을 고른다" "$answer" "메모.txt|문서 1.txt"
+	keys keys:meta_l+a sleep:0.5
+	guest selected
+	check "⌘A로 모두 선택한다" "$answer" "메모.txt|문서 1.txt|문서 2.txt|문서 10.txt|프로젝트"
+	keys keys:esc sleep:0.5
+	guest selected
+	check "Esc로 선택을 푼다" "$answer" none
+	# 단축 메뉴의 새로운 폴더(메뉴의 첫 항목). 메뉴가 닫힌 뒤 키가 이름 변경 칸에 가야 한다
+	keys rclick:900,300 sleep:0.8 click:960,318 sleep:1 type:box sleep:0.3 keys:ret sleep:1
+	guest files
+	check "단축 메뉴로 새로운 폴더를 만들고 이름을 바꾼다" "$answer" "box|메모.txt|문서 1.txt|문서 10.txt|문서 2.txt|프로젝트"
+	keys click:1218,388 sleep:0.5 keys:meta_l+backspace sleep:1
+	guest trash
+	check "⌘⌫로 항목을 휴지통으로 옮긴다" "$answer" "문서 10.txt"
+	guest show-items false
+	check "항목 보기를 끄면 데스크탑 항목 창을 숨긴다" "$answer" hidden
+	guest show-items true
+	check "항목 보기를 켜면 다시 보인다" "$answer" shown
+	((failed == 0)) || fail "e2e 8번(데스크탑 항목): ${failed}개 실패"
+	echo "e2e 8번(데스크탑 항목): ${SECONDS}초, ${passed}개 통과"
+fi
+
+# e2e 5번: 에이전트가 앱 A(계산기)의 값을 읽어 앱 B(텍스트 편집기)에 넣고, 창 스크린샷의 픽셀을 누르며,
+# fill이 실패를 성공으로 알리지 않는지 본다(tests/e2e/agent-apps.sh).
+# 스크립트를 직렬 콘솔로 넣어 root로 돌린다. 결과 줄은 입력 줄의 에코와 구분되도록 앞에 표시를 붙인다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/agent-apps.sh /tmp/e2e-agent-apps.sh
+	echo 'bash /tmp/e2e-agent-apps.sh 2>&1 | sed "s/^/E2E5: /"' >&3
+	wait_for "^E2E5: E2E5_RESULT [0-9]+ [0-9]+$" || fail "e2e 5번(에이전트 앱 간 제어)이 끝나지 않았다"
+	console | grep -a "^E2E5: E2E5 " | sed 's/^E2E5: E2E5 /e2e 5번 /'
+	read -r passed failed < <(console | grep -a -E "^E2E5: E2E5_RESULT" | tail -1 | sed 's/^E2E5: E2E5_RESULT //')
+	((failed == 0 && passed > 0)) || fail "e2e 5번(에이전트 앱 간 제어): ${failed}개 실패"
+	echo "e2e 5번(에이전트 앱 간 제어): ${SECONDS}초, ${passed}개 통과"
+fi
 
 # e2e 6번: 키보드 단축키. 키는 실제 입력과 같은 길(libinput → 컴포지터 단축키 → 앱)을 거치고, 결과는 게스트 쪽
 # 도우미(tests/e2e/shortcuts.sh)가 에이전트와 컴포지터 API로 읽는다. e2e 5번이 연 계산기, 텍스트 편집기,

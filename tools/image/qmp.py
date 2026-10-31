@@ -8,6 +8,7 @@
   cont             멈춘 VM을 이어서 실행한다 (QEMU를 -S로 띄웠을 때)
   click:X,Y        화면 좌표(X, Y)를 왼쪽 버튼으로 누른다 (가상 태블릿 필요)
   dclick:X,Y       두 번 누른다 (예: 제목 표시줄을 두 번 눌러 최대화)
+  rclick:X,Y       오른쪽 버튼으로 누른다 (단축 메뉴)
   drag:X1,Y1,X2,Y2 왼쪽 버튼을 누른 채 (X1, Y1)에서 (X2, Y2)로 끈다
   move:X,Y         포인터만 옮긴다
   press, release   왼쪽 단추를 누른 채로 두거나 뗀다 (끌기 중간에 화면을 찍을 때 move와 함께 쓴다)
@@ -80,10 +81,10 @@ class Qmp:
         ]
         self.command("input-send-event", events=events)
 
-    def button(self, down):
-        self.command("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
+    def button(self, down, button="left"):
+        self.command("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": button}}])
 
-    def click(self, x, y, count=1):
+    def click(self, x, y, count=1, button="left"):
         # 팝업 메뉴가 닫힌 직후의 첫 포인터 이동은 컴포지터(smithay)가 팝업 그랩을 푸는 데 쓰고
         # 버리므로, 두 번 옮겨 누르는 위치가 반영되게 한다
         self.move(x + 1, y)
@@ -93,7 +94,7 @@ class Qmp:
         # 두 번 누르기로 인식되도록 누르는 간격을 짧게 둔다
         for _ in range(count):
             for down in (True, False):
-                self.button(down)
+                self.button(down, button)
                 time.sleep(0.05)
         time.sleep(0.1)
 
@@ -134,12 +135,12 @@ def main():
             )
         elif kind == "cont":
             qmp.command("cont")
-        elif kind in ("click", "dclick", "move"):
+        elif kind in ("click", "dclick", "rclick", "move"):
             x, y = (int(value) for value in argument.split(","))
             if kind == "move":
                 qmp.move(x, y)
             else:
-                qmp.click(x, y, count=2 if kind == "dclick" else 1)
+                qmp.click(x, y, count=2 if kind == "dclick" else 1, button="right" if kind == "rclick" else "left")
         elif kind == "drag":
             qmp.drag(*(int(value) for value in argument.split(",")))
         elif kind in ("press", "release"):
