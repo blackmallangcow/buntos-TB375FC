@@ -269,6 +269,7 @@ name = "bunt-greeter"
 version = "0.1.0"
 dependencies = [
  "bunt-i18n",
+ "bunt-keyboard",
  "gtk4",
  "gtk4-layer-shell",
  "libc",

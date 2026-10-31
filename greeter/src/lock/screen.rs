@@ -338,7 +338,19 @@ impl LockScreen {
         account.append(&field);
         account.append(&message);
         view.append(&account);
-        overlay.add_overlay(&view);
+        // 터치 모드에서는 화면 키보드가 아래에서 나오고 사진과 암호 칸이 위로 올라간다. 키보드 없는 태블릿에서도
+        // 암호를 친다. 잠긴 동안 컴포지터는 잠금 표면만 그리므로 셸의 키보드가 아니라 이 창 안의 키보드이고, 키는 암호
+        // 칸에 바로 넣는다(다른 프로그램이 잠금 화면에 키를 넣는 길을 열지 않는다)
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        view.set_vexpand(true);
+        column.append(&view);
+        overlay.add_overlay(&column);
+        bunt_keyboard::embed(
+            window,
+            overlay,
+            &column,
+            Rc::new(bunt_keyboard::EditableKeys::new(window)),
+        );
 
         let weak_entry = entry.downgrade();
         view.connect_map(move |_| {

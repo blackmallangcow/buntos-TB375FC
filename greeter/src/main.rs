@@ -157,8 +157,25 @@ fn build(app: &gtk::Application, tr: &Rc<Translations>, preview: Option<View>) {
             .can_target(false)
             .build(),
     );
-    overlay.add_overlay(&stack);
+    // 터치 모드에서는 화면 키보드가 아래에서 나오고 내용이 위로 올라간다. 키는 로그인 화면의 컴포지터에 실제 키보드처럼
+    // 넣어 입력기가 별칭의 한글을 조합한다(bunt-greeter가 그 컴포지터의 셸이다). 컴포지터에 닿지 못하면 칸에 바로 넣는다
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.append(&stack);
+    overlay.add_overlay(&column);
     window.set_child(Some(&overlay));
+    let keys = bunt_keyboard::CompositorKeys::with_fallback(Rc::new(
+        bunt_keyboard::EditableKeys::new(&window),
+    ));
+    let keyboard = bunt_keyboard::embed(&window, &overlay, &column, Rc::new(keys));
+    // 배열은 fcitx5의 지금 입력 소스를 따른다(암호 칸에서는 fcitx5가 영문 배열을 쓴다). 지구본은 다음 입력 소스다
+    let weak = keyboard.downgrade();
+    let fcitx = bunt_keyboard::fcitx::Fcitx::start(move |script, globe| {
+        if let Some(keyboard) = weak.upgrade() {
+            keyboard.set_script(script);
+            keyboard.set_globe(globe);
+        }
+    });
+    keyboard.connect_next_source(move || fcitx.next());
 
     let shared = Rc::new(Shared {
         tr: tr.clone(),
