@@ -65,6 +65,9 @@
    * 앞의 창이 화면을 채우면 메뉴 막대 바탕이 검정이 된다 */
   --on-wallpaper: #ffffff;
   --on-wallpaper-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  /* 판 없이 창 위에도 놓이는 글자(알림 센터의 머리 줄): 흰 창 위에서도 읽히게 얇고 진한 윤곽(1px)과 번진
+   * 그림자를 두른다 */
+  --on-wallpaper-shadow-strong: 0 0 1px rgba(0, 0, 0, 0.8), 0 1px 2px rgba(0, 0, 0, 0.6), 0 0 8px rgba(0, 0, 0, 0.35);
   --on-wallpaper-hover: rgba(255, 255, 255, 0.22);
   --menubar-solid: #000000;
   /* 스위치·막대 손잡이 */

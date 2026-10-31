@@ -24,7 +24,7 @@ use crate::{
 const BANNER_SECONDS: u32 = 5;
 /// 알림 카드의 너비. 배너와 알림 센터에서 같다
 const CARD_WIDTH: i32 = 348;
-/// 알림 센터 판의 너비: 카드와 좌우 안쪽 여백(style.css .notification-center의 10px, 카드 그림자 자리)
+/// 알림 센터 판의 너비: 카드와 좌우 여백(style.css .center-list의 안쪽 여백 10px, 카드 그림자 자리)
 const PANEL_WIDTH: i32 = CARD_WIDTH + 2 * 10;
 /// 배너 카드의 좌우 바깥 여백(style.css .notification-card.banner, 그림자 자리). GTK의 크기 요청은
 /// 바깥 여백을 포함한다
@@ -284,7 +284,7 @@ pub fn popover(notifications: &Notifications, tr: &Rc<Translations>) -> gtk::Pop
         .build();
     let cleared = notifications.clone();
     clear.connect_clicked(move |_| cleared.clear());
-    let header = gtk::Box::builder().build();
+    let header = gtk::Box::builder().css_classes(["center-header"]).build();
     header.append(
         &gtk::Label::builder()
             .label(tr.get("notifications-title"))
@@ -295,9 +295,11 @@ pub fn popover(notifications: &Notifications, tr: &Rc<Translations>) -> gtk::Pop
     );
     header.append(&clear);
 
+    // 스크롤 영역은 내용을 경계에서 자르므로 카드 그림자 자리는 목록의 안쪽 여백이다(style.css .center-list)
     let list = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
+        .css_classes(["center-list"])
         .build();
     let scroller = gtk::ScrolledWindow::builder()
         .child(&list)
@@ -306,9 +308,9 @@ pub fn popover(notifications: &Notifications, tr: &Rc<Translations>) -> gtk::Pop
         .max_content_height(LIST_MAX_HEIGHT)
         .build();
 
+    // 머리 줄과 첫 카드, 마지막 카드와 달력 위젯 사이의 틈은 목록의 안쪽 여백이 낸다
     let panel = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(10)
         .width_request(PANEL_WIDTH)
         .css_classes(["notification-center"])
         .build();

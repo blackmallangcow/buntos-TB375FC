@@ -691,21 +691,36 @@ popover.notification-center-popover > contents {
   box-shadow: none;
 }
 
-/* 좌우와 아래 여백은 카드 그림자(--shadow-card, 0 2px 8px)가 판 경계에서 잘리지 않을 자리다 */
+/* 카드 그림자(--shadow-card, 0 2px 8px)와 테두리가 잘리지 않을 자리: 카드 목록은 스크롤 영역 안이고 스크롤
+ * 영역은 내용을 경계에서 자르므로 목록의 안쪽 여백(.center-list)에 둔다. 판의 좌우에 여백을 두면 스크롤 영역도
+ * 같이 줄어 카드가 다시 경계에 붙는다. 머리 줄과 달력 위젯은 같은 좌우 10px를 바깥 여백으로 두고, 판의 아래
+ * 12px는 달력 위젯의 그림자 자리다 */
 .notification-center {
-  padding: 4px 10px 12px;
+  padding: 4px 0 12px;
 }
 
+.center-header,
+.notification-center > .calendar-widget {
+  margin: 0 10px;
+}
+
+/* 위아래 10px는 머리 줄과 첫 카드, 마지막 카드와 달력 위젯 사이의 틈이기도 하다 */
+.center-list {
+  padding: 10px;
+}
+
+/* 머리 줄의 글자는 판 없이 아래 창이나 배경화면 위에 놓인다. 흰 창 위에서도 흰 글씨가 또렷하게 진한 그림자를
+ * 두른다 */
 .center-title,
 .center-empty {
   color: var(--on-wallpaper);
-  text-shadow: var(--on-wallpaper-shadow);
+  text-shadow: var(--on-wallpaper-shadow-strong);
 }
 
 .center-title {
   margin-left: 4px;
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 800;
 }
 
 .center-empty {
