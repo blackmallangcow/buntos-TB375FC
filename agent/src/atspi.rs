@@ -41,6 +41,10 @@ pub fn is_human_only(name: &str) -> bool {
 /// 잠금 화면(bunt-lock): 앱 이름이자 창의 접근성 이름. 사람만 암호를 치는 화면이라 에이전트는 읽지도 조작하지도
 /// 않는다. 잠긴 동안에는 데몬이 모든 요청을 거절하므로, 이 이름은 잠금을 푼 뒤 잠금 화면이 끝나기까지의 틈을 막는다
 pub const LOCK_WINDOW: &str = "bunt-lock";
+/// 셸의 화면 키보드(bunt-osk): 레이어 이름이자 창의 접근성 이름 (comp/src/osk.rs). 사람만 누른다: 에이전트가 이 키보드의
+/// 키를 누르면 막은 앱에도 글을 칠 수 있다. 앱 목록과 스냅샷에서 빼고 동작 대상으로 받지 않는다. 사람만 답하는 창과 달리
+/// 떠 있어도 에이전트의 다른 동작은 막지 않는다. 에이전트의 키와 글은 press·type으로 넣는다
+pub const KEYBOARD_WINDOW: &str = "bunt-osk";
 const CACHE: &str = "/org/a11y/atspi/cache";
 const ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
 const ACTION: &str = "org.a11y.atspi.Action";

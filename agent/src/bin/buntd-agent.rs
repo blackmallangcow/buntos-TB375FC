@@ -31,7 +31,7 @@ use std::{
 
 use bunt_access::{Client, Policy};
 use bunt_agent::{
-    atspi::{self, A11y, AppRef, Focus, LOCK_WINDOW, Placed, ROOT, WindowRef},
+    atspi::{self, A11y, AppRef, Focus, KEYBOARD_WINDOW, LOCK_WINDOW, Placed, ROOT, WindowRef},
     desk::Desk,
     desktop::{self, DesktopApp},
     diff,
@@ -364,6 +364,14 @@ fn screen_locked() -> Failure {
     )
 }
 
+/// 셸의 화면 키보드는 사람만 누른다 (atspi::KEYBOARD_WINDOW)
+fn on_screen_keyboard() -> Failure {
+    (
+        protocol::NOT_ALLOWED,
+        "the on-screen keyboard is only for people; enter keys with press or type".into(),
+    )
+}
+
 fn blocked_app() -> Failure {
     (
         protocol::BLOCKED_APP,
@@ -609,8 +617,8 @@ impl Agent {
         Ok(a11y)
     }
 
-    /// 앱 목록. 사람만 답하는 창(관리자 인증, Wi-Fi 암호, Bluetooth 페어링)과 잠금 화면은 빼서 스냅샷
-    /// 범위에도 들지 않는다
+    /// 앱 목록. 사람만 답하는 창(관리자 인증, Wi-Fi 암호, Bluetooth 페어링), 잠금 화면, 셸의 화면 키보드는 빼서
+    /// 스냅샷 범위에도 들지 않는다
     async fn list(&mut self, a11y: &A11y) -> Result<Vec<AppRef>, Failure> {
         let mut apps = a11y.apps().await.map_err(|err| {
             self.a11y = None;
@@ -618,8 +626,11 @@ impl Agent {
         })?;
         apps.retain(|app| app.name != LOCK_WINDOW);
         for app in &mut apps {
+            // 화면 키보드도 뺀다: 에이전트가 키보드의 키를 누르는 길을 열지 않는다
             app.windows.retain(|window| {
-                !atspi::is_human_only(&window.title) && window.title != LOCK_WINDOW
+                !atspi::is_human_only(&window.title)
+                    && window.title != LOCK_WINDOW
+                    && window.title != KEYBOARD_WINDOW
             });
         }
         Ok(apps)
@@ -1071,6 +1082,10 @@ impl Agent {
         }
         if window_title == LOCK_WINDOW {
             return Err(screen_locked());
+        }
+        // 화면 키보드의 키는 사람만 누른다
+        if window_title == KEYBOARD_WINDOW {
+            return Err(on_screen_keyboard());
         }
         Ok(Target {
             bus,
@@ -2334,6 +2349,10 @@ async fn compositor_surface(a11y: &A11y, pid: u32, title: &str) -> Result<Surfac
     if title == LOCK_WINDOW {
         return Err(screen_locked());
     }
+    // 화면 키보드의 키는 사람만 누른다
+    if title == KEYBOARD_WINDOW {
+        return Err(on_screen_keyboard());
+    }
     let windows = a11y
         .windows()
         .await
@@ -2364,8 +2383,11 @@ fn choose_surface(
             layers
                 .iter()
                 .rev()
+                // 화면 키보드도 고르지 않는다 (컴포지터도 알리지 않는다)
                 .filter(|layer| {
-                    !atspi::is_human_only(&layer.namespace) && layer.namespace != LOCK_WINDOW
+                    !atspi::is_human_only(&layer.namespace)
+                        && layer.namespace != LOCK_WINDOW
+                        && layer.namespace != KEYBOARD_WINDOW
                 })
                 .find(|layer| layer.pid == pid && layer.namespace == title)
                 .map(|layer| Surface::Layer(layer.clone()))
@@ -3044,6 +3066,22 @@ mod tests {
         assert_eq!(chosen(choose_surface(&[], &layers, 10, LOCK_WINDOW)), None);
         // 창도 레이어 표면도 없으면 없다
         assert_eq!(chosen(choose_surface(&[], &[], 10, "bunt-menubar")), None);
+    }
+
+    /// 셸의 화면 키보드는 사람만 누른다: 레이어 표면이 알려져도 고르지 않는다 (atspi::KEYBOARD_WINDOW)
+    #[test]
+    fn the_on_screen_keyboard_is_never_a_surface_to_press() {
+        let layers = [layer(10, "bunt-dock"), layer(10, KEYBOARD_WINDOW)];
+        assert_eq!(
+            chosen(choose_surface(&[], &layers, 10, KEYBOARD_WINDOW)),
+            None
+        );
+        assert_eq!(
+            chosen(choose_surface(&[], &layers, 10, "bunt-dock")),
+            Some(("layer", "bunt-dock".into()))
+        );
+        // 사람만 답하는 창이 아니므로 떠 있어도 에이전트의 다른 동작을 막지 않는다
+        assert!(!atspi::is_human_only(KEYBOARD_WINDOW));
     }
 
     #[test]
