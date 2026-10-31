@@ -661,3 +661,27 @@ list.source-picker > row:selected .row-title {
 .dark scale slider {
   background: rgb(225, 225, 228);
 }
+
+/* 터치 모드(설계안 5.1절): 컴포지터가 터치스크린만 붙었다고 알리면 창에 touch 클래스가 붙는다(input_mode.rs).
+ * 목록 줄과 스위치의 누를 영역을 44px 이상으로 넓힌다(디자인 스펙 11장). 배치와 글자 크기는 그대로다.
+ * min-height는 안쪽 여백을 뺀 내용의 크기다 */
+
+/* 사이드바 줄: 위아래 3px를 더해 44px */
+window.touch list.sidebar-list > row {
+  min-height: 38px;
+}
+
+/* 묶음 상자의 줄: 위아래 8px를 더해 44px */
+window.touch list.settings-group > row {
+  min-height: 28px;
+}
+
+/* 스위치: 그림은 그대로, 위아래 11px·좌우 3px의 투명한 테두리로 누를 영역 44px 이상. 음수 여백으로 자리는 그대로라
+ * 줄의 높이가 바뀌지 않고, 위아래로 넓힌 영역은 44px 줄의 남는 자리와 안쪽 여백에 들어간다 */
+window.touch switch {
+  margin: -11px -3px;
+  border: 11px solid transparent;
+  border-left-width: 3px;
+  border-right-width: 3px;
+  background-clip: padding-box;
+}

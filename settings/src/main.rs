@@ -11,6 +11,8 @@ mod pages;
 mod system;
 mod widgets;
 mod window;
+// 포인터 모드와 터치 모드(컴포지터가 정한다). 터치 모드에서 목록 줄과 스위치의 누를 영역을 넓힌다
+mod input_mode;
 
 use std::{cell::RefCell, ffi::OsString, path::PathBuf, rc::Rc};
 
@@ -68,6 +70,8 @@ fn main() -> glib::ExitCode {
         .build();
     app.connect_startup(|app| {
         load_style();
+        // 터치 모드면 창에 touch 클래스를 단다. 창을 만들기 전에 불러 시트도 모두 따르게 한다
+        input_mode::follow();
         // 메뉴바의 앱 메뉴("시스템 설정 종료")가 D-Bus로 부르는 동작
         let quit = gio::ActionEntry::builder("quit")
             .activate(|app: &gtk::Application, _, _| app.quit())
