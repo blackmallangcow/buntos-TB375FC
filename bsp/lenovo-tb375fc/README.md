@@ -36,6 +36,14 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'K=~/buntos-build/tb375fc/
 limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'bsp/lenovo-tb375fc/boot/test.sh'
 ```
 
+5. 맛보기: 기기 없이 같은 커널과 initramfs를 빌드 VM의 QEMU virt로 띄워 init이 끝까지 도는지 본다. 장치 트리는 QEMU 것이라 vendor_boot 표지, UDC, nvdata는 없다고 나온다. 셸에서 `poweroff -f`로 끝낸다.
+
+```bash
+limactl shell buntos-dev -- bash -lc 'B=~/buntos-build/tb375fc; qemu-system-aarch64 -M virt -cpu host -accel kvm -smp 2 -m 1024 -nographic -no-reboot -kernel $B/out/arch/arm64/boot/Image -initrd $B/images/initramfs.cpio.lz4 -append "console=ttyAMA0 buntos.wait=3"'
+```
+
+LK처럼 vendor_boot의 램디스크 조각을 initramfs 앞에 이어 붙여 `-initrd`로 주면 init이 표지를 알아본다(2026-11-01 확인).
+
 ## 기기에서 띄우기 전에
 
 - 언락과 굽기는 buntOS 설계안 4.2.3절의 go/no-go 넷을 통과한 뒤에 한다. 파티션 이름과 슬롯은 기기에서 `fastboot getvar all`로 확인한다.
