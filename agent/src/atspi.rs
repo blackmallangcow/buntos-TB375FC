@@ -122,8 +122,8 @@ pub struct Placed {
     pub focused: bool,
 }
 
-/// GetLayers 항목: pid, 레이어 이름, x, y, 너비, 높이
-type RawLayer = (u32, String, i32, i32, i32, i32);
+/// GetLayers 항목: pid, 레이어 이름, x, y, 너비, 높이, 그 출력의 배율
+type RawLayer = (u32, String, i32, i32, i32, i32, f64);
 
 /// 컴포지터가 놓은 레이어 표면 (GetLayers): 셸의 메뉴 막대, Dock, 모든 앱 패널 등. 셸은 레이어 창의
 /// 접근성 이름을 레이어 이름으로 둔다. 사람만 답하는 창은 컴포지터가 알리지 않는다
@@ -135,6 +135,8 @@ pub struct Layer {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    /// 그 표면이 있는 출력의 배율. 레이어 스크린샷(CaptureLayer)의 픽셀은 논리 좌표에 이것을 곱한 것이다
+    pub scale: f64,
 }
 
 /// 컴포지터가 키보드 포커스를 준 곳 (GetFocus)
@@ -293,13 +295,14 @@ impl A11y {
         let layers: Vec<RawLayer> = self.compositor("GetLayers", &()).await?;
         Ok(layers
             .into_iter()
-            .map(|(pid, namespace, x, y, width, height)| Layer {
+            .map(|(pid, namespace, x, y, width, height, scale)| Layer {
                 pid,
                 namespace,
                 x,
                 y,
                 width,
                 height,
+                scale,
             })
             .collect())
     }
@@ -354,6 +357,21 @@ impl A11y {
         self.compositor("Scroll", &(x, y, dx, dy)).await
     }
 
+    /// 그 pid의 레이어 표면(이름이 같은 것) 안의 (x, y)에서 휠을 돌린다. x, y는 click_layer와 같은 표면 기준
+    /// 논리 좌표이고 dx, dy는 scroll과 같은 눈금 수다. 그 점에서 포인터가 그 표면에 가지 않으면 오류다
+    pub async fn scroll_layer(
+        &self,
+        pid: u32,
+        namespace: &str,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    ) -> zbus::Result<()> {
+        self.compositor("ScrollLayer", &(pid, namespace, x, y, dx, dy))
+            .await
+    }
+
     /// 그 pid의 창(제목이 같은 것 먼저) 안의 (x, y)를 왼쪽 단추로 누른다. x, y는 그 창 스크린샷의
     /// 픽셀이다. 누른 화면의 논리 좌표를 돌려준다. 창 밖이거나 그 점 위에 다른 것이 있으면 오류다
     pub async fn click_window(
@@ -381,6 +399,24 @@ impl A11y {
             "org.buntos.Compositor1",
             "CaptureWindow",
             &(pid, title),
+        )
+        .await
+    }
+
+    /// 그 pid의 레이어 표면(이름이 같은 것)만 그린 PNG: (너비, 높이, 배율, PNG 바이트)
+    pub async fn capture_layer(
+        &self,
+        pid: u32,
+        namespace: &str,
+    ) -> zbus::Result<(u32, u32, f64, Vec<u8>)> {
+        call_on(
+            &self.session,
+            CAPTURE_TIMEOUT,
+            "org.buntos.Compositor",
+            "/org/buntos/Compositor",
+            "org.buntos.Compositor1",
+            "CaptureLayer",
+            &(pid, namespace),
         )
         .await
     }

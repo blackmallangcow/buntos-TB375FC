@@ -11,7 +11,7 @@ use std::{sync::mpsc, time::Duration};
 
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
-    desktop::{Window, layer_map_for_output},
+    desktop::{Window, WindowSurfaceType, layer_map_for_output},
     input::{
         keyboard::{FilterResult, Keycode, xkb},
         pointer::AxisFrame,
@@ -176,6 +176,31 @@ impl BuntState {
                     None => self.agent_click_layer(pid, &namespace, (x, y), button),
                 });
             }
+            AgentRequest::ScrollLayer {
+                pid,
+                namespace,
+                x,
+                y,
+                dx,
+                dy,
+                reply,
+            } => match refused.map_or_else(|| self.layer_point(pid, &namespace, (x, y)), Err) {
+                Ok(pos) => self.agent_scroll(pos.x, pos.y, dx, dy, reply),
+                Err(why) => {
+                    let _ = reply.send(Err(why));
+                }
+            },
+            // 창 그림(Capture)과 같다: 읽기라 인증 창이 떠 있어도 막지 않지만, 잠긴 동안에는 막는다
+            AgentRequest::CaptureLayer {
+                pid,
+                namespace,
+                reply,
+            } => {
+                let _ = reply.send(match locked {
+                    Some(why) => Err(why),
+                    None => self.agent_capture_layer(pid, &namespace),
+                });
+            }
         }
     }
 
@@ -223,6 +248,7 @@ impl BuntState {
                         namespace: layer.namespace().to_string(),
                         surface: layer.wl_surface().clone(),
                         area,
+                        scale: output.current_scale().fractional_scale(),
                     });
                 }
             }
@@ -241,6 +267,19 @@ impl BuntState {
         (x, y): (f64, f64),
         button: u32,
     ) -> Result<(f64, f64), Refused> {
+        let pos = self.layer_point(pid, namespace, (x, y))?;
+        self.agent_click(pos.x, pos.y, button);
+        Ok((pos.x, pos.y))
+    }
+
+    /// 그 pid의 레이어 표면 안의 점(표면 기준 논리 좌표)의 전역 논리 좌표. 누르기(ClickLayer)와 휠(ScrollLayer)이
+    /// 같이 쓴다. 그 점에서 포인터가 이 표면이나 그 팝업에 가지 않으면 NotShown이다
+    fn layer_point(
+        &self,
+        pid: u32,
+        namespace: &str,
+        (x, y): (f64, f64),
+    ) -> Result<Point<f64, Logical>, Refused> {
         let placed = self.placed_layers();
         let layer = choose_layer(&placed, pid, namespace)?;
         let pos = layer.area.loc.to_f64() + Point::<f64, Logical>::from((x, y));
@@ -251,8 +290,38 @@ impl BuntState {
         if !reaches {
             return Err(Refused::NotShown);
         }
-        self.agent_click(pos.x, pos.y, button);
-        Ok((pos.x, pos.y))
+        Ok(pos)
+    }
+
+    /// 그 pid의 레이어 표면(이름이 같은 것의 맨 위)만 따로 그려 읽는다 (capture_window와 같다). 표면의 왼쪽
+    /// 위가 그림의 (0, 0)이고, 표면 밖으로 나온 팝업(열린 메뉴)은 잘린다. 사람만 답하는 창과 화면 키보드는
+    /// choose_layer가 거절한다
+    fn agent_capture_layer(&mut self, pid: u32, namespace: &str) -> Result<(Image, f64), Refused> {
+        let placed = self.placed_layers();
+        let layer = choose_layer(&placed, pid, namespace)?;
+        let size = layer.area.size;
+        let surface = layer.surface.clone();
+        let (layer, output) = self
+            .space
+            .outputs()
+            .find_map(|output| {
+                let map = layer_map_for_output(output);
+                let layer = map.layer_for_surface(&surface, WindowSurfaceType::TOPLEVEL)?;
+                Some((layer.clone(), output.clone()))
+            })
+            .ok_or(Refused::NoWindow)?;
+        let scale = output.current_scale().fractional_scale();
+        let renderer = self.backend.renderer();
+        let elements: Vec<OutputRenderElements> =
+            layer.render_elements(renderer, Point::from((0, 0)), Scale::from(scale), 1.0);
+        let scene: Vec<&OutputRenderElements> = elements.iter().collect();
+        let area = Rectangle::from_size(size);
+        let image = screenshot::capture_scene(renderer, &scene, &output, Some(area), BACKDROP)
+            .map_err(|err| {
+                tracing::warn!("agent: cannot draw the {namespace:?} surface of pid {pid}: {err}");
+                Refused::CaptureFailed
+            })?;
+        Ok((image, scale))
     }
 
     fn agent_windows(&self) -> Vec<WindowInfo> {
@@ -649,6 +718,8 @@ struct PlacedLayer<S = WlSurface> {
     surface: S,
     /// 전역 논리 좌표
     area: Rectangle<i32, Logical>,
+    /// 그 표면이 있는 출력의 배율
+    scale: f64,
 }
 
 /// 에이전트에게 알리는 레이어 표면 (GetLayers): 사람만 답하는 창과 화면 키보드는 뺀다
@@ -664,6 +735,7 @@ fn listed<S>(placed: Vec<PlacedLayer<S>>) -> Vec<LayerInfo> {
             y: layer.area.loc.y,
             width: layer.area.size.w,
             height: layer.area.size.h,
+            scale: layer.scale,
         })
         .collect()
 }
@@ -738,6 +810,7 @@ mod tests {
             namespace: namespace.into(),
             surface: (),
             area: Rectangle::new((x, y).into(), (w, h).into()),
+            scale: 1.0,
         };
         vec![
             layer(10, "bunt-wallpaper", (0, 0, 1280, 800)),
@@ -818,6 +891,7 @@ mod tests {
             namespace: crate::osk::KEYBOARD_NAMESPACE.into(),
             surface: (),
             area: Rectangle::new((0, 446).into(), (1280, 354).into()),
+            scale: 1.0,
         });
         assert_eq!(
             choose_layer(&placed, 10, crate::osk::KEYBOARD_NAMESPACE).err(),

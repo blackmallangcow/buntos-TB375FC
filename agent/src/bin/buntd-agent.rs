@@ -16,6 +16,7 @@
 //! 띄운 워커 프로세스(`buntd-agent --repl-worker`, seccomp로 가둔다)에서 돈다.
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fs,
     io::{self, BufRead, BufReader, Write},
@@ -1195,6 +1196,7 @@ impl Agent {
                     bus: &bus,
                     path: &target.path,
                     window_title: &window_title,
+                    layer: RefCell::default(),
                 };
                 Some(
                     scroll_into_view(&element)
@@ -1525,7 +1527,8 @@ impl Agent {
             ));
         }
         let session = params.session.clone().unwrap_or_else(|| "default".into());
-        let window = self.target_window(a11y, params.app.as_deref()).await?;
+        let surface = self.target_surface(a11y, params.app.as_deref()).await?;
+        let window = surface.placed();
         let running = self.list(a11y).await?;
         let tree = accessible_window(&running, &window);
         let before = match &tree {
@@ -1536,9 +1539,23 @@ impl Agent {
             }
             None => None,
         };
-        let (screen_x, screen_y) = a11y
-            .click_window(window.pid, &window.title, x, y)
-            .await
+        let clicked = match &surface {
+            Surface::Window(window) => a11y.click_window(window.pid, &window.title, x, y).await,
+            // 셸 표면은 그 스크린샷(CaptureLayer)의 픽셀을 표면 기준 논리 좌표로 바꿔 누른다
+            Surface::Layer(layer) => {
+                let (left, top) = (x / layer.scale, y / layer.scale);
+                if left >= f64::from(layer.width) || top >= f64::from(layer.height) {
+                    return Err(agent_error(format!(
+                        "the point is outside the surface ({:.0}x{:.0} pixels in its screenshot)",
+                        f64::from(layer.width) * layer.scale,
+                        f64::from(layer.height) * layer.scale
+                    )));
+                }
+                a11y.click_layer(layer.pid, &layer.namespace, left, top)
+                    .await
+            }
+        };
+        let (screen_x, screen_y) = clicked
             .map_err(|err| agent_error(format!("the pointer click failed: {}", reason(&err))))?;
         let done = format!(
             "clicked with the pointer at ({x:.0}, {y:.0}) in {:?} (screen {screen_x:.0}, {screen_y:.0})",
@@ -1609,11 +1626,44 @@ impl Agent {
         Ok(window)
     }
 
+    /// 스크린샷과 click --at이 쓰는 표면: target_window의 창, 없으면 레이어 이름이 `app`과 같은 셸의 레이어
+    /// 표면(`bunt agent apps`의 bunt-shell 창 이름: bunt-dock, bunt-launcher 등). 셸 표면은 창 목록에 없어
+    /// 찍거나 누르지 못했다
+    async fn target_surface(&mut self, a11y: &A11y, app: Option<&str>) -> Result<Surface, Failure> {
+        let not_found = match self.target_window(a11y, app).await {
+            Ok(window) => return Ok(Surface::Window(window)),
+            // 막은 앱이나 모호한 이름은 셸 표면으로 넘어가지 않고 그대로 알린다
+            Err(err)
+                if err.0 != protocol::AGENT_ERROR || err.1.contains(protocol::BE_MORE_SPECIFIC) =>
+            {
+                return Err(err);
+            }
+            Err(err) => err,
+        };
+        let Some(query) = app else {
+            return Err(not_found);
+        };
+        let layers = a11y.layers().await.unwrap_or_default();
+        layers
+            .into_iter()
+            .rev()
+            // 사람만 답하는 창, 잠금 화면, 화면 키보드는 고르지 않는다 (choose_surface와 같다)
+            .filter(|layer| {
+                !atspi::is_human_only(&layer.namespace)
+                    && layer.namespace != LOCK_WINDOW
+                    && layer.namespace != KEYBOARD_WINDOW
+            })
+            .find(|layer| layer.namespace == query)
+            .map(Surface::Layer)
+            .ok_or(not_found)
+    }
+
     /// 창 하나의 스크린샷을 PNG 파일로 쓴다 (ref가 없는 UI를 볼 때). 컴포지터가 그 창만 따로 그리므로
     /// 가려진 부분도 보이고, 다른 앱(막은 앱 포함)과 셸의 인증 창은 들지 않는다
     async fn screenshot(&mut self, params: ScreenshotParams) -> Result<Screenshot, Failure> {
         let a11y = self.a11y().await?;
-        let window = self.target_window(&a11y, params.app.as_deref()).await?;
+        let surface = self.target_surface(&a11y, params.app.as_deref()).await?;
+        let window = surface.placed();
         let path = match &params.out {
             Some(out) if Path::new(out).is_absolute() => PathBuf::from(out),
             Some(_) => {
@@ -1625,16 +1675,17 @@ impl Agent {
             None => new_screenshot_path()
                 .map_err(|err| agent_error(format!("cannot make a screenshot file: {err}")))?,
         };
-        let (width, height, scale, png) = a11y
-            .capture_window(window.pid, &window.title)
-            .await
-            .map_err(|err| {
-                agent_error(format!(
-                    "cannot take a screenshot of {:?}: {}",
-                    window.title,
-                    reason(&err)
-                ))
-            })?;
+        let captured = match &surface {
+            Surface::Window(window) => a11y.capture_window(window.pid, &window.title).await,
+            Surface::Layer(layer) => a11y.capture_layer(layer.pid, &layer.namespace).await,
+        };
+        let (width, height, scale, png) = captured.map_err(|err| {
+            agent_error(format!(
+                "cannot take a screenshot of {:?}: {}",
+                window.title,
+                reason(&err)
+            ))
+        })?;
         fs::write(&path, png)
             .map_err(|err| agent_error(format!("cannot write {}: {err}", path.display())))?;
         tracing::info!(width, height, "screenshot of {}", window.app_id);
@@ -2358,6 +2409,26 @@ enum Surface {
     Layer(atspi::Layer),
 }
 
+impl Surface {
+    /// 창처럼 다룰 때의 자리(전역 논리 좌표). 셸은 레이어 창의 접근성 이름을 레이어 이름으로 두므로, 레이어
+    /// 표면의 제목은 레이어 이름이다
+    fn placed(&self) -> Placed {
+        match self {
+            Surface::Window(window) => window.clone(),
+            Surface::Layer(layer) => Placed {
+                pid: layer.pid,
+                app_id: layer.namespace.clone(),
+                title: layer.namespace.clone(),
+                x: layer.x,
+                y: layer.y,
+                width: layer.width,
+                height: layer.height,
+                focused: false,
+            },
+        }
+    }
+}
+
 /// 컴포지터가 놓은 그 pid의 표면 (choose_surface). 사람만 답하는 창과 잠금 화면은 거절한다
 async fn compositor_surface(a11y: &A11y, pid: u32, title: &str) -> Result<Surface, Failure> {
     if atspi::is_human_only(title) {
@@ -2424,22 +2495,6 @@ fn layer_has_keyboard(focus: Option<&Focus>, layer: &atspi::Layer) -> bool {
     })
 }
 
-/// 컴포지터가 놓은 그 pid의 창: 제목이 같은 창, 없으면 맨 위 창
-async fn compositor_window(a11y: &A11y, pid: u32, title: &str) -> Result<Placed, Failure> {
-    let windows = a11y
-        .windows()
-        .await
-        .map_err(|err| agent_error(format!("cannot read the window list: {err}")))?;
-    windows
-        .iter()
-        .rev()
-        .filter(|window| window.pid == pid)
-        .find(|window| window.title == title)
-        .or_else(|| windows.iter().rev().find(|window| window.pid == pid))
-        .cloned()
-        .ok_or_else(|| agent_error("the compositor has no window for this app"))
-}
-
 /// 창을 앞으로 가져온다
 async fn activate(a11y: &A11y, pid: u32, title: &str) -> Result<(), Failure> {
     a11y.activate_window(pid, title)
@@ -2457,8 +2512,11 @@ async fn wheel(
     over: Option<(&str, &Item)>,
     [dx, dy]: [f64; 2],
 ) -> Result<String, Failure> {
-    let window = compositor_window(a11y, pid, window_title).await?;
-    let (width, height) = (f64::from(window.width), f64::from(window.height));
+    // 셸의 레이어 표면(모든 앱 패널 등)은 창 목록에 없어, 창만 찾던 이 자리에서 "the compositor has no window
+    // for this app"으로 실패했다. 레이어 표면이면 컴포지터가 표면 기준 자리에서 돌린다(ScrollLayer)
+    let surface = compositor_surface(a11y, pid, window_title).await?;
+    let placed = surface.placed();
+    let (width, height) = (f64::from(placed.width), f64::from(placed.height));
     let (x, y) = match over {
         Some((bus, target)) => {
             let (x, y, w, h) = a11y
@@ -2479,11 +2537,16 @@ async fn wheel(
         }
         None => (width / 2.0, height / 2.0),
     };
-    activate(a11y, pid, &window.title).await?;
-    let at = (f64::from(window.x) + x, f64::from(window.y) + y);
-    a11y.scroll(at.0, at.1, dx, dy)
-        .await
-        .map_err(|err| agent_error(format!("scrolling failed: {}", reason(&err))))?;
+    let scrolled = match &surface {
+        Surface::Window(window) => {
+            activate(a11y, pid, &window.title).await?;
+            a11y.scroll(f64::from(window.x) + x, f64::from(window.y) + y, dx, dy)
+                .await
+        }
+        Surface::Layer(layer) => a11y.scroll_layer(pid, &layer.namespace, x, y, dx, dy).await,
+    };
+    scrolled.map_err(|err| agent_error(format!("scrolling failed: {}", reason(&err))))?;
+    let at = (f64::from(placed.x) + x, f64::from(placed.y) + y);
     Ok(format!(
         "scrolled {} at ({:.0}, {:.0})",
         notches(dx, dy),
@@ -2532,6 +2595,8 @@ struct AppElement<'a> {
     bus: &'a str,
     path: &'a str,
     window_title: &'a str,
+    /// raise_window가 찾은 셸의 레이어 표면. 휠은 그 표면 기준 자리에서 돌린다(ScrollLayer)
+    layer: RefCell<Option<atspi::Layer>>,
 }
 
 impl Scrollable for AppElement<'_> {
@@ -2561,13 +2626,30 @@ impl Scrollable for AppElement<'_> {
             .pid(self.bus)
             .await
             .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
-        let window = compositor_window(self.a11y, pid, self.window_title).await?;
-        activate(self.a11y, pid, &window.title).await?;
-        Ok(window)
+        // 셸의 레이어 표면(모든 앱 패널 등)도 찾는다. 창만 찾던 때는 "the compositor has no window for this
+        // app"으로 실패했다. 레이어 표면은 늘 제 층에 있어 앞으로 가져올 것이 없다
+        let surface = compositor_surface(self.a11y, pid, self.window_title).await?;
+        match &surface {
+            Surface::Window(window) => activate(self.a11y, pid, &window.title).await?,
+            Surface::Layer(layer) => {
+                self.layer.replace(Some(layer.clone()));
+            }
+        }
+        Ok(surface.placed())
     }
 
     async fn wheel(&self, x: f64, y: f64, dx: f64, dy: f64) -> zbus::Result<()> {
-        self.a11y.scroll(x, y, dx, dy).await
+        let layer = self.layer.borrow().clone();
+        match layer {
+            // 화면 좌표를 표면 기준 자리로 바꾼다
+            Some(layer) => {
+                let (x, y) = (x - f64::from(layer.x), y - f64::from(layer.y));
+                self.a11y
+                    .scroll_layer(layer.pid, &layer.namespace, x, y, dx, dy)
+                    .await
+            }
+            None => self.a11y.scroll(x, y, dx, dy).await,
+        }
     }
 }
 
@@ -3128,6 +3210,7 @@ mod tests {
             y: 0,
             width: 1280,
             height: 24,
+            scale: 1.0,
         }
     }
 
@@ -3184,6 +3267,30 @@ mod tests {
         assert_eq!(chosen(choose_surface(&[], &layers, 10, LOCK_WINDOW)), None);
         // 창도 레이어 표면도 없으면 없다
         assert_eq!(chosen(choose_surface(&[], &[], 10, "bunt-menubar")), None);
+    }
+
+    /// 셸의 레이어 표면은 창처럼 다룰 때(휠, 스크린샷, click --at) 레이어 이름을 제목으로 쓰고 컴포지터가 놓은
+    /// 자리를 그대로 쓴다. 휠과 누르기는 그 자리를 빼 표면 기준 좌표로 보낸다
+    #[test]
+    fn a_shell_surface_is_placed_like_a_window() {
+        let dock = atspi::Layer {
+            x: 300,
+            y: 740,
+            width: 680,
+            height: 60,
+            scale: 1.25,
+            ..layer(10, "bunt-dock")
+        };
+        let placed = Surface::Layer(dock).placed();
+        assert_eq!(
+            (placed.pid, placed.title.as_str(), placed.app_id.as_str()),
+            (10, "bunt-dock", "bunt-dock")
+        );
+        assert_eq!(
+            (placed.x, placed.y, placed.width, placed.height),
+            (300, 740, 680, 60)
+        );
+        assert!(!placed.focused);
     }
 
     /// 셸의 화면 키보드는 사람만 누른다: 레이어 표면이 알려져도 고르지 않는다 (atspi::KEYBOARD_WINDOW)

@@ -185,6 +185,8 @@ pub struct LayerInfo {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    /// 그 표면이 있는 출력의 배율. CaptureLayer 그림의 픽셀은 논리 좌표에 이것을 곱한 것이다
+    pub scale: f64,
 }
 
 /// 에이전트의 입력을 받지 않은 까닭
@@ -341,6 +343,22 @@ pub enum AgentRequest {
         y: f64,
         button: u32,
         reply: mpsc::Sender<Result<(f64, f64), Refused>>,
+    },
+    /// 그 pid의 레이어 표면(이름이 같은 것) 안의 점(표면 기준 논리 좌표)에서 휠을 돌린다
+    ScrollLayer {
+        pid: u32,
+        namespace: String,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+        reply: mpsc::Sender<Result<(), Refused>>,
+    },
+    /// 그 pid의 레이어 표면(이름이 같은 것)만 따로 그려 읽는다: 그림과 그 출력의 배율
+    CaptureLayer {
+        pid: u32,
+        namespace: String,
+        reply: mpsc::Sender<Result<(Image, f64), Refused>>,
     },
 }
 
@@ -1000,14 +1018,14 @@ impl Api {
     }
 
     /// 에이전트 전용: 레이어 표면(셸의 메뉴 막대, Dock, 모든 앱 패널 등) 목록 (pid, 레이어 이름, x, y, 너비,
-    /// 높이). 출력마다 아래층부터 쌓인 순서다. 사람만 답하는 창(관리자 인증, Wi-Fi 암호, Bluetooth 페어링)은
-    /// 들지 않는다
+    /// 높이, 그 출력의 배율). 출력마다 아래층부터 쌓인 순서다. 사람만 답하는 창(관리자 인증, Wi-Fi 암호,
+    /// Bluetooth 페어링)은 들지 않는다
     #[allow(clippy::type_complexity)]
     async fn get_layers(
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
-    ) -> fdo::Result<Vec<(u32, String, i32, i32, i32, i32)>> {
+    ) -> fdo::Result<Vec<(u32, String, i32, i32, i32, i32, f64)>> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Layers(reply)))?;
@@ -1022,6 +1040,7 @@ impl Api {
                     layer.y,
                     layer.width,
                     layer.height,
+                    layer.scale,
                 )
             })
             .collect())
@@ -1056,6 +1075,68 @@ impl Api {
             reply,
         }))?;
         answer(receiver)
+    }
+
+    /// 에이전트 전용: 그 pid의 레이어 표면(이름이 같은 것) 안의 (x, y)로 포인터를 옮겨 휠을 돌린다. x, y는
+    /// ClickLayer와 같은 표면 기준 논리 좌표이고, dx, dy는 Scroll과 같은 휠 눈금 수다. 그 점에서 포인터가 그
+    /// 표면이나 그 열린 메뉴에 가지 않으면(자동으로 숨은 막대, 다른 표면에 가림) 돌리지 않는다. 셸 표면은
+    /// 창 목록에 없어 Scroll의 자리를 창에서 셈할 수 없었다
+    #[allow(clippy::too_many_arguments)]
+    async fn scroll_layer(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        namespace: String,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    ) -> fdo::Result<()> {
+        check_agent(connection, &header).await?;
+        if ![x, y, dx, dy].iter().all(|value| value.is_finite())
+            || dx.abs() > MAX_NOTCHES
+            || dy.abs() > MAX_NOTCHES
+        {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "x and y must be numbers, dx and dy at most {MAX_NOTCHES} notches"
+            )));
+        }
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::ScrollLayer {
+            pid,
+            namespace,
+            x,
+            y,
+            dx,
+            dy,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
+    /// 에이전트 전용: 그 pid의 레이어 표면(이름이 같은 것)만 따로 그린 PNG. CaptureWindow와 같이 (너비, 높이,
+    /// 배율, PNG)이고 표면의 왼쪽 위가 (0, 0)이다. 다른 표면과 창은 들지 않고, 표면 밖으로 나온 열린 메뉴는
+    /// 잘린다. 사람만 답하는 창과 화면 키보드는 거절한다
+    async fn capture_layer(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        namespace: String,
+    ) -> fdo::Result<(u32, u32, f64, Vec<u8>)> {
+        check_agent(connection, &header).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::CaptureLayer {
+            pid,
+            namespace,
+            reply,
+        }))?;
+        let (image, scale) = answer_within(receiver, CAPTURE_REPLY)?;
+        let mut png = Vec::new();
+        write_png(&image, &mut png)
+            .map_err(|err| fdo::Error::Failed(format!("cannot make the PNG: {err}")))?;
+        Ok((image.width, image.height, scale, png))
     }
 
     /// 키보드 포커스: (클라이언트 pid, 앱 ID나 레이어 이름, 창 제목, 레이어 표면인지).
