@@ -344,20 +344,24 @@ mod tests {
         const INSIDE: &str = "BUNT_SHELL_TEST_GTK_PROCESS";
         const TEST: &str = "input_mode::tests::touch_mode_targets_are_at_least_44px";
         if std::env::var_os(INSIDE).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            // 띄운 프로세스의 출력은 파이프가 아니라 파일로 받는다. 같은 프로세스의 D-Bus 시험이 GLib TestDBus를
+            // 처음 올릴 때 exec 없이 fork하는 감시 프로세스가 파이프의 쓰기 끝을 물려받으면 끝을 받지 못해 멈췄다
+            let log = std::env::temp_dir()
+                .join(format!("bunt-shell-gtk-test-{}.log", std::process::id()));
+            let file = std::fs::File::create(&log).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", TEST, "--nocapture"])
                 .env(INSIDE, "1")
                 // 화면 없는 시험 환경(Xvfb)에는 GL이 없을 수 있다
                 .env("GSK_RENDERER", "cairo")
-                .output()
+                .stdout(file.try_clone().unwrap())
+                .stderr(file)
+                .status()
                 .unwrap();
+            let output = std::fs::read_to_string(&log).unwrap_or_default();
+            let _ = std::fs::remove_file(&log);
             // 띄운 프로세스의 기록(GTK 경고 포함)은 실패할 때만 보인다
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            assert!(status.success(), "{output}");
             return;
         }
         if gtk::init().is_err() {
