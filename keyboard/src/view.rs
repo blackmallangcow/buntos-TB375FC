@@ -39,6 +39,8 @@ const KEY_MARGIN: i32 = 4;
 /// 지우기를 누르고 있으면 되풀이하기까지와 그 간격 (iPadOS)
 const REPEAT_DELAY: Duration = Duration::from_millis(500);
 const REPEAT_INTERVAL: Duration = Duration::from_millis(100);
+/// 지우기 되풀이의 상한(20초). 손가락을 뗀 이벤트를 놓치면(창이 사라지는 등) 끝없이 지우지 않게 한다. 시험은 짧게 본다
+const MAX_REPEATS: u32 = if cfg!(test) { 5 } else { 200 };
 /// 미리 보기 풍선의 크기(키에 견준 배수)와 키 사이의 틈
 const PREVIEW_WIDTH: f32 = 1.5;
 const PREVIEW_HEIGHT: f32 = 1.2;
@@ -357,6 +359,11 @@ impl Inner {
                 }
                 (None, Phase::Move)
             }
+            // 다른 곳이 누르기를 가져갔다. 누르던 키(지우기 되풀이)를 모두 그만둔다
+            EventType::GrabBroken => {
+                self.cancel_all();
+                return glib::Propagation::Proceed;
+            }
             _ => return glib::Propagation::Proceed,
         };
         let point = grid_point(&self.grid, event);
@@ -498,17 +505,18 @@ impl Inner {
             };
             inner.sink.send(Output::Delete);
             let weak = Rc::downgrade(&inner);
+            let (repeated, finished) = (Cell::new(1), slot.clone());
             // 이 원천은 끝나므로 칸에는 되풀이 원천을 둔다
-            slot.set(Some(glib::timeout_add_local(
-                REPEAT_INTERVAL,
-                move || match weak.upgrade() {
-                    Some(inner) => {
-                        inner.sink.send(Output::Delete);
-                        glib::ControlFlow::Continue
-                    }
-                    None => glib::ControlFlow::Break,
-                },
-            )));
+            slot.set(Some(glib::timeout_add_local(REPEAT_INTERVAL, move || {
+                let Some(inner) = weak.upgrade().filter(|_| repeated.get() < MAX_REPEATS) else {
+                    // 스스로 끝나는 원천이므로 칸을 비운다 (멈출 때 없는 원천을 지우지 않는다)
+                    finished.set(None);
+                    return glib::ControlFlow::Break;
+                };
+                repeated.set(repeated.get() + 1);
+                inner.sink.send(Output::Delete);
+                glib::ControlFlow::Continue
+            })));
         });
         source.set(Some(first));
         source
@@ -897,6 +905,16 @@ mod tests {
         // 삭제는 누를 때 보낸다. 바로 떼면 되풀이하지 않는다
         inner.begin(None, center((0, 40)));
         assert_eq!(take(), [Output::Delete]);
+        inner.end(&None, center((0, 40)));
+        assert_eq!(take(), []);
+        // 누르고 있으면 0.5초 뒤부터 되풀이하고, 뗀 이벤트를 놓쳐도 상한(시험은 5번)에서 멈춘다
+        inner.begin(None, center((0, 40)));
+        let until = Instant::now() + REPEAT_DELAY + REPEAT_INTERVAL * (MAX_REPEATS + 5);
+        while Instant::now() < until {
+            context.iteration(false);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(take().len(), 2 + MAX_REPEATS as usize - 1);
         inner.end(&None, center((0, 40)));
         assert_eq!(take(), []);
         // 숫자 쪽에서 스페이스를 치면 글자 쪽으로 돌아온다

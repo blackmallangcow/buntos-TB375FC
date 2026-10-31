@@ -26,6 +26,8 @@ const INTERFACE: &str = "org.buntos.Compositor1";
 const MAX_KEYS: usize = 64;
 /// 컴포지터가 답하기를 기다리는 시간 (ms). 컴포지터는 2초 안에 답한다
 const CALL_TIMEOUT: i32 = 2500;
+/// 답을 기다리는 동안 모아 두는 키의 상한. 컴포지터가 멈춘 동안 지우기를 누르고 있어도 끝없이 쌓지 않는다. 넘친 키는 버린다
+const MAX_PENDING: usize = 256;
 
 /// 화면 키보드가 누른 키를 받는 곳
 pub trait KeySink {
@@ -65,7 +67,14 @@ impl CompositorKeys {
 
 impl KeySink for CompositorKeys {
     fn send(&self, output: Output) {
-        self.0.pending.borrow_mut().push(output);
+        {
+            let mut pending = self.0.pending.borrow_mut();
+            if pending.len() >= MAX_PENDING {
+                eprintln!("bunt-keyboard: the compositor is not taking keys; dropping {output:?}");
+                return;
+            }
+            pending.push(output);
+        }
         flush(&self.0);
     }
 }
@@ -227,7 +236,204 @@ impl KeySink for EditableKeys {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{BufRead, BufReader},
+        path::PathBuf,
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+
     use super::*;
+
+    /// 시험 하나가 쓰는 버스 데몬 (shell/src/dbus.rs의 시험과 같다). dbus-daemon이 없으면 None이다
+    struct Bus {
+        daemon: Child,
+        dir: PathBuf,
+        address: String,
+    }
+
+    impl Bus {
+        fn start(name: &str) -> Option<Self> {
+            let dir = std::env::temp_dir()
+                .join(format!("bunt-keyboard-test-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let spawned = Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address"])
+                .arg(format!("--address=unix:dir={}", dir.display()))
+                .stdout(Stdio::piped())
+                .spawn();
+            let mut daemon = match spawned {
+                Ok(daemon) => daemon,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return None;
+                }
+                Err(err) => panic!("dbus-daemon: {err}"),
+            };
+            let mut address = String::new();
+            if let Some(stdout) = daemon.stdout.take() {
+                let _ = BufReader::new(stdout).read_line(&mut address);
+            }
+            Some(Self {
+                daemon,
+                dir,
+                address: address.trim().to_owned(),
+            })
+        }
+
+        fn connect(&self) -> gio::DBusConnection {
+            gio::DBusConnection::for_address_sync(
+                &self.address,
+                gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
+                    | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
+                None,
+                gio::Cancellable::NONE,
+            )
+            .unwrap()
+        }
+    }
+
+    impl Drop for Bus {
+        fn drop(&mut self) {
+            let _ = self.daemon.kill();
+            let _ = self.daemon.wait();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// 가짜 컴포지터: PressOnScreenKeys로 받은 묶음을 적는다. `refuse`면 셸이 아니라고 거절한다(AccessDenied)
+    fn fake_compositor(
+        bus: &Bus,
+        refuse: bool,
+    ) -> (gio::DBusConnection, Rc<RefCell<Vec<Vec<String>>>>) {
+        let connection = bus.connect();
+        connection
+            .call_sync(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                "RequestName",
+                Some(&(NAME, 0u32).to_variant()),
+                None,
+                gio::DBusCallFlags::NONE,
+                -1,
+                gio::Cancellable::NONE,
+            )
+            .unwrap();
+        let node = gio::DBusNodeInfo::for_xml(&format!(
+            "<node><interface name='{INTERFACE}'><method name='PressOnScreenKeys'>\
+             <arg type='as' direction='in'/></method></interface></node>"
+        ))
+        .unwrap();
+        let batches = Rc::new(RefCell::new(Vec::new()));
+        let seen = batches.clone();
+        let _ = connection
+            .register_object(PATH, &node.interfaces()[0])
+            .method_call(move |_, _, _, _, _, parameters, invocation| {
+                if refuse {
+                    invocation.return_dbus_error(
+                        "org.freedesktop.DBus.Error.AccessDenied",
+                        "only the shell started by the compositor may call this",
+                    );
+                    return;
+                }
+                let (keys,): (Vec<String>,) = parameters.get().unwrap();
+                seen.borrow_mut().push(keys);
+                invocation.return_value(None);
+            })
+            .build()
+            .unwrap();
+        (connection, batches)
+    }
+
+    /// 받은 키를 적는 대신 넣는 곳 (로그인 화면의 글 칸)
+    struct Record(Rc<RefCell<Vec<Output>>>);
+
+    impl KeySink for Record {
+        fn send(&self, output: Output) {
+            self.0.borrow_mut().push(output);
+        }
+    }
+
+    fn pump_until(context: &glib::MainContext, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            if !context.iteration(false) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// 셸·로그인 화면의 키가 컴포지터의 PressOnScreenKeys에 누른 차례로 닿는다. 답을 기다리는 동안 누른 키는 다음 요청에
+    /// 모아 보낸다
+    #[test]
+    fn keys_reach_the_compositor_in_order() {
+        let Some(bus) = Bus::start("order") else {
+            eprintln!("dbus-daemon is not installed; skipping the compositor keys test");
+            return;
+        };
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let (_service, batches) = fake_compositor(&bus, false);
+                let keys = CompositorKeys::new();
+                keys.0.bus.replace(Some(bus.connect()));
+                for output in [
+                    Output::Char('a'),
+                    Output::Char('B'),
+                    Output::Char(' '),
+                    Output::Delete,
+                    Output::Return,
+                ] {
+                    keys.send(output);
+                }
+                pump_until(&context, || {
+                    batches.borrow().iter().map(Vec::len).sum::<usize>() == 5
+                });
+                // 첫 키는 바로 가고, 답을 기다리는 동안 누른 키는 한 요청에 모여 간다
+                assert_eq!(
+                    *batches.borrow(),
+                    [
+                        vec!["a".to_owned()],
+                        ["B", " ", "BackSpace", "Return"].map(String::from).to_vec()
+                    ]
+                );
+                pump_until(&context, || !keys.0.busy.get());
+            })
+            .unwrap();
+    }
+
+    /// 컴포지터에 닿지 못한 키(컴포지터가 버스에 없다, 셸이 아니라고 거절했다)는 대신 넣는 곳에 차례대로 넣는다
+    #[test]
+    fn keys_fall_back_when_the_compositor_does_not_take_them() {
+        let Some(bus) = Bus::start("fallback") else {
+            eprintln!("dbus-daemon is not installed; skipping the fallback test");
+            return;
+        };
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                for refuse in [None, Some(true)] {
+                    // None: 컴포지터가 버스에 없다
+                    let service = refuse.map(|refuse| fake_compositor(&bus, refuse));
+                    let typed = Rc::new(RefCell::new(Vec::new()));
+                    let keys = CompositorKeys::with_fallback(Rc::new(Record(typed.clone())));
+                    keys.0.bus.replace(Some(bus.connect()));
+                    keys.send(Output::Char('q'));
+                    keys.send(Output::Delete);
+                    keys.send(Output::Return);
+                    pump_until(&context, || typed.borrow().len() == 3);
+                    assert_eq!(
+                        *typed.borrow(),
+                        [Output::Char('q'), Output::Delete, Output::Return]
+                    );
+                    pump_until(&context, || !keys.0.busy.get());
+                    drop(service);
+                }
+            })
+            .unwrap();
+    }
 
     #[test]
     fn keys_go_out_in_order_and_in_bounded_batches() {
@@ -238,6 +444,23 @@ mod tests {
         assert_eq!(pending, ["64", "65", "66"]);
         assert_eq!(take_batch(&mut pending), ["64", "65", "66"]);
         assert!(take_batch(&mut pending).is_empty());
+    }
+
+    /// 컴포지터가 답하지 않는 동안 누른 키는 상한까지만 모은다
+    #[test]
+    fn keys_waiting_for_a_busy_compositor_are_bounded() {
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let keys = CompositorKeys::new();
+                for _ in 0..MAX_PENDING + 10 {
+                    keys.send(Output::Delete);
+                }
+                // 첫 키는 보내는 중(답을 기다린다. 이 시험은 루프를 돌리지 않는다)이고, 나머지는 상한까지만 모인다
+                assert!(keys.0.busy.get());
+                assert_eq!(keys.0.pending.borrow().len(), MAX_PENDING);
+            })
+            .unwrap();
     }
 
     /// 컴포지터에 닿지 못한 키만 대신 넣는다. 답이 늦거나 키를 거절한 것(넣었을 수 있거나, 넣으면 안 된다)은 넣지 않는다
