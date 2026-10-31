@@ -9,7 +9,11 @@
 //! 켜면 늘 흐린 유리 바탕이다. 자동으로 숨고 위쪽 가장자리에서 나오는 것은 컴포지터가 한다
 //! (comp/src/panels.rs, 설정은 compositor.rs가 알린다).
 
-use std::rc::Rc;
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use bunt_i18n::Translations;
 use gtk4::{self as gtk, gio, glib, prelude::*};
@@ -31,6 +35,8 @@ const SETTINGS_COMMAND: &str = "bunt-settings";
 const LOGO_ICON: &str = "org.buntos.Logo-symbolic";
 /// 셸 설정 키: 메뉴 막대 배경 보기
 const BACKGROUND_KEY: &str = "menu-bar-background";
+/// 움직임으로 넘겨 연 메뉴가 이 안에 닫히고 포인터가 그 항목 위에 있으면 다시 연다 (HoverSwitch)
+const REOPEN_WITHIN: Duration = Duration::from_millis(500);
 
 pub fn build(
     app: &gtk::Application,
@@ -66,6 +72,7 @@ pub fn build(
     end.append(&network::extra(tr, &services.network));
     end.append(&control_center::extra(tr, services));
     end.append(&clock(tr, notifications));
+    HoverSwitch::attach(&end);
 
     let bar = gtk::CenterBox::builder().css_classes(["bar"]).build();
     bar.set_start_widget(Some(&start));
@@ -141,6 +148,144 @@ fn logo_menu_model(tr: &Translations, log_out: &str) -> (gio::Menu, gio::Menu) {
 }
 
 /// 로고 메뉴 단추
+/// 메뉴 막대 항목의 메뉴가 열린 동안 다른 항목 위로 포인터가 가면 그 항목의 메뉴를 바로 연다(macOS). GTK는 열린
+/// 팝오버 밖을 누르면 팝오버만 닫고 그 누르기를 버려, 다른 항목을 누르면 열린 메뉴만 닫혔다. 메뉴가 열린 동안에는
+/// 다른 단추의 이벤트 컨트롤러도 움직임을 받지 못하지만, GTK는 포인터 아래 단추의 hover 상태(PRELIGHT)는 바꾸므로
+/// 그 상태로 넘긴다. 포인터를 옮기자마자 누르면(에이전트의 누르기) 그 누르기가 방금 연 메뉴를 닫으므로,
+/// REOPEN_WITHIN 안에 닫히고 포인터가 아직 그 항목 위에 있으면 다시 연다
+struct HoverSwitch {
+    area: gtk::Box,
+    /// 움직임으로 넘겨 연 항목과 그때
+    switched: RefCell<Option<(gtk::MenuButton, Instant)>>,
+    /// hover 상태를 지켜보는 단추와 닫힘을 지켜보는 팝오버
+    buttons: RefCell<Vec<glib::WeakRef<gtk::MenuButton>>>,
+    popovers: RefCell<Vec<glib::WeakRef<gtk::Popover>>>,
+}
+
+impl HoverSwitch {
+    fn attach(area: &gtk::Box) {
+        let switch = Rc::new(HoverSwitch {
+            area: area.clone(),
+            switched: RefCell::default(),
+            buttons: RefCell::default(),
+            popovers: RefCell::default(),
+        });
+        // 앱이 넣는 항목은 나중에 붙으므로 포인터가 막대에 들어올 때마다 새 단추를 찾는다. 메뉴를 열려면 먼저
+        // 막대에 들어와 누르므로 열린 메뉴의 단추와 그 이웃은 이미 지켜보고 있다
+        switch.follow_buttons();
+        let motion = gtk::EventControllerMotion::new();
+        let entered = Rc::downgrade(&switch);
+        motion.connect_enter(move |_, _, _| {
+            if let Some(switch) = entered.upgrade() {
+                switch.follow_buttons();
+            }
+        });
+        area.add_controller(motion);
+        // 단추의 처리기가 약한 참조만 드므로 상자가 사는 동안 함께 산다
+        area.connect_destroy(move |_| {
+            let _ = &switch;
+        });
+    }
+
+    /// 막대 안의 메뉴 단추마다 hover 상태가 켜지는 것을 듣는다 (이미 듣는 단추는 건너뛴다)
+    fn follow_buttons(self: &Rc<Self>) {
+        let mut found = Vec::new();
+        menu_buttons(self.area.upcast_ref(), &mut found);
+        let mut buttons = self.buttons.borrow_mut();
+        buttons.retain(|known| known.upgrade().is_some());
+        for button in found {
+            if buttons
+                .iter()
+                .any(|known| known.upgrade().as_ref() == Some(&button))
+            {
+                continue;
+            }
+            buttons.push(button.downgrade());
+            let weak = Rc::downgrade(self);
+            button.connect_state_flags_changed(move |button, old| {
+                let hover = gtk::StateFlags::PRELIGHT;
+                if button.state_flags().contains(hover)
+                    && !old.contains(hover)
+                    && let Some(switch) = weak.upgrade()
+                {
+                    switch.hovered(button);
+                }
+            });
+        }
+    }
+
+    /// 포인터가 그 단추 위로 왔다. 다른 단추의 메뉴가 열려 있으면 이 단추의 메뉴로 바꾼다
+    fn hovered(self: &Rc<Self>, hovered: &gtk::MenuButton) {
+        let Some(open) = open_menu_button(self.area.upcast_ref()) else {
+            return;
+        };
+        if open == *hovered {
+            return;
+        }
+        // 포인터 이벤트를 다루는 중이므로 메뉴를 바꾸는 것은 그 뒤에 한다
+        let (switch, hovered) = (self.clone(), hovered.clone());
+        glib::idle_add_local_once(move || {
+            open.popdown();
+            hovered.popup();
+            switch
+                .switched
+                .replace(Some((hovered.clone(), Instant::now())));
+            if let Some(popover) = hovered.popover() {
+                switch.watch(&popover);
+            }
+        });
+    }
+
+    /// 움직임으로 연 메뉴가 그 뒤의 누르기로 바로 닫히면 다시 연다
+    fn watch(self: &Rc<Self>, popover: &gtk::Popover) {
+        let mut popovers = self.popovers.borrow_mut();
+        popovers.retain(|known| known.upgrade().is_some());
+        if popovers
+            .iter()
+            .any(|known| known.upgrade().as_ref() == Some(popover))
+        {
+            return;
+        }
+        popovers.push(popover.downgrade());
+        let weak = Rc::downgrade(self);
+        popover.connect_closed(move |popover| {
+            let Some(switch) = weak.upgrade() else {
+                return;
+            };
+            let Some((button, at)) = switch.switched.take() else {
+                return;
+            };
+            let same = button.popover().as_ref() == Some(popover);
+            let still_over = button.state_flags().contains(gtk::StateFlags::PRELIGHT);
+            if same && still_over && at.elapsed() < REOPEN_WITHIN {
+                glib::idle_add_local_once(move || button.popup());
+            }
+        });
+    }
+}
+
+/// 그 아래의 메뉴 단추를 모두 모은다 (앱이 넣는 항목은 상자 안에 있다)
+fn menu_buttons(widget: &gtk::Widget, found: &mut Vec<gtk::MenuButton>) {
+    if let Some(button) = widget.downcast_ref::<gtk::MenuButton>() {
+        found.push(button.clone());
+        return;
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        menu_buttons(&widget, found);
+        child = widget.next_sibling();
+    }
+}
+
+/// 메뉴가 열린(active) 메뉴 단추. 그 아래를 모두 훑는다(앱이 넣는 항목은 상자 안에 있다)
+fn open_menu_button(widget: &gtk::Widget) -> Option<gtk::MenuButton> {
+    if let Some(button) = widget.downcast_ref::<gtk::MenuButton>() {
+        return button.is_active().then(|| button.clone());
+    }
+    std::iter::successors(widget.first_child(), gtk::Widget::next_sibling)
+        .find_map(|child| open_menu_button(&child))
+}
+
 fn logo_menu(tr: &Rc<Translations>) -> gtk::MenuButton {
     let log_out = session::log_out_label(tr);
     let (menu, account) = logo_menu_model(tr, &log_out);
