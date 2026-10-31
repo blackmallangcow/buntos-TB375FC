@@ -9,14 +9,15 @@ sound-description = 경고음, 출력 장치와 입력 장치, 음량을 정합�
 sound-effects = 사운드 효과
 sound-alert = 경고음
 sound-alert-volume = 경고음 음량
-# 경고음 이름 (freedesktop 사운드 테마의 소리 이름마다)
-sound-alert-message-new-instant = 새 메시지
-sound-alert-message = 메시지
-sound-alert-bell = 벨
-sound-alert-complete = 완료
-sound-alert-dialog-information = 정보
-sound-alert-dialog-warning = 경고
-sound-alert-window-attention = 주의
+# 경고음 이름 (소리 이름마다). macOS처럼 쓰임새가 아니라 소리의 느낌으로 부른다. buntOS 사운드 테마의 소리다
+# (tools/sounds/generate.py)
+sound-alert-message-new-instant = 차임
+sound-alert-message = 물방울
+sound-alert-bell = 종
+sound-alert-complete = 오름
+sound-alert-dialog-information = 반짝
+sound-alert-dialog-warning = 둥
+sound-alert-window-attention = 핑
 # 경고음을 빈 값으로 정해 두었을 때 (gsettings)
 sound-alert-none = 없음
 sound-output-input = 출력 및 입력

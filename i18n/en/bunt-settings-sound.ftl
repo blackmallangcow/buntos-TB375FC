@@ -9,14 +9,15 @@ sound-description = Choose the alert sound, the output and input devices, and th
 sound-effects = Sound Effects
 sound-alert = Alert sound
 sound-alert-volume = Alert volume
-# Alert sound names (one per freedesktop sound theme name)
-sound-alert-message-new-instant = New Message
-sound-alert-message = Message
+# Alert sound names (one per sound name). Like macOS, named after how they sound rather than what they are for.
+# These are the sounds of the buntOS sound theme (tools/sounds/generate.py)
+sound-alert-message-new-instant = Chime
+sound-alert-message = Droplet
 sound-alert-bell = Bell
-sound-alert-complete = Complete
-sound-alert-dialog-information = Information
-sound-alert-dialog-warning = Warning
-sound-alert-window-attention = Attention
+sound-alert-complete = Rise
+sound-alert-dialog-information = Twinkle
+sound-alert-dialog-warning = Thump
+sound-alert-window-attention = Ping
 # When the alert sound is set to an empty value (gsettings)
 sound-alert-none = None
 sound-output-input = Output & Input

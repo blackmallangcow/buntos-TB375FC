@@ -6,7 +6,8 @@
 //! - 테마: 고른 테마(org.gnome.desktop.sound theme-name), 없으면 freedesktop
 //! - 이름이 없으면 끝의 "-부분"을 떼어 다시 찾는다(message-new-instant → message-new → message)
 //!
-//! 테마의 index.theme(상속, 디렉터리 목록)는 읽지 않는다. 이미지의 sound-theme-freedesktop은 stereo 하나뿐이다.
+//! 테마의 index.theme(상속, 디렉터리 목록)는 읽지 않는다. 이미지의 테마(buntos, sound-theme-freedesktop)는 stereo
+//! 하나뿐이고, buntos가 잇는 테마(Inherits)는 어차피 찾는 freedesktop이다.
 
 use std::path::{Path, PathBuf};
 
@@ -14,8 +15,8 @@ use std::path::{Path, PathBuf};
 pub const FALLBACK_THEME: &str = "freedesktop";
 const EXTENSIONS: [&str; 3] = ["oga", "ogg", "wav"];
 
-/// 시스템 설정의 사운드 페이지에서 고를 수 있는 경고음. freedesktop 사운드 테마의 이름이다. 이미지에 없는
-/// 파일은 시스템 설정이 목록에서 뺀다
+/// 시스템 설정의 사운드 페이지에서 고를 수 있는 경고음. freedesktop 사운드 이름이고, 이미지의 buntos 테마
+/// (tools/sounds/generate.py)가 모두 만든다. 고른 테마에 그 이름의 파일이 없으면 시스템 설정이 목록에서 뺀다
 pub const ALERT_SOUNDS: [&str; 7] = [
     "message-new-instant",
     "message",
