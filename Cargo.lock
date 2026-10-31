@@ -271,6 +271,7 @@ version = "0.1.0"
 dependencies = [
  "bunt-i18n",
  "bunt-keyboard",
+ "bunt-sound",
  "gtk4",
  "gtk4-layer-shell",
  "libc",

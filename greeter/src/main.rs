@@ -14,6 +14,7 @@ mod background;
 mod clock;
 mod create;
 mod login;
+mod startup_sound;
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -213,11 +214,15 @@ fn build(app: &gtk::Application, tr: &Rc<Translations>, preview: Option<View>) {
         window.set_default_size(1280, 800);
     }
     // 시험(tests/e2e, tools/image/vmctl.sh)이 이 줄을 보고 암호를 친다. 컴포지터가 창에 키보드를 준
-    // 뒤(활성 창) 입력 칸이 포커스를 받을 틈을 두고 한 번 알린다. 활성으로 알려 오지 않아도 5초 뒤에는 알린다
+    // 뒤(활성 창) 입력 칸이 포커스를 받을 틈을 두고 한 번 알린다. 활성으로 알려 오지 않아도 5초 뒤에는 알린다.
+    // 이때 화면이 다 떴으므로 부팅 뒤 처음이면 시동음도 낸다
     let announced = Rc::new(std::cell::Cell::new(false));
     let announce = move || {
         if announced.replace(true) {
             return;
+        }
+        if preview.is_none() {
+            startup_sound::play_once();
         }
         eprintln!(
             "bunt-greeter: ready ({})",
