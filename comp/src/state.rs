@@ -222,6 +222,8 @@ pub struct BuntState {
     pub touch: crate::touch::Touch,
     /// 붙은 입력 장치와 입력 모드 (input_mode.rs)
     pub input_devices: crate::input_mode::InputDevices,
+    /// 셸의 화면 키보드에 알린 글 입력 상태 (osk.rs)
+    pub osk: crate::osk::TextInputState,
 }
 
 impl BuntState {
@@ -393,6 +395,7 @@ impl BuntState {
             session,
             touch: crate::touch::Touch::default(),
             input_devices,
+            osk: Default::default(),
         })
     }
 
@@ -833,6 +836,8 @@ impl BuntState {
     fn window_area(&self, fill: Fill) -> Option<Rectangle<i32, Logical>> {
         let output = self.space.outputs().next()?;
         let mut area = self.space.output_geometry(output)?;
+        // 화면 키보드(osk.rs)의 위쪽 끝. keyboard_top도 레이어 맵을 잠그므로 맵을 잠그기 전에 읽는다
+        let keyboard_top = self.keyboard_top(output);
         let map = layer_map_for_output(output);
         for layer in map.layers() {
             let state = layer.cached_state();
@@ -850,6 +855,11 @@ impl BuntState {
                     amount.saturating_add(edge.margin(&state.margin)),
                 );
             }
+        }
+        // 화면 키보드가 보이면 창은 키보드 위까지다. 키보드는 배타 영역 없이 Dock 위를 덮으므로 위의 독점 영역으로는
+        // 줄지 않는다. 막대와 달리 전체 화면 창도 줄인다: 앱(GTK)은 가려진 글 칸을 스스로 스크롤해 보이지 않는다
+        if let Some(top) = keyboard_top {
+            crate::osk::reserve_above(&mut area, top);
         }
         Some(area)
     }
@@ -2157,6 +2167,8 @@ impl BuntState {
             Request::Agent(request) => self.agent_request(request),
             // 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
             Request::Session(request) => self.session_request(request),
+            // 셸의 화면 키보드에서 누른 키 (osk.rs)
+            Request::Keyboard(request) => self.keyboard_request(request),
         }
     }
 

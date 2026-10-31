@@ -111,6 +111,8 @@ impl BuntState {
             } => {
                 let _ = reply.send(match refused {
                     Some(why) => Err(why),
+                    // 화면 키보드는 사람만 누른다. 에이전트가 누르면 막은 앱에도 글을 칠 수 있다 (osk.rs)
+                    None if self.over_keyboard((x, y).into()) => Err(Refused::Keyboard),
                     None => {
                         self.agent_click(x, y, button);
                         Ok(())
@@ -635,6 +637,11 @@ fn human_only(namespace: &str) -> bool {
     AUTH_NAMESPACES.contains(&namespace)
 }
 
+/// 셸의 화면 키보드인지. 에이전트에게 알리지 않고 누르게 하지도 않는다 (osk.rs)
+fn on_screen_keyboard(namespace: &str) -> bool {
+    namespace == crate::osk::KEYBOARD_NAMESPACE
+}
+
 /// 레이어 표면 하나와 지금 그리는 자리 (placed_layers). 시험은 표면 없이(`()`) 만든다
 struct PlacedLayer<S = WlSurface> {
     pid: u32,
@@ -644,11 +651,12 @@ struct PlacedLayer<S = WlSurface> {
     area: Rectangle<i32, Logical>,
 }
 
-/// 에이전트에게 알리는 레이어 표면 (GetLayers): 사람만 답하는 창은 뺀다
+/// 에이전트에게 알리는 레이어 표면 (GetLayers): 사람만 답하는 창과 화면 키보드는 뺀다
 fn listed<S>(placed: Vec<PlacedLayer<S>>) -> Vec<LayerInfo> {
     placed
         .into_iter()
-        .filter(|layer| !human_only(&layer.namespace))
+        // 화면 키보드도 뺀다: 에이전트가 키보드를 누르는 길을 열지 않는다
+        .filter(|layer| !human_only(&layer.namespace) && !on_screen_keyboard(&layer.namespace))
         .map(|layer| LayerInfo {
             pid: layer.pid,
             namespace: layer.namespace,
@@ -669,6 +677,10 @@ fn choose_layer<'a, S>(
 ) -> Result<&'a PlacedLayer<S>, Refused> {
     if human_only(namespace) {
         return Err(Refused::AuthDialog);
+    }
+    // 화면 키보드는 사람만 누른다 (osk.rs)
+    if on_screen_keyboard(namespace) {
+        return Err(Refused::Keyboard);
     }
     placed
         .iter()
@@ -794,5 +806,28 @@ mod tests {
             choose_layer(&placed, 20, "bunt-menubar").err(),
             Some(Refused::NoWindow)
         );
+    }
+
+    /// 셸의 화면 키보드는 에이전트에게 보이지 않고 눌리지도 않는다. 사람만 답하는 창과 달리 떠 있어도 에이전트의
+    /// 다른 입력은 막지 않는다 (osk.rs)
+    #[test]
+    fn the_agent_never_sees_or_presses_the_on_screen_keyboard() {
+        let mut placed = shell_layers();
+        placed.push(PlacedLayer {
+            pid: 10,
+            namespace: crate::osk::KEYBOARD_NAMESPACE.into(),
+            surface: (),
+            area: Rectangle::new((0, 446).into(), (1280, 354).into()),
+        });
+        assert_eq!(
+            choose_layer(&placed, 10, crate::osk::KEYBOARD_NAMESPACE).err(),
+            Some(Refused::Keyboard)
+        );
+        assert!(
+            listed(placed)
+                .iter()
+                .all(|layer| layer.namespace != crate::osk::KEYBOARD_NAMESPACE)
+        );
+        assert!(!human_only(crate::osk::KEYBOARD_NAMESPACE));
     }
 }

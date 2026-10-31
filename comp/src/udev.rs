@@ -420,6 +420,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     event_loop.run(None, &mut state, |state| {
         state.space.refresh();
         state.popups.cleanup();
+        // 글 입력이 켜지거나 꺼졌으면 셸의 화면 키보드에 알린다 (osk.rs). 앱의 요청, 포커스 바꾸기, 잠금이 모두 바꾼다
+        state.publish_text_input();
         if let Err(err) = state.display_handle.flush_clients() {
             tracing::warn!("failed to flush clients: {err}");
         }

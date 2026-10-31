@@ -38,6 +38,8 @@ mod selection;
 mod touch;
 // 입력 장치로 정하는 포인터 모드와 터치 모드
 mod input_mode;
+// 셸의 화면 키보드: 셸에만 알리는 글 입력 상태, 셸이 누른 키, 키보드 위까지의 창 자리
+mod osk;
 
 fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

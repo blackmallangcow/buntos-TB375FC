@@ -331,6 +331,10 @@ impl Dispatch<ZwpTextInputV3, TextInputUserData> for BuntState {
             .is_some_and(|focus| focus.id().same_client_as(&resource.id()))
         {
             state.preedit.reset();
+            // 이미 켜진 칸을 다시 눌러도 GTK가 다시 켠다. 가린 화면 키보드를 다시 띄우도록 셸에 알린다 (osk.rs)
+            if matches!(request, zwp_text_input_v3::Request::Enable) {
+                state.osk.enable_requested();
+            }
         }
         <TextInputManagerState as Dispatch<ZwpTextInputV3, TextInputUserData, Self>>::request(
             state, client, resource, request, data, dhandle, data_init,
