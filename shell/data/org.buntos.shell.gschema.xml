@@ -86,6 +86,11 @@ bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock",
       <summary>최소화된 윈도우 애니메이션 (지니 효과, 크기 조절 효과)</summary>
       <description>genie: 창이 휘며 Dock의 최소화 칸으로 빨려 든다(macOS의 기본값). scale: 창이 그대로 줄며 칸으로 간다. 칸에서 꺼낼 때는 거꾸로 나온다. 셸이 컴포지터에 알리고(SetMinimizeEffect) 컴포지터가 그린다</description>
     </key>
+    <key name="desktop-show-items" type="b">
+      <default>true</default>
+      <summary>데스크탑에 항목 보기 (macOS의 항목 보기: 데스크탑에서)</summary>
+      <description>데스크탑 폴더의 파일과 폴더를 배경화면 위에 보인다. 끄면 셸이 데스크탑 항목 창을 숨긴다</description>
+    </key>
     <key name="recent-apps" type="as">
       <default>[]</default>
       <summary>최근에 실행한 앱 (.desktop ID, 최근 것이 먼저). 모든 앱 패널의 첫 줄</summary>

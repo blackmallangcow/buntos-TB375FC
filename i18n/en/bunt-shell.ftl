@@ -250,3 +250,14 @@ bluetooth-nearby = Nearby Devices
 sound-settings = Sound Settings…
 # Shown in place of the title of a notification card when Show Previews is Never (like macOS)
 notifications-preview-hidden = Notification
+
+# Desktop items (Finder desktop terms in macOS)
+desktop-title = Desktop
+desktop-open = Open
+desktop-rename = Rename
+desktop-move-to-trash = Move to Trash
+desktop-new-folder = New Folder
+desktop-clean-up-by = Clean Up By
+desktop-sort-name = Name
+desktop-change-wallpaper = Change Wallpaper…
+desktop-untitled-folder = untitled folder

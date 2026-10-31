@@ -247,3 +247,14 @@ bluetooth-nearby = 근처 기기
 sound-settings = 사운드 설정…
 # 미리 보기 보기가 "안 함"일 때 알림 카드의 제목 자리에 보인다 (macOS와 같다)
 notifications-preview-hidden = 알림
+
+# 데스크탑 항목 (macOS 한국어판의 Finder 데스크탑 용어)
+desktop-title = 데스크탑
+desktop-open = 열기
+desktop-rename = 이름 변경
+desktop-move-to-trash = 휴지통으로 이동
+desktop-new-folder = 새로운 폴더
+desktop-clean-up-by = 정리 기준
+desktop-sort-name = 이름
+desktop-change-wallpaper = 배경화면 변경…
+desktop-untitled-folder = 무제 폴더

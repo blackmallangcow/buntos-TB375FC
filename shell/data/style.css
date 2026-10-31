@@ -1054,3 +1054,56 @@ checkbutton.auth-check {
   min-width: 12px;
   min-height: 12px;
 }
+
+/* 데스크탑 항목(macOS의 데스크탑): 배경화면 위의 흰 이름(그림자). 고른 항목은 아이콘 뒤에 어두운 둥근 칸,
+   이름에 강조색 칸을 깐다. 데스크탑이 키보드를 잃으면(다른 창을 쓰는 중) 이름 칸이 회색이다 */
+window.bunt-desktop,
+window.bunt-desktop.background {
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+  font-family: var(--font-family);
+}
+
+.desktop-item {
+  padding: 4px 2px;
+}
+
+.desktop-item .desktop-icon {
+  padding: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.desktop-item .desktop-name {
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--on-wallpaper);
+  font-size: var(--text-callout);
+  font-weight: 500;
+  text-shadow: var(--on-wallpaper-shadow);
+}
+
+.desktop-item.selected .desktop-icon {
+  background-color: rgba(0, 0, 0, 0.25);
+}
+
+.desktop-item.selected .desktop-name {
+  background-color: var(--selection);
+  color: #ffffff;
+  text-shadow: none;
+}
+
+.inactive .desktop-item.selected .desktop-name {
+  background-color: rgba(128, 128, 128, 0.75);
+}
+
+.desktop-item entry.desktop-rename {
+  min-height: 20px;
+  font-size: var(--text-callout);
+}
+
+/* 빈 곳을 드래그하는 동안의 반투명 사각형 */
+.desktop-marquee {
+  background-color: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+}

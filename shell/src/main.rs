@@ -10,6 +10,8 @@ mod compositor;
 mod config;
 mod control_center;
 mod dbus;
+// 데스크탑 폴더의 파일과 폴더(배경화면 위 층)
+mod desktop;
 mod dock;
 mod extras;
 mod input_source;
@@ -112,6 +114,9 @@ fn main() -> glib::ExitCode {
         );
         let launcher = Launcher::new(app, &tr, toplevels.as_ref());
         let dock = dock::build(app, &config, &tr, toplevels.as_ref(), &launcher);
+        // 데스크탑 항목 창은 메뉴 막대와 Dock 다음에 띄운다. 컴포지터(smithay)가 레이어를 띄운 차례로 놓아,
+        // 먼저 뜬 막대의 배타 영역만 피하기 때문이다
+        let desktop = desktop::build(app, &tr);
         let banner = notification_center::banner(app, &notifications, &tr);
         // ⇧⌘5 스크린샷 도구 막대와 찍은 뒤 화면 모서리의 미리 보기
         let screenshot_toolbar = screenshot::Toolbar::new(app, &tr);
@@ -124,7 +129,7 @@ fn main() -> glib::ExitCode {
         compositor::follow_shortcuts(&launcher, &session, shell_settings(), &screenshot_toolbar);
         // ⌘⇥ 앱 전환 창. 키는 컴포지터가 받고 이 창은 보이기만 한다
         let switcher = switcher::Switcher::start(app);
-        follow_color_scheme(vec![
+        let mut windows = vec![
             menubar,
             dock,
             banner,
@@ -132,7 +137,10 @@ fn main() -> glib::ExitCode {
             switcher.window().clone(),
             screenshot_toolbar.window().clone(),
             screenshot_preview.window().clone(),
-        ]);
+        ];
+        // 데스크탑의 단축 메뉴도 밝게·어둡게를 따른다
+        windows.extend(desktop.map(|desktop| desktop.window().clone()));
+        follow_color_scheme(windows);
     });
     app.run()
 }
