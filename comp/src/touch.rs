@@ -982,7 +982,8 @@ impl BuntState {
     }
 
     /// 첫 손가락이 숨은 막대의 가장자리 띠를 눌렀으면 가장자리 스와이프를 알아보기 시작한다. 막대는 첫 화면에 있다
-    /// (update_bars)
+    /// (update_bars). 화면 키보드가 보이면 아래 끝은 키보드의 맨 아랫줄이라 Dock을 꺼내지 않는다(스페이스를 치던
+    /// 손가락을 거두게 되고, 꺼낸 Dock은 overlay인 키보드 밑에 가린다)
     fn begin_edge_swipe(
         &self,
         slot: TouchSlot,
@@ -991,7 +992,10 @@ impl BuntState {
     ) -> Option<EdgeSwipe> {
         let output = self.space.outputs().next()?;
         let screen = self.space.output_geometry(output)?;
-        EdgeSwipe::begin(slot, pos, time, screen, |bar| self.bar_hidden(bar))
+        let keyboard = self.keyboard_top(output).is_some();
+        EdgeSwipe::begin(slot, pos, time, screen, |bar| {
+            self.bar_hidden(bar) && !(keyboard && bar == Bar::Dock)
+        })
     }
 
     /// 앱이 손가락으로 누른 serial로 창 옮기기를 청했다(xdg_toplevel.move, state.rs). 그 손가락이 아직 닿아 있으면
