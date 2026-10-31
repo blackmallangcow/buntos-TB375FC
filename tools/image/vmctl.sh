@@ -29,6 +29,9 @@
 # 빌드 VM에 렌더 노드(/dev/dri/renderD*, VMCTL_RENDERNODE로 고른다)와 QEMU의 OpenGL 모듈
 # (qemu-system-modules-opengl, tools/devvm/setup.sh)이 있어야 한다. GPU가 없는 빌드 VM(Lima)은 vgem 커널
 # 모듈로 렌더 노드를 만들고, 그때 빌드 VM은 llvmpipe(CPU)로 그린다. 기본값(빈 값)은 3D 없는 virtio-gpu다.
+# VMCTL_INPUT_HOTPLUG=1이면 키보드와 태블릿을 PCIe 루트 포트에 id keyboard, tablet으로 꽂고 빈 포트(spare-port)를
+# 하나 더 두어, QMP device_del로 떼고 device_add로 다시 붙일 수 있다(입력 모드 시험). 기본값은 루트 버스(pcie.0)에
+# 바로 꽂아 뗄 수 없다("Bus 'pcie.0' does not support hotplugging")
 # 보드는 BOARD(기본 qemu-aarch64)로 고른다. BOARD=x86_64-generic이면 q35 기계와 OVMF로 띄우고, 빌드 VM과
 # 아키텍처가 다르면(Apple Silicon의 빌드 VM) KVM 없이 소프트웨어 에뮬레이션(TCG)으로 띄워 느리다.
 # VMCTL_TOUCH=1이면 가상 터치 화면(virtio-multitouch, QEMU 8.1 이상)도 붙인다. qmp 동작 touch:·tdrag:이 손가락으로
@@ -186,6 +189,19 @@ start)
 		exit 2
 		;;
 	esac
+	# 키보드, 터치 화면, 태블릿 차례로 붙인다(태블릿이 마지막이어야 한다, 위). 떼고 붙이는 시험(VMCTL_INPUT_HOTPLUG=1)
+	# 에서는 키보드와 태블릿을 루트 포트에 id를 붙여 꽂는다(머리말). 터치 화면은 떼지 않으므로 루트 버스에 둔다
+	input=(-device virtio-keyboard-pci "${touch[@]}" -device virtio-tablet-pci)
+	if [[ "${VMCTL_INPUT_HOTPLUG:-}" == 1 ]]; then
+		input=(
+			-device "pcie-root-port,id=keyboard-port,chassis=1,slot=1"
+			-device "virtio-keyboard-pci,id=keyboard,bus=keyboard-port"
+			"${touch[@]}"
+			-device "pcie-root-port,id=tablet-port,chassis=2,slot=2"
+			-device "virtio-tablet-pci,id=tablet,bus=tablet-port"
+			-device "pcie-root-port,id=spare-port,chassis=3,slot=3"
+		)
+	fi
 	# shellcheck disable=SC2086 # VMCTL_QEMU_ARGS는 일부러 낱말로 나눈다
 	"$qemu" -machine "$machine" "${accel[@]}" -smp "${VMCTL_CPUS:-2}" -m 2048M \
 		-nodefaults -no-user-config \
@@ -198,7 +214,7 @@ start)
 		-drive if=none,id=disk,format=qcow2,discard=unmap,file="$work/disk.qcow2" \
 		-device virtio-blk-pci,drive=disk,bootindex=1 \
 		-smbios "type=11,value=io.systemd.stub.kernel-cmdline-extra=$cmdline" "${credential[@]}" \
-		"${gpu[@]}" -device virtio-keyboard-pci "${touch[@]}" -device virtio-tablet-pci \
+		"${gpu[@]}" "${input[@]}" \
 		-audiodev none,id=snd0 -device virtio-sound-pci,audiodev=snd0 \
 		-qmp "unix:$work/qmp.sock,server=on,wait=off" ${VMCTL_QEMU_ARGS:-} \
 		<"$work/console.in" >"$work/console.log" 2>&1 8>&- &
