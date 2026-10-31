@@ -1,6 +1,7 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.0
+# buntOS TB375FC 포팅 최종 설계안 v1.1
 
 - 작성일: 2026-11-01
+- v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -87,8 +88,10 @@
 
 ### 2.3 장치 트리 방침
 
-- **2a:** 벤더 트리를 줄여 출발한다(`status = "disabled"`). LK가 기대하는 경로(패널 노드 `/soc/dsi@1400d000/panel1@0` 등)를 남기기 위해서다. 주소와 인터럽트는 커뮤니티 포트의 `mt6897.dtsi`, 벤더 `mt6897.dts`, 우리가 뽑은 트리 셋을 대조한다.
-- **2b부터:** 노드를 하나씩 mainline 바인딩으로 바꾼다.
+- **2a:** 처음부터 업스트림 꼴로 짠다(v1.0의 "벤더 트리를 줄여 출발"을 바꿨다). 커뮤니티 포트가 이 꼴의 트리로 LK에서 UART 콘솔과 저장장치까지 띄웠다. 주소와 인터럽트는 커뮤니티 포트의 `mt6897.dtsi`, 벤더 `mt6897.dts`, 우리가 뽑은 트리 셋을 대조한다(`kernel/tb375fc/dts/README.md`).
+  - LK가 찾는 패널 경로(`/soc/dsi@1400d000/panel1@0` 등)는 화면을 붙이는 2c에서 더한다.
+  - 첫 부팅 뒤 LK가 우리 트리의 무엇을 고치는지 살아 있는 트리로 견준다.
+- **2b부터:** 꺼 둔 노드(UFS, USB, SPMI 등)를 클럭·핀·전원 도메인 패치와 함께 하나씩 켠다.
 - **최종 꼴:** `mt6897.dtsi`(SoC)와 `mt6897-lenovo-tb375fc.dts`(보드)다. TB373FU는 같은 dts에 `model`만 다르다.
 - **framebuffer:** 정적 트리에 없다. LK가 부팅 화면을 켠 영역을 기기에서 읽는다(안드로이드의 `/proc/iomem`, 살아 있는 트리). 그 주소로 `simple-framebuffer`를 만든다. 화면은 1472×1840 두 줄을 합친 2944×1840이고, LK가 DSC까지 켜 둔다.
 - **예약 메모리:** 정적 트리에는 동적 할당 셋(modem 버퍼, CMA 256MB, 커널 보호)뿐이다. TEE, GenieZone, connsys, framebuffer의 고정 예약은 preloader·LK가 부팅 때 더한다.
@@ -98,6 +101,9 @@
 ### 2.4 처음 띄우는 법과 디버그 채널
 
 - 첫 부팅은 `fastboot boot`로 RAM에서 한다. 지원하지 않으면 비운 슬롯에 굽는다.
+  - `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있어서, LK가 이 둘을 굽혀 있는 원래 파티션에서 읽을 가능성이 높다(AOSP 부트로더의 동작이다. MT6897 LK에서는 확인하지 않았다).
+  - 그래서 init이 vendor_boot의 표지로 LK가 우리 vendor_boot를 읽었는지 알린다. initramfs를 boot.img에도 넣은 이미지(`mkimages.sh --boot-ramdisk`)로 LK가 그 램디스크를 쓰는지도 본다.
+  - 원래 장치 트리로 뜨면 비운 슬롯에 넷을 굽는 길로 간다.
 - 디버그 채널:
   1. **UART:** 커뮤니티 포트는 UART 콘솔을 쓴다. 기기 밖 단자는 없으니 위치(시험 패드나 포고 핀의 UART3)를 그 포트와 `tb375fc-linux-utils`에서 확인한다. 포고 핀 UART3(GPIO180·181)은 키보드가 쓰는 줄이다.
   2. **화면 콘솔:** simple-framebuffer + simpledrm
