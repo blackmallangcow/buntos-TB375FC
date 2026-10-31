@@ -857,8 +857,8 @@ impl BuntState {
         }
     }
 
-    /// 셸의 막대(메뉴 막대, Dock)인지
-    fn bar_of(&self, layer: &LayerSurface) -> Option<Bar> {
+    /// 셸의 막대(메뉴 막대, Dock)인지. 손가락이 누른 막대를 찾을 때도 쓴다 (touch.rs)
+    pub(crate) fn bar_of(&self, layer: &LayerSurface) -> Option<Bar> {
         let bar = match layer.namespace() {
             MENUBAR_NAMESPACE => Bar::MenuBar,
             DOCK_NAMESPACE => Bar::Dock,
@@ -896,6 +896,16 @@ impl BuntState {
         self.bars.iter().any(|bar| bar.sliding(now))
     }
 
+    /// 그 막대가 숨었는지(숨는 중 포함). 막대 표면이 없으면 거짓이다. 손가락의 가장자리 스와이프가 쓴다 (touch.rs)
+    pub(crate) fn bar_hidden(&self, bar: Bar) -> bool {
+        !self.bars[bar.index()].shown()
+            && self.space.outputs().next().is_some_and(|output| {
+                layer_map_for_output(output)
+                    .layers()
+                    .any(|layer| self.bar_of(layer) == Some(bar))
+            })
+    }
+
     /// 막대를 숨길지 꺼낼지 다시 정한다 (panels.rs). 포인터가 움직일 때(`pointer`는 새 위치), 화면을
     /// 그릴 때, 숨기기를 기다리던 때가 됐을 때 부른다
     pub fn update_bars(&mut self, pointer: Option<Point<f64, Logical>>) {
@@ -913,6 +923,9 @@ impl BuntState {
             })
             .unwrap_or_default();
         let (maximized, fullscreen) = self.front_window_fills();
+        // 손가락을 쓴 뒤로 포인터를 움직이지 않았으면 포인터 자리로는 막대를 꺼내거나 붙들지 않는다 (touch.rs). 터치만 쓰면
+        // 포인터가 그 자리(처음에는 화면 왼쪽 위)에 머물러, 숨은 메뉴 막대를 꺼내고 숨지 못하게 붙들었다
+        let pointer_active = !self.touch.pointer_idle();
         let now = Instant::now();
         let mut next: Option<Instant> = None;
         for bar in Bar::ALL {
@@ -932,20 +945,24 @@ impl BuntState {
             let Some((geo, menu_open)) = found else {
                 continue;
             };
-            let at_edge = match bar {
-                Bar::MenuBar => pointer.y < f64::from(output_geo.loc.y) + panels::EDGE,
-                Bar::Dock => {
-                    pointer.y >= f64::from(output_geo.loc.y + output_geo.size.h) - panels::EDGE
-                        && pointer.x >= f64::from(geo.loc.x)
-                        && pointer.x < f64::from(geo.loc.x + geo.size.w)
-                }
-            };
+            let at_edge = pointer_active
+                && match bar {
+                    Bar::MenuBar => pointer.y < f64::from(output_geo.loc.y) + panels::EDGE,
+                    Bar::Dock => {
+                        pointer.y >= f64::from(output_geo.loc.y + output_geo.size.h) - panels::EDGE
+                            && pointer.x >= f64::from(geo.loc.x)
+                            && pointer.x < f64::from(geo.loc.x + geo.size.w)
+                    }
+                };
+            let covered = self.bar_mode(bar).hides(maximized, fullscreen);
             let input = BarInput {
-                covered: self.bar_mode(bar).hides(maximized, fullscreen),
+                covered,
                 at_edge,
-                inside: geo.to_f64().contains(pointer),
-                // 최소화 효과가 도는 동안에는 숨은 Dock을 꺼내 둔다 (minimize.rs)
-                menu_open: menu_open || (bar == Bar::Dock && self.minimize_effects.reveals_dock()),
+                inside: pointer_active && geo.to_f64().contains(pointer),
+                // 최소화 효과가 도는 동안과 가장자리에서 밀어 꺼낸 동안(touch.rs)에는 숨은 막대를 꺼내 둔다 (minimize.rs)
+                menu_open: menu_open
+                    || (bar == Bar::Dock && self.minimize_effects.reveals_dock())
+                    || self.touch.keeps_bar(bar, covered),
             };
             if let Some(at) = panels::decide(&mut self.bars[bar.index()], input, now) {
                 next = Some(next.map_or(at, |next| next.min(at)));

@@ -11,10 +11,13 @@
 //! - 누르면 포인터로 누를 때와 같이 키보드 포커스를 준다(input.rs의 focus_at). 열린 팝업 메뉴 밖을 누르면 메뉴를 닫는다.
 //! - 앱이 손가락으로 누른 serial로 창 옮기기·크기 조절을 청하면 그 손가락의 터치 그랩이 받는다(grabs.rs).
 //! - ⇧⌘4·⇧⌘5의 영역 고르기와 창 고르기는 손가락 하나를 왼쪽 단추처럼 받는다(screenshot.rs).
+//! - 숨은 메뉴 막대는 위 가장자리에서 아래로, 숨은 Dock은 아래 가장자리에서 위로 밀어 꺼낸다(EdgeSwipe, iPadOS 26과
+//!   같다). 제스처로 잡은 손가락은 받던 앱에서 거둔다(wl_touch.cancel). 꺼낸 막대는 그 막대 밖을 누르거나, 막대를 누른
+//!   손가락을 떼거나, 포인터를 움직일 때까지 둔다(iPadOS의 Dock처럼 손을 떼도 남는다).
 
 use smithay::{
     backend::input::{AbsolutePositionEvent, Event, InputBackend, TouchEvent, TouchSlot},
-    desktop::{PopupGrab, PopupUngrabStrategy},
+    desktop::{PopupGrab, PopupUngrabStrategy, WindowSurfaceType, layer_map_for_output},
     input::{
         Seat, SeatHandler,
         touch::{
@@ -30,8 +33,27 @@ use smithay::{
 
 use crate::{
     grabs::{ResizeEdges, TouchMoveSurfaceGrab, TouchResizeSurfaceGrab},
+    panels::Bar,
     state::BuntState,
 };
+
+/// 가장자리 스와이프가 시작하는 띠의 두께 (논리 픽셀). iPadOS가 시스템 제스처 몫으로 앱에 비워 두게 하는 안전 영역과
+/// 같다: 아래는 홈 표시기 20pt, 위는 상태 막대 24pt(Face ID iPad Pro의 safeAreaInsets). GNOME Shell의 가장자리
+/// 끌기(edgeDragAction.js)도 20px이다
+const BOTTOM_BAND: f64 = 20.0;
+const TOP_BAND: f64 = 24.0;
+/// 누른 자리에서 이만큼 안쪽으로 밀면 막대를 꺼낸다. iPadOS는 짧게 밀어 Dock·메뉴 막대를 꺼내고 길거나 빠르게 밀면 다른
+/// 화면(앱 전환기, 알림 센터)으로 가므로 짧게 둔다: HIG의 가장 작은 누를 영역(44pt) 하나. GNOME Shell은 80px이다
+const SWIPE_DISTANCE: f64 = 44.0;
+/// 손가락이 이보다 덜 움직였으면 아직 끌기가 아니다 (iOS 스크롤이 움직이기 시작하는 거리로 알려진 약 10pt. Apple 문서는
+/// 없다. Android의 touch slop은 8dp)
+const SLOP: f64 = 10.0;
+/// 문턱을 넘은 뒤 평균 빠르기가 이 이상(논리 픽셀/ms)이면 거리가 모자라도 꺼낸다(튕기기). 아래 띠(20px)를 40ms에 지나는
+/// 빠르기로, 천천히 끄는 손가락(0.1~0.2px/ms)과 튕기는 손가락(1px/ms 넘게) 사이다. Apple은 값을 밝히지 않아 고른 값이다
+const SWIPE_VELOCITY: f64 = 0.5;
+/// 가장자리에서 문턱만큼 움직이지 않고 이만큼 누르고 있으면 앱의 길게 누르기로 둔다
+/// (UILongPressGestureRecognizer의 기본 minimumPressDuration 0.5초)
+const REST_LIMIT_MS: u32 = 500;
 
 /// 기기에 붙은 화면의 커넥터 이름 앞부분 (udev.rs가 `<커넥터 종류>-<번호>`로 이름 짓는다)
 const BUILTIN_CONNECTORS: [&str; 3] = ["eDP-", "DSI-", "LVDS-"];
@@ -64,6 +86,90 @@ fn is_builtin(name: &str) -> bool {
         .any(|prefix| name.starts_with(prefix))
 }
 
+/// 한 손가락이 화면 가장자리에서 숨은 막대 쪽으로 미는지 알아본다
+#[derive(Clone, Copy, Debug)]
+pub struct EdgeSwipe {
+    /// 꺼낼 막대: 위 가장자리는 메뉴 막대, 아래 가장자리는 Dock
+    pub bar: Bar,
+    pub slot: TouchSlot,
+    start: Point<f64, Logical>,
+    /// 누른 장치 시각 (ms)
+    started_at: u32,
+    /// 문턱(SLOP)보다 안쪽으로 밀었다
+    moved: bool,
+}
+
+/// 가장자리 스와이프를 알아본 결과
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Swipe {
+    /// 아직 모른다. 그동안 손가락은 앱이 받는다
+    Undecided,
+    /// 막대를 꺼낸다. 손가락을 앱에서 거둔다
+    Recognized,
+    /// 스와이프가 아니다. 그 손가락은 끝까지 앱의 것이다
+    Failed,
+}
+
+impl EdgeSwipe {
+    /// `pos`(전역 좌표)를 누른 손가락이 숨은 막대(`hidden`이 참)의 가장자리 띠 안이면 알아보기를 시작한다. `screen`은
+    /// 막대가 놓인 화면이다. 화면이 작아 두 띠가 겹치면 위(메뉴 막대)가 먼저다
+    pub fn begin(
+        slot: TouchSlot,
+        pos: Point<f64, Logical>,
+        time: u32,
+        screen: Rectangle<i32, Logical>,
+        hidden: impl Fn(Bar) -> bool,
+    ) -> Option<Self> {
+        let screen = screen.to_f64();
+        if !screen.contains(pos) {
+            return None;
+        }
+        let bottom = screen.loc.y + screen.size.h;
+        let bar = if pos.y < screen.loc.y + TOP_BAND && hidden(Bar::MenuBar) {
+            Bar::MenuBar
+        } else if pos.y >= bottom - BOTTOM_BAND && hidden(Bar::Dock) {
+            Bar::Dock
+        } else {
+            return None;
+        };
+        Some(Self {
+            bar,
+            slot,
+            start: pos,
+            started_at: time,
+            moved: false,
+        })
+    }
+
+    /// 손가락이 장치 시각 `time`(ms)에 `pos`로 왔다. 장치 시각은 u32로 돌아 넘치므로 그 차이로 잰다
+    pub fn update(&mut self, pos: Point<f64, Logical>, time: u32) -> Swipe {
+        let inward = match self.bar {
+            Bar::MenuBar => pos.y - self.start.y,
+            Bar::Dock => self.start.y - pos.y,
+        };
+        let sideways = (pos.x - self.start.x).abs();
+        let elapsed = time.wrapping_sub(self.started_at);
+        // 가장자리를 따라 옆으로 끌거나(앱의 가로 스크롤) 가장자리 쪽으로 되돌아 나갔다
+        if (sideways > SLOP && sideways > inward) || inward < -SLOP {
+            return Swipe::Failed;
+        }
+        // 문턱을 넘기 전에 길게 눌렀다. 그사이 앱이 길게 누르기를 알아봤을 수 있다
+        if !self.moved && elapsed >= REST_LIMIT_MS {
+            return Swipe::Failed;
+        }
+        if inward >= SLOP {
+            self.moved = true;
+        }
+        if inward >= SWIPE_DISTANCE {
+            return Swipe::Recognized;
+        }
+        if self.moved && elapsed > 0 && inward / f64::from(elapsed) >= SWIPE_VELOCITY {
+            return Swipe::Recognized;
+        }
+        Swipe::Undecided
+    }
+}
+
 /// 손가락 하나가 가는 곳
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Route {
@@ -71,6 +177,8 @@ enum Route {
     Client,
     /// ⇧⌘4·⇧⌘5의 고르기가 받는다 (screenshot.rs)
     Screenshot,
+    /// 가장자리 스와이프로 잡았다. 뗄 때까지 아무에게도 보내지 않는다
+    Gesture,
     /// 받던 앱에서 거뒀다(wl_touch.cancel). 뗄 때까지 아무에게도 보내지 않는다
     Cancelled,
     /// 손가락으로 창을 옮기거나 크기를 바꾸는 동안 닿은 손가락, 잠글 때 닿아 있던 손가락. 뗄 때까지 버린다
@@ -91,6 +199,8 @@ struct Finger {
     focus: Option<(WlSurface, Point<f64, Logical>)>,
     /// smithay에 누르기를 보냈다. 떼기도 보낸다 (거둔 손가락은 smithay가 표면을 비워 아무에게도 가지 않는다)
     forwarded: bool,
+    /// 손가락으로 꺼내 둔 막대를 눌렀다. 떼면 그 막대를 놓는다
+    held_bar: Option<Bar>,
 }
 
 /// 터치 상태 (BuntState::touch)
@@ -99,11 +209,58 @@ pub struct Touch {
     /// 붙어 있는 터치 장치 (입력 장치 ID). 하나라도 있으면 seat이 터치를 연다
     devices: Vec<String>,
     fingers: Vec<Finger>,
+    swipe: Option<EdgeSwipe>,
+    /// 손가락으로 꺼내 둔 막대 (Bar::index 순서)
+    held: [bool; 2],
+    /// 손가락을 쓴 뒤로 포인터를 움직이지 않았다. 그동안 포인터 자리로는 막대를 꺼내거나 붙들지 않는다
+    pointer_idle: bool,
     /// 열린 팝업 메뉴의 그랩 (state.rs의 XdgShellHandler::grab). 손가락으로 그 밖을 누르면 닫는다
     popup_grab: Option<PopupGrab<BuntState>>,
 }
 
 impl Touch {
+    /// 손가락으로 꺼낸 막대를 붙들고 있는지 (state.rs의 update_bars). 앞의 창이 막대를 덮지 않게 되면(`covered`가
+    /// 거짓) 놓는다: 막대는 그대로 보이고, 다시 덮일 때 붙든 채 남지 않는다
+    pub fn keeps_bar(&mut self, bar: Bar, covered: bool) -> bool {
+        let held = &mut self.held[bar.index()];
+        if !covered {
+            *held = false;
+        }
+        *held
+    }
+
+    /// 손가락을 쓴 뒤로 포인터를 움직이지 않았는지 (update_bars)
+    pub fn pointer_idle(&self) -> bool {
+        self.pointer_idle
+    }
+
+    /// 사람이 포인터를 움직였다 (input.rs의 pointer_moved). 손가락으로 꺼낸 막대는 포인터의 규칙(막대를 떠나면 잠시 뒤
+    /// 숨기)으로 돌아간다
+    pub fn pointer_moved(&mut self) {
+        self.pointer_idle = false;
+        self.held = [false; 2];
+    }
+
+    /// 손가락이 막대 `on`(막대가 아니면 None)을 눌렀다. 손가락으로 꺼내 둔 다른 막대는 놓고, 누른 막대가 꺼내 둔 막대면
+    /// 그 막대를 돌려준다(그 손가락을 떼면 놓는다). 놓은 막대가 있으면 둘째 값이 참이다
+    fn touched(&mut self, on: Option<Bar>) -> (Option<Bar>, bool) {
+        let mut kept = None;
+        let mut released = false;
+        for bar in Bar::ALL {
+            let held = &mut self.held[bar.index()];
+            if !*held {
+                continue;
+            }
+            if on == Some(bar) {
+                kept = Some(bar);
+            } else {
+                *held = false;
+                released = true;
+            }
+        }
+        (kept, released)
+    }
+
     fn position(&self, slot: TouchSlot) -> Option<usize> {
         self.fingers.iter().position(|finger| finger.slot == slot)
     }
@@ -486,6 +643,9 @@ impl BuntState {
         if self.touch.position(slot).is_some() {
             self.touch_up(slot, time);
         }
+        self.touch.pointer_idle = true;
+        // 다른 손가락이 닿으면 가장자리 스와이프가 아니다. 여러 손가락의 제스처는 앱의 것이다
+        self.touch.swipe = None;
         self.queue_redraw_all();
         let serial = SERIAL_COUNTER.next_serial();
         let mut finger = Finger {
@@ -496,6 +656,7 @@ impl BuntState {
             position: pos,
             focus: self.surface_under(pos),
             forwarded: false,
+            held_bar: None,
         };
         if self.session_lock.is_locked() {
             // 잠긴 동안에는 잠금 표면만 받는다(surface_under). 누른 화면의 잠금 표면에 키보드를 준다
@@ -508,7 +669,7 @@ impl BuntState {
             if self.screenshot_touch_down(pos) {
                 finger.route = Route::Screenshot;
             } else {
-                self.finger_pressed(&finger);
+                self.finger_pressed(&mut finger, time);
             }
         }
         if finger.route == Route::Client {
@@ -527,8 +688,18 @@ impl BuntState {
         self.touch.fingers.push(finger);
     }
 
-    /// 앱이 받을 손가락이 닿았다. 포인터로 누를 때처럼 키보드 포커스를 준다
-    fn finger_pressed(&mut self, finger: &Finger) {
+    /// 앱이 받을 손가락이 닿았다. 꺼내 둔 막대를 정리하고, 포인터로 누를 때처럼 키보드 포커스를 주고, 첫 손가락이면
+    /// 가장자리 스와이프를 알아보기 시작한다
+    fn finger_pressed(&mut self, finger: &mut Finger, time: u32) {
+        let bar = finger
+            .focus
+            .as_ref()
+            .and_then(|(surface, _)| self.bar_of_surface(surface));
+        let (held_bar, released) = self.touch.touched(bar);
+        finger.held_bar = held_bar;
+        if released {
+            self.update_bars(None);
+        }
         // 팝업 메뉴가 포인터를 잡고 있으면(같은 앱의 메뉴 안을 눌렀다) 포커스는 메뉴에 둔다 (press_button과 같다)
         if !self
             .seat
@@ -536,6 +707,9 @@ impl BuntState {
             .is_some_and(|pointer| pointer.is_grabbed())
         {
             self.focus_at(finger.start, finger.serial);
+        }
+        if self.touch.fingers.is_empty() && self.screenshot_area.is_none() {
+            self.touch.swipe = self.begin_edge_swipe(finger.slot, finger.start, time);
         }
     }
 
@@ -552,7 +726,22 @@ impl BuntState {
                 self.screenshot_touch_motion(pos);
                 return;
             }
-            Route::Cancelled | Route::Ignored => return,
+            Route::Gesture | Route::Cancelled | Route::Ignored => return,
+        }
+        let verdict = self
+            .touch
+            .swipe
+            .as_mut()
+            .filter(|swipe| swipe.slot == slot)
+            .map(|swipe| (swipe.bar, swipe.update(pos, time)));
+        match verdict {
+            Some((bar, Swipe::Recognized)) => {
+                self.touch.swipe = None;
+                self.claim_swipe(index, bar);
+                return;
+            }
+            Some((_, Swipe::Failed)) => self.touch.swipe = None,
+            Some((_, Swipe::Undecided)) | None => {}
         }
         let Some(touch) = self.seat.get_touch() else {
             return;
@@ -582,6 +771,7 @@ impl BuntState {
             return;
         };
         let finger = self.touch.fingers.remove(index);
+        self.forget_swipe(slot);
         if finger.route == Route::Screenshot {
             self.screenshot_touch_up(finger.position);
         }
@@ -604,11 +794,19 @@ impl BuntState {
             _ => {}
         }
         let finger = self.touch.fingers.remove(index);
+        self.forget_swipe(slot);
         self.end_finger(&finger, time);
     }
 
-    /// 뗐거나 장치가 거둔 손가락을 마무리한다: smithay에 떼기를 보낸다. 앱에서 거둔 손가락은 표면이 비어 아무에게도 가지
-    /// 않는다
+    /// 그 손가락으로 알아보던 가장자리 스와이프를 그만둔다
+    fn forget_swipe(&mut self, slot: TouchSlot) {
+        if self.touch.swipe.is_some_and(|swipe| swipe.slot == slot) {
+            self.touch.swipe = None;
+        }
+    }
+
+    /// 뗐거나 장치가 거둔 손가락을 마무리한다: smithay에 떼기를 보내고(앱에서 거둔 손가락은 표면이 비어 아무에게도 가지
+    /// 않는다), 꺼내 둔 막대를 누른 손가락이면 그 막대를 놓는다
     fn end_finger(&mut self, finger: &Finger, time: u32) {
         if finger.forwarded
             && let Some(touch) = self.seat.get_touch()
@@ -622,6 +820,28 @@ impl BuntState {
                 },
             );
         }
+        if let Some(bar) = finger.held_bar {
+            self.touch.held[bar.index()] = false;
+            self.update_bars(None);
+        }
+        self.queue_redraw_all();
+    }
+
+    /// 가장자리 스와이프로 잡았다: 그 손가락을 받던 앱의 터치를 거두고 막대를 꺼내 붙든다
+    fn claim_swipe(&mut self, index: usize, bar: Bar) {
+        let focus = self.touch.fingers[index]
+            .focus
+            .as_ref()
+            .map(|(surface, _)| surface.clone());
+        if let Some(surface) = focus {
+            self.cancel_fingers(|other| other.id().same_client_as(&surface.id()));
+        }
+        // 거둔 손가락 가운데 이 손가락은 막대를 꺼낸 손가락이다
+        self.touch.fingers[index].route = Route::Gesture;
+        self.touch.held[bar.index()] = true;
+        // 사람이 일부러 하는 동작이라 드물다. 포인터로 꺼낸 것과 가려 볼 수 있게 남긴다
+        tracing::info!("an edge swipe reveals the hidden {bar:?}");
+        self.update_bars(None);
         self.queue_redraw_all();
     }
 
@@ -676,7 +896,10 @@ impl BuntState {
             if finger.route != Route::Cancelled {
                 finger.route = Route::Ignored;
             }
+            finger.held_bar = None;
         }
+        self.touch.swipe = None;
+        self.touch.held = [false; 2];
     }
 
     /// 터치 장치가 붙었다 (input.rs). 첫 장치면 seat에 터치를 연다. 손가락마다 누른 자리 아래의 표면에 보내는 기본
@@ -692,8 +915,8 @@ impl BuntState {
         }
     }
 
-    /// 터치 장치가 빠졌다 (input.rs): 닿아 있던 손가락의 떼기가 오지 않으므로 거두고 잊는다. 마지막 장치면 seat의 터치를
-    /// 닫는다
+    /// 터치 장치가 빠졌다 (input.rs): 닿아 있던 손가락의 떼기가 오지 않으므로 거두고 잊는다. 남겨 두면 가장자리
+    /// 스와이프(첫 손가락에서만 시작한다)가 다시 시작하지 못한다. 마지막 장치면 seat의 터치를 닫는다
     pub(crate) fn touch_device_removed(&mut self, id: &str) {
         self.cancel_touches();
         let time = self.start_time.elapsed().as_millis() as u32;
@@ -748,12 +971,37 @@ impl BuntState {
         }
     }
 
+    /// 그 표면(이나 그 팝업)이 속한 셸 막대
+    fn bar_of_surface(&self, surface: &WlSurface) -> Option<Bar> {
+        let root = self.root_surface(surface);
+        self.space.outputs().find_map(|output| {
+            let map = layer_map_for_output(output);
+            let layer = map.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL)?;
+            self.bar_of(layer)
+        })
+    }
+
+    /// 첫 손가락이 숨은 막대의 가장자리 띠를 눌렀으면 가장자리 스와이프를 알아보기 시작한다. 막대는 첫 화면에 있다
+    /// (update_bars)
+    fn begin_edge_swipe(
+        &self,
+        slot: TouchSlot,
+        pos: Point<f64, Logical>,
+        time: u32,
+    ) -> Option<EdgeSwipe> {
+        let output = self.space.outputs().next()?;
+        let screen = self.space.output_geometry(output)?;
+        EdgeSwipe::begin(slot, pos, time, screen, |bar| self.bar_hidden(bar))
+    }
+
     /// 앱이 손가락으로 누른 serial로 창 옮기기를 청했다(xdg_toplevel.move, state.rs). 그 손가락이 아직 닿아 있으면
     /// 그 손가락의 터치 그랩으로 옮기고 참이다. 손가락의 serial이 아니면 거짓이다(포인터 그랩이 확인한다)
     pub(crate) fn touch_move_request(&mut self, surface: &ToplevelSurface, serial: Serial) -> bool {
         let Some(start_data) = self.touch_grab_start(surface.wl_surface(), serial) else {
             return false;
         };
+        // 앱이 먼저 그 손가락으로 창을 잡았다. 가장자리 스와이프로 가로채면 끌던 창이 반쯤 옮겨진 채 남는다
+        self.forget_swipe(start_data.slot);
         let (Some(touch), Some(window)) = (
             self.seat.get_touch(),
             self.window_for_surface(surface.wl_surface()),
@@ -784,6 +1032,7 @@ impl BuntState {
         let Some(start_data) = self.touch_grab_start(surface.wl_surface(), serial) else {
             return false;
         };
+        self.forget_swipe(start_data.slot);
         let (Some(touch), Some(window)) = (
             self.seat.get_touch(),
             self.window_for_surface(surface.wl_surface()),
@@ -948,12 +1197,204 @@ mod tests {
         assert!(!is_builtin("DP-1"));
     }
 
+    fn hidden(dock: bool, menu_bar: bool) -> impl Fn(Bar) -> bool {
+        move |bar| match bar {
+            Bar::Dock => dock,
+            Bar::MenuBar => menu_bar,
+        }
+    }
+
+    fn begin(pos: Point<f64, Logical>, time: u32) -> Option<EdgeSwipe> {
+        EdgeSwipe::begin(slot(0), pos, time, screen(), hidden(true, true))
+    }
+
+    #[test]
+    fn swipes_start_in_the_band_of_a_hidden_bar() {
+        // 아래 띠는 20px: 780 이상
+        assert_eq!(
+            begin(point(640.0, 780.0), 0).map(|s| s.bar),
+            Some(Bar::Dock)
+        );
+        assert_eq!(
+            begin(point(640.0, 799.9), 0).map(|s| s.bar),
+            Some(Bar::Dock)
+        );
+        assert!(begin(point(640.0, 779.9), 0).is_none());
+        // 위 띠는 24px: 24 미만
+        assert_eq!(
+            begin(point(640.0, 0.0), 0).map(|s| s.bar),
+            Some(Bar::MenuBar)
+        );
+        assert_eq!(
+            begin(point(640.0, 23.9), 0).map(|s| s.bar),
+            Some(Bar::MenuBar)
+        );
+        assert!(begin(point(640.0, 24.0), 0).is_none());
+        // 가로로는 화면 어디서나 (iPadOS도 Dock이 놓인 범위 밖에서 밀어도 나온다)
+        assert!(begin(point(100.0, 790.0), 0).is_some());
+        // 화면 밖과 다른 화면
+        assert!(begin(point(99.0, 790.0), 0).is_none());
+        assert!(begin(point(1380.0, 790.0), 0).is_none());
+        // 숨지 않은 막대의 가장자리는 앱의 것이다
+        let shown = |pos| EdgeSwipe::begin(slot(0), pos, 0, screen(), hidden(false, false));
+        assert!(shown(point(640.0, 795.0)).is_none());
+        assert!(shown(point(640.0, 5.0)).is_none());
+        // Dock만 숨으면 위 가장자리는 앱의 것이다
+        let dock_only = |pos| EdgeSwipe::begin(slot(0), pos, 0, screen(), hidden(true, false));
+        assert!(dock_only(point(640.0, 5.0)).is_none());
+        assert!(dock_only(point(640.0, 795.0)).is_some());
+        // 두 띠가 겹치는 작은 화면에서는 위가 먼저다
+        let tiny = EdgeSwipe::begin(
+            slot(0),
+            point(10.0, 10.0),
+            0,
+            rect(0, 0, 100, 30),
+            hidden(true, true),
+        );
+        assert_eq!(tiny.map(|s| s.bar), Some(Bar::MenuBar));
+    }
+
+    #[test]
+    fn a_short_swipe_reveals_the_dock() {
+        let mut swipe = begin(point(640.0, 795.0), 1000).unwrap();
+        // 문턱 안의 떨림은 아직 모른다
+        assert_eq!(swipe.update(point(641.0, 790.0), 1030), Swipe::Undecided);
+        // 천천히 끈다: 문턱은 넘었지만 거리와 빠르기가 모자란다 (20px / 200ms = 0.1px/ms)
+        assert_eq!(swipe.update(point(642.0, 775.0), 1200), Swipe::Undecided);
+        // 누른 자리에서 44px
+        assert_eq!(swipe.update(point(643.0, 751.0), 1400), Swipe::Recognized);
+    }
+
+    #[test]
+    fn a_short_swipe_reveals_the_menu_bar() {
+        let mut swipe = begin(point(300.0, 2.0), 0).unwrap();
+        assert_eq!(swipe.bar, Bar::MenuBar);
+        assert_eq!(swipe.update(point(300.0, 30.0), 300), Swipe::Undecided);
+        assert_eq!(swipe.update(point(300.0, 46.0), 400), Swipe::Recognized);
+    }
+
+    #[test]
+    fn a_flick_reveals_before_the_distance() {
+        let mut swipe = begin(point(640.0, 798.0), 0).unwrap();
+        // 15px / 20ms = 0.75px/ms
+        assert_eq!(swipe.update(point(640.0, 783.0), 20), Swipe::Recognized);
+        // 빠르지만 문턱 안이면 아직 모른다
+        let mut swipe = begin(point(640.0, 798.0), 0).unwrap();
+        assert_eq!(swipe.update(point(640.0, 792.0), 5), Swipe::Undecided);
+        // 같은 장치 시각(0ms)의 움직임은 빠르기를 재지 않는다 (0으로 나누지 않는다)
+        let mut swipe = begin(point(640.0, 798.0), 0).unwrap();
+        assert_eq!(swipe.update(point(640.0, 780.0), 0), Swipe::Undecided);
+        assert_eq!(swipe.update(point(640.0, 750.0), 0), Swipe::Recognized);
+    }
+
+    #[test]
+    fn sideways_and_outward_drags_stay_with_the_app() {
+        // 가장자리를 따라 옆으로 끈다 (가로 스크롤)
+        let mut swipe = begin(point(640.0, 795.0), 0).unwrap();
+        assert_eq!(swipe.update(point(661.0, 790.0), 100), Swipe::Failed);
+        // 대각선은 안쪽이 더 크면 된다
+        let mut swipe = begin(point(640.0, 795.0), 0).unwrap();
+        assert_eq!(swipe.update(point(670.0, 760.0), 200), Swipe::Undecided);
+        assert_eq!(swipe.update(point(680.0, 750.0), 300), Swipe::Recognized);
+        // 띠 위쪽에서 눌러 가장자리 쪽으로 끈다
+        let mut swipe = begin(point(640.0, 781.0), 0).unwrap();
+        assert_eq!(swipe.update(point(640.0, 792.0), 100), Swipe::Failed);
+    }
+
+    #[test]
+    fn resting_at_the_edge_is_a_long_press() {
+        // 0.5초 동안 문턱을 넘지 않았다
+        let mut swipe = begin(point(640.0, 795.0), 0).unwrap();
+        assert_eq!(swipe.update(point(641.0, 793.0), 499), Swipe::Undecided);
+        assert_eq!(swipe.update(point(641.0, 793.0), 500), Swipe::Failed);
+        // 그 전에 밀기 시작했으면 천천히 끌어도 된다
+        let mut swipe = begin(point(640.0, 795.0), 0).unwrap();
+        assert_eq!(swipe.update(point(640.0, 784.0), 300), Swipe::Undecided);
+        assert_eq!(swipe.update(point(640.0, 770.0), 900), Swipe::Undecided);
+        assert_eq!(swipe.update(point(640.0, 750.0), 1500), Swipe::Recognized);
+    }
+
+    #[test]
+    fn thresholds_count_when_reached() {
+        // 문턱(10px)을 꼭 채우고 빠르기가 꼭 0.5px/ms면 꺼낸다
+        let mut swipe = begin(point(640.0, 798.0), 0).unwrap();
+        assert_eq!(swipe.update(point(640.0, 788.0), 20), Swipe::Recognized);
+        // 문턱에 조금 모자라면 빨라도 아직 모른다
+        let mut swipe = begin(point(640.0, 798.0), 0).unwrap();
+        assert_eq!(swipe.update(point(640.0, 788.5), 1), Swipe::Undecided);
+        // 문턱은 넘었지만 빠르기가 조금 모자란다 (10px / 21ms)
+        let mut swipe = begin(point(640.0, 798.0), 0).unwrap();
+        assert_eq!(swipe.update(point(640.0, 788.0), 21), Swipe::Undecided);
+        // 옆으로 꼭 10px, 바깥으로 꼭 10px은 아직 실패가 아니다
+        let mut swipe = begin(point(640.0, 785.0), 0).unwrap();
+        assert_eq!(swipe.update(point(650.0, 795.0), 100), Swipe::Undecided);
+        assert_eq!(swipe.update(point(650.1, 795.1), 110), Swipe::Failed);
+        // 옆과 안쪽이 같으면 안쪽으로 본다
+        let mut swipe = begin(point(640.0, 795.0), 0).unwrap();
+        assert_eq!(swipe.update(point(670.0, 765.0), 300), Swipe::Undecided);
+    }
+
     #[test]
     fn broken_device_values_do_not_stop_the_compositor() {
         // libinput이 주지 않는 값이지만, 들어와도 panic하지 않고 화면 밖 자리로 남아 아무 표면도 받지 않는다
         let pos = to_global(point(f64::NAN, 5.0), Transform::Normal, screen());
         assert!(pos.x.is_nan());
         assert_eq!(pos.y, 5.0);
+        assert!(EdgeSwipe::begin(slot(0), pos, 0, screen(), hidden(true, true)).is_none());
+        let mut swipe = begin(point(640.0, 795.0), 0).unwrap();
+        assert_eq!(
+            swipe.update(point(f64::NAN, f64::NAN), 10),
+            Swipe::Undecided
+        );
+    }
+
+    #[test]
+    fn device_time_wraps_around() {
+        // u32 ms 시각이 49.7일마다 넘친다
+        let mut swipe = begin(point(640.0, 798.0), u32::MAX - 10).unwrap();
+        // 31ms 뒤에 20px
+        assert_eq!(swipe.update(point(640.0, 778.0), 20), Swipe::Recognized);
+    }
+
+    #[test]
+    fn revealed_bars_stay_until_touched_elsewhere() {
+        let mut touch = Touch::default();
+        assert!(!touch.keeps_bar(Bar::Dock, true));
+        touch.held = [true, true];
+        // Dock을 누른 손가락: 메뉴 막대는 놓고 Dock은 그 손가락을 뗄 때 놓는다
+        assert_eq!(touch.touched(Some(Bar::Dock)), (Some(Bar::Dock), true));
+        assert_eq!(touch.held, [false, true]);
+        assert!(touch.keeps_bar(Bar::Dock, true));
+        assert!(!touch.keeps_bar(Bar::MenuBar, true));
+        // 다시 눌러도 놓을 것이 없다
+        assert_eq!(touch.touched(Some(Bar::Dock)), (Some(Bar::Dock), false));
+        // 막대 밖을 누르면 놓는다
+        assert_eq!(touch.touched(None), (None, true));
+        assert_eq!(touch.held, [false, false]);
+        // 꺼내 두지 않은 막대를 누르면 아무것도 하지 않는다
+        assert_eq!(touch.touched(Some(Bar::MenuBar)), (None, false));
+    }
+
+    #[test]
+    fn bars_that_nothing_covers_are_let_go() {
+        let mut touch = Touch::default();
+        touch.held[Bar::Dock.index()] = true;
+        // 앞의 창이 최대화를 풀었다: 막대는 그대로 보이고, 다시 최대화해도 붙든 채 남지 않는다
+        assert!(!touch.keeps_bar(Bar::Dock, false));
+        assert!(!touch.keeps_bar(Bar::Dock, true));
+    }
+
+    #[test]
+    fn moving_the_pointer_hands_the_bars_back() {
+        let mut touch = Touch {
+            pointer_idle: true,
+            held: [true, false],
+            ..Touch::default()
+        };
+        assert!(touch.pointer_idle());
+        touch.pointer_moved();
+        assert!(!touch.pointer_idle());
+        assert_eq!(touch.held, [false, false]);
     }
 
     /// 실제 Wayland 클라이언트로 손가락마다의 표면과 앱 하나만 거두기를 본다. 컴포지터(BuntState)는 GPU와 seat 장치가

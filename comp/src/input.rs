@@ -516,6 +516,11 @@ impl BuntState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
+        // 포인터를 옮기면 손가락으로 꺼내 둔 막대를 포인터의 규칙(떠나면 잠시 뒤 숨기)에 맡긴다 (touch.rs). 자리가 같은
+        // 부름(잠글 때, 스크린샷 고르기를 마칠 때)은 사람이 포인터를 움직인 것이 아니다
+        if pointer.current_location() != pos {
+            self.touch.pointer_moved();
+        }
         // 커서를 옮겨 그린다 (에이전트가 옮긴 포인터도 여기로 온다). 화면 기록에도 커서가 들어간다(recording.rs)
         self.queue_redraw_all();
         let serial = SERIAL_COUNTER.next_serial();
