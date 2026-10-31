@@ -152,6 +152,8 @@ pub struct BuntState {
 
     pub space: Space<Window>,
     pub popups: PopupManager,
+    /// 키보드를 가진 팝업 메뉴를 연 표면(창이나 레이어). 메뉴가 닫히면 포커스를 그리로 돌려준다
+    popup_root: Option<WlSurface>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -343,6 +345,7 @@ impl BuntState {
             socket_name,
             space: Space::default(),
             popups: PopupManager::default(),
+            popup_root: None,
             compositor_state,
             xdg_shell_state,
             layer_shell_state,
@@ -1538,7 +1541,7 @@ impl XdgShellHandler for BuntState {
         let Ok(root) = find_popup_root_surface(&kind) else {
             return;
         };
-        let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else {
+        let Ok(mut grab) = self.popups.grab_popup(root.clone(), kind, &seat, serial) else {
             return;
         };
 
@@ -1556,6 +1559,7 @@ impl XdgShellHandler for BuntState {
             }
             let next = grab.current_grab();
             self.commit_preedit_before_focus(next.as_ref());
+            self.popup_root = Some(root);
             keyboard.set_focus(self, next, serial);
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }
@@ -1665,6 +1669,10 @@ impl SeatHandler for BuntState {
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client);
+        // 포커스가 팝업 메뉴 밖으로 가면 메뉴를 연 표면을 잊는다
+        if focused.is_none_or(|surface| self.popups.find_popup(surface).is_none()) {
+            self.popup_root = None;
+        }
         // 키보드를 받지 않는 레이어(메뉴바, Dock)로 포커스가 왔다면 그 레이어의 팝업 메뉴가
         // 닫힌 것이다. 키보드를 독점하는 레이어나 앞에 있던 창에 돌려준다. 포커스를 바꾸는 중이므로
         // 다음 차례에 한다
@@ -1859,6 +1867,18 @@ impl BuntState {
                 && self.cannot_hold_focus(&self.root_surface(focus))
         });
         if stale {
+            // 닫힌 메뉴를 연 표면이 키보드를 받으면(데스크탑 항목 창 같은 on-demand 레이어, 창) 그리로
+            // 돌려준다. smithay의 팝업 그랩도 다음 입력 때 그렇게 하지만, 앱이 팝업을 지운 뒤 표면을 지우기
+            // 전에 여기 오면 그랩이 풀려 그다음 키를 잃는다(새로운 폴더를 누른 뒤의 이름 변경 칸)
+            if let Some(root) = self
+                .popup_root
+                .clone()
+                .filter(|root| !self.cannot_hold_focus(root))
+            {
+                self.commit_preedit_before_focus(Some(&root));
+                keyboard.set_focus(self, Some(root), serial);
+                return;
+            }
             match self
                 .active_window()
                 .or_else(|| self.space.elements().last().cloned())
