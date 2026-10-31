@@ -39,7 +39,8 @@ Commands:
   snapshot [options]       Print the active window as a compact tree with refs
   screenshot [--app <name>] [--out <file>]
                            Save a PNG of the active window, or of the app's window, and
-                           print its path. For what has no refs, such as a canvas
+                           print its path. For what has no refs, such as a canvas. A shell
+                           surface goes by its name (bunt-dock, bunt-launcher, ...)
   click <ref> [--pointer]  Press a button, switch, link or list item (--pointer: click it
                            with the pointer instead of its accessible action)
   click --at <x>,<y> [--app <name>]
@@ -89,7 +90,8 @@ Options for snapshot:
 
 Options for actions:
   --app <name>             Without a ref (click --at, press, type, scroll): act on this app's
-                           window instead of the one with the keyboard focus. With a ref it
+                           window instead of the one with the keyboard focus, or on a shell
+                           surface by its name (bunt-dock, bunt-launcher, ...). With a ref it
                            only checks that the ref is in that app
   --settle <ms>            Wait at most this long for the window to stop changing after an
                            action (default 3000; 0 reads it once right away). A page that is
