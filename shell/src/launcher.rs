@@ -212,6 +212,8 @@ impl Launcher {
         // 메뉴바와 Dock까지 덮어, 패널 바깥 어디를 눌러도 닫히게 한다
         window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::Exclusive);
+        // 검색 칸에 치는 동안 화면 키보드 위까지만 덮는다. 키보드보다 늦게 떠도 키보드를 가리지 않는다
+        crate::osk::avoid_keyboard(&window, crate::osk::Avoid::Fill);
 
         let panel = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)

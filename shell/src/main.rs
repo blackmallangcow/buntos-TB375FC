@@ -43,6 +43,8 @@ mod service_dialog;
 mod notification_policy;
 // 포인터 모드와 터치 모드(컴포지터가 정한다). 터치 모드에서 누를 영역을 넓힌다
 mod input_mode;
+// 화면 키보드 창 (터치 모드에서 글 칸에 포커스가 가면 뜬다)
+mod osk;
 
 use std::rc::Rc;
 
@@ -106,6 +108,8 @@ fn main() -> glib::ExitCode {
             sound: Sound::start(),
         };
         let input_sources = InputSources::start();
+        // 화면 키보드는 메뉴 막대의 입력 소스를 따른다
+        let keyboard = osk::Osk::start(app, &input_sources);
         // 로고 메뉴의 강제 종료…, 잠자기, 화면 잠금, 로그아웃… 동작. 메뉴 막대보다 먼저 단다
         let session = session::Session::new(app, &tr);
         let menubar = menubar::build(
@@ -141,6 +145,7 @@ fn main() -> glib::ExitCode {
             switcher.window().clone(),
             screenshot_toolbar.window().clone(),
             screenshot_preview.window().clone(),
+            keyboard.window().clone(),
         ];
         // 데스크탑의 단축 메뉴도 밝게·어둡게를 따른다
         windows.extend(desktop.map(|desktop| desktop.window().clone()));

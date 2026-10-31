@@ -311,6 +311,7 @@ version = "0.1.0"
 dependencies = [
  "bunt-access",
  "bunt-i18n",
+ "bunt-keyboard",
  "bunt-sound",
  "gdk4-wayland",
  "gio-unix",

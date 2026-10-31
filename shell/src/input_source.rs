@@ -228,6 +228,12 @@ impl InputSources {
         });
     }
 
+    /// 지금 입력 소스를 바로 다시 읽는다. 암호 칸에서는 fcitx5가 영문 배열을 쓰므로 화면 키보드가 뜰 때 부른다
+    /// (osk.rs). 짧은 간격으로 읽는 것(POLL_INTERVAL)을 기다리지 않는다
+    pub fn refresh(&self) {
+        self.poll();
+    }
+
     pub fn select(&self, id: &str) {
         if let Some(proxy) = self.0.controller.borrow().as_ref() {
             crate::dbus::call(proxy, "SetCurrentIM", Some(&(id,).to_variant()));

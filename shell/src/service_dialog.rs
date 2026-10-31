@@ -59,6 +59,8 @@ impl Frame {
         let window = crate::layer_window(app, namespace);
         window.set_layer(Layer::Overlay);
         window.set_keyboard_mode(keyboard);
+        // 터치 모드에서 암호·PIN을 치는 화면 키보드에 가리지 않게 키보드 위로 올라간다
+        crate::osk::avoid_keyboard(&window, crate::osk::Avoid::Centered);
         if crate::interface_settings()
             .is_some_and(|settings| settings.string("color-scheme") == "prefer-dark")
         {
