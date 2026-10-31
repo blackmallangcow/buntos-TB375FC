@@ -176,6 +176,29 @@ fn resolve(keymap: &xkb::Keymap, layout: u32, key: OskKey) -> Result<Press, char
     }
 }
 
+/// 키를 모두 지금 키 배열의 키로 바꾸고 Shift 키를 찾는다. 칠 수 없는 글자가 하나라도 있으면 그 글자다. Shift 키가
+/// 없는 배열에서 Shift 글자(대문자, !)를 그냥 누르면 다른 글자가 되므로 그것도 칠 수 없다
+fn plan(
+    keymap: &xkb::Keymap,
+    layout: u32,
+    keys: &[OskKey],
+) -> Result<(Vec<Press>, Option<Keycode>), char> {
+    let shift = find_key(keymap, layout, Keysym::Shift_L, 0);
+    let mut presses = Vec::with_capacity(keys.len());
+    for key in keys {
+        let press = resolve(keymap, layout, *key)?;
+        if press.shift && shift.is_none() {
+            return Err(match key {
+                OskKey::Char(character) => *character,
+                OskKey::BackSpace => '\u{8}',
+                OskKey::Return => '\r',
+            });
+        }
+        presses.push(press);
+    }
+    Ok((presses, shift))
+}
+
 /// 창이 놓일 영역(`area`, 전역 좌표)의 아래쪽을 화면 키보드의 위쪽 끝(`top`, 전역 y, keyboard_top)까지로 줄인다.
 /// 이미 그 위에서 끝나면 그대로 둔다 (state.rs의 window_area)
 pub(crate) fn reserve_above(area: &mut Rectangle<i32, Logical>, top: i32) {
@@ -217,18 +240,14 @@ impl BuntState {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return Ok(());
         };
-        let (presses, shift) = keyboard.with_xkb_state(self, |context| {
+        let planned = keyboard.with_xkb_state(self, |context| {
             let xkb = context.xkb().lock().unwrap();
             let layout = xkb.active_layout().0;
             // 안전: 키맵의 참조를 이 닫힘 밖으로 내보내지 않는다
             let keymap = unsafe { xkb.keymap() };
-            let presses: Result<Vec<Press>, char> = keys
-                .iter()
-                .map(|key| resolve(keymap, layout, *key))
-                .collect();
-            (presses, find_key(keymap, layout, Keysym::Shift_L, 0))
+            plan(keymap, layout, keys)
         });
-        let presses = presses.map_err(KeysRefused::NotOnLayout)?;
+        let (presses, shift) = planned.map_err(KeysRefused::NotOnLayout)?;
         // 앱에 옮겨 보내며 되풀이하던 단축키는 다른 키를 누르면 멈춘다 (input.rs의 on_keyboard와 같다)
         self.stop_key_repeat();
         let time = self.start_time.elapsed().as_millis() as u32;
@@ -438,6 +457,30 @@ mod tests {
         // 배열에 없는 글자는 그 글자로 알린다
         assert_eq!(resolve(&keymap, 0, OskKey::Char('€')), Err('€'));
         assert!(find_key(&keymap, 0, Keysym::Shift_L, 0).is_some());
+    }
+
+    #[test]
+    fn a_batch_is_planned_whole_or_not_at_all() {
+        let Some(keymap) = us_keymap() else {
+            eprintln!("xkeyboard-config is not installed; skipping the key plan test");
+            return;
+        };
+        let keys = [
+            OskKey::Char('h'),
+            OskKey::Char('I'),
+            OskKey::Char('!'),
+            OskKey::BackSpace,
+            OskKey::Return,
+        ];
+        let (presses, shift) = plan(&keymap, 0, &keys).unwrap();
+        assert_eq!(presses.len(), keys.len());
+        assert_eq!(presses.iter().filter(|press| press.shift).count(), 2);
+        assert!(shift.is_some());
+        // 하나라도 칠 수 없으면 아무것도 치지 않는다
+        assert_eq!(
+            plan(&keymap, 0, &[OskKey::Char('a'), OskKey::Char('€')]),
+            Err('€')
+        );
     }
 
     #[test]
