@@ -1598,37 +1598,52 @@ impl XdgShellHandler for BuntState {
         let Ok(root) = find_popup_root_surface(&kind) else {
             return;
         };
-        let Ok(mut grab) = self.popups.grab_popup(root.clone(), kind, &seat, serial) else {
-            return;
+        let mut grab = match self.popups.grab_popup(root.clone(), kind, &seat, serial) {
+            Ok(grab) => grab,
+            // 잡기 없이 뜬 메뉴는 Esc도 바깥 누르기도 받지 못한다. 왜 거절했는지 남긴다
+            Err(err) => {
+                tracing::warn!("popup grab refused: {err:?}");
+                return;
+            }
         };
 
         // 다른 그랩이 진행 중이면 팝업 그랩을 거절한다. 이어지는 하위 메뉴의 그랩은 허용한다.
         // 입력기(fcitx5)가 입력 칸 때문에 잡은 키보드는 예외다. 포커스가 팝업으로 옮겨 가면 입력기가
         // 놓는다 (막으면 입력 칸에 포커스가 있을 때 메뉴가 키보드를 받지 못해 Esc로 닫히지 않는다)
-        if let Some(keyboard) = seat.get_keyboard() {
-            if keyboard.is_grabbed()
+        let keyboard = seat.get_keyboard();
+        if keyboard.as_ref().is_some_and(|keyboard| {
+            keyboard.is_grabbed()
                 && !seat.input_method().keyboard_grabbed()
                 && !(keyboard.has_grab(serial)
                     || keyboard.has_grab(grab.previous_serial().unwrap_or(serial)))
-            {
-                grab.ungrab(PopupUngrabStrategy::All);
-                return;
-            }
+        }) {
+            tracing::warn!("popup grab refused: the keyboard has another grab");
+            grab.ungrab(PopupUngrabStrategy::All);
+            return;
+        }
+        let pointer = seat.get_pointer();
+        if pointer.as_ref().is_some_and(|pointer| {
+            pointer.is_grabbed()
+                && !(pointer.has_grab(serial)
+                    || pointer.has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
+        }) {
+            tracing::warn!("popup grab refused: the pointer has another grab");
+            grab.ungrab(PopupUngrabStrategy::All);
+            return;
+        }
+        // 포인터 잡기를 먼저 둔다. 바꿔 끼운 앞 메뉴의 포인터 잡기는 풀리면서(smithay의 PopupPointerGrab::unset)
+        // serial이 같은 키보드 잡기를 풀고 키보드를 뿌리 표면에 돌려준다. 셸이 메뉴 막대 항목의 메뉴를 넘길 때(하위
+        // 메뉴도) 앞 메뉴를 연 누르기의 serial을 다시 쓰므로, 키보드를 먼저 두면 새 메뉴의 키보드 잡기와 포커스가 곧바로
+        // 풀려 Esc도 바깥 누르기도 새 메뉴에 닿지 않았다
+        if let Some(pointer) = pointer {
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
+        if let Some(keyboard) = keyboard {
             let next = grab.current_grab();
             self.commit_preedit_before_focus(next.as_ref());
             self.popup_root = Some(root);
             keyboard.set_focus(self, next, serial);
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
-        }
-        if let Some(pointer) = seat.get_pointer() {
-            if pointer.is_grabbed()
-                && !(pointer.has_grab(serial)
-                    || pointer.has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
-            {
-                grab.ungrab(PopupUngrabStrategy::All);
-                return;
-            }
-            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
         // 손가락으로 메뉴 밖을 누르면 닫도록 그랩을 둔다 (touch.rs)
         self.note_popup_grab(grab);
