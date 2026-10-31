@@ -11,7 +11,8 @@
 #   tools/image/vmctl.sh login        로그인 화면에 시험 계정의 암호를 쳐 그래픽 세션에 들어간다
 #   tools/image/vmctl.sh sh '명령'     직렬 콘솔에서 root로 실행하고 출력을 보인다 (SH_TIMEOUT초, 기본 120)
 #   tools/image/vmctl.sh push 파일 경로  빌드 VM의 파일을 게스트의 경로로 넣는다 (실행 권한을 주고 sha256으로 견준다)
-#   tools/image/vmctl.sh qmp 동작...   tools/image/qmp.py 동작 (click:X,Y, type:글자, keys:A+B, screen:경로 ...)
+#   tools/image/vmctl.sh qmp 동작...   tools/image/qmp.py 동작 (click:X,Y, type:글자, keys:A+B, screen:경로,
+#                                     VMCTL_TOUCH=1이면 touch:X,Y와 tdrag:X1,Y1,X2,Y2 ...)
 #   tools/image/vmctl.sh stop
 # 시험 계정은 부팅 때 systemd 자격 증명 buntos.account로 만든다. 기본은 buntos(uid 1000, 암호 buntos,
 # 관리자)이고, VMCTL_ACCOUNT="계정 이름:별칭:암호"로 바꾼다. VMCTL_ACCOUNT=를 비워 주면 계정 없이
@@ -30,6 +31,8 @@
 # 모듈로 렌더 노드를 만들고, 그때 빌드 VM은 llvmpipe(CPU)로 그린다. 기본값(빈 값)은 3D 없는 virtio-gpu다.
 # 보드는 BOARD(기본 qemu-aarch64)로 고른다. BOARD=x86_64-generic이면 q35 기계와 OVMF로 띄우고, 빌드 VM과
 # 아키텍처가 다르면(Apple Silicon의 빌드 VM) KVM 없이 소프트웨어 에뮬레이션(TCG)으로 띄워 느리다.
+# VMCTL_TOUCH=1이면 가상 터치 화면(virtio-multitouch, QEMU 8.1 이상)도 붙인다. qmp 동작 touch:·tdrag:이 손가락으로
+# 누르고 끈다. 가상 키보드와 태블릿은 그대로 있으므로 입력 모드는 auto에서 pointer다.
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -166,6 +169,23 @@ start)
 		exit 2
 		;;
 	esac
+	# 가상 터치 화면. 태블릿보다 앞에 붙인다: QEMU는 단추 이벤트를 단추를 받는 장치 가운데 게스트가 마지막에 켠 것에
+	# 보내므로, 태블릿이 나중에 켜져야 click:의 누르기가 태블릿으로 간다. qmp.py도 누르기 전에 태블릿을 앞에 둔다
+	touch=()
+	case "${VMCTL_TOUCH:-}" in
+	"" | 0) ;;
+	1)
+		if ! "$qemu" -device help 2>/dev/null | grep -q '"virtio-multitouch-pci"'; then
+			echo "QEMU에 virtio-multitouch-pci가 없다(QEMU 8.1 이상)" >&2
+			exit 1
+		fi
+		touch=(-device virtio-multitouch-pci)
+		;;
+	*)
+		echo "VMCTL_TOUCH는 비우거나 1이다" >&2
+		exit 2
+		;;
+	esac
 	# shellcheck disable=SC2086 # VMCTL_QEMU_ARGS는 일부러 낱말로 나눈다
 	"$qemu" -machine "$machine" "${accel[@]}" -smp "${VMCTL_CPUS:-2}" -m 2048M \
 		-nodefaults -no-user-config \
@@ -178,7 +198,7 @@ start)
 		-drive if=none,id=disk,format=qcow2,discard=unmap,file="$work/disk.qcow2" \
 		-device virtio-blk-pci,drive=disk,bootindex=1 \
 		-smbios "type=11,value=io.systemd.stub.kernel-cmdline-extra=$cmdline" "${credential[@]}" \
-		"${gpu[@]}" -device virtio-keyboard-pci -device virtio-tablet-pci \
+		"${gpu[@]}" -device virtio-keyboard-pci "${touch[@]}" -device virtio-tablet-pci \
 		-audiodev none,id=snd0 -device virtio-sound-pci,audiodev=snd0 \
 		-qmp "unix:$work/qmp.sock,server=on,wait=off" ${VMCTL_QEMU_ARGS:-} \
 		<"$work/console.in" >"$work/console.log" 2>&1 8>&- &

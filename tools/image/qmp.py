@@ -16,6 +16,9 @@
   down:A, up:A     키를 누른 채로 두거나 뗀다 (⌘를 누른 채 ⇥를 거듭 누르는 앱 전환 등)
   type:TEXT        영문 소문자·숫자를 한 글자씩 입력한다
   wheel:DIR,N      포인터 자리에서 휠을 N눈금 돌린다 (DIR: up, down, left, right)
+  touch:X,Y        화면 좌표(X, Y)를 손가락으로 누른다 (가상 터치 화면 필요: vmctl.sh의 VMCTL_TOUCH=1)
+  tdrag:X1,Y1,X2,Y2[,STEPS]
+                   손가락 하나로 (X1, Y1)에서 (X2, Y2)로 끈다. STEPS번에 나눠 옮긴다 (기본 12)
   sleep:SECONDS    기다린다
   screen:PATH      화면을 PNG로 저장한다 (경로는 QEMU가 보는 경로)
 """
@@ -25,8 +28,10 @@ import socket
 import sys
 import time
 
-# QMP 절대 좌표 범위
+# QMP 절대 좌표 범위 (가상 태블릿과 가상 터치 화면이 같다)
 ABS_MAX = 0x7FFF
+# 손가락 하나만 쓴다. QEMU의 GTK 화면처럼 손가락 번호(tracking id)도 슬롯 번호로 둔다
+TOUCH_SLOT = 0
 # mkosi가 이미지 디스크에 붙이는 블록 노드 이름
 DISK_NODE = "mkosi"
 
@@ -55,6 +60,7 @@ class Qmp:
         self.stream = connect(address).makefile("rw")
         self.stream.readline()  # 인사 메시지
         self.command("qmp_capabilities")
+        self.buttons_ready = False
 
     def command(self, name, **arguments):
         message = {"execute": name}
@@ -73,15 +79,32 @@ class Qmp:
         # screendump 없이 크기를 알 방법이 없어 QEMU 기본 해상도를 쓴다
         return 1280, 800
 
-    def move(self, x, y):
+    def absolute(self, x, y):
+        """화면 픽셀 좌표를 QMP 절대 좌표로 바꾼다"""
         width, height = self.screen_size()
+        return x * ABS_MAX // (width - 1), y * ABS_MAX // (height - 1)
+
+    def move(self, x, y):
+        x, y = self.absolute(x, y)
         events = [
-            {"type": "abs", "data": {"axis": "x", "value": x * ABS_MAX // (width - 1)}},
-            {"type": "abs", "data": {"axis": "y", "value": y * ABS_MAX // (height - 1)}},
+            {"type": "abs", "data": {"axis": "x", "value": x}},
+            {"type": "abs", "data": {"axis": "y", "value": y}},
         ]
         self.command("input-send-event", events=events)
 
+    def ready_buttons(self):
+        """단추·휠 이벤트가 가상 태블릿으로 가게 한다. 가상 터치 화면(virtio-multitouch)도 단추 이벤트를 받고, QEMU는
+        단추를 받는 장치 가운데 게스트가 마지막에 켠 것에 보낸다. 그러면 누르기가 포인터 자리가 없는 터치 화면으로 간다.
+        HMP의 mouse_set이 태블릿을 맨 앞으로 옮긴다. 터치 화면이 없어도 해가 없다"""
+        if self.buttons_ready:
+            return
+        self.buttons_ready = True
+        tablet = next((mouse for mouse in self.command("query-mice") if mouse.get("absolute")), None)
+        if tablet is not None:
+            self.command("human-monitor-command", **{"command-line": f"mouse_set {tablet['index']}"})
+
     def button(self, down, button="left"):
+        self.ready_buttons()
         self.command("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": button}}])
 
     def click(self, x, y, count=1, button="left"):
@@ -117,11 +140,47 @@ class Qmp:
         self.command("input-send-event", events=[{"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": name}}}])
 
     def wheel(self, direction, count):
+        self.ready_buttons()
         # 휠 눈금 하나는 wheel-up/down 단추를 눌렀다 떼는 것이다 (QEMU 가상 태블릿의 REL_WHEEL)
         for _ in range(count):
             for down in (True, False):
                 self.command("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": f"wheel-{direction}"}}])
             time.sleep(0.03)
+
+    def finger(self, kind, x=0, y=0):
+        """손가락 하나의 한 프레임을 보낸다: begin(누름)과 update(옮김)는 자리와 함께, end(뗌)는 손가락 번호를 지운다
+        (-1). QMP의 input-send-event가 한 번에 보낸 이벤트 뒤에 SYN_REPORT를 하나 붙인다. 단추(BTN_TOUCH)는 보내지
+        않는다: libinput은 멀티터치 화면의 손가락을 번호로 읽고, 단추 이벤트는 태블릿이 받게 둔다(ready_buttons).
+        QEMU 8.1 이상의 mtt 이벤트다"""
+
+        def event(kind, axis="x", value=0):
+            tracking = -1 if kind == "end" else TOUCH_SLOT
+            data = {"type": kind, "slot": TOUCH_SLOT, "tracking-id": tracking, "axis": axis, "value": value}
+            return {"type": "mtt", "data": data}
+
+        events = [event(kind)]
+        if kind != "end":
+            x, y = self.absolute(x, y)
+            events += [event("data", "x", x), event("data", "y", y)]
+        self.command("input-send-event", events=events)
+
+    def touch(self, x, y):
+        self.finger("begin", x, y)
+        time.sleep(0.05)
+        self.finger("end")
+        time.sleep(0.1)
+
+    def tdrag(self, x1, y1, x2, y2, steps=12):
+        # 한 번에 30ms씩 옮긴다. 가장자리 스와이프(comp/src/touch.rs)는 44px을 밀거나 빠르게 튕기면 알아본다
+        steps = max(steps, 1)
+        self.finger("begin", x1, y1)
+        time.sleep(0.1)
+        for step in range(1, steps + 1):
+            self.finger("update", x1 + (x2 - x1) * step // steps, y1 + (y2 - y1) * step // steps)
+            time.sleep(0.03)
+        time.sleep(0.1)
+        self.finger("end")
+        time.sleep(0.1)
 
 
 def main():
@@ -152,6 +211,14 @@ def main():
         elif kind == "wheel":
             direction, _, count = argument.partition(",")
             qmp.wheel(direction, int(count or 1))
+        elif kind == "touch":
+            x, y = (int(value) for value in argument.split(","))
+            qmp.touch(x, y)
+        elif kind == "tdrag":
+            values = [int(value) for value in argument.split(",")]
+            if len(values) not in (4, 5):
+                raise SystemExit(f"tdrag needs X1,Y1,X2,Y2[,STEPS]: {action}")
+            qmp.tdrag(*values)
         elif kind == "type":
             for character in argument:
                 qmp.keys(["spc" if character == " " else character])
