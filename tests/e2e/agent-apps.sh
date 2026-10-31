@@ -216,11 +216,13 @@ HTML
 chmod 644 "$page"
 url="file://$page"
 firefox=$(open_app firefox-esr)
-# 바쁜 VM에서는 Firefox가 첫 창을 띄우는 데 1분을 넘기기도 한다. 뜨는 중인 Firefox를 다시 띄우지 않고 창을 기다린다
-if ! grep -q 'ref=e' <<<"$firefox"; then
-	wait_firefox "Mozilla Firefox"
-	firefox=$(A snapshot --app firefox-esr -i)
-fi
+# 바쁜 VM에서는 Firefox가 첫 창을 띄우는 데 1분을 넘기기도 하고, 창이 뜬 뒤에도 주소 막대는 접근성 트리에 늦게
+# 나온다. 뜨는 중인 Firefox를 다시 띄우지 않고 주소 막대가 나올 때까지 트리를 다시 본다
+for _ in $(seq 45); do
+	grep -q combobox <<<"$firefox" && break
+	sleep 2
+	firefox=$(A snapshot --app firefox-esr -i 2>/dev/null)
+done
 address=$(ref combobox <<<"$firefox")
 if filled=$(A fill "$address" "$url" 2>&1); then
 	echo "E2E5 알림: Firefox 주소 막대가 fill의 글을 지켰다"
@@ -273,7 +275,12 @@ A press ctrl+a --ref "$address" >/dev/null
 A type "file://$long" --ref "$address" >/dev/null
 A press Return --settle 2000 >/dev/null
 wait_firefox top
-text=$(A snapshot --app firefox-esr)
+# 바쁜 VM에서는 제목이 바뀐 뒤에도 Firefox가 문단의 글을 늦게 채운다. 링크 뒤의 글이 나올 때까지 트리를 다시 본다
+for _ in $(seq 5); do
+	text=$(A snapshot --app firefox-esr)
+	grep -q 'text: "이고 밤부터 비가 옵니다."' <<<"$text" && break
+	sleep 2
+done
 check "문단의 글이 링크 사이에 차례대로 나온다" \
 	"$(grep -A2 -- '- text: "첫 문단: 오늘 서울은"' <<<"$text" | grep -c -e 'link "흐림"' -e 'text: "이고 밤부터 비가 옵니다."')" 2
 check "글에 자식 자리 표시(U+FFFC)가 없다" "$(grep -c $'\xef\xbf\xbc' <<<"$text")" 0
