@@ -122,6 +122,16 @@ struct Inner {
 #[derive(Clone)]
 pub struct Keyboard(Rc<Inner>);
 
+/// 키보드를 붙들지 않는 손잡이. 키보드가 붙든 처리기(지구본 등)가 다시 키보드를 부를 때 쓴다
+#[derive(Clone)]
+pub struct WeakKeyboard(std::rc::Weak<Inner>);
+
+impl WeakKeyboard {
+    pub fn upgrade(&self) -> Option<Keyboard> {
+        self.0.upgrade().map(Keyboard)
+    }
+}
+
 impl Keyboard {
     pub fn new(sink: Rc<dyn KeySink>, room: Room) -> Self {
         install_style();
@@ -196,6 +206,10 @@ impl Keyboard {
     /// 창에 넣을 위젯
     pub fn widget(&self) -> &gtk::Widget {
         &self.0.root
+    }
+
+    pub fn downgrade(&self) -> WeakKeyboard {
+        WeakKeyboard(Rc::downgrade(&self.0))
     }
 
     /// 화면 높이(논리 픽셀)에 맞춰 키 높이를 정한다
@@ -907,6 +921,66 @@ mod tests {
         keyboard.conceal();
         inner.end(&None, center((0, 0)));
         assert_eq!(take(), []);
+        window.destroy();
+        typing_into_the_focused_field_of_the_window(&context);
+    }
+
+    /// 잠금 화면처럼 창 안에 넣은 키보드는 그 창의 포커스를 가진 칸에 바로 넣는다 (EditableKeys). 위 시험에서 이어
+    /// 부른다(GTK는 한 스레드에서만 쓴다)
+    fn typing_into_the_focused_field_of_the_window(context: &glib::MainContext) {
+        let window = gtk::Window::new();
+        window.set_default_size(1280, 800);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let entry = gtk::PasswordEntry::new();
+        entry.set_vexpand(true);
+        column.append(&entry);
+        let overlay = gtk::Overlay::builder().child(&column).build();
+        window.set_child(Some(&overlay));
+        let keyboard = Keyboard::new(
+            Rc::new(crate::EditableKeys::new(&window)),
+            Room::Embedded(overlay.clone()),
+        );
+        keyboard.set_screen_height(800);
+        column.append(keyboard.widget());
+        let activated = Rc::new(Cell::new(0));
+        let on_activate = activated.clone();
+        entry.connect_activate(move |_| on_activate.set(on_activate.get() + 1));
+        window.present();
+        entry.grab_focus();
+        keyboard.reveal();
+        let inner = keyboard.0.clone();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while inner.grid.width() < 1000 || !inner.revealer.is_child_revealed() {
+            assert!(Instant::now() < deadline, "the keyboard was never laid out");
+            context.iteration(false);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let tap = |at: (usize, u8), width: u8| {
+            let bounds = inner.slot_rect(at, width);
+            let point = Some(graphene::Point::new(
+                bounds.x() + bounds.width() / 2.0,
+                bounds.y() + bounds.height() / 2.0,
+            ));
+            inner.begin(None, point);
+            inner.end(&None, point);
+        };
+        // q, w, Shift+e, 삭제(누를 때 지운다), 스페이스
+        tap((0, 0), 4);
+        tap((0, 4), 4);
+        tap((2, 0), 5);
+        tap((0, 8), 4);
+        assert_eq!(entry.text(), "qwE");
+        tap((0, 40), 6);
+        assert_eq!(entry.text(), "qw");
+        tap((3, 4), 28);
+        assert_eq!(entry.text(), "qw ");
+        // Return은 칸의 기본 동작(잠금 화면: 암호 확인)
+        tap((1, 38), 8);
+        assert_eq!(activated.get(), 1);
+        // 막아 둔 칸(암호를 확인하는 동안)에는 넣지 않는다
+        entry.set_sensitive(false);
+        tap((0, 0), 4);
+        assert_eq!(entry.text(), "qw ");
         window.destroy();
     }
 }

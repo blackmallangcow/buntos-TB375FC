@@ -4,7 +4,8 @@
 //! 창 안의 글 칸 포커스를 따라 화면 키보드를 띄우고 숨긴다 (잠금·로그인 화면). 셸은 컴포지터가 알리는 앱의 글
 //! 입력 상태를 따른다(shell/src/osk.rs). 이 창들은 제 창 안의 글 칸만 쓰므로 GTK의 포커스로 안다.
 //!
-//! - 글 칸에 포커스가 오면 `focused(true)`, 글 칸이 아닌 곳으로 가면 `focused(false)`
+//! - 글 칸에 포커스가 오면 `focused(true)`, 글 칸이 아닌 위젯(단추)으로 가면 `focused(false)`. 포커스가 없어지면
+//!   (칸을 막아 GTK가 포커스를 거뒀다) 부르지 않는다
 //! - 포커스를 가진 글 칸을 다시 누르면 `focused(true)`를 다시 부른다(가린 키보드를 다시 띄운다, iPadOS)
 
 use std::rc::Rc;
@@ -31,7 +32,9 @@ pub fn follow_text_focus(window: &impl IsA<gtk::Window>, focused: impl Fn(bool) 
     let focused = Rc::new(focused);
     let on_focus = focused.clone();
     window.connect_focus_widget_notify(move |window| {
-        on_focus(is_text(GtkWindowExt::focus(window).as_ref()));
+        if let Some(focus) = GtkWindowExt::focus(window) {
+            on_focus(is_text(Some(&focus)));
+        }
     });
     // 누르기는 칸에 그대로 간다 (잡지 않는다)
     let click = gtk::GestureClick::new();

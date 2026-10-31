@@ -21,7 +21,12 @@ use std::{
     time::Duration,
 };
 
-use bunt_keyboard::{CompositorKeys, InputMode, Keyboard, Room, fcitx::script_of, mode};
+use bunt_keyboard::{
+    CompositorKeys, Keyboard, Room,
+    fcitx::script_of,
+    mode,
+    rules::{Decision, Rules},
+};
 use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 
@@ -36,57 +41,6 @@ const INTERFACE: &str = "org.buntos.Compositor1";
 const HIDE_DELAY: Duration = Duration::from_millis(250);
 /// 키보드 위로 비킨 창과 키보드 사이의 틈
 const DIALOG_GAP: i32 = 16;
-
-/// 뜨고 숨는 규칙에 쓰는 상태 (GTK 없이 시험한다)
-#[derive(Clone, Copy, Debug, Default)]
-struct Rules {
-    mode: InputMode,
-    /// 컴포지터가 마지막으로 알린 글 입력 상태
-    text_input: bool,
-    /// 키보드 가리기 키로 숨겼다. 칸을 다시 누르면(글 입력을 다시 켜면) 풀린다
-    dismissed: bool,
-}
-
-/// 규칙이 정한 일
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Decision {
-    Show,
-    /// 조금 기다렸다 숨는다 (그사이 다시 켜지면 그대로 둔다)
-    HideSoon,
-    Hide,
-    Stay,
-}
-
-impl Rules {
-    /// 컴포지터가 글 입력이 켜졌거나(켠 칸을 다시 누른 것 포함) 꺼졌다고 알렸다
-    fn text_input(&mut self, active: bool) -> Decision {
-        self.text_input = active;
-        if !active {
-            return Decision::HideSoon;
-        }
-        self.dismissed = false;
-        match self.mode {
-            InputMode::Touch => Decision::Show,
-            InputMode::Pointer => Decision::Stay,
-        }
-    }
-
-    /// 입력 모드가 바뀌었다 (키보드를 떼거나 붙였다)
-    fn mode(&mut self, mode: InputMode) -> Decision {
-        self.mode = mode;
-        match mode {
-            InputMode::Pointer => Decision::Hide,
-            InputMode::Touch if self.text_input && !self.dismissed => Decision::Show,
-            InputMode::Touch => Decision::Stay,
-        }
-    }
-
-    /// 키보드 가리기 키를 눌렀다
-    fn hide_key(&mut self) -> Decision {
-        self.dismissed = true;
-        Decision::Hide
-    }
-}
 
 struct Inner {
     window: gtk::ApplicationWindow,
@@ -121,12 +75,9 @@ impl Osk {
         osk.follow_sources();
         osk.connect_keyboard();
         osk.clip_input();
-        let weak = Rc::downgrade(&osk.0);
-        mode::watch(move |mode| {
-            if let Some(inner) = weak.upgrade() {
-                Osk(inner).decide(|rules| rules.mode(mode));
-            }
-        });
+        // 입력 모드 구독도 화면 키보드를 붙든다(셸이 끝날 때까지 받는다)
+        let on_mode = osk.clone();
+        mode::watch(move |mode| on_mode.decide(|rules| rules.mode(mode)));
         osk.watch_text_input();
         osk
     }
@@ -213,7 +164,8 @@ impl Osk {
     /// 컴포지터가 알리는 글 입력 상태를 받는다. 신호는 WatchTextInput을 부른 셸에만 오므로, 컴포지터의 버스 이름이
     /// (다시) 생길 때마다 부른다
     fn watch_text_input(&self) {
-        let weak = Rc::downgrade(&self.0);
+        // 이 처리기와 아래의 신호 처리기가 화면 키보드를 셸이 끝날 때까지 붙든다(main은 Osk를 들고 있지 않는다)
+        let osk = self.clone();
         gio::DBusProxy::for_bus(
             gio::BusType::Session,
             gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
@@ -231,7 +183,7 @@ impl Osk {
                         return;
                     }
                 };
-                let on_signal = weak.clone();
+                let on_signal = osk.clone();
                 let subscription = proxy.connection().subscribe_to_signal(
                     Some(NAME),
                     Some(INTERFACE),
@@ -240,20 +192,19 @@ impl Osk {
                     None,
                     gio::DBusSignalFlags::NONE,
                     move |signal| {
-                        if let (Some(inner), Some((active,))) =
-                            (on_signal.upgrade(), signal.parameters.get::<(bool,)>())
-                        {
-                            Osk(inner).decide(|rules| rules.text_input(active));
+                        if let Some((active,)) = signal.parameters.get::<(bool,)>() {
+                            on_signal.decide(|rules| rules.text_input(active));
                         }
                     },
                 );
                 // 셸이 끝날 때까지 받는다
                 std::mem::forget(subscription);
+                let weak = Rc::downgrade(&osk.0);
                 let on_owner = weak.clone();
                 proxy.connect_notify_local(Some("g-name-owner"), move |proxy, _| {
                     watch(proxy, on_owner.clone());
                 });
-                watch(&proxy, weak.clone());
+                watch(&proxy, weak);
             },
         );
     }
@@ -457,36 +408,6 @@ fn placement(how: Avoid, keyboard: i32) -> Placement {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_keyboard_shows_for_text_input_in_touch_mode_only() {
-        let mut rules = Rules::default();
-        // 포인터 모드(키보드와 마우스가 있다)에서는 글 칸에 포커스가 가도 뜨지 않는다
-        assert_eq!(rules.text_input(true), Decision::Stay);
-        // 키보드를 떼어 터치 모드가 되면 켜진 칸이 있으니 뜬다
-        assert_eq!(rules.mode(InputMode::Touch), Decision::Show);
-        // 칸에서 나가면 조금 기다렸다 숨고(칸을 옮기면 바로 다시 켜진다), 다시 켜지면 뜬다
-        assert_eq!(rules.text_input(false), Decision::HideSoon);
-        assert_eq!(rules.text_input(true), Decision::Show);
-        // 포인터 모드가 되면 바로 숨는다
-        assert_eq!(rules.mode(InputMode::Pointer), Decision::Hide);
-        // 글 입력이 꺼진 채 터치 모드가 되면 그대로다
-        rules.text_input(false);
-        assert_eq!(rules.mode(InputMode::Touch), Decision::Stay);
-    }
-
-    #[test]
-    fn a_hidden_keyboard_comes_back_when_the_field_is_tapped_again() {
-        let mut rules = Rules::default();
-        rules.mode(InputMode::Touch);
-        assert_eq!(rules.text_input(true), Decision::Show);
-        assert_eq!(rules.hide_key(), Decision::Hide);
-        // 가린 동안 모드가 바뀌었다 돌아와도 다시 뜨지 않는다
-        rules.mode(InputMode::Pointer);
-        assert_eq!(rules.mode(InputMode::Touch), Decision::Stay);
-        // 켠 칸을 다시 누르면 컴포지터가 다시 알리고(TextInputChanged(true)) 다시 뜬다
-        assert_eq!(rules.text_input(true), Decision::Show);
-    }
 
     #[test]
     fn shell_windows_move_above_the_keyboard_and_back() {
