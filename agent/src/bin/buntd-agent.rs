@@ -86,8 +86,15 @@ const SCROLL_PAUSE: Duration = Duration::from_millis(120);
 /// 크기에 따라 수십 픽셀을 움직이므로 넉넉히 어림해 지나치지 않게 한다
 const SCROLL_NOTCHES: f64 = 5.0;
 const SCROLL_PIXELS: f64 = 60.0;
-/// 스크롤한 뒤 요소가 보이기(SHOWING)를 기다리는 시간
-const SHOWN_WAIT: Duration = Duration::from_secs(1);
+/// 스크롤한 뒤 요소가 보이기(SHOWING)를 기다리는 시간. 보통 앱은 바로 고친다. 1초이던 때 바쁜 VM의 Firefox가
+/// ScrollTo 뒤 그 안에 고치지 못해 e2e 5번이 실패했다(2026-10-31)
+const SHOWN_WAIT: Duration = Duration::from_secs(5);
+/// 휠을 돌린 뒤 요소의 자리가 이만큼 그대로면 끝에 닿았거나 휠로 움직이는 영역이 아니다. 전에는 한 번 다시 읽어
+/// 그대로면 멈췄는데, 바쁜 앱은 자리를 늦게 고친다
+const SCROLL_STUCK: Duration = Duration::from_secs(3);
+/// 화면 밖 요소를 보이게 하는 데 쓰는 시간 전체의 상한. 요청은 하나씩 처리하므로 스크롤할 수 없는 요소나 아주
+/// 느린 앱이 데몬을 오래 붙잡지 않게 한다. 지나면 그때 하던 한 바퀴(자리 읽기와 휠)만 마친다
+const SCROLL_LIMIT: Duration = Duration::from_secs(15);
 /// 스크린샷 폴더($XDG_RUNTIME_DIR, 메모리)에 남기는 파일 수
 const SCREENSHOTS_KEPT: usize = 20;
 /// 세션을 열 때 접근성을 켜며 버스의 답을 기다리는 시간. 로그인 중의 VM에서는 접근성 버스가 뜨는 데
@@ -1182,11 +1189,21 @@ impl Agent {
         // 화면 밖 요소는 사람처럼 먼저 보이게 스크롤한다 (휠만 돌릴 scroll은 그 자리에서 돌린다)
         let wheel_only = params.action == "scroll" && params.amount.is_some();
         let scrolled = match item.as_ref().filter(|_| off_screen && !wheel_only) {
-            Some(target) => Some(
-                scroll_into_view(&a11y, &bus, &window_title, target)
-                    .await
-                    .map_err(|(code, message)| (code, format!("{}: {message}", params.target)))?,
-            ),
+            Some(target) => {
+                let element = AppElement {
+                    a11y: &a11y,
+                    bus: &bus,
+                    path: &target.path,
+                    window_title: &window_title,
+                };
+                Some(
+                    scroll_into_view(&element)
+                        .await
+                        .map_err(|(code, message)| {
+                            (code, format!("{}: {message}", params.target))
+                        })?,
+                )
+            }
             None => None,
         };
         let (done, expect) = match (params.action.as_str(), &item) {
@@ -2490,37 +2507,122 @@ fn notches(dx: f64, dy: f64) -> String {
     }
 }
 
+/// 화면 밖 요소를 보이게 스크롤할 때 쓰는 것: 요소의 자리와 보임 상태를 읽고, 앱에 스크롤을 부탁하거나 그
+/// 창에서 휠을 돌린다. 시계도 여기서 읽어, 시험은 스크롤을 늦게 고치는 가짜 앱과 가짜 시계로 바꾼다
+trait Scrollable {
+    /// 지금 시각
+    fn now(&self) -> Instant;
+    /// `duration`만큼 쉰다
+    async fn pause(&self, duration: Duration);
+    /// 요소의 자리와 크기 (창 기준 논리 좌표: x, y, 너비, 높이)
+    async fn extents(&self) -> zbus::Result<(i32, i32, i32, i32)>;
+    /// 요소가 화면에 보이는가 (SHOWING)
+    async fn shown(&self) -> bool;
+    /// 앱이 요소가 보이게 스스로 스크롤한다 (Component.ScrollTo)
+    async fn scroll_to(&self) -> zbus::Result<bool>;
+    /// 요소가 있는 창을 앞으로 가져와 컴포지터가 놓은 자리를 준다. 휠은 포인터 아래의 창으로 간다
+    async fn raise_window(&self) -> Result<Placed, Failure>;
+    /// 화면의 논리 좌표 (x, y)에서 휠을 돌린다. 눈금 수 dx, dy는 오른쪽·아래가 +다
+    async fn wheel(&self, x: f64, y: f64, dx: f64, dy: f64) -> zbus::Result<()>;
+}
+
+/// 접근성 버스에 있는 앱의 요소와 그 창
+struct AppElement<'a> {
+    a11y: &'a A11y,
+    bus: &'a str,
+    path: &'a str,
+    window_title: &'a str,
+}
+
+impl Scrollable for AppElement<'_> {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    async fn pause(&self, duration: Duration) {
+        async_io::Timer::after(duration).await;
+    }
+
+    async fn extents(&self) -> zbus::Result<(i32, i32, i32, i32)> {
+        self.a11y.extents(self.bus, self.path).await
+    }
+
+    async fn shown(&self) -> bool {
+        self.a11y.states(self.bus, self.path).await & state::SHOWING != 0
+    }
+
+    async fn scroll_to(&self) -> zbus::Result<bool> {
+        self.a11y.scroll_to(self.bus, self.path).await
+    }
+
+    async fn raise_window(&self) -> Result<Placed, Failure> {
+        let pid = self
+            .a11y
+            .pid(self.bus)
+            .await
+            .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
+        let window = compositor_window(self.a11y, pid, self.window_title).await?;
+        activate(self.a11y, pid, &window.title).await?;
+        Ok(window)
+    }
+
+    async fn wheel(&self, x: f64, y: f64, dx: f64, dy: f64) -> zbus::Result<()> {
+        self.a11y.scroll(x, y, dx, dy).await
+    }
+}
+
 /// 화면 밖 요소를 보이게 스크롤한다. 앱이 스스로 하면(Component.ScrollTo, Firefox) 그것을 쓰고, 못
-/// 하면(GTK4는 지원하지 않는다) 요소가 있는 쪽으로 창 가운데에서 휠을 돌리며 요소가 창 안에 들어올
-/// 때까지 다시 본다
-async fn scroll_into_view(
-    a11y: &A11y,
-    bus: &str,
-    window_title: &str,
-    target: &Item,
-) -> Result<String, Failure> {
-    let path = target.path.as_str();
+/// 하거나(GTK4는 지원하지 않는다) SHOWN_WAIT까지 보이지 않으면 휠을 돌린다. 바쁜 앱은 자리와 보임 상태를
+/// 늦게 고치므로 기다리되, 모두 SCROLL_LIMIT 안에 마친다
+async fn scroll_into_view(element: &impl Scrollable) -> Result<String, Failure> {
+    let deadline = element.now() + SCROLL_LIMIT;
     // Firefox는 웹 페이지 요소의 자리를 받아 둔 뒤에야 ScrollTo 뒤의 보임 상태(SHOWING)를 고친다
-    let _ = a11y.extents(bus, path).await;
-    if matches!(a11y.scroll_to(bus, path).await, Ok(true))
-        && wait_until_shown(a11y, bus, path).await
-    {
+    let _ = element.extents().await;
+    let asked = matches!(element.scroll_to().await, Ok(true));
+    if asked && wait_until_shown(element, (element.now() + SHOWN_WAIT).min(deadline)).await {
         return Ok("scrolled it into view".into());
     }
-    let pid = a11y
-        .pid(bus)
-        .await
-        .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
-    let window = compositor_window(a11y, pid, window_title).await?;
-    activate(a11y, pid, &window.title).await?;
+    match wheel_into_view(element, deadline).await? {
+        // 앱이 ScrollTo를 SHOWN_WAIT보다 늦게 고쳤고 휠은 돌리지 않았다
+        Some(0) if asked => Ok("scrolled it into view".into()),
+        Some(0) => Ok("it came into view".into()),
+        // 전에는 돌린 휠 수가 아니라 자리를 읽은 수를 "(1 turns)"처럼 알렸다
+        Some(turns) => {
+            let unit = if turns == 1 { "turn" } else { "turns" };
+            Ok(format!(
+                "scrolled it into view with the wheel ({turns} {unit})"
+            ))
+        }
+        None => Err(agent_error(
+            "it is off screen and scrolling did not bring it into view; scroll the list or page \
+             that holds it (bunt agent scroll down --ref <list>) and take a new snapshot",
+        )),
+    }
+}
+
+/// 요소가 있는 쪽으로 창 가운데에서 휠을 돌리며 요소가 창 안에 들어와 보일 때까지 다시 본다. 보이면 돌린
+/// 휠 수를 준다. 요소가 SCROLL_STUCK 동안 움직이지 않거나, 창 안에서 SHOWN_WAIT까지 보이지 않거나,
+/// SCROLL_TURNS를 다 돌렸거나 `deadline`이 지나면 None이다
+async fn wheel_into_view(
+    element: &impl Scrollable,
+    deadline: Instant,
+) -> Result<Option<usize>, Failure> {
+    if element.now() >= deadline {
+        return Ok(None);
+    }
+    let window = element.raise_window().await?;
     let center = (
         f64::from(window.x) + f64::from(window.width) / 2.0,
         f64::from(window.y) + f64::from(window.height) / 2.0,
     );
-    let mut last = None;
-    for turn in 1..=SCROLL_TURNS {
-        let (x, y, width, height) = a11y
-            .extents(bus, path)
+    let mut turns = 0;
+    // 마지막으로 휠을 돌린 때와 그때 요소의 자리
+    let mut turned: Option<(Instant, (i32, i32))> = None;
+    // 요소가 자리로는 창 안에 든 때. 그 뒤로 보임 상태를 기다린다
+    let mut inside: Option<Instant> = None;
+    while element.now() < deadline {
+        let (x, y, width, height) = element
+            .extents()
             .await
             .map_err(|err| agent_error(format!("cannot tell where it is: {err}")))?;
         let (dx, dy) = (
@@ -2528,27 +2630,41 @@ async fn scroll_into_view(
             toward(y, height, window.height),
         );
         if dx == 0.0 && dy == 0.0 {
-            if wait_until_shown(a11y, bus, path).await {
-                return Ok(format!(
-                    "scrolled it into view with the wheel ({turn} turns)"
-                ));
+            if element.shown().await {
+                return Ok(Some(turns));
             }
-            break;
+            // 1초만 기다리던 것을 늘렸다: 바쁜 앱은 자리를 고친 뒤에도 보임 상태를 늦게 고친다. SHOWN_WAIT가
+            // 지나도 보이지 않으면 창 안의 다른 영역에 가려 있다
+            let since = *inside.get_or_insert_with(|| element.now());
+            if element.now().saturating_duration_since(since) >= SHOWN_WAIT {
+                return Ok(None);
+            }
+            element.pause(SETTLE_STEP).await;
+            continue;
         }
-        // 더 움직이지 않으면 끝에 닿았거나 휠로 움직이는 영역이 아니다
-        if last == Some((x, y)) {
-            break;
+        inside = None;
+        // 자리를 한 번 다시 읽어 그대로면 끝에 닿았다고 보던 것을 고쳤다: 바쁜 앱은 앞의 휠을 늦게 고친다.
+        // 그동안 휠을 더 돌리면 앱이 한꺼번에 고쳐 지나치므로, 돌리지 않고 SCROLL_STUCK까지 다시 본다
+        if let Some((at, _)) = turned.filter(|(_, last)| *last == (x, y)) {
+            if element.now().saturating_duration_since(at) >= SCROLL_STUCK {
+                // 더 움직이지 않는다: 끝에 닿았거나 휠로 움직이는 영역이 아니다
+                return Ok(None);
+            }
+            element.pause(SCROLL_PAUSE).await;
+            continue;
         }
-        last = Some((x, y));
-        a11y.scroll(center.0, center.1, dx, dy)
+        if turns == SCROLL_TURNS {
+            return Ok(None);
+        }
+        element
+            .wheel(center.0, center.1, dx, dy)
             .await
             .map_err(|err| agent_error(format!("scrolling failed: {}", reason(&err))))?;
-        async_io::Timer::after(SCROLL_PAUSE).await;
+        turns += 1;
+        turned = Some((element.now(), (x, y)));
+        element.pause(SCROLL_PAUSE).await;
     }
-    Err(agent_error(
-        "it is off screen and scrolling did not bring it into view; scroll the list or page that \
-         holds it (bunt agent scroll down --ref <list>) and take a new snapshot",
-    ))
+    Ok(None)
 }
 
 /// 요소(창 기준 start, 길이 length)가 창(크기 size) 밖에 있는 쪽으로 돌릴 눈금 수. 멀수록 많이
@@ -2569,17 +2685,19 @@ fn toward(start: i32, length: i32, size: i32) -> f64 {
         * f64::from(distance.signum())
 }
 
-/// 요소가 보일 때까지(SHOWING) 잠깐 기다린다
-async fn wait_until_shown(a11y: &A11y, bus: &str, path: &str) -> bool {
-    let started = Instant::now();
+/// 요소가 보일 때까지(SHOWING) `until`까지 기다린다
+async fn wait_until_shown(element: &impl Scrollable, until: Instant) -> bool {
     loop {
-        if a11y.states(bus, path).await & state::SHOWING != 0 {
+        if element.shown().await {
             return true;
         }
-        if started.elapsed() >= SHOWN_WAIT {
+        if element.now() >= until {
             return false;
         }
-        async_io::Timer::after(SETTLE_STEP).await;
+        element.pause(SETTLE_STEP).await;
+        // 보임 상태만 다시 읽던 것에 자리 읽기를 더했다: Firefox는 자리를 받아 둔 뒤에야 보임 상태를 고치고,
+        // 바쁘면 ScrollTo 뒤의 자리도 늦게 고친다
+        let _ = element.extents().await;
     }
 }
 
@@ -3162,5 +3280,335 @@ mod tests {
         ];
         let several = find_window(&windows, &[], &[], "a").unwrap_err().1;
         assert!(several.contains(protocol::BE_MORE_SPECIFIC), "{several}");
+    }
+
+    /// 가짜 페이지의 창 높이 (placed()가 놓는 창)
+    const PAGE_HEIGHT: i32 = 600;
+
+    /// 가짜 웹 페이지. 문서를 스크롤한 거리로 요소의 자리와 보임 상태를 알리되, 바쁜 VM의 Firefox처럼 받은
+    /// 스크롤을 `lag`가 지나서야 자리에 알리고 보임 상태는 그보다 `shown_lag` 더 늦게 고친다. 접근성 호출
+    /// 하나는 `call`만큼 걸린다. 시계가 가짜라 몇 초를 기다리는 시험도 바로 끝난다
+    struct Page {
+        started: Instant,
+        clock: Cell<Duration>,
+        /// 요소가 문서에서 놓인 세로 자리와 높이
+        top: i32,
+        height: i32,
+        /// 문서를 스크롤할 수 있는 거리 (0부터 이것까지)
+        end: i32,
+        /// 휠 눈금 하나에 움직이는 거리
+        notch: i32,
+        /// ScrollTo를 하는 앱이다 (Firefox. GTK4는 NotSupported)
+        scroll_to: bool,
+        /// 창 안의 다른 영역에 가려 늘 보이지 않는다
+        covered: bool,
+        lag: Duration,
+        shown_lag: Duration,
+        call: Duration,
+        /// 앱이 받은 스크롤: (자리에 알리기 시작하는 때, 스크롤한 거리)
+        scrolls: RefCell<Vec<(Duration, i32)>>,
+        wheels: Cell<usize>,
+    }
+
+    impl Page {
+        /// e2e 5번의 긴 페이지: 맨 위를 보고 있고, 단추는 4000px 아래 문서 끝에 있다
+        fn new() -> Page {
+            Page {
+                started: Instant::now(),
+                clock: Cell::new(Duration::ZERO),
+                top: 4060,
+                height: 30,
+                end: 3500,
+                notch: 50,
+                scroll_to: true,
+                covered: false,
+                lag: Duration::ZERO,
+                shown_lag: Duration::ZERO,
+                call: Duration::from_millis(1),
+                scrolls: RefCell::new(Vec::new()),
+                wheels: Cell::new(0),
+            }
+        }
+
+        fn elapsed(&self) -> Duration {
+            self.clock.get()
+        }
+
+        /// 접근성 호출 하나에 드는 시간
+        fn answer(&self) {
+            self.clock.set(self.clock.get() + self.call);
+        }
+
+        /// `at`에 앱이 자리로 알리는 스크롤 거리
+        fn scrolled(&self, at: Duration) -> i32 {
+            self.scrolls
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(from, _)| *from <= at)
+                .map_or(0, |(_, to)| *to)
+        }
+
+        /// 앱이 마지막으로 받은 스크롤. 아직 알리지 않았어도 앱은 그리로 간다
+        fn heading(&self) -> i32 {
+            self.scrolls.borrow().last().map_or(0, |(_, to)| *to)
+        }
+
+        /// 앱이 스크롤을 받는다. 자리에는 `lag` 뒤에 알린다
+        fn take_scroll(&self, to: i32) {
+            let to = to.clamp(0, self.end);
+            self.scrolls
+                .borrow_mut()
+                .push((self.clock.get() + self.lag, to));
+        }
+
+        /// `at`에 앱이 알리는 요소의 창 기준 세로 자리
+        fn y(&self, at: Duration) -> i32 {
+            self.top - self.scrolled(at)
+        }
+    }
+
+    impl Scrollable for Page {
+        fn now(&self) -> Instant {
+            self.started + self.clock.get()
+        }
+
+        async fn pause(&self, duration: Duration) {
+            self.clock.set(self.clock.get() + duration);
+        }
+
+        async fn extents(&self) -> zbus::Result<(i32, i32, i32, i32)> {
+            self.answer();
+            Ok((100, self.y(self.elapsed()), 200, self.height))
+        }
+
+        async fn shown(&self) -> bool {
+            self.answer();
+            // Firefox처럼 창에 조금이라도 들면 보인다
+            let y = self.y(self.elapsed().saturating_sub(self.shown_lag));
+            !self.covered && y < PAGE_HEIGHT && y + self.height > 0
+        }
+
+        async fn scroll_to(&self) -> zbus::Result<bool> {
+            self.answer();
+            if !self.scroll_to {
+                return Err(zbus::Error::Failure("NotSupported".into()));
+            }
+            // ATSPI_SCROLL_ANYWHERE: 요소가 다 보이는 가장 가까운 곳으로 간다
+            let lowest = self.top + self.height - PAGE_HEIGHT;
+            self.take_scroll(self.heading().clamp(lowest, self.top));
+            Ok(true)
+        }
+
+        async fn raise_window(&self) -> Result<Placed, Failure> {
+            self.answer();
+            Ok(placed(7, "firefox-esr", "top"))
+        }
+
+        async fn wheel(&self, _x: f64, _y: f64, _dx: f64, dy: f64) -> zbus::Result<()> {
+            self.answer();
+            self.wheels.set(self.wheels.get() + 1);
+            self.take_scroll(self.heading() + dy as i32 * self.notch);
+            Ok(())
+        }
+    }
+
+    /// 가짜 페이지에서 화면 밖 요소를 보이게 스크롤한다: (답, 걸린 시간, 돌린 휠 수)
+    fn scroll_page(page: &Page) -> (Result<String, Failure>, Duration, usize) {
+        let answer = async_io::block_on(scroll_into_view(page));
+        (answer, page.elapsed(), page.wheels.get())
+    }
+
+    #[test]
+    fn an_app_that_scrolls_at_once_is_not_kept_waiting() {
+        let page = Page::new();
+        let (answer, took, wheels) = scroll_page(&page);
+        assert_eq!(answer.unwrap(), "scrolled it into view");
+        assert_eq!(wheels, 0);
+        // 전과 같다: 자리 읽기, ScrollTo, 보임 상태 읽기를 한 번씩 하고 쉬지 않는다
+        assert_eq!(took, 3 * page.call);
+    }
+
+    #[test]
+    fn a_busy_app_that_shows_it_late_is_waited_for() {
+        // 바쁜 VM의 Firefox: ScrollTo를 3초 뒤에야 자리에, 1초 더 뒤에 보임 상태에 알린다. 1초만 기다리던
+        // 때는 휠 길로 넘어가 다시 읽은 자리가 그대로인 것을 끝으로 보고 실패했다
+        let page = Page {
+            lag: Duration::from_secs(3),
+            shown_lag: Duration::from_secs(1),
+            call: Duration::from_millis(40),
+            ..Page::new()
+        };
+        let (answer, took, wheels) = scroll_page(&page);
+        assert_eq!(answer.unwrap(), "scrolled it into view");
+        assert_eq!(wheels, 0);
+        assert!(
+            took >= Duration::from_secs(4) && took < SHOWN_WAIT,
+            "{took:?}"
+        );
+    }
+
+    #[test]
+    fn a_scroll_the_app_makes_after_the_wait_is_still_seen() {
+        // ScrollTo를 SHOWN_WAIT보다 1초 늦게 고치는 앱: 휠 길로 넘어가 휠을 한 번 돌린 뒤 자리가 그대로여도
+        // 기다리다가, 앱이 ScrollTo를 고치면 보인 것을 안다
+        let page = Page {
+            lag: SHOWN_WAIT + Duration::from_secs(1),
+            ..Page::new()
+        };
+        let (answer, took, wheels) = scroll_page(&page);
+        assert_eq!(
+            answer.unwrap(),
+            "scrolled it into view with the wheel (1 turn)"
+        );
+        assert_eq!(wheels, 1);
+        assert!(took < SHOWN_WAIT + SCROLL_STUCK, "{took:?}");
+    }
+
+    #[test]
+    fn without_wheel_turns_the_answer_says_what_scrolled() {
+        // ScrollTo를 4.9초 뒤 자리에, 0.5초 더 뒤 보임 상태에 알리는 앱: SHOWN_WAIT 뒤 휠 길에서 자리는 이미
+        // 창 안이라 휠을 돌리지 않고 보임 상태를 기다린다. 휠 수 대신 ScrollTo가 했다고 알린다
+        let page = Page {
+            lag: Duration::from_millis(4_900),
+            shown_lag: Duration::from_millis(500),
+            ..Page::new()
+        };
+        let (answer, took, wheels) = scroll_page(&page);
+        assert_eq!(answer.unwrap(), "scrolled it into view");
+        assert_eq!(wheels, 0);
+        assert!(took > SHOWN_WAIT, "{took:?}");
+        // ScrollTo를 못 하는 앱에서 요소가 이미 창 안에 있었다: 스크롤하지 않았다고 알린다
+        let page = Page {
+            scroll_to: false,
+            top: 300,
+            ..Page::new()
+        };
+        let (answer, _, wheels) = scroll_page(&page);
+        assert_eq!(answer.unwrap(), "it came into view");
+        assert_eq!(wheels, 0);
+    }
+
+    #[test]
+    fn the_wheel_waits_for_an_app_that_moves_late() {
+        // ScrollTo를 못 하는 앱이 휠을 1초 늦게 고친다. 전에는 다시 읽은 자리가 그대로라 끝에 닿았다고 보고
+        // 실패했다. 기다리는 동안 휠을 더 돌리지 않으므로 바로 고치는 앱과 같은 수만 돌린다
+        let page = |lag| Page {
+            scroll_to: false,
+            top: 1200,
+            lag,
+            ..Page::new()
+        };
+        let quick = page(Duration::ZERO);
+        let (quick_answer, quick_took, quick_wheels) = scroll_page(&quick);
+        assert_eq!(
+            quick_answer.as_deref().unwrap(),
+            "scrolled it into view with the wheel (4 turns)"
+        );
+        assert!(quick_took < Duration::from_secs(1), "{quick_took:?}");
+        let late = page(Duration::from_secs(1));
+        let (late_answer, late_took, late_wheels) = scroll_page(&late);
+        assert_eq!(late_answer, quick_answer);
+        assert_eq!(late_wheels, quick_wheels);
+        assert!(late_took < SCROLL_LIMIT, "{late_took:?}");
+        // 지나치지 않았다: 요소가 창 안에 다 든다
+        let y = late.y(late.elapsed());
+        assert!(y >= 0 && y + late.height <= PAGE_HEIGHT, "{y}");
+    }
+
+    #[test]
+    fn the_wheel_waits_for_showing_that_comes_late() {
+        // 휠을 고친 자리는 바로 알리지만 보임 상태는 2초 늦게 고치는 앱 (1초만 기다리던 때는 실패했다)
+        let page = Page {
+            scroll_to: false,
+            top: 1200,
+            shown_lag: Duration::from_secs(2),
+            ..Page::new()
+        };
+        let (answer, took, wheels) = scroll_page(&page);
+        assert_eq!(
+            answer.unwrap(),
+            "scrolled it into view with the wheel (4 turns)"
+        );
+        assert_eq!(wheels, 4);
+        assert!(
+            took >= Duration::from_secs(2) && took < SHOWN_WAIT,
+            "{took:?}"
+        );
+    }
+
+    #[test]
+    fn an_element_that_cannot_be_scrolled_to_fails_soon() {
+        // 문서가 스크롤되지 않는다: ScrollTo는 참이라고 답하지만 아무것도 움직이지 않는다
+        let page = Page {
+            end: 0,
+            ..Page::new()
+        };
+        let (answer, took, wheels) = scroll_page(&page);
+        let (code, message) = answer.unwrap_err();
+        assert_eq!(code, protocol::AGENT_ERROR);
+        assert!(
+            message.starts_with("it is off screen and scrolling did not bring it into view"),
+            "{message}"
+        );
+        // ScrollTo 뒤 SHOWN_WAIT를 기다리고, 휠을 한 번 돌려 SCROLL_STUCK 동안 움직이지 않는 것을 본다
+        assert_eq!(wheels, 1);
+        let expected = SHOWN_WAIT + SCROLL_STUCK;
+        assert!(
+            took >= expected && took < expected + Duration::from_millis(500),
+            "{took:?}"
+        );
+    }
+
+    #[test]
+    fn an_element_covered_inside_the_window_fails_after_the_wait() {
+        // 자리로는 창 안인데 다른 영역에 가려 보이지 않는다: 휠을 돌리지 않고 SHOWN_WAIT까지 본다
+        let page = Page {
+            scroll_to: false,
+            top: 300,
+            covered: true,
+            ..Page::new()
+        };
+        let (answer, took, wheels) = scroll_page(&page);
+        assert!(answer.is_err());
+        assert_eq!(wheels, 0);
+        assert!(
+            took >= SHOWN_WAIT && took < SHOWN_WAIT + Duration::from_millis(500),
+            "{took:?}"
+        );
+    }
+
+    #[test]
+    fn the_wheel_stops_after_its_turns() {
+        // 휠 눈금 하나에 1px만 움직이는 앱: 요소가 다가오는 동안에도 SCROLL_TURNS까지만 돌린다
+        let page = Page {
+            scroll_to: false,
+            notch: 1,
+            ..Page::new()
+        };
+        let (answer, took, wheels) = scroll_page(&page);
+        assert!(answer.is_err());
+        assert_eq!(wheels, SCROLL_TURNS);
+        assert!(took < SCROLL_LIMIT, "{took:?}");
+    }
+
+    #[test]
+    fn a_slow_desktop_stops_at_the_limit() {
+        // 접근성 호출 하나가 0.7초 걸리고 휠 눈금 하나에 1px만 움직인다: 요소가 다가오는 동안 상한이 지난다.
+        // 상한이 지난 뒤에는 그때 하던 한 바퀴(자리 읽기, 휠, 쉼)만 마친다
+        let call = Duration::from_millis(700);
+        let page = Page {
+            scroll_to: false,
+            notch: 1,
+            call,
+            ..Page::new()
+        };
+        let (answer, took, wheels) = scroll_page(&page);
+        assert!(answer.is_err());
+        assert!(wheels < SCROLL_TURNS, "{wheels}");
+        assert!(
+            took >= SCROLL_LIMIT && took <= SCROLL_LIMIT + 2 * call + SCROLL_PAUSE,
+            "{took:?}"
+        );
     }
 }
