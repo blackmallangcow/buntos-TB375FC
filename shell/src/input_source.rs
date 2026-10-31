@@ -247,7 +247,11 @@ fn display_name(tr: &Translations, source: &Source) -> String {
 }
 
 pub fn extra(tr: &Rc<Translations>, sources: &InputSources) -> gtk::MenuButton {
-    let label = gtk::Label::builder().css_classes(["input-badge"]).build();
+    // 테두리를 그리는 글자다. 단추가 터치 모드에서 44px로 높아져도 글자 높이 그대로 가운데에 둔다
+    let label = gtk::Label::builder()
+        .css_classes(["input-badge"])
+        .valign(gtk::Align::Center)
+        .build();
     let menu = Menu::new();
     let button = extras::button(&label, &menu, &tr.get("input-source-title"));
     let visibility = Visibility::new(&button, "show-input-source");
