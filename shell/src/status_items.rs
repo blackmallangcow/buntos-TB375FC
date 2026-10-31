@@ -303,10 +303,6 @@ fn item_widget(
     let image = gtk::Image::new();
     image.set_pixel_size(ICON_SIZE);
     update_icon(&image, proxy);
-    let title: String = proxy
-        .cached_property("Title")
-        .and_then(|value| value.get())
-        .unwrap_or_default();
     let menu_path: Option<glib::variant::ObjectPath> = proxy
         .cached_property("Menu")
         .and_then(|value| value.get())
@@ -316,7 +312,6 @@ fn item_widget(
         Some(menu_path) => {
             let button = gtk::MenuButton::builder()
                 .child(&image)
-                .tooltip_text(&title)
                 .css_classes(["status-item"])
                 .build();
             let menu = DbusMenu::new(connection, &address.bus, menu_path.as_str());
@@ -341,7 +336,6 @@ fn item_widget(
         None => {
             let button = gtk::Button::builder()
                 .child(&image)
-                .tooltip_text(&title)
                 .css_classes(["status-item"])
                 .build();
             let target = proxy.clone();
@@ -386,13 +380,29 @@ fn item_widget(
                     }
                 }
                 update_icon(&image, &target);
+                update_title(&shown, &target);
                 update_status(&shown, &target);
             });
         }
         None
     });
+    update_title(&widget, proxy);
     update_status(&widget, proxy);
     widget
+}
+
+/// 앱이 정한 제목을 툴팁과 접근성 이름으로 단다. 접근성 이름을 정하지 않으면 GTK가 아이콘이나 열린 메뉴의 글을
+/// 이어 붙여 이름을 만들어, 메뉴를 연 동안 이름이 메뉴 항목 글이 되었다(다른 메뉴 막대 단추 extras::button과
+/// 같다). 제목이 없으면 툴팁만 비운다
+fn update_title(widget: &gtk::Widget, proxy: &gio::DBusProxy) {
+    let title: String = proxy
+        .cached_property("Title")
+        .and_then(|value| value.get())
+        .unwrap_or_default();
+    widget.set_tooltip_text(Some(title.as_str()).filter(|title| !title.is_empty()));
+    if !title.is_empty() {
+        widget.update_property(&[gtk::accessible::Property::Label(&title)]);
+    }
 }
 
 /// Passive 항목은 숨긴다 (명세: 지금 알릴 것이 없는 항목)
