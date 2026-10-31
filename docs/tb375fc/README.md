@@ -1,0 +1,36 @@
+# TB375FC 문서
+
+이 저장소(`buntos-TB375FC`)는 buntOS를 포크해 Lenovo Xiaoxin Pad Pro 12.7 (2025, **TB375FC**)에 올리는 저장소다. 글로벌판 Lenovo Idea Tab Pro(TB373FU)는 같은 하드웨어라 같이 지원한다.
+- 데스크톱(컴포지터, 셸, 시스템 설정, 로그인 화면, 에이전트)은 buntOS 그대로다.
+- 이 포크에서 더하는 것은 기기 쪽이다: 커널 커스텀(mainline + MT6897 포팅), 장치 트리, 부트 이미지와 언락, 기기 맞춤 최적화.
+- 원본 buntOS는 원격 `buntos`(로컬 `../buntOS`)로 두고 필요할 때 받아 합친다.
+
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| [DESIGN.md](DESIGN.md) | **최종 설계안.** 핵심 결정, 부팅 길, 단계별 bring-up, 블록별 포팅 계획, 기기 맞춤 최적화, 위험, 일정 |
+| [porting-materials.md](porting-materials.md) | 포팅 재료 조사: 블록마다 가까운 업스트림 드라이버, 공개 벤더 소스, 포팅 크기 |
+| [wifi-soc7_0.md](wifi-soc7_0.md) | Wi-Fi·Bluetooth(connsys soc7_0, A-die MT6637) 단서 확인과 포팅 설계 |
+| [../hw/lenovo-tb375fc.md](../hw/lenovo-tb375fc.md) | 펌웨어에서 읽은 하드웨어 실측(장치 트리, 부트 이미지, 커널), 중국판·글로벌판 비교 |
+| [../design/ARCHITECTURE.md](../design/ARCHITECTURE.md) | buntOS 설계안(4.2절 실기기, 12장 Phase 0 실측 항목) |
+
+## 기기 쪽 코드
+
+| 곳 | 내용 |
+|---|---|
+| `kernel/tb375fc/` | 커널 커스텀: Linux 7.2.x(buntOS 이미지의 Debian forky와 같은 판)에 얹는 설정 조각(`config/`), 패치 대기열(`patches/`), 장치 트리(`dts/`), 빌드 스크립트 |
+| `bsp/lenovo-tb375fc/` | 부트 이미지(boot·vendor_boot·init_boot·dtbo)와 initramfs 만들기 |
+| `tools/hw/` | 펌웨어를 받고 푸는 도구(원격 ZIP 부분 받기, 부트 이미지 풀기, 켜진 노드 뽑기) |
+
+## 빌드 VM
+
+- buntOS와 같은 Lima VM `buntos-dev`를 쓴다. VM에 이 포크도 마운트되어 있어야 한다(2026-11-01부터, 같은 경로, 쓰기 가능).
+- 새로 만들 때는 저장소 맨 위 폴더에서 `limactl edit buntos-dev --mount "$PWD:w" --tty=false`로 더하고 VM을 다시 켠다.
+- 커널 빌드 도구는 `kernel/tb375fc/README.md`에 있다.
+
+## 규칙
+
+- 펌웨어 파일(레노버·MediaTek 저작물)과 펌웨어에서 푼 벤더 장치 트리는 저장소에 넣지 않는다. 읽어 낸 사실과 우리 코드만 둔다.
+- 벤더 커널 소스(OPPO, OnePlus, Motorola, GPL)는 참고만 한다. 옮겨 쓰는 코드는 출처와 원래 저작권 줄을 남기고 업스트림 꼴로 다시 쓴다.
+- 실기기 작업은 buntOS 설계안 4.2.3절의 안전 수칙(전체 파티션 백업, 언락 진행 조건)을 따른다.

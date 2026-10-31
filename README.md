@@ -1,5 +1,13 @@
 # buntOS
 
+> **이 저장소는 buntOS의 TB375FC 포크(`buntos-TB375FC`)입니다.**
+> Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)와 같은 하드웨어인 Idea Tab Pro(TB373FU)에 올리기 위한 것을 더합니다.
+> - 커널 커스텀: [kernel/tb375fc](kernel/tb375fc/README.md)
+> - 부트 이미지: [bsp/lenovo-tb375fc](bsp/lenovo-tb375fc/README.md)
+> - 최종 설계안: [docs/tb375fc](docs/tb375fc/README.md)
+>
+> 데스크톱(컴포지터, 셸, 시스템 설정, 에이전트)은 원본 buntOS(원격 `buntos`)와 같습니다.
+
 태블릿 폼팩터의 개발용 Unix 워크스테이션을 목표로 하는 오픈소스 OS입니다. 안드로이드 태블릿에서 막혀 있던 셸 제어, 개발환경 구성, 테스트 호스팅, 앱 간 제어를 완전히 열린 스택 위에서 제공하려고 합니다.
 
 *English: buntOS is an open-source OS that aims to turn tablets into fully open Unix development workstations: Debian-based, mainline Linux, a Rust/Smithay Wayland compositor, and an AI-friendly control plane. The same image recipe builds and boots on x86-64 and arm64 QEMU with its own compositor, macOS-style shell, settings app and AI agent control plane (CLI, JavaScript REPL and MCP); the remaining foundation step is surveying the first target tablet. The design documents are written in Korean.*
