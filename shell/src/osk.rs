@@ -78,8 +78,9 @@ impl Osk {
         for edge in [Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }
+        // 크기를 바꿀 수 없게(set_resizable(false)) 두면 GTK 4.24가 창을 내용의 자연 너비로 두어, 왼쪽과 오른쪽에 붙여도
+        // 화면 너비 전체로 늘어나지 않는다(1280×800에서 판이 468px였다). 너비는 컴포지터가 정하게 둔다
         window.set_exclusive_zone(-1);
-        window.set_resizable(false);
         window.set_child(Some(keyboard.widget()));
         let osk = Self(Rc::new(Inner {
             window,
