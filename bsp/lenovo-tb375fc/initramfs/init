@@ -1,0 +1,262 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# TB375FC 첫 부팅(2a·2b)용 initramfs의 /init. busybox sh로 돈다. LK가 init_boot의 램디스크를 initrd로 넘기면
+# 커널이 이것을 PID 1로 띄운다.
+# - proc·sys·devtmpfs·devpts·configfs·pstore·debugfs를 붙이고 initramfs의 모듈을 올린다
+# - 직전 부팅의 pstore 기록을 /run/buntos/pstore에 떠 두고(지우지 않는다) 콘솔 기록의 끝을 보인다
+# - 커널, 명령줄, 장치 트리, CPU의 EL(설계안 12.1절), 화면을 알리고 LK가 넘긴 트리를 /run/buntos/fdt.dtb에 뜬다
+# - /etc/inittab을 만들어 busybox init에 넘긴다. busybox init이 console=의 화면(tty0)과 UART(ttyS0)에 셸을 띄우고
+#   "/init --late"를 한 번 돌린다
+# - --late: UDC를 기다려 USB 가젯(ACM + NCM, 기기 172.16.42.1/24)을 띄우고 ttyGS0에 셸을 더한다.
+#   nvdata·nvcfg·persist를 GPT 파티션 이름으로 찾아 /mnt/vendor/<이름>에 읽기 전용으로 붙인다(Wi-Fi 보정값이 nvdata에 있다)
+# 진행은 /dev/kmsg로 알린다. 커널이 모든 콘솔(simpledrm 화면, UART)과 dmesg, pstore에 함께 남기고, 같은 글을
+# /run/buntos/boot.log에도 적는다. 화면 콘솔(fbcon)에 한글 글꼴이 없어 기기에 찍는 글은 영어로 쓴다.
+# PID 1이 끝나면 커널이 panic하므로 set -e를 쓰지 않는다. 한 단계가 실패해도 다음으로 넘어간다.
+#
+# 커널 명령줄 옵션:
+#   buntos.wait=<초>       --late가 UDC와 nvdata를 기다리는 시간 (기본 30)
+#   buntos.usbnet=ncm|ecm  가젯의 네트워크 함수 (기본 ncm)
+#   buntos.telnet=1        가젯 네트워크(172.16.42.1:23)에 암호 없는 telnetd를 띄운다
+#   buntos.debug=1         set -x
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux ENV=/etc/profile
+log=/run/buntos/boot.log
+
+say() {
+	echo "$*" >>"$log"
+	echo "<5>bunt-init: $*" >/dev/kmsg 2>/dev/null || echo "bunt-init: $*"
+}
+
+# 커널 명령줄의 값. 여러 번 나오면 마지막 것, 없으면 $2
+arg() {
+	local v
+	v=$(tr ' ' '\n' </proc/cmdline | sed -n "s/^$1=//p" | tail -n 1)
+	echo "${v:-$2}"
+}
+
+# 셸을 띄울 콘솔: console=의 장치 가운데 열리는 것 (UART 포트가 없으면 ttyS0 노드는 있어도 열리지 않는다)
+consoles() {
+	local list t seen=
+	list=$(tr ' ' '\n' </proc/cmdline | sed -n 's/^console=\([^,]*\).*/\1/p')
+	for t in ${list:-tty0 ttyS0}; do
+		case " $seen " in *" $t "*) continue ;; esac
+		[ -c "/dev/$t" ] && stty -F "/dev/$t" >/dev/null 2>&1 && seen="$seen $t"
+	done
+	echo $seen
+}
+
+# 직전 부팅의 기록을 떠 둔다. /sys/fs/pstore의 파일을 지우면 백엔드의 기록도 지워지므로 건드리지 않는다
+keep_pstore() {
+	local f n=0
+	mkdir -p /run/buntos/pstore
+	for f in /sys/fs/pstore/*; do
+		[ -f "$f" ] || continue
+		cp "$f" /run/buntos/pstore/ && n=$((n + 1))
+		say "pstore: ${f##*/} ($(wc -c <"$f") bytes)"
+	done
+	if [ "$n" = 0 ]; then
+		say "pstore: no records from the previous boot (backend: $(cat /sys/module/pstore/parameters/backend 2>/dev/null || echo none))"
+		return
+	fi
+	say "pstore: copied $n records to /run/buntos/pstore"
+	for f in /run/buntos/pstore/console-ramoops*; do
+		[ -f "$f" ] || continue
+		say "previous boot console, last lines (${f##*/}):"
+		tail -n 12 "$f" | while IFS= read -r l; do say "| $l"; done
+	done
+}
+
+# GPT 파티션 이름으로 블록 장치를 찾는다. udev가 없어 /dev/disk/by-partlabel이 없으므로 uevent의 PARTNAME을 본다
+part() {
+	local u
+	for u in /sys/class/block/*/uevent; do
+		grep -qx "PARTNAME=$1" "$u" 2>/dev/null || continue
+		echo "/dev/$(sed -n 's/^DEVNAME=//p' "$u")"
+		return 0
+	done
+	return 1
+}
+
+# 보정값이 든 파티션을 읽기 전용으로 붙인다. 블록 장치부터 읽기 전용으로 두고(쓰기가 커널에서 막힌다),
+# ext4는 noload로 저널을 되살리지 않는다. 읽기 전용으로 두지 못했으면 ext4 ro,noload만 쓴다
+mount_ro() {
+	local dev dir="/mnt/vendor/$1" ok=
+	if ! dev=$(part "$1"); then
+		say "$1: no partition"
+		return 1
+	fi
+	mkdir -p "$dir"
+	if blockdev --setro "$dev"; then
+		mount -t ext4 -o ro,noload "$dev" "$dir" 2>/dev/null || mount -o ro "$dev" "$dir" && ok=1
+	else
+		mount -t ext4 -o ro,noload "$dev" "$dir" && ok=1
+	fi
+	if [ -n "$ok" ]; then
+		say "$1: $dev mounted read-only on $dir"
+	else
+		say "$1: could not mount $dev"
+	fi
+}
+
+gadget() {
+	local udc=$1 g=/sys/kernel/config/usb_gadget/buntos net ifname
+	net=$(arg buntos.usbnet ncm)
+	if [ ! -d /sys/kernel/config/usb_gadget ]; then
+		say "usb gadget: no usb_gadget in configfs (CONFIG_USB_CONFIGFS, libcomposite)"
+		return 1
+	fi
+	mkdir "$g" || return 1
+	echo 0x1d6b >"$g/idVendor"  # Linux Foundation
+	echo 0x0104 >"$g/idProduct" # Multifunction Composite Gadget
+	echo 0x0100 >"$g/bcdDevice"
+	echo 0x0200 >"$g/bcdUSB"
+	# 여러 함수를 묶은 장치(IAD). Windows가 ACM을 알아보게 한다
+	echo 0xef >"$g/bDeviceClass"
+	echo 0x02 >"$g/bDeviceSubClass"
+	echo 0x01 >"$g/bDeviceProtocol"
+	mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409"
+	echo buntOS >"$g/strings/0x409/manufacturer"
+	echo "TB375FC initramfs" >"$g/strings/0x409/product"
+	arg androidboot.serialno buntos >"$g/strings/0x409/serialnumber"
+	echo "ACM + $net" >"$g/configs/c.1/strings/0x409/configuration"
+	echo 500 >"$g/configs/c.1/MaxPower"
+	if ! mkdir "$g/functions/acm.0" "$g/functions/$net.0"; then
+		say "usb gadget: no acm or $net function (usb_f_acm, usb_f_$net)"
+		return 1
+	fi
+	# 고정 MAC(로컬 관리 주소, 02 + "bunt")
+	echo 02:62:75:6e:74:01 >"$g/functions/$net.0/dev_addr"
+	echo 02:62:75:6e:74:02 >"$g/functions/$net.0/host_addr"
+	ln -s "$g/functions/acm.0" "$g/configs/c.1/"
+	ln -s "$g/functions/$net.0" "$g/configs/c.1/"
+	if ! echo "$udc" >"$g/UDC"; then
+		say "usb gadget: could not bind to $udc"
+		return 1
+	fi
+	ifname=$(cat "$g/functions/$net.0/ifname")
+	ip link set lo up
+	ip addr add 172.16.42.1/24 dev "$ifname"
+	ip link set "$ifname" up
+	# 호스트가 172.16.42.2를 저절로 받게 한다. 경로·DNS는 주지 않는다
+	cat >/run/buntos/udhcpd.conf <<-EOF
+		interface $ifname
+		start 172.16.42.2
+		end 172.16.42.2
+		max_leases 1
+		option subnet 255.255.255.0
+		lease_file /run/buntos/udhcpd.leases
+	EOF
+	touch /run/buntos/udhcpd.leases
+	udhcpd /run/buntos/udhcpd.conf
+	echo "ttyGS0::respawn:/bin/sh" >>/etc/inittab && kill -HUP 1
+	say "usb gadget: $udc, acm (shell on ttyGS0) + $net ($ifname 172.16.42.1/24, host 172.16.42.2)"
+	if [ "$(arg buntos.telnet)" = 1 ] && telnetd -b 172.16.42.1 -l /bin/sh; then
+		say "telnetd: 172.16.42.1:23, no password"
+	fi
+}
+
+late() {
+	local wait_s
+	wait_s=$(arg buntos.wait 30)
+	(
+		i=0
+		udc=
+		while [ "$i" -lt "$wait_s" ]; do
+			udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+			[ -n "$udc" ] && break
+			sleep 1
+			i=$((i + 1))
+		done
+		if [ -n "$udc" ]; then
+			gadget "$udc"
+		else
+			say "usb gadget: no UDC within ${wait_s}s (mtu3 in device or dual-role mode)"
+		fi
+	) &
+	(
+		i=0
+		while [ "$i" -lt "$wait_s" ] && ! part nvdata >/dev/null; do
+			sleep 1
+			i=$((i + 1))
+		done
+		for p in nvdata nvcfg persist; do
+			mount_ro "$p"
+		done
+		# MediaTek이 Wi-Fi NVRAM(보정값·MAC)을 두는 자리 (안드로이드 관례, 기기에서 확인한다)
+		f=/mnt/vendor/nvdata/APCFG/APRDEB/WIFI
+		[ -f "$f" ] && say "wifi calibration: $f ($(wc -c <"$f") bytes)"
+	) &
+	wait
+}
+
+main() {
+	mkdir -p /proc /sys /dev /run /tmp /root
+	mount -t proc proc /proc
+	mount -t sysfs sysfs /sys
+	mount -t devtmpfs devtmpfs /dev
+	mkdir -p /dev/pts /run/buntos
+	mount -t devpts devpts /dev/pts
+	[ "$(arg buntos.debug)" = 1 ] && set -x
+
+	say "buntOS TB375FC initramfs ($(cat /etc/buntos/initramfs 2>/dev/null))"
+	say "kernel: $(cat /proc/version)"
+	fold -s -w 200 /proc/cmdline | while IFS= read -r l; do say "cmdline: $l"; done
+	say "device tree: model '$(tr -d '\0' </proc/device-tree/model 2>/dev/null)'," \
+		"compatible '$(tr '\0' ' ' </proc/device-tree/compatible 2>/dev/null)'"
+	# LK가 고친 뒤의 트리. 우리 트리의 무엇을 바꾸는지 견준다(설계안 2.2절)
+	cp /sys/firmware/fdt /run/buntos/fdt.dtb 2>/dev/null && say "device tree from LK saved to /run/buntos/fdt.dtb"
+	if [ -f /etc/buntos/vendor_boot ]; then
+		say "vendor_boot: $(cat /etc/buntos/vendor_boot)"
+	else
+		say "vendor_boot: no buntOS marker (the stock vendor_boot may be in use)"
+	fi
+	l=$(dmesg | grep -m 1 -E 'CPU\(s\) started at EL[0-9]|started in inconsistent modes' | sed 's/^\[[^]]*\] //')
+	say "${l:-CPU: no EL line in dmesg}"
+	l=$(dmesg | grep -m 1 'kvm \[' | sed 's/^\[[^]]*\] //')
+	say "${l:-kvm: no message}$([ -e /dev/kvm ] && echo ', /dev/kvm present')"
+
+	ver=$(uname -r)
+	if [ -d "/lib/modules/$ver" ]; then
+		ok=
+		bad=
+		for m in $(grep -v '^#' /etc/buntos/modules); do
+			if modprobe -q "$m"; then ok="$ok $m"; else bad="$bad $m"; fi
+		done
+		say "modules ($ver):${ok:- none}${bad:+ / failed:$bad}"
+	elif [ -d /lib/modules ]; then
+		say "modules: built for $(ls /lib/modules | tr '\n' ' ')but the kernel is $ver"
+	fi
+
+	mount -t configfs configfs /sys/kernel/config 2>/dev/null
+	mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+	if mount -t pstore pstore /sys/fs/pstore 2>/dev/null; then
+		keep_pstore
+	else
+		say "pstore: could not mount (CONFIG_PSTORE)"
+	fi
+	if [ -e /sys/class/graphics/fb0 ]; then
+		say "display: $(cat /sys/class/graphics/fb0/name) $(cat /sys/class/graphics/fb0/virtual_size)"
+	else
+		say "display: no framebuffer (simple-framebuffer node, simpledrm)"
+	fi
+
+	cons=$(consoles)
+	{
+		for t in $cons; do
+			echo "$t::respawn:/bin/sh"
+		done
+		echo "::once:/init --late"
+		echo "::ctrlaltdel:/sbin/reboot"
+		echo "::shutdown:/bin/sync"
+	} >/etc/inittab
+	say "shells on: ${cons:-none}; log: $log"
+	exec /sbin/init
+}
+
+if [ "$1" = --late ]; then
+	late
+else
+	main
+fi

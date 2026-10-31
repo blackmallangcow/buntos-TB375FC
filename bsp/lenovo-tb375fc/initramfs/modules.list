@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# initramfs에 넣고 init이 이 차례로 올릴 커널 모듈. 커널 설정에서 모듈(=m)인 것만 넣고 내장(=y)이면 건너뛴다.
+# 의존 모듈은 modules.dep을 따라 함께 넣는다. 이름의 -와 _는 같게 본다.
+
+# 화면 콘솔 (LK가 켠 화면을 simple-framebuffer로 받는다)
+simpledrm
+# 직전 부팅 기록 (pstore 백엔드)
+ramoops
+# 워치독. LK가 하드웨어 워치독을 켜 두므로 커널이 받아 먹이지 않으면 기기가 다시 켜진다(커뮤니티 포트의 실측)
+mtk_wdt
+# USB 장치 쪽(UDC)과 가젯 함수 (가젯은 configfs로 만든다)
+configfs
+phy_mtk_tphy
+phy_mtk_xsphy
+mtu3
+libcomposite
+usb_f_acm
+usb_f_ncm
+usb_f_ecm
+# UFS (nvdata·nvcfg·persist)
+phy_mtk_ufs
+ufs_mediatek

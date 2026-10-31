@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# initramfs 셸의 환경. init이 ENV=/etc/profile을 넘겨 대화형 셸마다 읽는다. 화면 콘솔에 한글 글꼴이 없어 영어로 쓴다.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+PS1='tb375fc:\w\$ '
+alias ll='ls -la'
+echo "buntOS initramfs: log /run/buntos/boot.log, pstore /run/buntos/pstore, live fdt /run/buntos/fdt.dtb"
