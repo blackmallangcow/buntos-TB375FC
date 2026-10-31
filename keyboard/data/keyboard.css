@@ -1,0 +1,66 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * 화면 키보드 (iPadOS 키보드를 buntOS 유리 재질로). 색, 모서리, 글자 크기, 그림자는 theme/tokens.css의 --osk-* 와
+ * 공통 토큰만 쓴다. 키 높이는 화면 높이로 정하므로 코드(src/view.rs)가 정한다.
+ * 판의 안쪽 여백과 키 사이 틈(var(--space-1))은 src/view.rs의 PANEL_PADDING, KEY_MARGIN과 같아야 한다.
+ */
+
+.osk {
+  background: var(--osk-bg);
+  padding: var(--space-1);
+  /* 판 위쪽 끝의 밝은 선 (자리를 차지하지 않는다) */
+  box-shadow: inset 0 1px var(--glass-highlight);
+}
+
+.osk-key {
+  margin: var(--space-1);
+  border-radius: var(--radius-md);
+  background: var(--osk-key);
+  box-shadow: var(--osk-key-shadow);
+  color: var(--label);
+  font-family: var(--font-family);
+  font-size: var(--osk-key-text);
+}
+
+/* Shift, 지우기, Return, 쪽 바꾸기, 지구본, 키보드 가리기 */
+.osk-key.function {
+  background: var(--osk-key-function);
+  font-size: var(--osk-function-text);
+}
+
+/* 켠 Shift는 글자 키처럼 밝다 */
+.osk-key.function.on {
+  background: var(--osk-key);
+}
+
+/* 누르는 동안: 글자 키는 어둡게, 기능 키는 밝게 (iPadOS) */
+.osk-slot.pressed > .osk-key {
+  background: var(--osk-key-function);
+}
+
+.osk-slot.pressed > .osk-key.function {
+  background: var(--osk-key);
+}
+
+.osk-key image {
+  color: var(--label);
+}
+
+/* 쉼표·마침표 키 위의 작은 느낌표·물음표 */
+.osk-hint {
+  margin-top: var(--space-1);
+  font-size: var(--text-footnote);
+  color: var(--label-secondary);
+}
+
+/* 누르는 동안 키 위에 뜨는 글자 미리 보기 */
+.osk-preview {
+  border-radius: var(--radius-lg);
+  background: var(--osk-preview-bg);
+  box-shadow: var(--shadow-menu);
+  color: var(--label);
+  font-family: var(--font-family);
+  font-size: var(--osk-preview-text);
+}

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "bunt-keyboard"
+description = "buntOS on-screen keyboard shared by the shell, the login window and the lock screen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 키의 접근성 이름 (i18n/<언어>/bunt-keyboard.ftl)
+bunt-i18n = { path = "../i18n" }
+# 셸(bunt-shell)과 로그인·잠금 화면(bunt-greeter)과 같은 판
+gtk4 = { version = "0.11", features = ["v4_12"] }

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 화면 키보드의 삭제: 왼쪽을 가리키는 칸 안의 X -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" fill-rule="evenodd" d="M5.5 3h8A1.5 1.5 0 0 1 15 4.5v7a1.5 1.5 0 0 1-1.5 1.5h-8L1 8zM6.1 4.3L2.7 8l3.4 3.7h7.4c.1 0 .2-.1.2-.2v-7c0-.1-.1-.2-.2-.2zM7.7 5.3l1.8 1.8 1.8-1.8.9.9L10.4 8l1.8 1.8-.9.9-1.8-1.8-1.8 1.8-.9-.9L8.6 8 6.8 6.2z"/>
+</svg>

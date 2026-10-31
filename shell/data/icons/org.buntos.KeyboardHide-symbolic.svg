@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 화면 키보드의 키보드 가리기: 키보드와 아래쪽 화살표 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" fill-rule="evenodd" d="M2 2h12a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm.4 1.4v5.2h11.2V3.4zM3.5 4.5h1.2v1.2H3.5zm2.2 0h1.2v1.2H5.7zm2.2 0h1.2v1.2H7.9zm2.2 0h1.2v1.2h-1.2zM5 7h6v1H5zM6.2 11.8h3.6L8 14z"/>
+</svg>

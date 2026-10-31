@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 화면 키보드의 Caps Lock(Shift를 두 번): 채운 위쪽 화살표와 밑줄 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" fill-rule="evenodd" d="M8 1L1.5 7.5H5v3h6v-3h3.5zM5 12h6v2.5H5z"/>
+</svg>

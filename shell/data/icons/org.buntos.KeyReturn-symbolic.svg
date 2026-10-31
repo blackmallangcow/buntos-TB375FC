@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 buntOS contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- 화면 키보드의 Return: 아래로 내려와 왼쪽을 가리키는 화살표 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#000" fill-rule="evenodd" d="M13 3h1.5v6.5H4.4l2.3 2.3-1 1-4.1-4.1 4.1-4.1 1 1-2.3 2.3H13z"/>
+</svg>

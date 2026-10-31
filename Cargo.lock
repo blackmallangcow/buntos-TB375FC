@@ -287,6 +287,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bunt-keyboard"
+version = "0.1.0"
+dependencies = [
+ "bunt-i18n",
+ "gtk4",
+]
+
+[[package]]
 name = "bunt-settings"
 version = "0.1.0"
 dependencies = [
