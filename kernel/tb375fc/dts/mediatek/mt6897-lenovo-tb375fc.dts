@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)
+ *
+ * Copyright (c) 2026 buntOS contributors
+ */
+
+/dts-v1/;
+#include "mt6897.dtsi"
+
+/ {
+	model = "Lenovo Xiaoxin Pad Pro 12.7 (TB375FC)";
+	compatible = "lenovo,tb375fc", "mediatek,mt6897";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		stdout-path = "serial0:921600n8";
+
+		/*
+		 * The bootloader drives the panel over both DSI links with DSC
+		 * and scans out one 2944x1840 buffer. TODO(2a): the base is
+		 * from the community port's bootloader log; confirm it on the
+		 * device before enabling this and framebuffer_mem.
+		 */
+		framebuffer0: framebuffer@fc16f000 {
+			compatible = "simple-framebuffer";
+			reg = <0 0xfc16f000 0 (2944 * 1840 * 4)>;
+			width = <2944>;
+			height = <1840>;
+			stride = <(2944 * 4)>;
+			format = "a8r8g8b8";
+			status = "disabled";
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		/* The bootloader fills in the real size (8 or 12 GiB) */
+		reg = <0 0x40000000 0 0x40000000>;
+	};
+};
+
+&reserved_memory {
+	/* The bootloader's three-buffer allocation behind framebuffer0 */
+	framebuffer_mem: framebuffer@fc16f000 {
+		reg = <0 0xfc16f000 0 0x3e90000>;
+		no-map;
+		status = "disabled";
+	};
+
+	/* TODO(2a): confirm this gap survives warm reboots, then enable */
+	ramoops@48090000 {
+		compatible = "ramoops";
+		reg = <0 0x48090000 0 0xe0000>;
+		record-size = <0x20000>;
+		console-size = <0x40000>;
+		pmsg-size = <0x80000>;
+		status = "disabled";
+	};
+};
+
+/* Debug UART, GPIO207 (TX) and GPIO208 (RX) */
+&uart0 {
+	status = "okay";
+};

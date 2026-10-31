@@ -1,0 +1,454 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * MediaTek MT6897 (Dimensity 8300, sold as MT8792 in tablets) SoC
+ *
+ * Copyright (c) 2026 buntOS contributors
+ *
+ * Register and interrupt values come from the SoC device tree in the
+ * Lenovo TB373FU/TB375FC stock firmware and were checked against the
+ * MediaTek downstream mt6897.dts and the community port
+ * https://github.com/u0n0u/tb375fc-linux. Blocks that need the missing
+ * clock, pinctrl and power domain drivers are described but disabled.
+ */
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/phy/phy.h>
+
+/ {
+	compatible = "mediatek,mt6897";
+	interrupt-parent = <&gic>;
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	clk26m: oscillator-26m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+		clock-output-names = "clk26m";
+	};
+
+	clk13m: fixed-factor-clock-13m {
+		compatible = "fixed-factor-clock";
+		#clock-cells = <0>;
+		clocks = <&clk26m>;
+		clock-div = <2>;
+		clock-mult = <1>;
+		clock-output-names = "clk13m";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a510";
+			reg = <0x000>;
+			enable-method = "psci";
+			performance-domains = <&performance 0>;
+			capacity-dmips-mhz = <338>;
+			cpu-idle-states = <&cpu_off_l &cluster_off_l>;
+		};
+
+		cpu1: cpu@100 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a510";
+			reg = <0x100>;
+			enable-method = "psci";
+			performance-domains = <&performance 0>;
+			capacity-dmips-mhz = <338>;
+			cpu-idle-states = <&cpu_off_l &cluster_off_l>;
+		};
+
+		cpu2: cpu@200 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a510";
+			reg = <0x200>;
+			enable-method = "psci";
+			performance-domains = <&performance 0>;
+			capacity-dmips-mhz = <338>;
+			cpu-idle-states = <&cpu_off_l &cluster_off_l>;
+		};
+
+		cpu3: cpu@300 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a510";
+			reg = <0x300>;
+			enable-method = "psci";
+			performance-domains = <&performance 0>;
+			capacity-dmips-mhz = <338>;
+			cpu-idle-states = <&cpu_off_l &cluster_off_l>;
+		};
+
+		cpu4: cpu@400 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a715";
+			reg = <0x400>;
+			enable-method = "psci";
+			performance-domains = <&performance 1>;
+			capacity-dmips-mhz = <1080>;
+			cpu-idle-states = <&cpu_off_m &cluster_off_m>;
+		};
+
+		cpu5: cpu@500 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a715";
+			reg = <0x500>;
+			enable-method = "psci";
+			performance-domains = <&performance 1>;
+			capacity-dmips-mhz = <1080>;
+			cpu-idle-states = <&cpu_off_m &cluster_off_m>;
+		};
+
+		cpu6: cpu@600 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a715";
+			reg = <0x600>;
+			enable-method = "psci";
+			performance-domains = <&performance 1>;
+			capacity-dmips-mhz = <1080>;
+			cpu-idle-states = <&cpu_off_m &cluster_off_m>;
+		};
+
+		cpu7: cpu@700 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a715";
+			reg = <0x700>;
+			enable-method = "psci";
+			performance-domains = <&performance 2>;
+			capacity-dmips-mhz = <1024>;
+			cpu-idle-states = <&cpu_off_b &cluster_off_b>;
+		};
+
+		/* One DynamIQ cluster; the three DVFS domains are performance-domains */
+		cpu-map {
+			cluster0 {
+				core0 {
+					cpu = <&cpu0>;
+				};
+
+				core1 {
+					cpu = <&cpu1>;
+				};
+
+				core2 {
+					cpu = <&cpu2>;
+				};
+
+				core3 {
+					cpu = <&cpu3>;
+				};
+
+				core4 {
+					cpu = <&cpu4>;
+				};
+
+				core5 {
+					cpu = <&cpu5>;
+				};
+
+				core6 {
+					cpu = <&cpu6>;
+				};
+
+				core7 {
+					cpu = <&cpu7>;
+				};
+			};
+		};
+
+		/*
+		 * Only the CPU and cluster power-down states. The deeper MCUSYS
+		 * and system states are coordinated by the SPM and need its
+		 * driver first.
+		 */
+		idle-states {
+			entry-method = "psci";
+
+			cpu_off_l: cpu-off-l {
+				compatible = "arm,idle-state";
+				arm,psci-suspend-param = <0x00010000>;
+				local-timer-stop;
+				entry-latency-us = <126>;
+				exit-latency-us = <251>;
+				min-residency-us = <5700>;
+			};
+
+			cpu_off_m: cpu-off-m {
+				compatible = "arm,idle-state";
+				arm,psci-suspend-param = <0x00010000>;
+				local-timer-stop;
+				entry-latency-us = <77>;
+				exit-latency-us = <179>;
+				min-residency-us = <2520>;
+			};
+
+			cpu_off_b: cpu-off-b {
+				compatible = "arm,idle-state";
+				arm,psci-suspend-param = <0x00010000>;
+				local-timer-stop;
+				entry-latency-us = <52>;
+				exit-latency-us = <129>;
+				min-residency-us = <1890>;
+			};
+
+			cluster_off_l: cluster-off-l {
+				compatible = "arm,idle-state";
+				arm,psci-suspend-param = <0x01010001>;
+				local-timer-stop;
+				entry-latency-us = <143>;
+				exit-latency-us = <420>;
+				min-residency-us = <5700>;
+			};
+
+			cluster_off_m: cluster-off-m {
+				compatible = "arm,idle-state";
+				arm,psci-suspend-param = <0x01010001>;
+				local-timer-stop;
+				entry-latency-us = <82>;
+				exit-latency-us = <253>;
+				min-residency-us = <3020>;
+			};
+
+			cluster_off_b: cluster-off-b {
+				compatible = "arm,idle-state";
+				arm,psci-suspend-param = <0x01010001>;
+				local-timer-stop;
+				entry-latency-us = <46>;
+				exit-latency-us = <150>;
+				min-residency-us = <2460>;
+			};
+		};
+	};
+
+	pmu-a510 {
+		compatible = "arm,cortex-a510-pmu";
+		interrupt-parent = <&gic>;
+		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_HIGH &ppi_cluster0>;
+	};
+
+	pmu-a715 {
+		compatible = "arm,cortex-a715-pmu";
+		interrupt-parent = <&gic>;
+		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_HIGH &ppi_cluster1>;
+	};
+
+	psci {
+		compatible = "arm,psci-1.0";
+		method = "smc";
+	};
+
+	/*
+	 * The bootloader adds its fixed carve-outs (ATF, TEE, GenieZone,
+	 * connsys, framebuffer, ...) here at boot.
+	 */
+	reserved_memory: reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
+
+	timer: timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&gic>;
+		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_PPI 14 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_PPI 11 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_PPI 10 IRQ_TYPE_LEVEL_HIGH 0>;
+		clock-frequency = <13000000>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		dma-ranges = <0 0 0 0 0x10 0>;
+
+		/* CPU DVFS in the MCUPM, one register bank per frequency domain */
+		performance: performance-controller@11bc10 {
+			compatible = "mediatek,cpufreq-hw";
+			reg = <0 0x0011bc10 0 0x120>,
+			      <0 0x0011bd30 0 0x120>,
+			      <0 0x0011be50 0 0x120>;
+			#performance-domain-cells = <1>;
+		};
+
+		/*
+		 * Unlike MT8183..MT8195 the GIC is not at 0x0c000000: that
+		 * range is MCUSYS (mcucfg, CPU PLLs, MCUPM at 0x0c070000).
+		 * Both the shipped SoC tree and the tree the bootloader hands
+		 * to the kernel use this base, as does the community port.
+		 */
+		gic: interrupt-controller@c400000 {
+			compatible = "arm,gic-v3";
+			#interrupt-cells = <4>;
+			#redistributor-regions = <1>;
+			interrupt-parent = <&gic>;
+			interrupt-controller;
+			reg = <0 0x0c400000 0 0x40000>,
+			      <0 0x0c440000 0 0x200000>;
+			interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH 0>;
+
+			ppi-partitions {
+				ppi_cluster0: interrupt-partition-0 {
+					affinity = <&cpu0 &cpu1 &cpu2 &cpu3>;
+				};
+
+				ppi_cluster1: interrupt-partition-1 {
+					affinity = <&cpu4 &cpu5 &cpu6 &cpu7>;
+				};
+			};
+		};
+
+		/*
+		 * 8250_mtk needs a "bus" clock next to "baud". TODO(2b): use the
+		 * pericfg_ao UART gates once clk-mt6897 exists.
+		 */
+		uart0: serial@11001000 {
+			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
+			reg = <0 0x11001000 0 0x1000>;
+			interrupts = <GIC_SPI 250 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&clk26m>, <&clk26m>;
+			clock-names = "baud", "bus";
+			status = "disabled";
+		};
+
+		uart1: serial@11002000 {
+			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
+			reg = <0 0x11002000 0 0x1000>;
+			interrupts = <GIC_SPI 251 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&clk26m>, <&clk26m>;
+			clock-names = "baud", "bus";
+			status = "disabled";
+		};
+
+		uart2: serial@11003000 {
+			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
+			reg = <0 0x11003000 0 0x1000>;
+			interrupts = <GIC_SPI 252 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&clk26m>, <&clk26m>;
+			clock-names = "baud", "bus";
+			status = "disabled";
+		};
+
+		uart3: serial@11004000 {
+			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
+			reg = <0 0x11004000 0 0x1000>;
+			interrupts = <GIC_SPI 253 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&clk26m>, <&clk26m>;
+			clock-names = "baud", "bus";
+			status = "disabled";
+		};
+
+		/* TODO(2b): sys_ck, host_ck (topckgen), frmcnt_ck (pericfg_ao) */
+		ssusb: usb@11201000 {
+			compatible = "mediatek,mt6897-mtu3", "mediatek,mtu3";
+			reg = <0 0x11201000 0 0x2e00>, <0 0x11203e00 0 0x100>;
+			reg-names = "mac", "ippc";
+			interrupts = <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH 0>;
+			phys = <&u2port0 PHY_TYPE_USB2>, <&u3port0 PHY_TYPE_USB3>;
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+			status = "disabled";
+
+			xhci0: usb@11200000 {
+				compatible = "mediatek,mt6897-xhci", "mediatek,mtk-xhci";
+				reg = <0 0x11200000 0 0x1000>;
+				reg-names = "mac";
+				interrupts = <GIC_SPI 161 IRQ_TYPE_LEVEL_HIGH 0>;
+				clocks = <&clk26m>;
+				clock-names = "sys_ck";
+				status = "disabled";
+			};
+		};
+
+		/* TODO(2b): unipro and mp clocks */
+		ufsphy: ufs-phy@112a0000 {
+			compatible = "mediatek,mt8183-ufsphy";
+			reg = <0 0x112a0000 0 0x10000>;
+			#phy-cells = <0>;
+			status = "disabled";
+		};
+
+		/*
+		 * TODO(2b): ufs clock, ufscfg resets, power domain. SPI 177-184
+		 * are the MCQ queue interrupts.
+		 */
+		ufshci: ufshci@112b0000 {
+			compatible = "mediatek,mt8183-ufshci";
+			reg = <0 0x112b0000 0 0x3000>;
+			interrupts = <GIC_SPI 168 IRQ_TYPE_LEVEL_HIGH 0>;
+			phys = <&ufsphy>;
+			status = "disabled";
+		};
+
+		xsphy: xs-phy@11e43000 {
+			compatible = "mediatek,mt6897-xsphy", "mediatek,xsphy";
+			reg = <0 0x11e43000 0 0x200>;
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+			status = "disabled";
+
+			u2port0: usb-phy@11e40000 {
+				reg = <0 0x11e40000 0 0x400>;
+				clocks = <&clk26m>;
+				clock-names = "ref";
+				#phy-cells = <1>;
+			};
+
+			u3port0: usb-phy@11e43400 {
+				reg = <0 0x11e43400 0 0x500>;
+				clocks = <&clk26m>;
+				clock-names = "ref";
+				#phy-cells = <1>;
+			};
+		};
+
+		/* TOPRGU, already running when the bootloader hands over */
+		watchdog: watchdog@1c00a000 {
+			compatible = "mediatek,mt6897-wdt", "mediatek,mt6589-wdt";
+			reg = <0 0x1c00a000 0 0x100>;
+		};
+
+		/*
+		 * SPMI 2.0 arbiter with two buses, laid out like MT8196.
+		 * TODO(2b): PMIC children (MT6363 @4, MT6368 @5, MT6319 @6-8,
+		 * MT6685 @9) and the rcs interrupt (pio EINT 248), which needs
+		 * pinctrl-mt6897.
+		 */
+		spmi: spmi-arbiter@1cc00000 {
+			compatible = "mediatek,mt6897-spmi", "mediatek,mt8196-spmi";
+			ranges = <0 0 0x1cc00000 0x7000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			status = "disabled";
+
+			spmi_m: spmi@4000 {
+				reg = <0x4000 0x900>, <0x1000 0x100>;
+				reg-names = "pmif", "spmimst";
+			};
+
+			spmi_p: spmi@6000 {
+				reg = <0x6000 0x900>, <0x0 0x100>;
+				reg-names = "pmif", "spmimst";
+			};
+		};
+
+		/*
+		 * TODO(2a): the stock kernel does not use the upstream SYST driver,
+		 * so enable this broadcast timer only after a first boot works.
+		 * Until then the hrtimer broadcast covers deep idle.
+		 */
+		systimer: timer@1cc10000 {
+			compatible = "mediatek,mt6897-timer", "mediatek,mt6765-timer";
+			reg = <0 0x1cc10000 0 0x1000>;
+			interrupts = <GIC_SPI 330 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&clk13m>;
+			status = "disabled";
+		};
+	};
+};

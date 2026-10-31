@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * Lenovo Idea Tab Pro (TB373FU), the global version of the TB375FC
+ *
+ * Copyright (c) 2026 buntOS contributors
+ */
+
+#include "mt6897-lenovo-tb375fc.dts"
+
+/ {
+	model = "Lenovo Idea Tab Pro (TB373FU)";
+	compatible = "lenovo,tb373fu", "mediatek,mt6897";
+};
