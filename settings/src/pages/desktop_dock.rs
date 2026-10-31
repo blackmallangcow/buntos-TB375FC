@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 데스크탑 및 Dock (macOS 26과 같은 순서): Dock 크기, 투명도, 최소화된 윈도우 애니메이션,
-//! 자동으로 Dock 가리기, 실행 중 표시, 기본 웹 브라우저. bunt-shell이 같은 설정(org.buntos.shell)을
+//! 자동으로 Dock 가리기, 실행 중 표시, 데스크탑의 항목 보기, 기본 웹 브라우저. bunt-shell이 같은 설정(org.buntos.shell)을
 //! 바로 따른다(최소화 효과는 셸이 컴포지터에 알린다). 투명도는 macOS에 없고 buntOS에서 더했다.
 //! 자동으로 Dock 가리기는 macOS의 켜고 끄는 "자동으로 Dock 가리기와 보기" 대신 숨는 때를 고른다.
 //! 기본 웹 브라우저는 기본 앱 페이지와 같은 값이다
@@ -11,7 +11,9 @@ use std::rc::Rc;
 
 use gtk4::{self as gtk, prelude::*};
 
-use super::{Context, Page, bind_choice, bind_scale, bind_switch, default_apps, shell_settings};
+use super::{
+    Context, Page, bind_choice, bind_scale, bind_switch, default_apps, has_key, shell_settings,
+};
 use crate::widgets::{self, BadgeSize, Tint, badge};
 
 /// 셸이 설치하는 아이콘 (shell/data/icons)
@@ -81,6 +83,22 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
             let (row, indicators) = widgets::switch_row(&tr.get("desktop-dock-indicators"), None);
             bind_switch(&settings, "dock-show-indicators", &indicators);
             dock.append(&row);
+
+            // macOS의 "데스크탑 및 스테이지 매니저" 묶음의 항목 보기(☑ 데스크탑에서). 스테이지 매니저는 없다
+            let desktop = widgets::group(&column, Some(&tr.get("desktop-dock-desktop")), None);
+            let on_desktop = gtk::CheckButton::with_label(&tr.get("desktop-dock-on-desktop"));
+            on_desktop.set_valign(gtk::Align::Center);
+            if has_key(&settings, "desktop-show-items") {
+                settings
+                    .bind("desktop-show-items", &on_desktop, "active")
+                    .build();
+            } else {
+                on_desktop.set_sensitive(false);
+            }
+            desktop.append(&widgets::row(
+                &tr.get("desktop-dock-show-items"),
+                &on_desktop,
+            ));
         }
         None => column.append(&widgets::placeholder(
             ICON,
