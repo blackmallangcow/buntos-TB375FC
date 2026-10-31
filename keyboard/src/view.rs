@@ -274,6 +274,26 @@ impl Keyboard {
         self.0.on_concealed.replace(Some(Rc::new(f)));
     }
 
+    /// 나오기 시작하면 참, 다 들어가면 거짓을 알린다. 잠금·로그인 화면이 그동안 내용의 여백을 줄인다(embed.rs)
+    pub fn connect_reveal_changed(&self, f: impl Fn(bool) + 'static) {
+        let f = Rc::new(f);
+        let shown = f.clone();
+        self.0
+            .revealer
+            .connect_reveal_child_notify(move |revealer| {
+                if revealer.reveals_child() {
+                    shown(true);
+                }
+            });
+        self.0
+            .revealer
+            .connect_child_revealed_notify(move |revealer| {
+                if !revealer.is_child_revealed() && !revealer.reveals_child() {
+                    f(false);
+                }
+            });
+    }
+
     /// 미끄러져 나온다. 숨어 있다 나오면 글자 쪽, Shift 끔으로 시작한다(iPadOS)
     pub fn reveal(&self) {
         if !self.0.revealer.reveals_child() && self.0.board.borrow_mut().reset() {

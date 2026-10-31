@@ -62,6 +62,18 @@ pub fn embed(
     focus::follow_text_focus(window, move |focused| {
         on_focus.decide(|rules| rules.text_input(focused))
     });
+    // 키보드가 나와 있는 동안 창에 keyboard-shown을 단다. 창은 위아래 여백을 줄여 내용이 키보드 위에 들게 한다
+    let target = window.downgrade();
+    keyboard.connect_reveal_changed(move |shown| {
+        let Some(window) = target.upgrade() else {
+            return;
+        };
+        if shown {
+            window.add_css_class("keyboard-shown");
+        } else {
+            window.remove_css_class("keyboard-shown");
+        }
+    });
     let weak = Rc::downgrade(&state);
     keyboard.connect_hide(move || {
         if let Some(state) = weak.upgrade() {

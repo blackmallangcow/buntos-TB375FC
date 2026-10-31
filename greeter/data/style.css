@@ -264,3 +264,18 @@ button.greeter-power:hover {
 .lock-screen .greeter-account {
   margin-bottom: 128px;
 }
+
+/* 화면 키보드가 나와 있으면(bunt-keyboard의 embed가 창에 keyboard-shown을 단다) 위아래 여백을 줄여 사진·암호 칸·단추가
+ * 키보드 위에 든다. 로그인 화면은 다시 시작·시스템 종료 줄이 있어, 그대로면 1280×800에서 키보드를 21px 밀어냈다 */
+.keyboard-shown .greeter-clock {
+  margin-top: 24px;
+}
+
+.keyboard-shown .greeter-account,
+.keyboard-shown.lock-screen .greeter-account {
+  margin-bottom: 24px;
+}
+
+.keyboard-shown .greeter-power-row {
+  margin-bottom: 12px;
+}
