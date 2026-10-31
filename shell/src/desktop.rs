@@ -6,7 +6,8 @@
 //! - 누르면 고르고(⌘·⇧를 누른 채 누르면 더하거나 뺀다), 두 번 누르거나 ⌘O·⌘↓로 기본 앱으로 연다
 //! - 빈 곳에서 드래그하면 반투명 사각형이 나타나고 그 안에 든 항목을 고른다
 //! - 항목을 드래그하면 다른 앱에 파일로 건네고, 데스크탑 안에 놓으면 그 칸으로 옮긴다
-//! - Return은 이름 변경, ⌘⌫는 휴지통으로 이동이다(영구 삭제는 하지 않는다). 단축 메뉴가 있다
+//! - Return은 이름 변경, ⌘⌫는 휴지통으로 이동이다(영구 삭제는 하지 않는다). 단축 메뉴는 오른쪽 단추나 손가락으로
+//!   길게 눌러 연다
 //!
 //! 칸 자리는 이름마다 상태 폴더의 `buntos/desktop-positions`에 적어 다음 로그인에도 쓴다. 창은 누르면
 //! 키보드를 받는다(on-demand). 컴포지터는 창이 없는 곳을 누르면 이 창에 키보드를 준다. 시스템 설정의
@@ -472,14 +473,7 @@ impl Desktop {
             let hit = desktop.item_at(x, y);
             desktop.0.pressed_selected.replace(None);
             if button == gdk::BUTTON_SECONDARY {
-                if let Some(name) = &hit
-                    && !desktop.0.selected.borrow().contains(name)
-                {
-                    desktop.select([name.clone()]);
-                } else if hit.is_none() {
-                    desktop.select([]);
-                }
-                desktop.show_menu(hit.is_some(), x, y);
+                desktop.open_menu_at(x, y);
                 return;
             }
             if button != gdk::BUTTON_PRIMARY {
@@ -520,6 +514,22 @@ impl Desktop {
             }
         });
         area.add_controller(click);
+
+        // 손가락으로 길게 누르면 단축 메뉴를 연다. 터치 화면에는 오른쪽 단추가 없다(iPadOS처럼)
+        let long_press = gtk::GestureLongPress::builder().touch_only(true).build();
+        let weak = Rc::downgrade(&self.0);
+        long_press.connect_pressed(move |gesture, x, y| {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            // 누르는 동안 시작한 드래그해 여러 항목 선택은 그만둔다
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            inner.dragging_marquee.replace(None);
+            inner.marquee.set_visible(false);
+            inner.pressed_selected.replace(None);
+            Desktop(inner).open_menu_at(x, y);
+        });
+        area.add_controller(long_press);
 
         // 빈 곳에서 드래그해 여러 항목 선택. 항목 위에서 시작한 드래그는 항목의 끌어 놓기에 넘긴다
         let drag = gtk::GestureDrag::new();
@@ -868,6 +878,20 @@ impl Desktop {
         drop(items);
         self.0.area.grab_focus();
         self.refresh_soon();
+    }
+
+    /// 그 자리의 단축 메뉴를 연다(오른쪽 단추, 길게 누르기). 고르지 않은 항목이면 그 항목만 고르고, 빈 곳이면 고른
+    /// 것을 푼다
+    fn open_menu_at(&self, x: f64, y: f64) {
+        let hit = self.item_at(x, y);
+        if let Some(name) = &hit
+            && !self.0.selected.borrow().contains(name)
+        {
+            self.select([name.clone()]);
+        } else if hit.is_none() {
+            self.select([]);
+        }
+        self.show_menu(hit.is_some(), x, y);
     }
 
     /// 단축 메뉴. 항목 위면 그 항목들의 메뉴, 빈 곳이면 데스크탑 메뉴다. 동작 묶음은 메뉴에 단다(창에
