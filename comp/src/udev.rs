@@ -369,6 +369,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         .insert_source(
             LibinputInputBackend::new(libinput.clone()),
             |event, _, state| {
+                // 장치가 붙고 떨어지면 입력 모드를 다시 정한다 (input_mode.rs)
+                state.track_input_device(&event);
                 match &event {
                     InputEvent::DeviceAdded { device } => state.pointer_device_added(device),
                     InputEvent::DeviceRemoved { device } => state.pointer_device_removed(device),

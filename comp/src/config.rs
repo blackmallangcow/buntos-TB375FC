@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::input_mode::ModeSetting;
+
 const DEFAULT: &str = include_str!("../data/comp.toml");
 const SYSTEM_PATH: &str = "/etc/buntos/comp.toml";
 /// 설정 파일을 바꾸는 환경 변수. 로그인 화면은 사용자 세션과 다른 셸을 띄운다
@@ -20,6 +22,18 @@ pub struct Config {
     pub session: Session,
     #[serde(default)]
     pub effects: Effects,
+    /// 입력 모드 (input_mode.rs). 없으면 장치로 정한다
+    #[serde(default)]
+    pub input: Input,
+}
+
+/// 입력 모드 (설계안 5.1절)
+#[derive(Debug, Default, Deserialize)]
+pub struct Input {
+    /// "auto"(기본)는 붙은 입력 장치로 정하고, "pointer"·"touch"는 장치와 상관없이 그 모드로 둔다(개발·시험용).
+    /// 모르는 값은 알리고 auto로 읽는다
+    #[serde(default)]
+    pub mode: ModeSetting,
 }
 
 /// 화면 효과
@@ -129,6 +143,8 @@ mod tests {
         // 사용자 세션은 화면을 잠그고, 셸이 끝나도 남는다
         assert!(!config.session.lock.is_empty());
         assert!(!config.session.exit_with_shell);
+        // 입력 모드는 장치로 정한다
+        assert_eq!(config.input.mode, ModeSetting::Auto);
     }
 
     /// 로그인 화면의 설정(greeter/data/root/etc/buntos/greeter.toml): 잠그지 않고, bunt-greeter가 끝나면
@@ -142,6 +158,8 @@ mod tests {
         assert!(config.session.exit_with_shell);
         assert!(config.session.lock.is_empty());
         assert_eq!(config.session.shell, ["bunt-greeter"]);
+        // [input]이 없는 설정도 읽고, 입력 모드는 장치로 정한다
+        assert_eq!(config.input.mode, ModeSetting::Auto);
     }
 
     #[test]

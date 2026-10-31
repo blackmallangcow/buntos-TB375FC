@@ -36,6 +36,8 @@ mod recording;
 mod selection;
 // 터치 화면: 손가락마다의 포커스, 손가락의 창 끌기, 가장자리 스와이프
 mod touch;
+// 입력 장치로 정하는 포인터 모드와 터치 모드
+mod input_mode;
 
 fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

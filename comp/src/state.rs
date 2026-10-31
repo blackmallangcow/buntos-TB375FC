@@ -220,6 +220,8 @@ pub struct BuntState {
     pub session: Session,
     /// 화면에 닿은 손가락, 가장자리 스와이프, 손가락으로 꺼낸 막대 (touch.rs)
     pub touch: crate::touch::Touch,
+    /// 붙은 입력 장치와 입력 모드 (input_mode.rs)
+    pub input_devices: crate::input_mode::InputDevices,
 }
 
 impl BuntState {
@@ -338,6 +340,8 @@ impl BuntState {
         // 화면 잠금(ext-session-lock)과 세션(셸, 로그아웃, logind)
         let session_lock = SessionLock::new(&dh);
         let session = Session::new(&loop_handle, &config)?;
+        // 입력 모드: 장치가 붙기 전에는 comp.toml의 덮어쓰기만 본다
+        let input_devices = crate::input_mode::InputDevices::start(config.input.mode, &dbus);
 
         Ok(Self {
             config,
@@ -388,6 +392,7 @@ impl BuntState {
             session_lock,
             session,
             touch: crate::touch::Touch::default(),
+            input_devices,
         })
     }
 

@@ -155,6 +155,8 @@ pub struct Snapshot {
     pub shell_pid: u32,
     /// 화면을 기록하는 중이다 (recording.rs)
     pub recording: bool,
+    /// 포인터 모드와 터치 모드 (input_mode.rs)
+    pub input_mode: crate::input_mode::InputMode,
 }
 
 /// 에이전트가 보는 창 하나 (GetWindows)
@@ -422,6 +424,8 @@ pub enum Command {
     RecordingChanged(bool),
     /// RecordingSaved 신호를 보낸다: 저장한 화면 기록 파일과 그 미리 보기 그림 (플로팅 썸네일)
     RecordingSaved { path: String, preview: String },
+    /// InputModeChanged 신호를 보낸다: 포인터 모드와 터치 모드가 바뀌었다 (input_mode.rs)
+    InputModeChanged(crate::input_mode::InputMode),
 }
 
 pub struct Service {
@@ -494,6 +498,9 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
             }
             Command::RecordingSaved { path, preview } => {
                 emit(&connection, "RecordingSaved", &(path, preview))
+            }
+            Command::InputModeChanged(mode) => {
+                emit(&connection, "InputModeChanged", &(mode.as_str(),))
             }
         }
     }
@@ -1534,6 +1541,16 @@ impl Api {
     /// 포인터 장치를 연결하거나 뺀 뒤 보낸다
     #[zbus(signal)]
     async fn pointer_devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    /// 입력 모드(설계안 5.1절, input_mode.rs): "pointer"(마우스·트랙패드가 있다) 또는 "touch"(터치스크린만 있다).
+    /// 붙은 입력 장치로 정한다. 셸은 터치 모드에서 누를 영역을 키우고 화면 키보드를 띄운다
+    fn get_input_mode(&self) -> String {
+        self.snapshot.lock().unwrap().input_mode.as_str().to_owned()
+    }
+
+    /// 입력 모드가 바뀐 뒤 보낸다. 모드가 그대로이면 장치가 붙고 떨어져도 보내지 않는다
+    #[zbus(signal)]
+    async fn input_mode_changed(emitter: &SignalEmitter<'_>, mode: &str) -> zbus::Result<()>;
 }
 
 #[cfg(test)]
@@ -1606,5 +1623,92 @@ mod tests {
             answer_within(receiver, Duration::from_millis(1)),
             Err(fdo::Error::Failed(_))
         ));
+    }
+
+    /// 셸과 화면 키보드가 쓰는 입력 모드 API를 진짜 세션 버스에서 본다: 서비스 스레드가 이름을 얻고,
+    /// GetInputMode가 사본의 값을 "s"로 답하고, InputModeChanged(s)가 그 경로·인터페이스로 온다.
+    /// 버스는 dbus-run-session이 띄우고 이 시험을 그 안에서 다시 돌린다. 버스 주소(DBUS_SESSION_BUS_ADDRESS)를
+    /// 바꾸려고 시험 프로세스의 환경 변수를 고치면 다른 시험 스레드와 엉킨다. dbus-run-session이 없으면 건너뛴다
+    #[test]
+    fn input_mode_is_read_and_announced_on_a_session_bus() {
+        use smithay::reexports::calloop::channel;
+        use zbus::proxy::CacheProperties;
+
+        use crate::input_mode::InputMode;
+
+        const DBUS_RUN_SESSION: &str = "/usr/bin/dbus-run-session";
+        const INSIDE: &str = "BUNT_COMP_TEST_SESSION_BUS";
+        const TEST: &str = "dbus::tests::input_mode_is_read_and_announced_on_a_session_bus";
+        const WAIT: Duration = Duration::from_secs(10);
+
+        if std::env::var_os(INSIDE).is_none() {
+            if !std::path::Path::new(DBUS_RUN_SESSION).exists() {
+                eprintln!("no {DBUS_RUN_SESSION}; skipping");
+                return;
+            }
+            let output = std::process::Command::new(DBUS_RUN_SESSION)
+                .arg("--")
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(INSIDE, "1")
+                .output()
+                .unwrap();
+            // 띄운 프로세스의 기록은 실패할 때만 보인다
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let (requests, _channel) = channel::channel();
+        let service = Service::start(requests);
+        let connection = blocking::Connection::session().unwrap();
+        let proxy: blocking::Proxy<'_> = blocking::proxy::Builder::new(&connection)
+            .destination(BUS_NAME)
+            .unwrap()
+            .path(OBJECT_PATH)
+            .unwrap()
+            .interface(INTERFACE)
+            .unwrap()
+            .cache_properties(CacheProperties::No)
+            .build()
+            .unwrap();
+        let input_mode = || proxy.call::<_, _, String>("GetInputMode", &());
+        // 서비스 스레드가 버스에 붙어 이름을 얻을 때까지 기다린다. 장치가 붙기 전에는 포인터 모드다
+        let deadline = std::time::Instant::now() + WAIT;
+        let first = loop {
+            match input_mode() {
+                Ok(mode) => break mode,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(err) => panic!("GetInputMode: {err}"),
+            }
+        };
+        assert_eq!(first, "pointer");
+
+        let signals = proxy.receive_signal("InputModeChanged").unwrap();
+        let (received, signal) = mpsc::channel();
+        std::thread::spawn(move || {
+            for message in signals {
+                if received.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        // 컴포지터가 모드를 바꾸는 차례(input_mode.rs): 사본을 고치고 신호를 보낸다
+        service.update(|snapshot| snapshot.input_mode = InputMode::Touch);
+        service.send(Command::InputModeChanged(InputMode::Touch));
+        let message = signal.recv_timeout(WAIT).expect("InputModeChanged");
+        let body = message.body();
+        assert_eq!(body.signature().to_string(), "s");
+        assert_eq!(body.deserialize::<(String,)>().unwrap().0, "touch");
+        let header = message.header();
+        assert_eq!(header.path().unwrap().as_str(), OBJECT_PATH);
+        assert_eq!(header.interface().unwrap().as_str(), INTERFACE);
+        assert_eq!(input_mode().unwrap(), "touch");
     }
 }
