@@ -883,9 +883,12 @@ impl BuntState {
         }
     }
 
-    /// 포인터 장치가 연결됐다. 마우스 설정을 쓰고 시스템 설정에 알린다
+    /// 포인터 장치가 연결됐다. 마우스 설정을 쓰고 시스템 설정에 알린다. 터치 화면은 포인터를 함께 알려도 마우스로
+    /// 보지 않는다(입력 모드의 나누기와 같다, input_mode.rs)
     fn pointer_device_added(&mut self, device: &InputDevice) {
-        if !device.has_capability(DeviceCapability::Pointer) {
+        if !device.has_capability(DeviceCapability::Pointer)
+            || device.has_capability(DeviceCapability::Touch)
+        {
             return;
         }
         let mut device = device.clone();
