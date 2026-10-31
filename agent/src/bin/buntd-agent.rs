@@ -113,6 +113,8 @@ struct Target {
     off_screen: bool,
     /// 요소가 웹 페이지 안에 있다 (Firefox는 그 동작과 자리를 늦게 알린다)
     web: bool,
+    /// 요소가 드롭다운(콤보 상자)의 열린 목록 안에 있다 (누르기는 목록에서 고르지 않고 포인터로 누른다)
+    drop_down: bool,
 }
 
 /// ref 없는 동작(press, type, scroll)을 받을 창
@@ -1103,6 +1105,7 @@ impl Agent {
             item: Some(target.clone()),
             off_screen: tree.off_screen(target),
             web: tree.in_web_page(target),
+            drop_down: tree.in_drop_down(target),
         })
     }
 
@@ -1183,6 +1186,7 @@ impl Agent {
             parent,
             off_screen,
             web,
+            drop_down,
         } = found;
 
         let roots = [window.clone()];
@@ -1245,13 +1249,29 @@ impl Agent {
                 None,
             ),
             (_, Some(target)) => {
-                let done = match perform(&a11y, &bus, target, parent.as_ref(), web, &params).await?
+                // 드롭다운의 열린 목록 항목은 사람처럼 포인터로 누른다 (perform)
+                let picking = drop_down && params.action == "click";
+                let done = match perform(
+                    &a11y,
+                    &bus,
+                    target,
+                    parent.as_ref(),
+                    web,
+                    drop_down,
+                    &params,
+                )
+                .await?
                 {
                     Some(done) => done,
                     // 접근성 동작이 없는 요소는 사람처럼 포인터로 누른다
                     None => format!(
-                        "{}; it has no accessible action",
-                        pointer_click(&a11y, &bus, &window_title, target).await?
+                        "{}; {}",
+                        pointer_click(&a11y, &bus, &window_title, target).await?,
+                        if picking {
+                            "drop-down list items are clicked with the pointer"
+                        } else {
+                            "it has no accessible action"
+                        }
                     ),
                 };
                 // 앱이 참이라고 답하고도 글을 버리는 일이 있어(Firefox 주소 막대) 멈춘 뒤 다시 읽어 본다
@@ -1409,6 +1429,7 @@ impl Agent {
                     parent: None,
                     off_screen: false,
                     web: false,
+                    drop_down: false,
                 })));
             }
             return match focus.filter(|focus| !focus.layer) {
@@ -1441,6 +1462,7 @@ impl Agent {
                 parent: None,
                 off_screen: false,
                 web: false,
+                drop_down: false,
             })));
         }
         // 트리가 없는 창 (접근성을 켜기 전에 뜬 Firefox, foot 등)
@@ -1852,13 +1874,15 @@ fn window_of(tree: &Tree, path: &str) -> Option<String> {
     }
 }
 
-/// 동작 하나. 접근성 동작을 먼저 쓰고, 목록 항목은 목록에서 고른다
+/// 동작 하나. 접근성 동작을 먼저 쓰고, 목록 항목은 목록에서 고른다. 드롭다운의 열린 목록 항목(`drop_down`)은
+/// 누르기 이름의 동작이 없으면 목록에서 고르거나 하나뿐인 동작을 돌리지 않고 None을 준다(포인터로 누른다)
 async fn perform(
     a11y: &A11y,
     bus: &str,
     target: &Item,
     parent: Option<&Item>,
     web: bool,
+    drop_down: bool,
     params: &ActParams,
 ) -> Result<Option<String>, Failure> {
     let failed = |what: &str, err: zbus::Error| agent_error(format!("{what} failed: {err}"));
@@ -1887,6 +1911,11 @@ async fn perform(
                     .await
                     .map_err(|err| failed("the accessible action", err))?;
                 return Ok(Some(format!("clicked with the accessible action {name:?}")));
+            }
+            // GtkDropDown은 항목을 누를 때 값을 바꾼다. 목록에서 고르기(접근성 Selection)나 항목의 하나뿐인
+            // 동작(listitem.scroll-to)으로는 값이 그대로여서, 시스템 설정의 드롭다운에서 고른 항목이 들지 않았다
+            if drop_down {
+                return Ok(None);
             }
             if let Some((list, index)) = selectable {
                 a11y.select_child(bus, list, index)

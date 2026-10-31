@@ -440,6 +440,13 @@ impl<'a> Tree<'a> {
             .any(|parent| parent.role == role::DOCUMENT_WEB)
     }
 
+    /// 드롭다운(콤보 상자)의 열린 목록 안의 요소인가. GtkDropDown은 항목을 누를 때 값을 바꾸므로, 목록에서
+    /// 고르기(접근성 Selection)만 하면 목록 안의 표시만 바뀌고 값은 그대로다
+    pub fn in_drop_down(&self, item: &Item) -> bool {
+        self.ancestors(item)
+            .any(|parent| parent.role == role::COMBO_BOX)
+    }
+
     /// 부모부터 위로 (부모가 고리를 이루는 잘못된 목록에서는 MAX_DEPTH에서 멈춘다)
     fn ancestors<'s>(&'s self, item: &Item) -> impl Iterator<Item = &'a Item> + 's {
         std::iter::successors(self.get(&item.parent), |parent| self.get(&parent.parent))
@@ -996,6 +1003,22 @@ mod tests {
         assert!(!document.busy());
         document.states |= state::BUSY;
         assert!(document.busy());
+    }
+
+    #[test]
+    fn items_of_an_open_drop_down_are_known() {
+        // 시스템 설정의 최소화된 윈도우 애니메이션: 드롭다운(콤보 상자) 아래 열린 목록의 항목. 사이드바 목록의
+        // 항목은 드롭다운 안이 아니다
+        let window = item("/w", "", 0, role::FRAME, "시스템 설정");
+        let drop_down = item("/c", "/w", 0, role::COMBO_BOX, "지니 효과");
+        let list = item("/l", "/c", 0, role::LIST, "");
+        let choice = item("/i", "/l", 1, role::LIST_ITEM, "크기 조절 효과");
+        let sidebar = item("/s", "/w", 1, role::LIST, "");
+        let row = item("/r", "/s", 0, role::LIST_ITEM, "Wi-Fi");
+        let items = vec![window, drop_down, list, choice, sidebar, row];
+        let tree = Tree::new(&items);
+        assert!(tree.in_drop_down(&items[3]));
+        assert!(!tree.in_drop_down(&items[5]) && !tree.in_drop_down(&items[1]));
     }
 
     #[test]
