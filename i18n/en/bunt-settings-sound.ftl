@@ -23,8 +23,8 @@ sound-alert-none = None
 sound-output-input = Output & Input
 sound-output = Output
 sound-input = Input
-sound-no-output = No Output Devices
-sound-no-input = No Input Devices
+sound-no-output = No audio output devices found
+sound-no-input = No audio input devices found
 # Device type in the device list
 sound-kind-built-in = Built-in
 sound-kind-hdmi = HDMI

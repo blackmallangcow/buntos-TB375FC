@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 사운드: macOS 26 시스템 설정 > 사운드를 따른다.
-//! - 사운드 효과: 경고음과 경고음 음량. 셸 설정(org.buntos.shell의 alert-sound, alert-volume)에 두고, 셸이 앱이
+//! - 사운드 효과: 경고음과 알림 음량. 셸 설정(org.buntos.shell의 alert-sound, alert-volume)에 두고, 셸이 앱이
 //!   소리를 정하지 않은 알림에 낸다. 고르거나 음량 막대를 놓으면 그 소리를 한 번 들려준다
 //! - 출력 및 입력: [출력 | 입력] 단추로 장치 목록을 바꿔 본다. 줄을 누르면 기본 장치가 된다. 출력 쪽은 출력 음량,
-//!   음소거, 균형(채널이 하나인 장치는 숨긴다), 입력 쪽은 입력 음량과 입력 레벨이다
+//!   소리 끔, 밸런스(채널이 하나인 장치는 숨긴다), 입력 쪽은 입력 음량과 입력 레벨이다
 //! - 장치와 음량은 셸의 사운드 메뉴와 같은 bunt-sound(wpctl, pw-dump, pw-cli)로 읽고 바꾼다. 페이지가 보이는 동안
 //!   몇 초마다 다시 읽어 메뉴 막대나 키로 바꾼 음량을 따라간다
 //! - 입력 레벨은 입력 쪽이 보이는 동안만 기본 입력 장치를 녹음해(pw-record) 잰다. 녹음한 소리는 남기지 않는다
@@ -37,11 +37,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const SET_DELAY: Duration = Duration::from_millis(60);
 /// 사람이 막대를 움직인 뒤 이만큼은 다시 읽은 값으로 막대를 옮기지 않는다
 const HOLD_AFTER_CHANGE: Duration = Duration::from_millis(1500);
-/// 경고음 음량 막대를 놓은 뒤 소리를 들려주기까지
+/// 알림 음량 막대를 놓은 뒤 소리를 들려주기까지
 const PREVIEW_DELAY: Duration = Duration::from_millis(300);
 /// 입력 레벨 막대의 칸 수
 const LEVEL_BLOCKS: f64 = 15.0;
-/// 균형 막대가 가운데에 붙는 거리
+/// 밸런스 막대가 가운데에 붙는 거리
 const BALANCE_SNAP: f64 = 0.05;
 /// 음량 막대의 너비 (widgets::slider_row와 같다)
 const SLIDER_WIDTH: i32 = 260;
@@ -257,7 +257,7 @@ pub fn build(context: &Rc<Context>) -> gtk::Widget {
                 && !page.updating.get()
             {
                 let mut value = scale.value();
-                // 균형은 가운데 가까이 오면 가운데에 붙는다
+                // 밸런스는 가운데 가까이 오면 가운데에 붙는다
                 if control == Control::Balance && value.abs() < BALANCE_SNAP {
                     value = 0.0;
                 }
@@ -307,7 +307,7 @@ fn volume_scale() -> gtk::Scale {
     scale
 }
 
-/// 양 끝에 작은·큰 기호가 붙은 막대 (macOS의 음량 막대). 오른쪽에 체크 상자(음소거)를 둘 수 있다
+/// 양 끝에 작은·큰 기호가 붙은 막대 (macOS의 음량 막대). 오른쪽에 체크 상자(소리 끔)를 둘 수 있다
 fn icon_slider(
     scale: &gtk::Scale,
     low: &str,
@@ -332,7 +332,7 @@ fn icon_slider(
     control
 }
 
-/// 경고음과 경고음 음량. 셸 설정이 없으면(셸이 없는 이미지) 묶음을 끈다
+/// 경고음과 알림 음량. 셸 설정이 없으면(셸이 없는 이미지) 묶음을 끈다
 fn sound_effects(context: &Rc<Context>, column: &gtk::Box) {
     let tr = &context.tr;
     let group = widgets::group(column, Some(&tr.get("sound-effects")), None);
@@ -452,7 +452,7 @@ fn alert_label(tr: &bunt_i18n::Translations, name: &str) -> String {
     }
 }
 
-/// 고른 경고음을 경고음 음량으로 한 번 들려준다 (셸의 알림 소리와 같은 계산)
+/// 고른 경고음을 알림 음량으로 한 번 들려준다 (셸의 알림 소리와 같은 계산)
 fn preview(settings: &gio::Settings) {
     let name = settings.string("alert-sound");
     let level = settings.double("alert-volume").clamp(0.0, 1.0);
@@ -662,7 +662,7 @@ impl SoundPage {
                 let Some(volume) = self.output.borrow().clone() else {
                     return;
                 };
-                // macOS처럼 음량을 올리면 음소거가 풀린다
+                // macOS처럼 음량을 올리면 소리 끔이 풀린다
                 if volume.muted && value > 0.0 {
                     run::set_mute(DEFAULT_SINK, false).await;
                 }

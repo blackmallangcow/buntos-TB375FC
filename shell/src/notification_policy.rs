@@ -227,8 +227,8 @@ pub fn sound_file(
     theme::find(alert_sound, sound_theme, dirs)
 }
 
-/// 알림 소리를 낸다. 음량은 경고음 음량(alert-volume, 사람이 보는 세제곱 눈금)을 스트림 음량(선형)으로 바꿔 쓴다.
-/// 출력 음량에 곱해진다(macOS의 경고음 음량과 같다)
+/// 알림 소리를 낸다. 음량은 알림 음량(alert-volume, 사람이 보는 세제곱 눈금)을 스트림 음량(선형)으로 바꿔 쓴다.
+/// 출력 음량에 곱해진다(macOS의 알림 음량과 같다)
 pub fn play_sound(sound_file_hint: Option<&str>, sound_name_hint: Option<&str>, suppress: bool) {
     let shell = crate::shell_settings();
     let alert_sound = shell

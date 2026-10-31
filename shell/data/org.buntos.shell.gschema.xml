@@ -133,7 +133,7 @@ bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock",
     <key name="alert-volume" type="d">
       <range min="0.0" max="1.0"/>
       <default>0.75</default>
-      <summary>경고음 음량 (사람이 보는 세제곱 눈금). 출력 음량에 곱한다</summary>
+      <summary>알림 음량 (사람이 보는 세제곱 눈금). 출력 음량에 곱한다</summary>
     </key>
     <key name="notification-previews" type="s">
       <choices>
