@@ -28,7 +28,7 @@ use smithay::{
         },
         egl::{EGLContext, EGLDisplay, context::ContextPriority},
         input::InputEvent,
-        libinput::{LibinputInputBackend, LibinputSessionInterface},
+        libinput::LibinputSessionInterface,
         renderer::{
             ImportDma, ImportMemWl,
             element::{
@@ -364,23 +364,24 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     libinput
         .udev_assign_seat(&seat_name)
         .map_err(|()| "failed to assign libinput seat")?;
+    // 좌석을 붙이며 쌓인 장치 추가 이벤트는 fd를 읽히게 하지 않으므로 첫 루프에서 꺼내게 깨운다
+    // (libinput_source.rs). 세션이 돌아와 libinput을 다시 켤 때도 같다
+    let (input, wake_input) = crate::libinput_source::LibinputSource::new(libinput.clone())?;
+    wake_input.ping();
     event_loop
         .handle()
-        .insert_source(
-            LibinputInputBackend::new(libinput.clone()),
-            |event, _, state| {
-                // 장치가 붙고 떨어지면 입력 모드를 다시 정한다 (input_mode.rs)
-                state.track_input_device(&event);
-                match &event {
-                    InputEvent::DeviceAdded { device } => state.pointer_device_added(device),
-                    InputEvent::DeviceRemoved { device } => state.pointer_device_removed(device),
-                    _ => {}
-                }
-                state.process_input_event(event);
-                // 키와 단추는 컴포지터가 그리는 것(스크린샷 영역, 막대, 창 자리)도 바꾼다
-                state.queue_redraw_all();
-            },
-        )
+        .insert_source(input, |event, _, state| {
+            // 장치가 붙고 떨어지면 입력 모드를 다시 정한다 (input_mode.rs)
+            state.track_input_device(&event);
+            match &event {
+                InputEvent::DeviceAdded { device } => state.pointer_device_added(device),
+                InputEvent::DeviceRemoved { device } => state.pointer_device_removed(device),
+                _ => {}
+            }
+            state.process_input_event(event);
+            // 키와 단추는 컴포지터가 그리는 것(스크린샷 영역, 막대, 창 자리)도 바꾼다
+            state.queue_redraw_all();
+        })
         .map_err(|err| err.error)?;
 
     event_loop
@@ -394,6 +395,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 if libinput.resume().is_err() {
                     tracing::warn!("failed to resume libinput");
                 }
+                wake_input.ping();
                 if let Err(err) = state.backend.output_manager.activate(false) {
                     tracing::warn!("failed to activate DRM device: {err}");
                 }

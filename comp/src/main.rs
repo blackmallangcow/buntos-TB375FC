@@ -14,6 +14,7 @@ mod gpu;
 mod grabs;
 mod ime;
 mod input;
+mod libinput_source;
 mod panels;
 mod prefs;
 mod render;
