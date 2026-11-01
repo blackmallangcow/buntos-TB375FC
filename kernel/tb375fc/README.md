@@ -13,7 +13,7 @@ TB375FC(Lenovo Xiaoxin Pad Pro 12.7 2025, MediaTek MT6897)용 mainline 커널 �
 | `build.sh` | 원본 받기(sha256 확인), 작업 트리에 패치·장치 트리 얹기, 설정 합치기, 빌드. 이미지용 커널 .deb(`image-config`·`image`) |
 | `debian-config.sh` | 이미지용 설정. 이미지와 같은 시점의 Debian forky 커널 설정(서명·sha256 확인)에 조각을 얹고, 빠진 값을 알린다. `build.sh image-config`가 이미지용 작업 트리로 부른다(`KERNEL_TREE`·`KERNEL_OUT`·`STRICT=1`) |
 | `config/tb375fc.config` | 보드 설정 조각. 단계(2a~2e, 3)별로 묶었다. 7.2.12에 있는 기호만 쓴다 |
-| `patches/series` | 패치 대기열과 다음 차례. 0001 장치 트리 빌드 목록, 0002·0003 SPMI 업스트림 고침 백포트, 0004~0006 MT6897 핀 컨트롤러(바인딩, pinmux 매크로, 드라이버), 0007·0008 SPMI 고침(업스트림에 없음), 0009~0013 MT6897 클럭(바인딩, HW voter syscon, FENC 없는 HW voter 먹스, PLL HW voter, 드라이버), 0014~0016 MFD `mtk-spmi-pmic`(업스트림 v12 백포트와 고침), 0017·0018 MT6363 키, 0019~0022 MT6897 UFS(PHY·호스트 바인딩과 드라이버), 0023~0026 MT6368(regulator 바인딩·드라이버, MFD 데이터), 0027~0031 터치·펜(핀 drive-strength, pinmux 헤더 고침, SPI 바인딩의 MT6897, NT36532 터치 바인딩·드라이버) |
+| `patches/series` | 패치 대기열과 다음 차례. 0001 장치 트리 빌드 목록, 0002·0003 SPMI 업스트림 고침 백포트, 0004~0006 MT6897 핀 컨트롤러(바인딩, pinmux 매크로, 드라이버), 0007·0008 SPMI 고침(업스트림에 없음), 0009~0013 MT6897 클럭(바인딩, HW voter syscon, FENC 없는 HW voter 먹스, PLL HW voter, 드라이버), 0014~0016 MFD `mtk-spmi-pmic`(업스트림 v12 백포트와 고침), 0017·0018 MT6363 키, 0019~0022 MT6897 UFS(PHY·호스트 바인딩과 드라이버), 0023~0026 MT6368(regulator 바인딩·드라이버, MFD 데이터), 0027~0031 터치·펜(핀 drive-strength, pinmux 헤더 고침, SPI 바인딩의 MT6897, NT36532 터치 바인딩·드라이버), 0037~0041 MT6363 regulator 고침(8비트 값 regmap, VEMC 전압, OC 처리, VSRAM 레지스터. 업스트림에 낼 것) |
 | `dts/mediatek/` | `mt6897.dtsi`, `mt6897-lenovo-tb375fc.dts`, `mt6897-lenovo-tb373fu.dts`. 값의 출처와 할 일은 `dts/README.md` |
 
 ## 빌드
