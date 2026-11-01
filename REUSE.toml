@@ -20,9 +20,11 @@ precedence = "closest"
 SPDX-FileCopyrightText = "2026 buntOS contributors"
 SPDX-License-Identifier = "GPL-3.0-or-later"
 
-# TB375FC 커널 패치는 Linux에 얹으므로 리눅스와 같은 GPL-2.0-only다. 패치 파일 안에는 머리를 달 수 없다
+# TB375FC 커널 패치는 Linux에 얹으므로 리눅스와 같은 GPL-2.0-only다. 패치 파일 안에는 머리를 달 수 없다.
+# 패치 본문의 SPDX·저작권 줄은 패치가 더하는 리눅스 파일의 머리라서 패치 파일의 것으로 읽지 않는다(override).
+# 패치마다 지은이는 From:에, 코드의 저작권은 그 파일 머리에 있다
 [[annotations]]
 path = ["kernel/tb375fc/patches/**"]
-precedence = "aggregate"
+precedence = "override"
 SPDX-FileCopyrightText = "2026 buntOS contributors"
 SPDX-License-Identifier = "GPL-2.0-only"

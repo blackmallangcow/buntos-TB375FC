@@ -303,6 +303,40 @@
 		};
 
 		/*
+		 * 232 GPIOs and the five EINT blocks. EINTs 232-249 have no
+		 * pin; the driver gives them virtual GPIOs (the SPMI rcs
+		 * interrupt is EINT 248). TODO(2b): enable together with SPMI.
+		 */
+		pio: pinctrl@10005000 {
+			compatible = "mediatek,mt6897-pinctrl";
+			reg = <0 0x10005000 0 0x1000>,
+			      <0 0x11b20000 0 0x1000>,
+			      <0 0x11c00000 0 0x1000>,
+			      <0 0x11d30000 0 0x1000>,
+			      <0 0x11d40000 0 0x1000>,
+			      <0 0x11d50000 0 0x1000>,
+			      <0 0x11ea0000 0 0x1000>,
+			      <0 0x11eb0000 0 0x1000>,
+			      <0 0x11f20000 0 0x1000>,
+			      <0 0x11f30000 0 0x1000>,
+			      <0 0x11ce0000 0 0x1000>,
+			      <0 0x11de0000 0 0x1000>,
+			      <0 0x11e90000 0 0x1000>,
+			      <0 0x11fe0000 0 0x1000>,
+			      <0 0x1c01e000 0 0x1000>;
+			reg-names = "base", "rt", "rm", "bl", "bm", "br",
+				    "lb", "lt", "tm", "tl", "eint-e", "eint-s",
+				    "eint-w", "eint-n", "eint-c";
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pio 0 0 232>;
+			interrupt-controller;
+			interrupts = <GIC_SPI 309 IRQ_TYPE_LEVEL_HIGH 0>;
+			#interrupt-cells = <2>;
+			status = "disabled";
+		};
+
+		/*
 		 * 8250_mtk needs a "bus" clock next to "baud". TODO(2b): use the
 		 * pericfg_ao UART gates once clk-mt6897 exists.
 		 */
