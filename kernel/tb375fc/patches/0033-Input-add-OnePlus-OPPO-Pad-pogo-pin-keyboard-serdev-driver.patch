@@ -63,17 +63,36 @@ Signed-off-by: Yibo Wang <wyibo6109@gmail.com>
       the keyboard has just lost power. Annotate the state read without it.
     - Do not take a battery frame that the keyboard pushes for the reply to
       a general command.
-  - Add system sleep support: tell the keyboard about it, stop watching the
-    heartbeats and, with wakeup-source, let an edge on the wake line wake the
-    system. v6 left the keyboard running and power cycled it on resume, when
-    the heartbeat had timed out. ]
+  - Shut the TX gate when the echo of the frame comes back, instead of 300 us
+    after serdev_device_wait_until_sent(). On a UART without DMA that call
+    finds the last bytes still in the FIFO and sleeps in whole jiffies, so
+    the gate stayed open for milliseconds past the frame, in the way of the
+    reply. The vendor drivers shut it 300 us after the DMA completion, from
+    a callback in their 8250 driver, which serdev has no counterpart of. A
+    fixed time after the write would cut a frame that starts late because
+    the UART port has to resume first.
+  - Queue the delayed works on one workqueue only. On two, a work can overlap
+    itself, and a power on could finish after the power off that followed it.
+  - Check and change wake_irq_enabled in one step under a lock. The ISR could
+    run in between and leave the irq disabled twice.
+  - Forget the caps lock state along with the input devices, as the next ones
+    start with the LED off.
+  - Add system sleep support. Tell the keyboard about it and, with
+    wakeup-source, let an edge on the wake line wake the system. v6 left the
+    keyboard running and power cycled it on resume, when the heartbeat had
+    timed out. Disable the works until resume, as a late edge or frame would
+    start them again while the devices go down. Power off a keyboard still
+    coming up, which cannot be told. Leave the wake line off if the keyboard
+    did not take the notification, for which the vendor drivers check the
+    status in the reply. Let go of the keys and fingers, as the input core
+    leaves the slots and old_keys and a key pressed again would get lost. ]
 
 ---
  MAINTAINERS                               |    1 +
  drivers/input/keyboard/Kconfig            |   13 +
  drivers/input/keyboard/Makefile           |    1 +
- drivers/input/keyboard/oneplus-pogo-kbd.c | 1345 +++++++++++++++++++++
- 4 files changed, 1360 insertions(+)
+ drivers/input/keyboard/oneplus-pogo-kbd.c | 1396 +++++++++++++++++++++
+ 4 files changed, 1411 insertions(+)
 
 diff --git a/MAINTAINERS b/MAINTAINERS
 index cb3b635..22f97b2 100644
@@ -123,10 +142,10 @@ index 60bb7ba..3554c50 100644
  obj-$(CONFIG_KEYBOARD_PMIC8XXX)		+= pmic8xxx-keypad.o
 diff --git a/drivers/input/keyboard/oneplus-pogo-kbd.c b/drivers/input/keyboard/oneplus-pogo-kbd.c
 new file mode 100644
-index 0000000..0e76739
+index 0000000..1b286cc
 --- /dev/null
 +++ b/drivers/input/keyboard/oneplus-pogo-kbd.c
-@@ -0,0 +1,1345 @@
+@@ -0,0 +1,1396 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * OnePlus / OPPO Pad pogo-pin keyboard driver (Tinno keyboard MCU)
@@ -158,6 +177,7 @@ index 0000000..0e76739
 +#include <linux/interrupt.h>
 +#include <linux/jiffies.h>
 +#include <linux/kernel.h>
++#include <linux/ktime.h>
 +#include <linux/leds.h>
 +#include <linux/module.h>
 +#include <linux/mutex.h>
@@ -215,7 +235,7 @@ index 0000000..0e76739
 +
 +/* timing, all derived from the vendor driver */
 +#define POGO_TX_GATE_ON_US	450
-+#define POGO_TX_GATE_OFF_US	300
++#define POGO_TX_GATE_MAX_MS	5	/* ours: when the echo of a frame does not come */
 +#define POGO_ECHO_TIMEOUT_MS	50
 +#define POGO_RESP_TIMEOUT_MS	100
 +#define POGO_XFER_RETRIES	3
@@ -306,6 +326,7 @@ index 0000000..0e76739
 +	struct gpio_desc *tx_en_gpio;
 +	struct gpio_desc *wake_gpio;
 +	int wake_irq;
++	spinlock_t wake_lock;	/* wake_irq_enabled, with the irq it stands for */
 +	bool wake_irq_enabled;
 +	bool wake_armed;
 +
@@ -339,6 +360,7 @@ index 0000000..0e76739
 +	u8 mac[POGO_MAC_LEN];
 +	int battery_level;
 +
++	/* each on one workqueue only, which keeps it from overlapping itself */
 +	struct delayed_work detect_work;
 +	struct delayed_work hb_work;
 +	struct work_struct plug_work;
@@ -456,6 +478,11 @@ index 0000000..0e76739
 +/* ------------------------------------------------------------------------ */
 +/* host -> keyboard                                                         */
 +
++static bool pogo_wait_echo(struct pogo_kbd *kb, unsigned int ms)
++{
++	return wait_for_completion_timeout(&kb->echo_done, msecs_to_jiffies(ms));
++}
++
 +/*
 + * Send cmd/payload and optionally wait for the cmd + 1 reply.  The reply
 + * (cmd, len, data...) is copied to @resp when non-NULL and its length is
@@ -467,6 +494,8 @@ index 0000000..0e76739
 +	u8 frame[OWB_TX_BUF_LEN];
 +	unsigned int frame_len;
 +	int attempt, ret = -ETIMEDOUT;
++	s64 gate_us = 0;
++	ktime_t start;
 +
 +	if (len > OWB_MAX_PAYLOAD)
 +		return -EINVAL;
@@ -476,7 +505,7 @@ index 0000000..0e76739
 +
 +	mutex_lock(&kb->io_lock);
 +	for (attempt = 0; attempt < POGO_XFER_RETRIES; attempt++) {
-+		bool echoed;
++		bool echoed = false;
 +
 +		/*
 +		 * A late echo or reply of the previous attempt is as good as
@@ -493,28 +522,30 @@ index 0000000..0e76739
 +		gpiod_set_value_cansleep(kb->tx_en_gpio, 1);
 +		usleep_range(POGO_TX_GATE_ON_US, POGO_TX_GATE_ON_US + 50);
 +
++		start = ktime_get();
 +		ret = serdev_device_write(kb->serdev, frame, frame_len,
 +					  msecs_to_jiffies(POGO_RESP_TIMEOUT_MS));
-+		if (ret >= 0)
-+			serdev_device_wait_until_sent(kb->serdev,
-+						      msecs_to_jiffies(20));
 +
 +		/*
-+		 * Release the wire as soon as the last bit is out: the MCU
-+		 * answers within a few hundred microseconds and would collide
-+		 * with our idle-high TX driver otherwise.  The echo is only
-+		 * checked afterwards, it is already queued in the tty buffer.
++		 * Release the wire as soon as the frame is out: the MCU answers
++		 * within a few hundred microseconds and would collide with our
++		 * idle-high TX driver otherwise.  The echo says when.  The serial
++		 * core only polls the transmitter in whole jiffies, and a fixed
++		 * time would cut a frame that starts late because the port had
++		 * to resume first.
 +		 */
-+		usleep_range(POGO_TX_GATE_OFF_US, POGO_TX_GATE_OFF_US + 50);
++		if (ret >= 0)
++			echoed = pogo_wait_echo(kb, POGO_TX_GATE_MAX_MS);
 +		gpiod_set_value_cansleep(kb->tx_en_gpio, 0);
-+
-+		echoed = wait_for_completion_timeout(&kb->echo_done,
-+						     msecs_to_jiffies(POGO_ECHO_TIMEOUT_MS)) != 0;
++		gate_us = ktime_us_delta(ktime_get(), start);
 +
 +		if (ret < 0) {
 +			dev_warn(kb->dev, "cmd 0x%02x write failed: %d\n", cmd, ret);
 +			continue;
 +		}
++		/* it can still be on its way through the tty buffer */
++		if (!echoed)
++			echoed = pogo_wait_echo(kb, POGO_ECHO_TIMEOUT_MS);
 +		if (!echoed) {
 +			dev_dbg(kb->dev, "cmd 0x%02x: no echo\n", cmd);
 +			ret = -EIO;
@@ -531,6 +562,8 @@ index 0000000..0e76739
 +			ret = min(kb->resp_len, resp_size);
 +			memcpy(resp, kb->resp, ret);
 +			spin_unlock(&kb->xfer_lock);
++			dev_dbg(kb->dev, "cmd 0x%02x: %u bytes, gate shut after %lld us, reply after %lld us\n",
++				cmd, frame_len, gate_us, ktime_us_delta(ktime_get(), start));
 +			break;
 +		}
 +		dev_dbg(kb->dev, "cmd 0x%02x: no reply\n", cmd);
@@ -556,6 +589,9 @@ index 0000000..0e76739
 +		return ret;
 +	if (ret < 3 || resp[0] != OWB_CMD_GENERAL_ACK || resp[2] != sub)
 +		return -EPROTO;
++	/* the sleep notification comes back with a status, 1 when the MCU took it */
++	if (sub == OWB_GEN_SLEEP && ret >= 6 && resp[5] != 1)
++		return -EIO;
 +	return 0;
 +}
 +
@@ -813,6 +849,9 @@ index 0000000..0e76739
 +		input_unregister_device(tp);
 +	if (kbd)
 +		input_unregister_device(kbd);
++
++	/* the next input devices start with the LED off */
++	kb->caps_led = false;
 +}
 +
 +/* ------------------------------------------------------------------------ */
@@ -995,22 +1034,18 @@ index 0000000..0e76739
 +
 +static void pogo_wake_irq_enable(struct pogo_kbd *kb, bool enable)
 +{
-+	if (enable == READ_ONCE(kb->wake_irq_enabled))
-+		return;
-+	if (enable) {
-+		/*
-+		 * Update the state before enabling: the ISR may fire on
-+		 * another CPU the moment enable_irq() runs and flip the
-+		 * state to false; assigning after enable_irq() would
-+		 * clobber that and desynchronise software and hardware.
-+		 */
-+		WRITE_ONCE(kb->wake_irq_enabled, true);
-+		enable_irq(kb->wake_irq);
-+	} else {
-+		/* disable_irq() waits for a running ISR before returning */
-+		disable_irq(kb->wake_irq);
-+		WRITE_ONCE(kb->wake_irq_enabled, false);
++	unsigned long flags;
++
++	/* the ISR turns the irq off too, so the check and the change are one step */
++	spin_lock_irqsave(&kb->wake_lock, flags);
++	if (enable != kb->wake_irq_enabled) {
++		kb->wake_irq_enabled = enable;
++		if (enable)
++			enable_irq(kb->wake_irq);
++		else
++			disable_irq_nosync(kb->wake_irq);
 +	}
++	spin_unlock_irqrestore(&kb->wake_lock, flags);
 +}
 +
 +static void pogo_power_on(struct pogo_kbd *kb)
@@ -1102,8 +1137,8 @@ index 0000000..0e76739
 +
 +	timeout = connected ? POGO_HB_TIMEOUT_MS : POGO_BOOT_TIMEOUT_MS;
 +	if (time_before(jiffies, READ_ONCE(kb->last_rx) + msecs_to_jiffies(timeout))) {
-+		schedule_delayed_work(&kb->hb_work,
-+				      msecs_to_jiffies(POGO_HB_POLL_MS));
++		queue_delayed_work(system_dfl_wq, &kb->hb_work,
++				   msecs_to_jiffies(POGO_HB_POLL_MS));
 +		return;
 +	}
 +
@@ -1116,7 +1151,7 @@ index 0000000..0e76739
 +	retry_ms = kb->retry_ms;
 +	kb->retry_ms = min(retry_ms * 2, POGO_RETRY_MAX_MS);
 +	mutex_unlock(&kb->state_lock);
-+	schedule_delayed_work(&kb->detect_work, msecs_to_jiffies(retry_ms));
++	queue_delayed_work(system_dfl_wq, &kb->detect_work, msecs_to_jiffies(retry_ms));
 +}
 +
 +static void pogo_plug_work(struct work_struct *work)
@@ -1212,8 +1247,12 @@ index 0000000..0e76739
 +	struct pogo_kbd *kb = data;
 +
 +	/* the wire carries UART traffic once powered; stay quiet until then */
-+	disable_irq_nosync(irq);
-+	WRITE_ONCE(kb->wake_irq_enabled, false);
++	spin_lock(&kb->wake_lock);
++	if (kb->wake_irq_enabled) {
++		kb->wake_irq_enabled = false;
++		disable_irq_nosync(irq);
++	}
++	spin_unlock(&kb->wake_lock);
 +	mod_delayed_work(system_dfl_wq, &kb->detect_work,
 +			 msecs_to_jiffies(POGO_DETECT_DEBOUNCE_MS));
 +	return IRQ_HANDLED;
@@ -1299,6 +1338,7 @@ index 0000000..0e76739
 +	mutex_init(&kb->input_lock);
 +	mutex_init(&kb->state_lock);
 +	spin_lock_init(&kb->xfer_lock);
++	spin_lock_init(&kb->wake_lock);
 +	init_completion(&kb->echo_done);
 +	init_completion(&kb->resp_done);
 +	INIT_DELAYED_WORK(&kb->detect_work, pogo_detect_work);
@@ -1351,8 +1391,8 @@ index 0000000..0e76739
 +	}
 +
 +	/* evaluate the current attach state; enables the irq when idle */
-+	schedule_delayed_work(&kb->detect_work,
-+			      msecs_to_jiffies(POGO_DETECT_DEBOUNCE_MS));
++	queue_delayed_work(system_dfl_wq, &kb->detect_work,
++			   msecs_to_jiffies(POGO_DETECT_DEBOUNCE_MS));
 +
 +	dev_dbg(dev, "pogo keyboard link ready (wake irq %d)\n", kb->wake_irq);
 +	return 0;
@@ -1397,22 +1437,47 @@ index 0000000..0e76739
 + * The wire stays quiet while the MCU sleeps, so a key press or a keyboard being
 + * attached shows up as a falling edge. An MCU without the wake notification
 + * keeps sending heartbeats, which would wake the system right away, so its wake
-+ * line is left off.
++ * line is left off, as for one that did not take the notification.
 + */
 +static int pogo_suspend(struct device *dev)
 +{
 +	struct pogo_kbd *kb = dev_get_drvdata(dev);
 +	bool notify = kb->hw->features & POGO_FEAT_WAKE_NOTIFY;
++	bool arm_wake = notify;
++	bool powered, connected;
 +
-+	cancel_delayed_work_sync(&kb->detect_work);
-+	cancel_delayed_work_sync(&kb->hb_work);
-+	cancel_work_sync(&kb->plug_work);
-+	cancel_work_sync(&kb->led_work);
++	/*
++	 * Nothing may change from here on, however late an edge or a frame comes:
++	 * resume looks at everything again.
++	 */
++	disable_delayed_work_sync(&kb->detect_work);
++	disable_delayed_work_sync(&kb->hb_work);
++	disable_work_sync(&kb->plug_work);
++	disable_work_sync(&kb->led_work);
 +
-+	if (READ_ONCE(kb->connected) && notify)
-+		pogo_set_general(kb, OWB_GEN_SLEEP, 1);
++	mutex_lock(&kb->state_lock);
++	powered = kb->powered;
++	connected = kb->connected;
++	mutex_unlock(&kb->state_lock);
 +
-+	if (device_may_wakeup(dev) && notify) {
++	/* a keyboard still coming up cannot be told, so it goes off until resume */
++	if (powered && !connected)
++		pogo_power_off(kb);
++
++	if (connected && notify) {
++		int ret = pogo_set_general(kb, OWB_GEN_SLEEP, 1);
++
++		if (ret)
++			dev_warn(dev, "sleep notify failed: %d\n", ret);
++		arm_wake = !ret;
++	}
++
++	/* the input core lets go of the keys, not of the slots or of old_keys */
++	mutex_lock(&kb->input_lock);
++	pogo_release_all(kb);
++	mutex_unlock(&kb->input_lock);
++
++	if (device_may_wakeup(dev) && arm_wake) {
 +		pogo_wake_irq_enable(kb, true);
 +		enable_irq_wake(kb->wake_irq);
 +		kb->wake_armed = true;
@@ -1430,13 +1495,18 @@ index 0000000..0e76739
 +		kb->wake_armed = false;
 +	}
 +
++	enable_delayed_work(&kb->detect_work);
++	enable_delayed_work(&kb->hb_work);
++	enable_work(&kb->plug_work);
++	enable_work(&kb->led_work);
++
 +	mutex_lock(&kb->state_lock);
 +	powered = kb->powered;
 +	mutex_unlock(&kb->state_lock);
 +
 +	if (!powered) {
-+		schedule_delayed_work(&kb->detect_work,
-+				      msecs_to_jiffies(POGO_DETECT_DEBOUNCE_MS));
++		queue_delayed_work(system_dfl_wq, &kb->detect_work,
++				   msecs_to_jiffies(POGO_DETECT_DEBOUNCE_MS));
 +		return 0;
 +	}
 +
@@ -1444,7 +1514,7 @@ index 0000000..0e76739
 +	WRITE_ONCE(kb->last_rx, jiffies);
 +	if (READ_ONCE(kb->connected))
 +		schedule_work(&kb->plug_work);
-+	schedule_delayed_work(&kb->hb_work, msecs_to_jiffies(POGO_HB_POLL_MS));
++	queue_delayed_work(system_dfl_wq, &kb->hb_work, msecs_to_jiffies(POGO_HB_POLL_MS));
 +	return 0;
 +}
 +

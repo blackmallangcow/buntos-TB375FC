@@ -47,6 +47,13 @@ the driver reports it as SW_TABLET_MODE on an input device of its own.
 It also reports tablet mode without a keyboard, as
 surface_aggregator_tabletsw does.
 
+That frame is lost if it comes while the UART sleeps, so a key or a
+finger going down turns tablet mode off as well. A release does not, as
+the keyboard may send one after it has turned off. The other way round
+nothing tells: a keyboard folded during system sleep shows only if it
+sends its state again after the wake notification, which is to be seen
+on the hardware.
+
 All of this comes from the stock tn_keyboard module of the tablet (GPL,
 source not released, ZUI 17.0.04.266), which still has its symbols. It
 has not been tried on the hardware, as the tablet is not unlocked yet.
@@ -57,8 +64,8 @@ those are here yet.
 
 ---
  drivers/input/keyboard/Kconfig            |   7 +-
- drivers/input/keyboard/oneplus-pogo-kbd.c | 632 +++++++++++++++++++---
- 2 files changed, 560 insertions(+), 79 deletions(-)
+ drivers/input/keyboard/oneplus-pogo-kbd.c | 664 +++++++++++++++++++---
+ 2 files changed, 592 insertions(+), 79 deletions(-)
 
 diff --git a/drivers/input/keyboard/Kconfig b/drivers/input/keyboard/Kconfig
 index 011b924..ae7328f 100644
@@ -84,7 +91,7 @@ index 011b924..ae7328f 100644
  	  To compile this driver as a module, choose M here: the
  	  module will be called oneplus-pogo-kbd.
 diff --git a/drivers/input/keyboard/oneplus-pogo-kbd.c b/drivers/input/keyboard/oneplus-pogo-kbd.c
-index 0e76739..742eb23 100644
+index 1b286cc..9c5d234 100644
 --- a/drivers/input/keyboard/oneplus-pogo-kbd.c
 +++ b/drivers/input/keyboard/oneplus-pogo-kbd.c
 @@ -1,6 +1,6 @@
@@ -115,7 +122,7 @@ index 0e76739..742eb23 100644
   */
  
  #include <linux/bitops.h>
-@@ -33,9 +46,11 @@
+@@ -34,9 +47,11 @@
  #include <linux/module.h>
  #include <linux/mutex.h>
  #include <linux/of.h>
@@ -127,7 +134,7 @@ index 0e76739..742eb23 100644
  #include <linux/serdev.h>
  #include <linux/slab.h>
  #include <linux/spinlock.h>
-@@ -59,9 +74,16 @@
+@@ -60,9 +75,16 @@
  #define OWB_HDR_LEN		5	/* start, src, dst, cmd, len */
  #define OWB_TRAILER_LEN		5	/* crc(2), end, tail sync(2) seen on rx */
  #define OWB_MAX_PAYLOAD		128
@@ -147,7 +154,7 @@ index 0e76739..742eb23 100644
  
  #define OWB_CRC_POLY		0x8005
  #define OWB_CRC_INIT		0xC596
-@@ -72,8 +94,7 @@
+@@ -73,8 +95,7 @@
  #define OWB_CMD_TOUCHPAD	0x03
  #define OWB_CMD_PARAM_SET	0x20
  #define OWB_CMD_SYNC_UPLOAD	0x2F
@@ -157,7 +164,7 @@ index 0e76739..742eb23 100644
  
  /* 0x3A sub commands */
  #define OWB_GEN_SLEEP		0x02
-@@ -84,6 +105,19 @@
+@@ -85,6 +106,19 @@
  #define OWB_SYNC_PLUG_IN	0x01
  #define OWB_SYNC_HEARTBEAT	0x05
  
@@ -176,8 +183,8 @@ index 0e76739..742eb23 100644
 +
  /* timing, all derived from the vendor driver */
  #define POGO_TX_GATE_ON_US	450
- #define POGO_TX_GATE_OFF_US	300
-@@ -98,6 +132,8 @@
+ #define POGO_TX_GATE_MAX_MS	5	/* ours: when the echo of a frame does not come */
+@@ -99,6 +133,8 @@
  #define POGO_BOOT_TIMEOUT_MS	2000	/* power on -> first sync frame */
  #define POGO_RETRY_MIN_MS	1000
  #define POGO_RETRY_MAX_MS	30000
@@ -186,7 +193,7 @@ index 0e76739..742eb23 100644
  
  #define POGO_TOUCH_FINGERS	5
  #define POGO_TOUCH_REC_LEN	5
-@@ -115,6 +151,29 @@
+@@ -116,6 +152,29 @@
   */
  #define POGO_FEAT_WAKE_NOTIFY	BIT(0)
  #define POGO_FEAT_BACKLIGHT	BIT(1)
@@ -216,7 +223,7 @@ index 0e76739..742eb23 100644
  
  static const char * const caihong_names[] = {
  	"OPPO Pad 3 Pro Keyboard",
-@@ -135,40 +194,71 @@ static const char * const iceland_names[] = {
+@@ -136,40 +195,71 @@ static const char * const iceland_names[] = {
  };
  
  struct pogo_kbd_hw {
@@ -288,13 +295,14 @@ index 0e76739..742eb23 100644
  struct pogo_kbd {
  	struct serdev_device *serdev;
  	struct device *dev;
-@@ -176,9 +266,14 @@ struct pogo_kbd {
+@@ -177,10 +267,15 @@ struct pogo_kbd {
  	struct gpio_desc *power_gpio;
  	struct gpio_desc *tx_en_gpio;
  	struct gpio_desc *wake_gpio;
 +	struct gpio_desc *plug_gpio;	/* attach and detach, where there is one */
  	int wake_irq;
 +	int plug_irq;
+ 	spinlock_t wake_lock;	/* wake_irq_enabled, with the irq it stands for */
  	bool wake_irq_enabled;
  	bool wake_armed;
 +	struct pinctrl *pinctrl;
@@ -303,7 +311,7 @@ index 0e76739..742eb23 100644
  
  	/* rx frame assembly, serdev receive context only */
  	u8 rx_buf[OWB_RX_BUF_LEN];
-@@ -222,6 +317,7 @@ struct pogo_kbd {
+@@ -225,6 +320,7 @@ struct pogo_kbd {
  	struct mutex input_lock;
  	struct input_dev *kbd;
  	struct input_dev *tp;
@@ -311,7 +319,7 @@ index 0e76739..742eb23 100644
  	u8 old_keys[POGO_KEY_REPORT_LEN];
  	u8 old_media[POGO_MEDIA_REPORT_LEN];
  	char kbd_name[64];
-@@ -324,6 +420,61 @@ static unsigned int owb_build_frame(u8 *out, u8 cmd, const u8 *payload, u8 len)
+@@ -327,6 +423,61 @@ static unsigned int owb_build_frame(u8 *out, u8 cmd, const u8 *payload, u8 len)
  	return n;
  }
  
@@ -373,7 +381,7 @@ index 0e76739..742eb23 100644
  /* ------------------------------------------------------------------------ */
  /* host -> keyboard                                                         */
  
-@@ -342,7 +493,7 @@ static int pogo_xfer(struct pogo_kbd *kb, u8 cmd, const u8 *payload, u8 len,
+@@ -352,7 +503,7 @@ static int pogo_xfer(struct pogo_kbd *kb, u8 cmd, const u8 *payload, u8 len,
  	if (len > OWB_MAX_PAYLOAD)
  		return -EINVAL;
  
@@ -382,7 +390,7 @@ index 0e76739..742eb23 100644
  	print_hex_dump_debug("pogo tx: ", DUMP_PREFIX_NONE, 32, 1, frame, frame_len, false);
  
  	mutex_lock(&kb->io_lock);
-@@ -421,16 +572,16 @@ static int pogo_set_general(struct pogo_kbd *kb, u8 sub, u8 value)
+@@ -435,11 +586,11 @@ static int pogo_set_general(struct pogo_kbd *kb, u8 sub, u8 value)
  	u8 resp[8];
  	int ret;
  
@@ -394,6 +402,9 @@ index 0e76739..742eb23 100644
 -	if (ret < 3 || resp[0] != OWB_CMD_GENERAL_ACK || resp[2] != sub)
 +	if (ret < 3 || resp[0] != kb->hw->proto->cmd_general + 1 || resp[2] != sub)
  		return -EPROTO;
+ 	/* the sleep notification comes back with a status, 1 when the MCU took it */
+ 	if (sub == OWB_GEN_SLEEP && ret >= 6 && resp[5] != 1)
+@@ -447,7 +598,7 @@ static int pogo_set_general(struct pogo_kbd *kb, u8 sub, u8 value)
  	return 0;
  }
  
@@ -402,7 +413,7 @@ index 0e76739..742eb23 100644
  {
  	/* parameter 0x0D "led state": caps, reserved, mute, mic */
  	const u8 payload[] = { 0x0D, 0x04, kb->caps_led, 0x00, 0x00, 0x00 };
-@@ -439,6 +590,14 @@ static int pogo_set_leds(struct pogo_kbd *kb)
+@@ -456,6 +607,14 @@ static int pogo_set_leds(struct pogo_kbd *kb)
  			 NULL, 0);
  }
  
@@ -417,7 +428,7 @@ index 0e76739..742eb23 100644
  /* ------------------------------------------------------------------------ */
  /* input reporting (input_lock held)                                        */
  
-@@ -470,6 +629,24 @@ static void pogo_report_keys(struct pogo_kbd *kb, const u8 *rep)
+@@ -487,6 +646,24 @@ static void pogo_report_keys(struct pogo_kbd *kb, const u8 *rep)
  	memcpy(kb->old_keys, rep, POGO_KEY_REPORT_LEN);
  }
  
@@ -442,7 +453,7 @@ index 0e76739..742eb23 100644
  static int pogo_media_keycode(u16 usage)
  {
  	int i;
-@@ -518,8 +695,8 @@ static void pogo_report_media(struct pogo_kbd *kb, const u8 *rep)
+@@ -535,8 +712,8 @@ static void pogo_report_media(struct pogo_kbd *kb, const u8 *rep)
   * an optional 16 bit pressure, a finger count byte and a button byte.
   * flags: [7:4] slot id, [1] down, [1:0] palm (2 = palm).
   */
@@ -453,7 +464,7 @@ index 0e76739..742eb23 100644
  {
  	struct input_dev *input = kb->tp;
  	unsigned int fingers, i;
-@@ -557,6 +734,52 @@ static void pogo_report_touchpad(struct pogo_kbd *kb, const u8 *data,
+@@ -574,6 +751,53 @@ static void pogo_report_touchpad(struct pogo_kbd *kb, const u8 *data,
  	input_sync(input);
  }
  
@@ -495,6 +506,7 @@ index 0e76739..742eb23 100644
 +	input_sync(input);
 +}
 +
++/* state_lock held, as a frame can still come when the keyboard has lost power */
 +static void pogo_report_tablet_mode(struct pogo_kbd *kb, bool tablet)
 +{
 +	if (!kb->sw)
@@ -506,7 +518,7 @@ index 0e76739..742eb23 100644
  static void pogo_release_all(struct pogo_kbd *kb)
  {
  	static const u8 zeros[POGO_KEY_REPORT_LEN];
-@@ -591,7 +814,7 @@ static int pogo_register_inputs(struct pogo_kbd *kb)
+@@ -608,7 +832,7 @@ static int pogo_register_inputs(struct pogo_kbd *kb)
  	const char *name;
  	int i, ret;
  
@@ -515,7 +527,7 @@ index 0e76739..742eb23 100644
  	if (kb->brand >= 1 && kb->brand <= kb->hw->num_names)
  		name = kb->hw->names[kb->brand - 1];
  	snprintf(kb->kbd_name, sizeof(kb->kbd_name), "%s", name);
-@@ -608,8 +831,8 @@ static int pogo_register_inputs(struct pogo_kbd *kb)
+@@ -625,8 +849,8 @@ static int pogo_register_inputs(struct pogo_kbd *kb)
  	kbd->phys = "pogo/input0";
  	kbd->dev.parent = kb->dev;
  	kbd->id.bustype = BUS_HOST;
@@ -526,7 +538,7 @@ index 0e76739..742eb23 100644
  	kbd->id.version = 0x0010;
  	kbd->event = pogo_kbd_event;
  	input_set_drvdata(kbd, kb);
-@@ -627,8 +850,8 @@ static int pogo_register_inputs(struct pogo_kbd *kb)
+@@ -644,8 +868,8 @@ static int pogo_register_inputs(struct pogo_kbd *kb)
  	tp->phys = "pogo/input1";
  	tp->dev.parent = kb->dev;
  	tp->id.bustype = BUS_HOST;
@@ -537,7 +549,7 @@ index 0e76739..742eb23 100644
  	tp->id.version = 0x0010;
  	input_set_drvdata(tp, kb);
  	__set_bit(EV_KEY, tp->evbit);
-@@ -639,7 +862,7 @@ static int pogo_register_inputs(struct pogo_kbd *kb)
+@@ -656,7 +880,7 @@ static int pogo_register_inputs(struct pogo_kbd *kb)
  	input_set_abs_params(tp, ABS_MT_POSITION_Y, 0, kb->hw->tp_max_y, 0, 0);
  	input_abs_set_res(tp, ABS_MT_POSITION_X, kb->hw->tp_res_x);
  	input_abs_set_res(tp, ABS_MT_POSITION_Y, kb->hw->tp_res_y);
@@ -546,7 +558,7 @@ index 0e76739..742eb23 100644
  				  INPUT_MT_POINTER | INPUT_MT_DROP_UNUSED);
  	if (ret)
  		goto err_free;
-@@ -689,7 +912,7 @@ static void pogo_unregister_inputs(struct pogo_kbd *kb)
+@@ -709,7 +933,7 @@ static void pogo_unregister_inputs(struct pogo_kbd *kb)
  /* ------------------------------------------------------------------------ */
  /* rx path (serdev receive context)                                         */
  
@@ -555,7 +567,7 @@ index 0e76739..742eb23 100644
  {
  	bool replug = false;
  
-@@ -721,74 +944,91 @@ static void pogo_handle_sync(struct pogo_kbd *kb, const u8 *p, unsigned int len)
+@@ -741,74 +965,95 @@ static void pogo_handle_sync(struct pogo_kbd *kb, const u8 *p, unsigned int len)
  	mutex_unlock(&kb->state_lock);
  }
  
@@ -591,7 +603,11 @@ index 0e76739..742eb23 100644
 +{
 +	if (len < 3 || p[0] != OWB_TC_GEN_KB_ENABLE)
 +		return false;
-+	pogo_report_tablet_mode(kb, !p[2]);
++
++	mutex_lock(&kb->state_lock);
++	if (kb->connected)
++		pogo_report_tablet_mode(kb, !p[2]);
++	mutex_unlock(&kb->state_lock);
 +	return true;
 +}
 +
@@ -685,7 +701,7 @@ index 0e76739..742eb23 100644
  {
  	const u8 *f = kb->rx_buf;
  	unsigned int n = kb->rx_len;
-@@ -803,10 +1043,13 @@ static void pogo_rx_frame_done(struct pogo_kbd *kb)
+@@ -823,10 +1068,13 @@ static void pogo_rx_frame_done(struct pogo_kbd *kb)
  		dev_dbg(kb->dev, "bad crc %04x\n", crc);
  		return;
  	}
@@ -701,7 +717,7 @@ index 0e76739..742eb23 100644
  {
  	if (!kb->in_frame) {
  		if (c == OWB_HEAD_SYNC) {
-@@ -827,19 +1070,149 @@ static void pogo_rx_byte(struct pogo_kbd *kb, u8 c)
+@@ -847,19 +1095,177 @@ static void pogo_rx_byte(struct pogo_kbd *kb, u8 c)
  	kb->rx_buf[kb->rx_len++] = c;
  
  	if (kb->rx_len == OWB_HDR_LEN) {
@@ -719,15 +735,15 @@ index 0e76739..742eb23 100644
  	kb->in_frame = false;
 -	pogo_rx_frame_done(kb);
 +	owb_rx_frame_done(kb);
-+}
-+
+ }
+ 
 +static int owb_tc_symbol(const u8 *row, u8 c)
 +{
 +	const u8 *p = memchr(row, c, ARRAY_SIZE(owb_tc_rows[0]));
 +
 +	return p ? 15 - (p - row) : -1;
- }
- 
++}
++
 +static const u8 *owb_tc_find_row(u8 c)
 +{
 +	unsigned int i;
@@ -750,6 +766,33 @@ index 0e76739..742eb23 100644
 +		pogo_report_tablet_mode(kb, false);
 +		schedule_work(&kb->plug_work);
 +	}
++	mutex_unlock(&kb->state_lock);
++}
++
++/*
++ * The enable state is lost if the keyboard sends it while the UART sleeps.  A key
++ * or a finger going down says that it is on, whatever was heard last.  A release
++ * says nothing, as the keyboard may send one after it has turned off.
++ */
++static void owb_tc_note_use(struct pogo_kbd *kb, u8 cmd, const u8 *p, unsigned int len)
++{
++	bool used = false;
++	unsigned int i;
++
++	if (cmd == OWB_TC_CMD_KEYS || cmd == OWB_TC_CMD_MEDIA_KEYS) {
++		used = memchr_inv(p, 0, len);
++	} else if (cmd == OWB_TC_CMD_TOUCHPAD && len) {
++		used = p[0] & 0x03;
++		for (i = 1; i + POGO_TOUCH_REC_LEN <= len; i += POGO_TOUCH_REC_LEN)
++			if (p[i] & BIT(0))
++				used = true;
++	}
++	if (!used)
++		return;
++
++	mutex_lock(&kb->state_lock);
++	if (kb->connected)
++		pogo_report_tablet_mode(kb, false);
 +	mutex_unlock(&kb->state_lock);
 +}
 +
@@ -797,6 +840,7 @@ index 0e76739..742eb23 100644
 +		return;
 +
 +	owb_tc_set_connected(kb);
++	owb_tc_note_use(kb, cmd, &msg[1], msg[0]);
 +	pogo_handle_frame(kb, cmd, &msg[1], msg[0]);
 +}
 +
@@ -854,7 +898,7 @@ index 0e76739..742eb23 100644
  static size_t pogo_receive_buf(struct serdev_device *serdev, const u8 *data,
  			       size_t count)
  {
-@@ -852,7 +1225,7 @@ static size_t pogo_receive_buf(struct serdev_device *serdev, const u8 *data,
+@@ -872,7 +1278,7 @@ static size_t pogo_receive_buf(struct serdev_device *serdev, const u8 *data,
  
  	print_hex_dump_debug("pogo rx: ", DUMP_PREFIX_NONE, 32, 1, data, count, false);
  	for (i = 0; i < count; i++)
@@ -863,7 +907,7 @@ index 0e76739..742eb23 100644
  	return count;
  }
  
-@@ -895,6 +1268,13 @@ static void pogo_power_on(struct pogo_kbd *kb)
+@@ -911,6 +1317,13 @@ static void pogo_power_on(struct pogo_kbd *kb)
  	kb->powered = true;
  	mutex_unlock(&kb->state_lock);
  	gpiod_set_value_cansleep(kb->power_gpio, 1);
@@ -877,7 +921,12 @@ index 0e76739..742eb23 100644
  	mod_delayed_work(system_dfl_wq, &kb->hb_work,
  			 msecs_to_jiffies(POGO_HB_POLL_MS));
  }
-@@ -911,8 +1291,11 @@ static void pogo_power_off(struct pogo_kbd *kb)
+@@ -923,10 +1336,13 @@ static void pogo_power_off(struct pogo_kbd *kb)
+ 	was_connected = kb->connected;
+ 	WRITE_ONCE(kb->connected, false);
+ 	kb->powered = false;
++	pogo_report_tablet_mode(kb, true);
+ 	mutex_unlock(&kb->state_lock);
  
  	dev_dbg(kb->dev, "power off\n");
  	gpiod_set_value_cansleep(kb->power_gpio, 0);
@@ -885,11 +934,8 @@ index 0e76739..742eb23 100644
 +		pinctrl_select_state(kb->pinctrl, kb->pins_detached);
  	if (was_connected)
  		dev_info(kb->dev, "keyboard detached\n");
-+	pogo_report_tablet_mode(kb, true);
  
- 	/*
- 	 * Unregister whenever the devices exist, not only when connected:
-@@ -934,6 +1317,17 @@ static void pogo_detect_work(struct work_struct *work)
+@@ -950,6 +1366,17 @@ static void pogo_detect_work(struct work_struct *work)
  	mutex_lock(&kb->state_lock);
  	powered = kb->powered;
  	mutex_unlock(&kb->state_lock);
@@ -907,7 +953,7 @@ index 0e76739..742eb23 100644
  	if (powered)
  		return;
  
-@@ -1036,7 +1430,7 @@ static void pogo_plug_work(struct work_struct *work)
+@@ -1052,7 +1479,7 @@ static void pogo_plug_work(struct work_struct *work)
  		if (ret)
  			dev_warn(kb->dev, "wake notify failed: %d\n", ret);
  	}
@@ -916,7 +962,7 @@ index 0e76739..742eb23 100644
  	if (kb->brightness)
  		pogo_set_general(kb, OWB_GEN_BRIGHTNESS, kb->brightness);
  }
-@@ -1075,7 +1469,16 @@ static void pogo_led_work(struct work_struct *work)
+@@ -1091,7 +1518,16 @@ static void pogo_led_work(struct work_struct *work)
  	struct pogo_kbd *kb = container_of(work, struct pogo_kbd, led_work);
  
  	if (READ_ONCE(kb->connected))
@@ -934,7 +980,7 @@ index 0e76739..742eb23 100644
  }
  
  static irqreturn_t pogo_wake_isr(int irq, void *data)
-@@ -1148,6 +1551,54 @@ static int pogo_parse_dt(struct pogo_kbd *kb)
+@@ -1168,6 +1604,54 @@ static int pogo_parse_dt(struct pogo_kbd *kb)
  	if (kb->wake_irq < 0)
  		return dev_err_probe(dev, kb->wake_irq, "wake irq\n");
  
@@ -989,7 +1035,7 @@ index 0e76739..742eb23 100644
  	return 0;
  }
  
-@@ -1182,6 +1633,12 @@ static int pogo_probe(struct serdev_device *serdev)
+@@ -1203,6 +1687,12 @@ static int pogo_probe(struct serdev_device *serdev)
  	if (ret)
  		return ret;
  
@@ -1002,7 +1048,7 @@ index 0e76739..742eb23 100644
  	serdev_device_set_client_ops(serdev, &pogo_serdev_ops);
  	ret = devm_serdev_device_open(dev, serdev);
  	if (ret)
-@@ -1206,13 +1663,24 @@ static int pogo_probe(struct serdev_device *serdev)
+@@ -1227,13 +1717,24 @@ static int pogo_probe(struct serdev_device *serdev)
  	}
  
  	ret = devm_request_irq(dev, kb->wake_irq, pogo_wake_isr,
@@ -1029,59 +1075,59 @@ index 0e76739..742eb23 100644
  	if (device_property_read_bool(dev, "wakeup-source")) {
  		ret = devm_device_init_wakeup(dev);
  		if (ret) {
-@@ -1266,24 +1734,32 @@ static void pogo_remove(struct serdev_device *serdev)
+@@ -1287,15 +1788,17 @@ static void pogo_remove(struct serdev_device *serdev)
  
  /*
   * The wire stays quiet while the MCU sleeps, so a key press or a keyboard being
 - * attached shows up as a falling edge. An MCU without the wake notification
 - * keeps sending heartbeats, which would wake the system right away, so its wake
-- * line is left off.
+- * line is left off, as for one that did not take the notification.
 + * attached shows up as an edge on it. An MCU without the wake notification keeps
 + * sending heartbeats, which would wake the system right away, so its wake line
-+ * is left off. With a plug GPIO, that is what tells about a keyboard being
-+ * attached, and the wire floats while there is no keyboard.
++ * is left off, as for one that did not take the notification. With a plug GPIO,
++ * that is what tells about a keyboard being attached, and the wire floats while
++ * there is no keyboard.
   */
  static int pogo_suspend(struct device *dev)
  {
  	struct pogo_kbd *kb = dev_get_drvdata(dev);
  	bool notify = kb->hw->features & POGO_FEAT_WAKE_NOTIFY;
-+	bool connected;
+-	bool arm_wake = notify;
++	bool arm_wake = notify && !kb->plug_gpio;
+ 	bool powered, connected;
  
- 	cancel_delayed_work_sync(&kb->detect_work);
- 	cancel_delayed_work_sync(&kb->hb_work);
- 	cancel_work_sync(&kb->plug_work);
- 	cancel_work_sync(&kb->led_work);
+ 	/*
+@@ -1329,7 +1832,12 @@ static int pogo_suspend(struct device *dev)
+ 	pogo_release_all(kb);
+ 	mutex_unlock(&kb->input_lock);
  
--	if (READ_ONCE(kb->connected) && notify)
-+	connected = READ_ONCE(kb->connected);
-+	if (connected && notify)
- 		pogo_set_general(kb, OWB_GEN_SLEEP, 1);
- 
--	if (device_may_wakeup(dev) && notify) {
+-	if (device_may_wakeup(dev) && arm_wake) {
 +	if (!device_may_wakeup(dev))
 +		return 0;
 +
 +	if (kb->plug_gpio)
 +		enable_irq_wake(kb->plug_irq);
-+	if (notify && (connected || !kb->plug_gpio)) {
++	if (arm_wake) {
  		pogo_wake_irq_enable(kb, true);
  		enable_irq_wake(kb->wake_irq);
  		kb->wake_armed = true;
-@@ -1300,22 +1776,25 @@ static int pogo_resume(struct device *dev)
+@@ -1346,6 +1854,8 @@ static int pogo_resume(struct device *dev)
  		disable_irq_wake(kb->wake_irq);
  		kb->wake_armed = false;
  	}
 +	if (kb->plug_gpio && device_may_wakeup(dev))
 +		disable_irq_wake(kb->plug_irq);
  
- 	mutex_lock(&kb->state_lock);
+ 	enable_delayed_work(&kb->detect_work);
+ 	enable_delayed_work(&kb->hb_work);
+@@ -1356,17 +1866,18 @@ static int pogo_resume(struct device *dev)
  	powered = kb->powered;
  	mutex_unlock(&kb->state_lock);
  
 -	if (!powered) {
 +	if (kb->plug_gpio || !powered)
- 		schedule_delayed_work(&kb->detect_work,
- 				      msecs_to_jiffies(POGO_DETECT_DEBOUNCE_MS));
+ 		queue_delayed_work(system_dfl_wq, &kb->detect_work,
+ 				   msecs_to_jiffies(POGO_DETECT_DEBOUNCE_MS));
 +	if (!powered)
  		return 0;
 -	}
@@ -1090,13 +1136,13 @@ index 0e76739..742eb23 100644
  	WRITE_ONCE(kb->last_rx, jiffies);
  	if (READ_ONCE(kb->connected))
  		schedule_work(&kb->plug_work);
--	schedule_delayed_work(&kb->hb_work, msecs_to_jiffies(POGO_HB_POLL_MS));
+-	queue_delayed_work(system_dfl_wq, &kb->hb_work, msecs_to_jiffies(POGO_HB_POLL_MS));
 +	if (!kb->plug_gpio)
-+		schedule_delayed_work(&kb->hb_work, msecs_to_jiffies(POGO_HB_POLL_MS));
++		queue_delayed_work(system_dfl_wq, &kb->hb_work, msecs_to_jiffies(POGO_HB_POLL_MS));
  	return 0;
  }
  
-@@ -1325,6 +1804,7 @@ static const struct of_device_id pogo_of_match[] = {
+@@ -1376,6 +1887,7 @@ static const struct of_device_id pogo_of_match[] = {
  	{ .compatible = "oneplus,caihong-pogo-keyboard", .data = &pogo_caihong_hw },
  	{ .compatible = "oneplus,erhai-pogo-keyboard", .data = &pogo_erhai_hw },
  	{ .compatible = "oneplus,iceland-pogo-keyboard", .data = &pogo_iceland_hw },
@@ -1104,7 +1150,7 @@ index 0e76739..742eb23 100644
  	{ }
  };
  MODULE_DEVICE_TABLE(of, pogo_of_match);
-@@ -1341,5 +1821,5 @@ static struct serdev_device_driver pogo_driver = {
+@@ -1392,5 +1904,5 @@ static struct serdev_device_driver pogo_driver = {
  };
  module_serdev_device_driver(pogo_driver);
  
