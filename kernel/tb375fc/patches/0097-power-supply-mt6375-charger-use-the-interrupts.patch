@@ -1,0 +1,119 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: use the interrupts
+
+React to VBUS at once instead of at the next poll, which matters when a
+weaker source follows a stronger one. Also log the overvoltage of VBUS
+and the end of the safety timer. The core driver only gives these when it
+has an interrupt itself.
+
+---
+ drivers/power/supply/mt6375-charger.c | 75 +++++++++++++++++++++++++--
+ 1 file changed, 72 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+index f5356c6..1493b7a 100644
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -3,8 +3,9 @@
+  * MediaTek MT6375 charger: battery charging and the boost that sources USB VBUS
+  *
+  * The USB switch, BC1.2 and the charge pumps stay as the bootloader left them,
+- * and neither probing nor reading the state writes to the chip. The first write
+- * comes when the regulator is enabled or when charging is taken over.
++ * and neither probing nor reading the state writes to the chip, apart from
++ * unmasking the interrupts when the core driver has them. The first write to the
++ * charger comes when the regulator is enabled or when charging is taken over.
+  *
+  * Charging is only taken over with a description of the battery and a fuel gauge
+  * in the device tree, and once the gauge has given a good temperature and
+@@ -22,6 +23,7 @@
+ 
+ #include <linux/bitfield.h>
+ #include <linux/bits.h>
++#include <linux/interrupt.h>
+ #include <linux/kernel.h>
+ #include <linux/linear_range.h>
+ #include <linux/mod_devicetable.h>
+@@ -1050,6 +1052,69 @@ static void mt6375_chg_log_state(struct mt6375_chg *chg)
+ 		 cv, ichg, aicr, en, buck, hz, wdt);
+ }
+ 
++static irqreturn_t mt6375_chg_vbus_irq(int irq, void *data)
++{
++	struct mt6375_chg *chg = data;
++
++	if (chg->can_control)
++		mod_delayed_work(system_freezable_wq, &chg->work, 0);
++	power_supply_changed(chg->psy);
++
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t mt6375_chg_vbus_ov_irq(int irq, void *data)
++{
++	struct mt6375_chg *chg = data;
++
++	dev_err(chg->dev, "VBUS over voltage\n");
++	power_supply_changed(chg->psy);
++
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t mt6375_chg_tout_irq(int irq, void *data)
++{
++	struct mt6375_chg *chg = data;
++
++	dev_err(chg->dev, "Charging safety timer expired\n");
++	power_supply_changed(chg->psy);
++
++	return IRQ_HANDLED;
++}
++
++/* The core driver gives these only when it has an interrupt itself */
++static int mt6375_chg_init_irqs(struct platform_device *pdev)
++{
++	static const struct {
++		const char *name;
++		irq_handler_t handler;
++	} irqs[] = {
++		{ "pwr_rdy", mt6375_chg_vbus_irq },
++		{ "detach", mt6375_chg_vbus_irq },
++		{ "vbus_ov", mt6375_chg_vbus_ov_irq },
++		{ "chg_tout", mt6375_chg_tout_irq },
++	};
++	struct mt6375_chg *chg = platform_get_drvdata(pdev);
++	int i, irq, ret;
++
++	for (i = 0; i < ARRAY_SIZE(irqs); i++) {
++		irq = platform_get_irq_byname_optional(pdev, irqs[i].name);
++		if (irq == -ENXIO)
++			continue;
++		if (irq < 0)
++			return irq;
++
++		ret = devm_request_threaded_irq(chg->dev, irq, NULL, irqs[i].handler,
++						IRQF_ONESHOT, irqs[i].name, chg);
++		if (ret)
++			return dev_err_probe(chg->dev, ret, "Failed to request %s\n",
++					     irqs[i].name);
++	}
++
++	return 0;
++}
++
+ static void mt6375_chg_stop_control(struct mt6375_chg *chg)
+ {
+ 	disable_delayed_work_sync(&chg->work);
+@@ -1144,7 +1209,11 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, chg);
+ 
+-	return mt6375_chg_init_control(chg);
++	ret = mt6375_chg_init_control(chg);
++	if (ret)
++		return ret;
++
++	return mt6375_chg_init_irqs(pdev);
+ }
+ 
+ /* The stock kernel too turns VBUS off on its way down */

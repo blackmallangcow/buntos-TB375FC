@@ -134,6 +134,26 @@
 	};
 
 	/*
+	 * Charging through the MT6375 only, with the values of the stock tree: ichg
+	 * and ac-charger-current, ieoc, min-charge-temp and max-charge-temp. The
+	 * voltage is the lowest of its battery maintenance table, which a battery of
+	 * any age can take (maintenance-v20-level0-cv, maintenance-v10-level3-cv),
+	 * not the 4.5 V of battery-cv. Stock has no over-voltage threshold of its
+	 * own, so that one is the next step up in the fuel gauge's column of that
+	 * table (maintenance-v10-level2-fg-cv). The charge pumps can charge far
+	 * faster, which is not done here.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		constant-charge-voltage-max-microvolt = <4340000>;
+		constant-charge-current-max-microamp = <2000000>;
+		charge-term-current-microamp = <350000>;
+		over-voltage-threshold-microvolt = <4410000>;
+		operating-range-celsius = <0 50>;
+		status = "disabled";
+	};
+
+	/*
 	 * Turns the USB VBUS boost on and off from user space, through the state
 	 * attribute of this device, until the TCPC driver takes that over. Stays
 	 * off with the MT6375 (see &i2c5).
@@ -231,8 +251,17 @@
  * &imp_iic_wrap_n/en until UFS root and the USB gadget work on the device. It
  * also needs &pio for its GPIO179 state. The stock tree has no pins and no pull
  * setting for these buses, and runs them at 1 MHz. Check with i2cdetect first,
- * reading only. There is no driver for the interrupt (GPIO7), the TCPC, the
- * charger, the fuel gauge or the ADCs yet.
+ * reading only.
+ *
+ * TODO(charging): with this node alone the driver only reads and charging stays
+ * as the bootloader set it. Add monitored-battery = <&battery> and
+ * mediatek,fuel-gauge to the charger for it to take over, once the gauge works.
+ *
+ * TODO(TCPC): add interrupt-parent = <&pio> and interrupts = <7 IRQ_TYPE_LEVEL_LOW>
+ * here, which masks all interrupts of the chip at probe, and enable &mt6375_tcpc.
+ * First as below, then with power-role and data-role dual (and try-power-role
+ * sink), mediatek,usb-port in the charger, &usb_vbus_output off and the port of
+ * &ssusb. The order is in the bring-up checklist.
  */
 &i2c5 {
 	clock-frequency = <400000>;
@@ -252,6 +281,28 @@
 				regulator-min-microvolt = <5000000>;
 				regulator-max-microvolt = <5000000>;
 				vbus-switch-supply = <&charge_pump_65_switch>;
+			};
+		};
+
+		/*
+		 * The sink capability and the 1.5 A are those of the stock tree
+		 * (pd,sink-pdo-data, tcpc,rp-level). No PD yet: a failed negotiation
+		 * ends in a hard reset, which takes VBUS away from the USB gadget.
+		 * USB 3 may not work until there is a driver for the PS5170 redriver,
+		 * which stock sets up by the orientation that the TCPC reports.
+		 */
+		mt6375_tcpc: tcpc {
+			compatible = "mediatek,mt6375-tcpc";
+			vbus-supply = <&mt6375_otg_vbus>;
+			status = "disabled";
+
+			connector {
+				compatible = "usb-c-connector";
+				label = "USB-C";
+				data-role = "device";
+				power-role = "sink";
+				typec-power-opmode = "1.5A";
+				pd-disable;
 			};
 		};
 	};
@@ -898,6 +949,10 @@
  * in the state attribute of &usb_vbus_output. Without the TCPC nothing does this
  * by itself. Never add vbus-supply here: in otg mode ssusb_host_setup() enables
  * it at every probe, whatever is on the port.
+ *
+ * TODO(TCPC): with the TCPC the role comes over a graph between the connector and
+ * a port here, and the attributes are not needed. Keep role-switch-default-mode:
+ * without it, TCPM's role of none means host to this driver.
  */
 &ssusb {
 	dr_mode = "peripheral";

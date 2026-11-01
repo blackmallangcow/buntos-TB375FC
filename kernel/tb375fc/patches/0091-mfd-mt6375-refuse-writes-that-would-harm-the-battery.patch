@@ -1,0 +1,130 @@
+From: buntOS contributors
+Subject: [PATCH] mfd: mt6375: refuse writes that would harm the battery
+
+The charger driver is going to need the registers of the charge limits.
+Open only those, and add a check right before the wires that no driver
+can get around: a value over the limits taken from the stock tree of the
+Lenovo TB375FC for charging through this chip is refused, and so is
+setting BATFET_DIS, which would cut the battery off from the system. A
+bad read before a read-modify-write can bring any value there.
+
+The voltage limit is 4.34 V, the lowest of the battery maintenance table
+in that tree, which a battery of any age can take. Stock goes to 4.5 V
+with battery maintenance off, and to 3 A with a 3 A Type-C current, which
+stay out for now.
+
+---
+ drivers/mfd/mt6375.c | 69 ++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 63 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/mfd/mt6375.c b/drivers/mfd/mt6375.c
+index 3b850bb..e23ab2b 100644
+--- a/drivers/mfd/mt6375.c
++++ b/drivers/mfd/mt6375.c
+@@ -9,7 +9,8 @@
+  *
+  * Probing only reads the device information. Nothing here writes to the chip,
+  * and the interrupt line stays unused, so a failed probe leaves the chip as the
+- * bootloader left it.
++ * bootloader left it. Every write goes through mt6375_regmap_write(), which
++ * refuses the values below that would harm the battery or cut the power.
+  *
+  * Copyright (c) 2026 buntOS contributors
+  */
+@@ -21,6 +22,7 @@
+ #include <linux/mod_devicetable.h>
+ #include <linux/module.h>
+ #include <linux/regmap.h>
++#include <linux/unaligned.h>
+ 
+ #define MT6375_REG_DEV_INFO	0x100
+ #define MT6375_VENID_MASK	GENMASK(7, 4)
+@@ -31,6 +33,50 @@
+ #define MT6375_REG_PMU_LAST	0x1ff
+ #define MT6375_REG_OFFSET_SIZE	2
+ 
++#define MT6375_REG_CHG_TOP1	0x120
++#define MT6375_BATFET_DIS	BIT(6)
++#define MT6375_REG_CHG_AICR	0x122
++#define MT6375_AICR_MASK	GENMASK(6, 0)
++#define MT6375_REG_CHG_VCHG	0x125
++#define MT6375_CV_MASK		GENMASK(6, 0)
++#define MT6375_REG_CHG_ICHG	0x126
++#define MT6375_ICHG_MASK	GENMASK(5, 0)
++
++/*
++ * The highest settings this driver lets through, whatever a sub-device or the
++ * device tree asks for. These are values of the stock tree of the Lenovo TB375FC
++ * for charging through this chip: 4.34 V (maintenance-v20-level0-cv and
++ * maintenance-v10-level3-cv, the lowest of its battery maintenance table, which a
++ * battery of any age can take), an input of 2 A (ac-charger-input-current) and a
++ * charge current of 2 A (ichg). Stock goes to 4.5 V (battery-cv) with battery
++ * maintenance off, and to 3 A with a 3 A Type-C current, which stay out. AICR holds
++ * 100 mA from selector 2 up in steps of 25 mA, CV 3.9 V from 0 in steps of 10 mV,
++ * and ICHG 300 mA from 6 in steps of 50 mA, as in the MediaTek driver.
++ */
++#define MT6375_AICR_SEL_MAX	78
++#define MT6375_CV_SEL_MAX	44
++#define MT6375_ICHG_SEL_MAX	40
++
++/*
++ * A bad read before a read-modify-write can bring any value here, and setting
++ * BATFET_DIS would cut the battery off from the system.
++ */
++static bool mt6375_value_is_safe(unsigned int reg, u8 val)
++{
++	switch (reg) {
++	case MT6375_REG_CHG_TOP1:
++		return !(val & MT6375_BATFET_DIS);
++	case MT6375_REG_CHG_AICR:
++		return FIELD_GET(MT6375_AICR_MASK, val) <= MT6375_AICR_SEL_MAX;
++	case MT6375_REG_CHG_VCHG:
++		return FIELD_GET(MT6375_CV_MASK, val) <= MT6375_CV_SEL_MAX;
++	case MT6375_REG_CHG_ICHG:
++		return FIELD_GET(MT6375_ICHG_MASK, val) <= MT6375_ICHG_SEL_MAX;
++	default:
++		return true;
++	}
++}
++
+ static int mt6375_regmap_read(void *context, const void *reg_buf,
+ 			      size_t reg_size, void *val_buf, size_t val_size)
+ {
+@@ -49,6 +95,16 @@ static int mt6375_regmap_write(void *context, const void *data, size_t count)
+ {
+ 	struct i2c_client *i2c = context;
+ 	const u8 *buf = data;
++	unsigned int reg = get_unaligned_be16(buf);
++	size_t i;
++
++	for (i = MT6375_REG_OFFSET_SIZE; i < count; i++, reg++) {
++		if (!mt6375_value_is_safe(reg, buf[i])) {
++			dev_err(&i2c->dev, "Refused 0x%02x for register 0x%03x\n",
++				buf[i], reg);
++			return -EPERM;
++		}
++	}
+ 
+ 	return i2c_smbus_write_i2c_block_data(i2c, buf[1],
+ 					      count - MT6375_REG_OFFSET_SIZE,
+@@ -72,14 +128,15 @@ static const struct regmap_access_table mt6375_rd_table = {
+ };
+ 
+ /*
+- * The registers of the OTG boost and nothing else. The same bank holds battery
+- * charging, the USB switch and BC1.2, which this driver must leave alone. The
+- * cell that takes those over extends this list.
++ * The registers of the OTG boost and of battery charging, and nothing else. The
++ * same bank holds the USB switch, BC1.2, the ADCs and the protection settings,
++ * which these drivers must leave alone. The cell that takes those over extends
++ * this list.
+  */
+ static const struct regmap_range mt6375_wr_ranges[] = {
+ 	regmap_reg_range(0x107, 0x107),		/* TM_PAS_CODE1 */
+-	regmap_reg_range(0x120, 0x121),		/* CHG_TOP1, CHG_TOP2 */
+-	regmap_reg_range(0x129, 0x129),		/* CHG_VSYS */
++	regmap_reg_range(0x120, 0x122),		/* CHG_TOP1, CHG_TOP2, CHG_AICR */
++	regmap_reg_range(0x125, 0x12a),		/* CHG_VCHG to CHG_WDT */
+ 	regmap_reg_range(0x130, 0x132),		/* OTG_LBP, OTG_V, OTG_C */
+ 	regmap_reg_range(0x135, 0x135),		/* CHG_DUMY0 */
+ 	regmap_reg_range(0x140, 0x140),		/* CHG_HD_BUCK5 */

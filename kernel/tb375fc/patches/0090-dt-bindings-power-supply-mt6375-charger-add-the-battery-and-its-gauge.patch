@@ -1,0 +1,58 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: power: supply: mt6375-charger: add the battery and its gauge
+
+Charging can only be followed safely with a description of the battery
+and a way to read its temperature and voltage, so both are required for
+the driver to change anything. The USB port tells how much current it
+can give.
+
+---
+ .../power/supply/mediatek,mt6375-charger.yaml | 26 +++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml b/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
+index e0a221e..0b149d8 100644
+--- a/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
++++ b/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
+@@ -11,12 +11,34 @@ maintainers:
+ 
+ description:
+   This module is part of the MT6375 MFD device. It charges the battery and
+-  has a boost that sources USB VBUS from the battery.
++  has a boost that sources USB VBUS from the battery. Charging stays as the
++  bootloader set it unless both monitored-battery and mediatek,fuel-gauge are
++  there.
++
++allOf:
++  - $ref: power-supply.yaml#
+ 
+ properties:
+   compatible:
+     const: mediatek,mt6375-charger
+ 
++  monitored-battery:
++    description:
++      The battery. It has to give the constant charge voltage and current, the
++      termination current, the over-voltage threshold and the operating range.
++
++  mediatek,fuel-gauge:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      The power supply that reports the temperature and voltage of the battery.
++      Charging stops when that stops working.
++
++  mediatek,usb-port:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      The power supply of the USB port controller, which tells how much current
++      the port can give. Without it the input stays at the USB default.
++
+   usb-otg-vbus-regulator:
+     type: object
+     $ref: /schemas/regulator/regulator.yaml#
+@@ -39,4 +61,4 @@ properties:
+ required:
+   - compatible
+ 
+-additionalProperties: false
++unevaluatedProperties: false

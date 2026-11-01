@@ -1,0 +1,863 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: take over charging
+
+Follow the battery in software as the stock charger framework does: the
+same temperature thresholds with their hysteresis, in whole degrees as
+stock, 4.24 V above 45 C, and no charging at or above 50 C or below 0 C.
+All values come from the stock tree of the Lenovo TB375FC. Charging
+through the charge pumps stays out.
+
+The charge voltage is at most 4.34 V, the lowest of the battery maintenance
+table of that tree: stock uses it from 1050 cycles on or when the user asks
+for it, and takes the lower of that and the JEITA voltage. Following the
+table up by cycle count can come later. Stock also gives the fuel gauge a
+voltage for what counts as full, which this leaves alone.
+
+Nothing is written without a battery description and a fuel gauge in the
+device tree, and before the gauge has given a good temperature and
+voltage: until then the chip goes on as the bootloader set it. A battery
+description above the limits in the driver is not clamped but refused,
+as it means a mistake. After that, charging stops when the gauge stays
+silent for three polls and comes back when the gauge does, where stock
+takes 27 C. It also stops above the over-voltage threshold of the battery
+description, a check that stock does not have.
+
+Unlike stock, this keeps the safety timer of the chip running. Stock
+turns it off at plug-in and counts 30 hours in software. A new source
+starts the timer anew. It also leaves AICL and BC1.2 out: the latter
+would take D+ and D- away from the USB controller. The input stays at the
+USB default of 500 mA unless the USB port says more, and is back there
+with VBUS gone. The charge current stays at 500 mA with charging off.
+
+The charge and input currents go back to 500 mA when the driver stops
+watching on unbind and shutdown. In suspend charging stops, where stock
+wakes every 10 seconds to look. A kernel that hangs leaves them as they
+are, as with stock.
+
+---
+ drivers/power/supply/mt6375-charger.c | 685 +++++++++++++++++++++++++-
+ 1 file changed, 676 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+index d21c99c..f5356c6 100644
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -1,14 +1,21 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * MediaTek MT6375 charger: the boost that sources USB VBUS, and a read-only view
+- * of battery charging
++ * MediaTek MT6375 charger: battery charging and the boost that sources USB VBUS
+  *
+- * Battery charging, the USB switch, BC1.2 and the interrupts stay as the
+- * bootloader left them, and neither probing nor reading the state writes to the
+- * chip. The first write comes when the regulator is enabled.
++ * The USB switch, BC1.2 and the charge pumps stay as the bootloader left them,
++ * and neither probing nor reading the state writes to the chip. The first write
++ * comes when the regulator is enabled or when charging is taken over.
++ *
++ * Charging is only taken over with a description of the battery and a fuel gauge
++ * in the device tree, and once the gauge has given a good temperature and
++ * voltage. Until then the chip goes on as the bootloader set it. After that the
++ * driver follows the temperature in software as stock does, and stops charging
++ * when it no longer knows the temperature.
+  *
+  * The registers, the parameters and their order come from the MediaTek driver
+- * in the OnePlus MT6897 kernel.
++ * in the OnePlus MT6897 kernel, and the limits from the stock kernel of the
++ * Lenovo TB375FC. The chip's own safety timer, overvoltage and thermal
++ * protections are never turned off here.
+  *
+  * Copyright (c) 2026 buntOS contributors
+  */
+@@ -19,11 +26,14 @@
+ #include <linux/linear_range.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/platform_device.h>
++#include <linux/pm.h>
+ #include <linux/power_supply.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/driver.h>
++#include <linux/workqueue.h>
+ 
+ #define MT6375_REG_TM_PAS_CODE1		0x107
+ #define MT6375_REG_CHG_TOP1		0x120
+@@ -72,9 +82,47 @@
+ #define MT6375_OTG_UV			5000000
+ #define MT6375_OTG_CC_1800MA		4
+ 
++/*
++ * The most this driver ever asks for, from the stock tree: 4.34 V
++ * (maintenance-v20-level0-cv, maintenance-v10-level3-cv), the lowest of its battery
++ * maintenance table, which a battery of any age can take, a charge current of 2 A
++ * (ichg, ac-charger-current) and an input of 2 A (ac-charger-input-current). Stock
++ * also goes to 4.5 V (battery-cv) with battery maintenance off, and to 3 A with a
++ * 3 A Type-C current, which stay out here. A battery description above these is
++ * refused, and so is a value above them from user space. The core driver has its
++ * own check of the same limits for every write.
++ */
++#define MT6375_CHG_CV_MAX_UV		4340000
++#define MT6375_CHG_CC_MAX_UA		2000000
++#define MT6375_CHG_AICR_MAX_UA		2000000
++/* usb-charger-current: for when nobody says more, and where the MediaTek LK2 code leaves both */
++#define MT6375_CHG_USB_UA		500000
++#define MT6375_CHG_CC_MIN_UA		300000
++#define MT6375_CHG_CV_MIN_UV		3900000
++#define MT6375_CHG_AICR_MIN_UA		100000
++/* jeita-temp-t3-to-t4-cv and temp-t3-thres. Degrees, which is all that stock looks at */
++#define MT6375_CHG_CV_WARM_UV		4240000
++#define MT6375_CHG_TEMP_WARM		45
++#define MT6375_CHG_TEMP_MIN		0
++#define MT6375_CHG_TEMP_MAX		50
++/* temp-t4-thres-minus-x-degree, temp-t3-thres-minus-x-degree, temp-t1-thres-plus-x-degree */
++#define MT6375_CHG_TEMP_HYST		2
++/* The gauge reads as below absolute zero or wildly hot when something is wrong */
++#define MT6375_CHG_TEMP_SANE_MIN	-40
++#define MT6375_CHG_TEMP_SANE_MAX	100
++/* vrec: how far under the voltage limit charging comes back */
++#define MT6375_CHG_VREC_UV		200000
++#define MT6375_CHG_VREC_200MV		1
++/* chg-tmr, chg-tmr-en: 5 hours from 0 in steps of 5 hours */
++#define MT6375_CHG_TMR_10H		1
++/* The stock charger thread looks every 10 seconds */
++#define MT6375_CHG_POLL_MS		10000
++#define MT6375_CHG_MAX_READ_FAILS	3
++
+ enum mt6375_chg_field {
+-	F_CHG_EN, F_BUCK_EN, F_HZ, F_IAICR, F_ILIM_EN, F_VMIVR, F_CV, F_CC,
+-	F_CHG_TMR_EN, F_TE, F_IEOC, F_WDT_EN, F_IC_STAT, F_ST_PWR_RDY, F_MAX,
++	F_CHG_EN, F_BUCK_EN, F_HZ, F_IAICR, F_ILIM_EN, F_VMIVR, F_CV, F_VREC, F_CC,
++	F_CHG_TMR, F_CHG_TMR_EN, F_TE, F_IEOC, F_BLEED_DIS_EN, F_WDT_EN, F_IC_STAT,
++	F_ST_PWR_RDY, F_MAX,
+ };
+ 
+ static const struct reg_field mt6375_chg_reg_fields[F_MAX] = {
+@@ -85,10 +133,13 @@ static const struct reg_field mt6375_chg_reg_fields[F_MAX] = {
+ 	[F_ILIM_EN] = REG_FIELD(MT6375_REG_CHG_AICR, 7, 7),
+ 	[F_VMIVR] = REG_FIELD(MT6375_REG_CHG_MIVR, 0, 6),
+ 	[F_CV] = REG_FIELD(MT6375_REG_CHG_VCHG, 0, 6),
++	[F_VREC] = REG_FIELD(MT6375_REG_CHG_VCHG, 7, 7),
+ 	[F_CC] = REG_FIELD(MT6375_REG_CHG_ICHG, 0, 5),
++	[F_CHG_TMR] = REG_FIELD(MT6375_REG_CHG_TMR, 4, 5),
+ 	[F_CHG_TMR_EN] = REG_FIELD(MT6375_REG_CHG_TMR, 7, 7),
+ 	[F_TE] = REG_FIELD(MT6375_REG_CHG_EOC, 1, 1),
+ 	[F_IEOC] = REG_FIELD(MT6375_REG_CHG_EOC, 4, 7),
++	[F_BLEED_DIS_EN] = REG_FIELD(MT6375_REG_CHG_VSYS, 7, 7),
+ 	[F_WDT_EN] = REG_FIELD(MT6375_REG_CHG_WDT, 3, 3),
+ 	[F_IC_STAT] = REG_FIELD(MT6375_REG_CHG_STAT, 0, 3),
+ 	[F_ST_PWR_RDY] = REG_FIELD(MT6375_REG_CHG_STAT0, 0, 0),
+@@ -114,12 +165,43 @@ enum {
+ 	MT6375_CHG_STAT_FAULT,
+ };
+ 
++enum mt6375_chg_temp {
++	MT6375_CHG_TEMP_UNKNOWN,
++	MT6375_CHG_TEMP_COLD,
++	MT6375_CHG_TEMP_NORMAL,
++	MT6375_CHG_TEMP_WARM_RANGE,
++	MT6375_CHG_TEMP_HOT,
++};
++
+ struct mt6375_chg {
+ 	struct device *dev;
+ 	struct regmap *regmap;
+ 	struct regmap_field *fields[F_MAX];
+ 	struct regulator_dev *rdev;
+ 	struct power_supply *psy;
++
++	/* Set at probe, then fixed */
++	bool wants_control;		/* the device tree asks for it */
++	bool can_control;		/* and the battery description is usable */
++	int cv_max_uv;
++	int cc_max_ua;
++	int ieoc_ua;
++	int ovp_uv;
++	int temp_cold;
++	int temp_hot;
++
++	struct delayed_work work;
++	struct mutex lock;		/* the fields below */
++	bool taken_over;
++	bool overvoltage;
++	bool pwr_rdy;
++	enum mt6375_chg_temp temp;	/* the last one known, for its hysteresis */
++	bool temp_lost;
++	unsigned int read_fails;
++	int behaviour;
++	int user_cv_uv;
++	int user_cc_ua;
++	int user_aicr_ua;
+ };
+ 
+ /* The chip wants these set differently for the boost than for charging */
+@@ -408,6 +490,38 @@ static int mt6375_chg_get_charge_type(struct mt6375_chg *chg, int *val)
+ 	return 0;
+ }
+ 
++static int mt6375_chg_get_health(struct mt6375_chg *chg, int *val)
++{
++	unsigned int stat;
++	int ret;
++
++	mutex_lock(&chg->lock);
++	switch (chg->temp_lost ? MT6375_CHG_TEMP_UNKNOWN : chg->temp) {
++	case MT6375_CHG_TEMP_COLD:
++		*val = POWER_SUPPLY_HEALTH_COLD;
++		break;
++	case MT6375_CHG_TEMP_HOT:
++		*val = POWER_SUPPLY_HEALTH_OVERHEAT;
++		break;
++	case MT6375_CHG_TEMP_UNKNOWN:
++		*val = POWER_SUPPLY_HEALTH_UNKNOWN;
++		break;
++	default:
++		*val = chg->overvoltage ? POWER_SUPPLY_HEALTH_OVERVOLTAGE :
++					  POWER_SUPPLY_HEALTH_GOOD;
++		break;
++	}
++	mutex_unlock(&chg->lock);
++
++	ret = regmap_field_read(chg->fields[F_IC_STAT], &stat);
++	if (ret)
++		return ret;
++	if (stat == MT6375_CHG_STAT_FAULT)
++		*val = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	return 0;
++}
++
+ static int mt6375_chg_get_property(struct power_supply *psy,
+ 				   enum power_supply_property psp,
+ 				   union power_supply_propval *val)
+@@ -423,6 +537,19 @@ static int mt6375_chg_get_property(struct power_supply *psy,
+ 		return mt6375_chg_get_status(chg, &val->intval);
+ 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
+ 		return mt6375_chg_get_charge_type(chg, &val->intval);
++	case POWER_SUPPLY_PROP_HEALTH:
++		return mt6375_chg_get_health(chg, &val->intval);
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		mutex_lock(&chg->lock);
++		val->intval = chg->behaviour;
++		mutex_unlock(&chg->lock);
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++		val->intval = chg->cc_max_ua;
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
++		val->intval = chg->cv_max_uv;
++		return 0;
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+ 		return mt6375_chg_get_limit(chg, F_CC, &val->intval);
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
+@@ -438,12 +565,91 @@ static int mt6375_chg_get_property(struct power_supply *psy,
+ 	}
+ }
+ 
++/*
++ * User space can only ask for less than the limits, or stop charging. Without a
++ * description of the battery the chip is not ours to change.
++ */
++static int mt6375_chg_set_property(struct power_supply *psy,
++				   enum power_supply_property psp,
++				   const union power_supply_propval *val)
++{
++	struct mt6375_chg *chg = power_supply_get_drvdata(psy);
++	int ret = 0;
++
++	mutex_lock(&chg->lock);
++	if (!chg->can_control) {
++		mutex_unlock(&chg->lock);
++		return -EPERM;
++	}
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		if (val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO &&
++		    val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE)
++			ret = -EINVAL;
++		else
++			chg->behaviour = val->intval;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		if (val->intval < MT6375_CHG_CC_MIN_UA || val->intval > chg->cc_max_ua)
++			ret = -EINVAL;
++		else
++			chg->user_cc_ua = val->intval;
++		break;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		if (val->intval < MT6375_CHG_CV_MIN_UV || val->intval > chg->cv_max_uv)
++			ret = -EINVAL;
++		else
++			chg->user_cv_uv = val->intval;
++		break;
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		if (val->intval < MT6375_CHG_AICR_MIN_UA ||
++		    val->intval > MT6375_CHG_AICR_MAX_UA)
++			ret = -EINVAL;
++		else
++			chg->user_aicr_ua = val->intval;
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++	mutex_unlock(&chg->lock);
++
++	if (!ret)
++		mod_delayed_work(system_freezable_wq, &chg->work, 0);
++
++	return ret;
++}
++
++static int mt6375_chg_property_is_writeable(struct power_supply *psy,
++					    enum power_supply_property psp)
++{
++	struct mt6375_chg *chg = power_supply_get_drvdata(psy);
++
++	if (!chg->wants_control)
++		return 0;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		return 1;
++	default:
++		return 0;
++	}
++}
++
+ static const enum power_supply_property mt6375_chg_properties[] = {
+ 	POWER_SUPPLY_PROP_ONLINE,
+ 	POWER_SUPPLY_PROP_STATUS,
+ 	POWER_SUPPLY_PROP_CHARGE_TYPE,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
+ 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
+ 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+ 	POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT,
+ 	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
+@@ -454,9 +660,377 @@ static const struct power_supply_desc mt6375_chg_psy_desc = {
+ 	.type = POWER_SUPPLY_TYPE_USB,
+ 	.properties = mt6375_chg_properties,
+ 	.num_properties = ARRAY_SIZE(mt6375_chg_properties),
++	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
+ 	.get_property = mt6375_chg_get_property,
++	.set_property = mt6375_chg_set_property,
++	.property_is_writeable = mt6375_chg_property_is_writeable,
+ };
+ 
++/*
++ * Taken as it is or not at all. A value over a limit, in this file or in the
++ * device tree, is a mistake that must not reach the battery. Clamping would hide
++ * it.
++ */
++static int mt6375_chg_get_battery(struct mt6375_chg *chg)
++{
++	const struct linear_range *ieoc = &mt6375_chg_ranges[F_IEOC];
++	struct power_supply_battery_info *info;
++	int ret;
++
++	ret = power_supply_get_battery_info(chg->psy, &info);
++	if (ret)
++		return ret;
++
++	if (info->constant_charge_voltage_max_uv < MT6375_CHG_CV_MIN_UV ||
++	    info->constant_charge_voltage_max_uv > MT6375_CHG_CV_MAX_UV ||
++	    info->constant_charge_current_max_ua < MT6375_CHG_CC_MIN_UA ||
++	    info->constant_charge_current_max_ua > MT6375_CHG_CC_MAX_UA ||
++	    info->charge_term_current_ua < (int)ieoc->min ||
++	    info->charge_term_current_ua > (int)linear_range_get_max_value(ieoc) ||
++	    info->overvoltage_limit_uv <= info->constant_charge_voltage_max_uv ||
++	    info->temp_min == INT_MIN || info->temp_max == INT_MAX ||
++	    info->temp_min < MT6375_CHG_TEMP_MIN ||
++	    info->temp_max > MT6375_CHG_TEMP_MAX ||
++	    info->temp_min >= info->temp_max) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	chg->cv_max_uv = info->constant_charge_voltage_max_uv;
++	chg->cc_max_ua = info->constant_charge_current_max_ua;
++	chg->ieoc_ua = info->charge_term_current_ua;
++	chg->ovp_uv = info->overvoltage_limit_uv;
++	chg->temp_cold = info->temp_min;
++	chg->temp_hot = info->temp_max;
++
++	chg->user_cv_uv = chg->cv_max_uv;
++	chg->user_cc_ua = chg->cc_max_ua;
++	chg->user_aicr_ua = MT6375_CHG_AICR_MAX_UA;
++
++out:
++	power_supply_put_battery_info(chg->psy, info);
++
++	return ret;
++}
++
++/*
++ * Every write of a limit goes through here. The callers already stay under the
++ * maximum, so getting over it means a bug, which must not reach the battery.
++ */
++static int mt6375_chg_set_limit(struct mt6375_chg *chg, enum mt6375_chg_field fd,
++				unsigned int val)
++{
++	const struct linear_range *r = &mt6375_chg_ranges[fd];
++	unsigned int max, sel;
++
++	switch (fd) {
++	case F_CV:
++		max = MT6375_CHG_CV_MAX_UV;
++		break;
++	case F_CC:
++		max = MT6375_CHG_CC_MAX_UA;
++		break;
++	case F_IAICR:
++		max = MT6375_CHG_AICR_MAX_UA;
++		break;
++	default:
++		max = linear_range_get_max_value(r);
++		break;
++	}
++	if (WARN_ON(val > max))
++		return -ERANGE;
++
++	/* Rounds down, which is the safe way for all of these */
++	linear_range_get_selector_within(r, val, &sel);
++
++	return regmap_field_write(chg->fields[fd], sel);
++}
++
++/* Back to what the bootloader sets, for when nobody is watching the battery */
++static void mt6375_chg_set_unsupervised(struct mt6375_chg *chg)
++{
++	if (mt6375_chg_set_limit(chg, F_CC, MT6375_CHG_USB_UA) ||
++	    mt6375_chg_set_limit(chg, F_IAICR, MT6375_CHG_USB_UA))
++		dev_err(chg->dev, "Failed to lower the charge current\n");
++}
++
++/*
++ * Only an actual reading counts. A gauge that is not there yet is a failed read,
++ * and it is looked up each time because it may be a module that comes and goes.
++ */
++static int mt6375_chg_read_battery(struct mt6375_chg *chg, int *temp, int *uv)
++{
++	union power_supply_propval val;
++	struct power_supply *gauge;
++	int ret;
++
++	gauge = power_supply_get_by_reference(dev_fwnode(chg->dev),
++					      "mediatek,fuel-gauge");
++	if (IS_ERR_OR_NULL(gauge))
++		return -ENODEV;
++
++	ret = power_supply_get_property(gauge, POWER_SUPPLY_PROP_TEMP, &val);
++	if (ret)
++		goto out;
++	*temp = val.intval / 10;
++	if (*temp < MT6375_CHG_TEMP_SANE_MIN || *temp > MT6375_CHG_TEMP_SANE_MAX) {
++		ret = -ERANGE;
++		goto out;
++	}
++
++	ret = power_supply_get_property(gauge, POWER_SUPPLY_PROP_VOLTAGE_NOW, &val);
++	if (ret)
++		goto out;
++	if (val.intval <= 0) {
++		ret = -ERANGE;
++		goto out;
++	}
++	*uv = val.intval;
++
++out:
++	power_supply_put(gauge);
++
++	return ret;
++}
++
++/* The same steps as the stock JEITA state machine, with its thresholds */
++static enum mt6375_chg_temp mt6375_chg_next_temp(struct mt6375_chg *chg, int temp)
++{
++	if (temp >= chg->temp_hot)
++		return MT6375_CHG_TEMP_HOT;
++	if (chg->temp == MT6375_CHG_TEMP_HOT &&
++	    temp >= chg->temp_hot - MT6375_CHG_TEMP_HYST)
++		return MT6375_CHG_TEMP_HOT;
++	if (temp < chg->temp_cold)
++		return MT6375_CHG_TEMP_COLD;
++	if (chg->temp == MT6375_CHG_TEMP_COLD &&
++	    temp <= chg->temp_cold + MT6375_CHG_TEMP_HYST)
++		return MT6375_CHG_TEMP_COLD;
++	if (temp > MT6375_CHG_TEMP_WARM)
++		return MT6375_CHG_TEMP_WARM_RANGE;
++	if (chg->temp == MT6375_CHG_TEMP_WARM_RANGE &&
++	    temp >= MT6375_CHG_TEMP_WARM - MT6375_CHG_TEMP_HYST)
++		return MT6375_CHG_TEMP_WARM_RANGE;
++
++	return MT6375_CHG_TEMP_NORMAL;
++}
++
++/*
++ * The USB port says how much it can give, which goes above the USB default only
++ * with the Type-C current or a PD contract. BC1.2 stays unused: it would take
++ * D+ and D- away from the USB controller.
++ */
++static int mt6375_chg_input_limit(struct mt6375_chg *chg)
++{
++	union power_supply_propval val;
++	struct power_supply *port;
++	int limit = MT6375_CHG_USB_UA;
++
++	port = power_supply_get_by_reference(dev_fwnode(chg->dev), "mediatek,usb-port");
++	if (IS_ERR_OR_NULL(port))
++		return limit;
++
++	if (!power_supply_get_property(port, POWER_SUPPLY_PROP_ONLINE, &val) &&
++	    val.intval &&
++	    !power_supply_get_property(port, POWER_SUPPLY_PROP_CURRENT_MAX, &val))
++		limit = clamp(val.intval, MT6375_CHG_USB_UA, MT6375_CHG_AICR_MAX_UA);
++
++	power_supply_put(port);
++
++	return limit;
++}
++
++/*
++ * The settings stock makes at its probe that matter here. The limits go first:
++ * they share their registers with ILIM_EN and VREC, and the core driver refuses
++ * any write that carries a value over the maximum.
++ */
++static int mt6375_chg_take_over(struct mt6375_chg *chg, int cv_uv)
++{
++	int ret;
++
++	ret = mt6375_chg_set_limit(chg, F_IAICR, MT6375_CHG_USB_UA);
++	if (ret)
++		return ret;
++
++	ret = mt6375_chg_set_limit(chg, F_CC, MT6375_CHG_USB_UA);
++	if (ret)
++		return ret;
++
++	ret = mt6375_chg_set_limit(chg, F_CV, cv_uv);
++	if (ret)
++		return ret;
++
++	ret = regmap_field_write(chg->fields[F_ILIM_EN], 0);
++	if (ret)
++		return ret;
++
++	ret = regmap_field_write(chg->fields[F_VREC], MT6375_CHG_VREC_200MV);
++	if (ret)
++		return ret;
++
++	ret = regmap_field_write(chg->fields[F_CHG_TMR], MT6375_CHG_TMR_10H);
++	if (ret)
++		return ret;
++
++	ret = regmap_field_write(chg->fields[F_CHG_TMR_EN], 1);
++	if (ret)
++		return ret;
++
++	ret = mt6375_chg_set_limit(chg, F_IEOC, chg->ieoc_ua);
++	if (ret)
++		return ret;
++
++	ret = regmap_field_write(chg->fields[F_TE], 1);
++	if (ret)
++		return ret;
++
++	/* Stock turns it off at probe too and never turns it on here */
++	return regmap_field_write(chg->fields[F_WDT_EN], 0);
++}
++
++static void mt6375_chg_control(struct mt6375_chg *chg)
++{
++	int temp, vbat, cv, cc, aicr, ret;
++	unsigned int pwr_rdy, stat;
++	bool charge;
++
++	ret = mt6375_chg_read_battery(chg, &temp, &vbat);
++	if (ret) {
++		/* Nothing has been written yet, and nothing will be */
++		if (!chg->taken_over)
++			return;
++
++		if (chg->read_fails < MT6375_CHG_MAX_READ_FAILS)
++			chg->read_fails++;
++		if (chg->read_fails < MT6375_CHG_MAX_READ_FAILS)
++			return;
++
++		if (!chg->temp_lost)
++			dev_err(chg->dev, "Lost the battery temperature, stopping charging\n");
++		chg->temp_lost = true;
++	} else {
++		enum mt6375_chg_temp next = mt6375_chg_next_temp(chg, temp);
++
++		if (next != chg->temp)
++			dev_info(chg->dev, "Battery at %d C, temperature state %d\n",
++				 temp, next);
++		chg->temp = next;
++		chg->temp_lost = false;
++		chg->read_fails = 0;
++
++		if (vbat >= chg->ovp_uv) {
++			if (!chg->overvoltage)
++				dev_err(chg->dev, "Battery at %d uV, stopping charging\n", vbat);
++			chg->overvoltage = true;
++		} else if (vbat < chg->cv_max_uv - MT6375_CHG_VREC_UV) {
++			chg->overvoltage = false;
++		}
++	}
++
++	/* The chip uses these registers differently while it sources VBUS */
++	ret = regmap_field_read(chg->fields[F_IC_STAT], &stat);
++	if (ret)
++		goto stop;
++	if (stat == MT6375_IC_STAT_OTG)
++		return;
++
++	cv = min(chg->cv_max_uv, chg->user_cv_uv);
++	if (chg->temp != MT6375_CHG_TEMP_NORMAL || chg->temp_lost)
++		cv = min(cv, MT6375_CHG_CV_WARM_UV);
++
++	if (!chg->taken_over) {
++		ret = mt6375_chg_take_over(chg, cv);
++		if (ret) {
++			dev_err(chg->dev, "Failed to take over charging: %d\n", ret);
++			goto stop;
++		}
++		chg->taken_over = true;
++	}
++
++	ret = regmap_field_read(chg->fields[F_ST_PWR_RDY], &pwr_rdy);
++	if (ret)
++		goto stop;
++
++	/* Stock changes this one with VBUS. It drains the rail once VBUS is gone */
++	ret = regmap_field_write(chg->fields[F_BLEED_DIS_EN], !pwr_rdy);
++	if (ret)
++		goto stop;
++
++	charge = (chg->temp == MT6375_CHG_TEMP_NORMAL ||
++		  chg->temp == MT6375_CHG_TEMP_WARM_RANGE) && !chg->temp_lost &&
++		 !chg->overvoltage &&
++		 chg->behaviour == POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
++
++	aicr = MT6375_CHG_USB_UA;
++	if (pwr_rdy)
++		aicr = mt6375_chg_input_limit(chg);
++	aicr = min(aicr, chg->user_aicr_ua);
++
++	/* Stays low with charging off, in case turning it off fails */
++	cc = MT6375_CHG_USB_UA;
++	if (charge && aicr > MT6375_CHG_USB_UA)
++		cc = chg->cc_max_ua;
++	cc = min(cc, chg->user_cc_ua);
++
++	/*
++	 * A new source starts the safety timer anew, as stock does. Only turning
++	 * charging off and on does that for the chip, and only a fault needs it.
++	 */
++	if (!charge || (pwr_rdy && !chg->pwr_rdy && stat == MT6375_CHG_STAT_FAULT)) {
++		ret = regmap_field_write(chg->fields[F_CHG_EN], 0);
++		if (ret)
++			dev_err(chg->dev, "Failed to stop charging: %d\n", ret);
++	}
++	chg->pwr_rdy = pwr_rdy;
++
++	ret = mt6375_chg_set_limit(chg, F_CV, cv);
++	if (ret)
++		goto stop;
++
++	ret = mt6375_chg_set_limit(chg, F_CC, cc);
++	if (ret)
++		goto stop;
++
++	ret = mt6375_chg_set_limit(chg, F_IAICR, aicr);
++	if (ret)
++		goto stop;
++
++	if (charge) {
++		ret = regmap_field_write(chg->fields[F_CHG_EN], 1);
++		if (ret)
++			goto stop;
++	}
++
++	return;
++
++stop:
++	/* A limit may be stale now. With taking over unfinished this is still safe */
++	dev_err(chg->dev, "Failed to set up charging: %d\n", ret);
++	if (regmap_field_write(chg->fields[F_CHG_EN], 0))
++		dev_err(chg->dev, "Failed to stop charging\n");
++}
++
++static void mt6375_chg_work(struct work_struct *work)
++{
++	struct mt6375_chg *chg = container_of(to_delayed_work(work),
++					      struct mt6375_chg, work);
++	enum mt6375_chg_temp temp;
++	bool temp_lost;
++
++	mutex_lock(&chg->lock);
++	temp = chg->temp;
++	temp_lost = chg->temp_lost;
++	mt6375_chg_control(chg);
++	if (temp != chg->temp || temp_lost != chg->temp_lost)
++		power_supply_changed(chg->psy);
++	mutex_unlock(&chg->lock);
++
++	queue_delayed_work(system_freezable_wq, &chg->work,
++			   msecs_to_jiffies(MT6375_CHG_POLL_MS));
++}
++
+ /* What the bootloader left. It is the first thing to know about a new board */
+ static void mt6375_chg_log_state(struct mt6375_chg *chg)
+ {
+@@ -476,6 +1050,50 @@ static void mt6375_chg_log_state(struct mt6375_chg *chg)
+ 		 cv, ichg, aicr, en, buck, hz, wdt);
+ }
+ 
++static void mt6375_chg_stop_control(struct mt6375_chg *chg)
++{
++	disable_delayed_work_sync(&chg->work);
++
++	mutex_lock(&chg->lock);
++	if (chg->taken_over)
++		mt6375_chg_set_unsupervised(chg);
++	mutex_unlock(&chg->lock);
++}
++
++static void mt6375_chg_release_control(void *data)
++{
++	mt6375_chg_stop_control(data);
++}
++
++static int mt6375_chg_init_control(struct mt6375_chg *chg)
++{
++	struct device *dev = chg->dev;
++	int ret = -ENOENT;
++
++	if (chg->wants_control) {
++		ret = mt6375_chg_get_battery(chg);
++		if (ret)
++			dev_err(dev, "Unusable battery description: %d\n", ret);
++	}
++
++	if (ret) {
++		dev_info(dev, "Leaving charging as the bootloader set it\n");
++		return 0;
++	}
++
++	ret = devm_add_action_or_reset(dev, mt6375_chg_release_control, chg);
++	if (ret)
++		return ret;
++
++	mutex_lock(&chg->lock);
++	chg->can_control = true;
++	mutex_unlock(&chg->lock);
++
++	queue_delayed_work(system_freezable_wq, &chg->work, 0);
++
++	return 0;
++}
++
+ static int mt6375_chg_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -489,6 +1107,11 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	chg->dev = dev;
++	mutex_init(&chg->lock);
++	INIT_DELAYED_WORK(&chg->work, mt6375_chg_work);
++	chg->behaviour = POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
++	chg->cv_max_uv = MT6375_CHG_CV_MAX_UV;
++	chg->cc_max_ua = MT6375_CHG_CC_MAX_UA;
+ 	chg->regmap = dev_get_regmap(dev->parent, NULL);
+ 	if (!chg->regmap)
+ 		return dev_err_probe(dev, -ENODEV, "Failed to get regmap\n");
+@@ -508,6 +1131,10 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+ 		return dev_err_probe(dev, PTR_ERR(chg->rdev),
+ 				     "Failed to register the OTG regulator\n");
+ 
++	/* Decides which attributes are writable, so it comes before the registration */
++	chg->wants_control = fwnode_property_present(dev_fwnode(dev), "monitored-battery") &&
++			     fwnode_property_present(dev_fwnode(dev), "mediatek,fuel-gauge");
++
+ 	psy_cfg.drv_data = chg;
+ 	psy_cfg.fwnode = dev_fwnode(dev);
+ 	chg->psy = devm_power_supply_register(dev, &mt6375_chg_psy_desc, &psy_cfg);
+@@ -517,7 +1144,7 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, chg);
+ 
+-	return 0;
++	return mt6375_chg_init_control(chg);
+ }
+ 
+ /* The stock kernel too turns VBUS off on its way down */
+@@ -527,8 +1154,47 @@ static void mt6375_chg_shutdown(struct platform_device *pdev)
+ 
+ 	if (regulator_is_enabled_regmap(chg->rdev) > 0)
+ 		mt6375_otg_disable(chg->rdev);
++
++	if (chg->can_control)
++		mt6375_chg_stop_control(chg);
+ }
+ 
++/*
++ * The work does not run in suspend, so nothing would follow the temperature, and
++ * charging stops until resume. Stock wakes every 10 seconds to look instead.
++ */
++static int mt6375_chg_suspend(struct device *dev)
++{
++	struct mt6375_chg *chg = dev_get_drvdata(dev);
++
++	if (!chg->can_control)
++		return 0;
++
++	mt6375_chg_stop_control(chg);
++
++	mutex_lock(&chg->lock);
++	if (chg->taken_over && regmap_field_write(chg->fields[F_CHG_EN], 0))
++		dev_err(dev, "Failed to stop charging\n");
++	mutex_unlock(&chg->lock);
++
++	return 0;
++}
++
++static int mt6375_chg_resume(struct device *dev)
++{
++	struct mt6375_chg *chg = dev_get_drvdata(dev);
++
++	if (chg->can_control) {
++		enable_delayed_work(&chg->work);
++		queue_delayed_work(system_freezable_wq, &chg->work, 0);
++	}
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(mt6375_chg_pm_ops, mt6375_chg_suspend,
++				mt6375_chg_resume);
++
+ static const struct of_device_id mt6375_chg_of_match[] = {
+ 	{ .compatible = "mediatek,mt6375-charger" },
+ 	{ /* sentinel */ }
+@@ -541,6 +1207,7 @@ static struct platform_driver mt6375_chg_driver = {
+ 	.driver = {
+ 		.name = "mt6375-charger",
+ 		.of_match_table = mt6375_chg_of_match,
++		.pm = pm_sleep_ptr(&mt6375_chg_pm_ops),
+ 	},
+ };
+ module_platform_driver(mt6375_chg_driver);

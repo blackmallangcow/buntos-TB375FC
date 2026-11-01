@@ -1,0 +1,331 @@
+From: buntOS contributors
+Subject: [PATCH] mfd: mt6375: add the interrupts and the TCPC
+
+The TCPC answers on its own I2C address and sits in bank 0 of the regmap,
+as on MT6370, and its alert comes in through the interrupt registers of
+the PMU bank.
+
+Only with an interrupt in the device tree does probing touch the chip:
+it masks all the interrupts and clears their flags as the MediaTek driver
+does, because regmap-irq only touches the ones in use and any other could
+hold the line down. Only then is there a TCPC device. Without an interrupt
+the probe still writes nothing.
+
+---
+ drivers/mfd/Kconfig  |   4 +-
+ drivers/mfd/mt6375.c | 181 ++++++++++++++++++++++++++++++++++++++-----
+ 2 files changed, 164 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/mfd/Kconfig b/drivers/mfd/Kconfig
+index 251e412..013f7e1 100644
+--- a/drivers/mfd/Kconfig
++++ b/drivers/mfd/Kconfig
+@@ -1142,14 +1142,14 @@ config MFD_MT6375
+ 	tristate "MediaTek MT6375 SubPMIC"
+ 	select MFD_CORE
+ 	select REGMAP
++	select REGMAP_IRQ
+ 	depends on I2C
+ 	depends on ARCH_MEDIATEK || COMPILE_TEST
+ 	help
+ 	  Say Y here to enable MT6375 SubPMIC functional support. The chip has
+ 	  a battery charger with a boost for USB VBUS, a USB Type-C and PD
+ 	  controller, a fuel gauge and ADCs. This core driver checks the chip
+-	  and gives its sub-devices register access. So far the only one is
+-	  the boost.
++	  and gives its sub-devices register access and interrupts.
+ 
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called "mt6375".
+diff --git a/drivers/mfd/mt6375.c b/drivers/mfd/mt6375.c
+index e23ab2b..f41c044 100644
+--- a/drivers/mfd/mt6375.c
++++ b/drivers/mfd/mt6375.c
+@@ -4,13 +4,16 @@
+  *
+  * The chip answers on one I2C address per block. As on MT6370, a register
+  * address carries the bank in its upper byte and the offset in its lower byte,
+- * so the register numbers read like the ones in the MediaTek driver. Only the
+- * PMU bank, which sits on the address of the device node, is in use so far.
++ * so the register numbers read like the ones in the MediaTek driver. The TCPC
++ * and PMU banks are in use so far, and the PMU bank sits on the address of the
++ * device node.
+  *
+- * Probing only reads the device information. Nothing here writes to the chip,
+- * and the interrupt line stays unused, so a failed probe leaves the chip as the
+- * bootloader left it. Every write goes through mt6375_regmap_write(), which
+- * refuses the values below that would harm the battery or cut the power.
++ * Without an interrupt in the device tree, probing only reads the device
++ * information and nothing here writes to the chip, so a failed probe leaves the
++ * chip as the bootloader left it. Only with an interrupt does probing mask the
++ * ones of the chip, and only then is there a TCPC. Every write goes through
++ * mt6375_regmap_write(), which refuses the values below that would harm the
++ * battery or cut the power.
+  *
+  * Copyright (c) 2026 buntOS contributors
+  */
+@@ -18,10 +21,13 @@
+ #include <linux/bitfield.h>
+ #include <linux/bits.h>
+ #include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/ioport.h>
+ #include <linux/mfd/core.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/module.h>
+ #include <linux/regmap.h>
++#include <linux/string.h>
+ #include <linux/unaligned.h>
+ 
+ #define MT6375_REG_DEV_INFO	0x100
+@@ -29,10 +35,29 @@
+ #define MT6375_REV_MASK		GENMASK(3, 0)
+ #define MT6375_VENID		0x7
+ 
++#define MT6375_REG_TCPC_LAST	0x0ff
+ #define MT6375_REG_PMU_FIRST	0x100
+ #define MT6375_REG_PMU_LAST	0x1ff
+ #define MT6375_REG_OFFSET_SIZE	2
+ 
++#define MT6375_TCPC_I2C_ADDR	0x4e
++
++enum {
++	MT6375_BANK_TCPC,
++	MT6375_BANK_PMU,
++	MT6375_NUM_BANKS,
++};
++
++#define MT6375_REG_CHG_IRQ0	0x1d0
++#define MT6375_REG_CHG_MSK0	0x1f0
++#define MT6375_NUM_IRQ_REGS	16
++
++#define MT6375_IRQ_PWR_RDY	0
++#define MT6375_IRQ_DETACH	1
++#define MT6375_IRQ_VBUS_OV	8
++#define MT6375_IRQ_CHG_TOUT	11
++#define MT6375_IRQ_PD_EVT	120
++
+ #define MT6375_REG_CHG_TOP1	0x120
+ #define MT6375_BATFET_DIS	BIT(6)
+ #define MT6375_REG_CHG_AICR	0x122
+@@ -77,14 +102,22 @@ static bool mt6375_value_is_safe(unsigned int reg, u8 val)
+ 	}
+ }
+ 
++struct mt6375_data {
++	struct i2c_client *i2c[MT6375_NUM_BANKS];
++};
++
+ static int mt6375_regmap_read(void *context, const void *reg_buf,
+ 			      size_t reg_size, void *val_buf, size_t val_size)
+ {
+-	struct i2c_client *i2c = context;
++	struct mt6375_data *data = context;
+ 	const u8 *reg = reg_buf;
+ 	int ret;
+ 
+-	ret = i2c_smbus_read_i2c_block_data(i2c, reg[1], val_size, val_buf);
++	if (reg[0] >= MT6375_NUM_BANKS)
++		return -EINVAL;
++
++	ret = i2c_smbus_read_i2c_block_data(data->i2c[reg[0]], reg[1], val_size,
++					    val_buf);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -93,20 +126,23 @@ static int mt6375_regmap_read(void *context, const void *reg_buf,
+ 
+ static int mt6375_regmap_write(void *context, const void *data, size_t count)
+ {
+-	struct i2c_client *i2c = context;
++	struct mt6375_data *mt = context;
+ 	const u8 *buf = data;
+ 	unsigned int reg = get_unaligned_be16(buf);
+ 	size_t i;
+ 
++	if (buf[0] >= MT6375_NUM_BANKS)
++		return -EINVAL;
++
+ 	for (i = MT6375_REG_OFFSET_SIZE; i < count; i++, reg++) {
+ 		if (!mt6375_value_is_safe(reg, buf[i])) {
+-			dev_err(&i2c->dev, "Refused 0x%02x for register 0x%03x\n",
+-				buf[i], reg);
++			dev_err(&mt->i2c[MT6375_BANK_PMU]->dev,
++				"Refused 0x%02x for register 0x%03x\n", buf[i], reg);
+ 			return -EPERM;
+ 		}
+ 	}
+ 
+-	return i2c_smbus_write_i2c_block_data(i2c, buf[1],
++	return i2c_smbus_write_i2c_block_data(mt->i2c[buf[0]], buf[1],
+ 					      count - MT6375_REG_OFFSET_SIZE,
+ 					      buf + MT6375_REG_OFFSET_SIZE);
+ }
+@@ -119,6 +155,7 @@ static const struct regmap_bus mt6375_regmap_bus = {
+ };
+ 
+ static const struct regmap_range mt6375_rd_ranges[] = {
++	regmap_reg_range(0, MT6375_REG_TCPC_LAST),
+ 	regmap_reg_range(MT6375_REG_PMU_FIRST, MT6375_REG_PMU_LAST),
+ };
+ 
+@@ -128,18 +165,42 @@ static const struct regmap_access_table mt6375_rd_table = {
+ };
+ 
+ /*
+- * The registers of the OTG boost and of battery charging, and nothing else. The
+- * same bank holds the USB switch, BC1.2, the ADCs and the protection settings,
+- * which these drivers must leave alone. The cell that takes those over extends
+- * this list.
++ * The registers of the TCPC, the interrupts, the OTG boost and battery charging,
++ * and nothing else. The PMU bank also holds the USB switch, BC1.2, the ADCs and
++ * the protection settings, which these drivers must leave alone. The cell that
++ * takes those over extends this list.
+  */
+ static const struct regmap_range mt6375_wr_ranges[] = {
++	regmap_reg_range(0x010, 0x014),		/* ALERT to POWER_STATUS_MASK */
++	regmap_reg_range(0x019, 0x01a),		/* TCPC_CTRL, ROLE_CTRL */
++	regmap_reg_range(0x01c, 0x01c),		/* POWER_CTRL */
++	regmap_reg_range(0x01f, 0x020),		/* FAULT_STATUS, written as 16 bits */
++	regmap_reg_range(0x023, 0x023),		/* COMMAND */
++	regmap_reg_range(0x02e, 0x02f),		/* MSG_HDR_INFO, RX_DETECT */
++	regmap_reg_range(0x050, 0x06f),		/* TRANSMIT and its buffer */
++	regmap_reg_range(0x080, 0x082),		/* PHYCTRL1 to PHYCTRL3 */
++	regmap_reg_range(0x086, 0x086),		/* PHYCTRL7 */
++	regmap_reg_range(0x08b, 0x08c),		/* VCONCTRL2, VCONCTRL3 */
++	regmap_reg_range(0x08f, 0x090),		/* SYSCTRL1, SYSCTRL2 */
++	regmap_reg_range(0x091, 0x097),		/* MTMASK1 to MTMASK7 */
++	regmap_reg_range(0x098, 0x09e),		/* MTINT1 to MTINT7 */
++	regmap_reg_range(0x0ac, 0x0ac),		/* PHYCTRL9 */
++	regmap_reg_range(0x0b0, 0x0b4),		/* SYSCTRL3, TCPCCTRL1 to TCPCCTRL3 */
++	regmap_reg_range(0x0bb, 0x0bb),		/* LPWRCTRL3 */
++	regmap_reg_range(0x0be, 0x0bf),		/* WATCHDOGCTRL, I2CTORSTCTRL */
++	regmap_reg_range(0x0c8, 0x0c8),		/* HILOCTRL9 */
++	regmap_reg_range(0x0ca, 0x0ca),		/* SHIELDCTRL1 */
++	regmap_reg_range(0x0cf, 0x0cf),		/* FODCTRL */
+ 	regmap_reg_range(0x107, 0x107),		/* TM_PAS_CODE1 */
+ 	regmap_reg_range(0x120, 0x122),		/* CHG_TOP1, CHG_TOP2, CHG_AICR */
+ 	regmap_reg_range(0x125, 0x12a),		/* CHG_VCHG to CHG_WDT */
+ 	regmap_reg_range(0x130, 0x132),		/* OTG_LBP, OTG_V, OTG_C */
+ 	regmap_reg_range(0x135, 0x135),		/* CHG_DUMY0 */
+ 	regmap_reg_range(0x140, 0x140),		/* CHG_HD_BUCK5 */
++	regmap_reg_range(MT6375_REG_CHG_IRQ0,
++			 MT6375_REG_CHG_IRQ0 + MT6375_NUM_IRQ_REGS - 1),
++	regmap_reg_range(MT6375_REG_CHG_MSK0,
++			 MT6375_REG_CHG_MSK0 + MT6375_NUM_IRQ_REGS - 1),
+ };
+ 
+ static const struct regmap_access_table mt6375_wr_table = {
+@@ -156,18 +217,85 @@ static const struct regmap_config mt6375_regmap_config = {
+ 	.wr_table		= &mt6375_wr_table,
+ };
+ 
++static const struct regmap_irq mt6375_irqs[] = {
++	REGMAP_IRQ_REG_LINE(MT6375_IRQ_PWR_RDY, 8),
++	REGMAP_IRQ_REG_LINE(MT6375_IRQ_DETACH, 8),
++	REGMAP_IRQ_REG_LINE(MT6375_IRQ_VBUS_OV, 8),
++	REGMAP_IRQ_REG_LINE(MT6375_IRQ_CHG_TOUT, 8),
++	REGMAP_IRQ_REG_LINE(MT6375_IRQ_PD_EVT, 8),
++};
++
++static const struct regmap_irq_chip mt6375_irq_chip = {
++	.name		= "mt6375-irqs",
++	.status_base	= MT6375_REG_CHG_IRQ0,
++	.ack_base	= MT6375_REG_CHG_IRQ0,
++	.mask_base	= MT6375_REG_CHG_MSK0,
++	.num_regs	= MT6375_NUM_IRQ_REGS,
++	.irqs		= mt6375_irqs,
++	.num_irqs	= ARRAY_SIZE(mt6375_irqs),
++};
++
++static const struct resource mt6375_chg_irqs[] = {
++	DEFINE_RES_IRQ_NAMED(MT6375_IRQ_PWR_RDY, "pwr_rdy"),
++	DEFINE_RES_IRQ_NAMED(MT6375_IRQ_DETACH, "detach"),
++	DEFINE_RES_IRQ_NAMED(MT6375_IRQ_VBUS_OV, "vbus_ov"),
++	DEFINE_RES_IRQ_NAMED(MT6375_IRQ_CHG_TOUT, "chg_tout"),
++};
++
++static const struct resource mt6375_tcpc_irqs[] = {
++	DEFINE_RES_IRQ_NAMED(MT6375_IRQ_PD_EVT, "pd_evt"),
++};
++
+ static const struct mfd_cell mt6375_devices[] = {
+ 	MFD_CELL_OF("mt6375-charger", NULL, NULL, 0, 0, "mediatek,mt6375-charger"),
+ };
+ 
++static const struct mfd_cell mt6375_irq_devices[] = {
++	MFD_CELL_OF("mt6375-charger", mt6375_chg_irqs, NULL, 0, 0,
++		    "mediatek,mt6375-charger"),
++	MFD_CELL_OF("mt6375-tcpc", mt6375_tcpc_irqs, NULL, 0, 0,
++		    "mediatek,mt6375-tcpc"),
++};
++
++/*
++ * Masks and clears them all as the MediaTek driver does, not only the ones in
++ * use: regmap-irq touches only those, and any other could hold the line down.
++ */
++static int mt6375_quiet_irqs(struct regmap *regmap)
++{
++	u8 all[MT6375_NUM_IRQ_REGS];
++	int ret;
++
++	memset(all, 0xff, sizeof(all));
++
++	ret = regmap_bulk_write(regmap, MT6375_REG_CHG_MSK0, all, sizeof(all));
++	if (ret)
++		return ret;
++
++	return regmap_bulk_write(regmap, MT6375_REG_CHG_IRQ0, all, sizeof(all));
++}
++
+ static int mt6375_probe(struct i2c_client *i2c)
+ {
+ 	struct device *dev = &i2c->dev;
++	struct regmap_irq_chip_data *irq_data;
++	struct mt6375_data *data;
+ 	struct regmap *regmap;
+ 	unsigned int devinfo;
+ 	int ret;
+ 
+-	regmap = devm_regmap_init(dev, &mt6375_regmap_bus, i2c,
++	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++
++	data->i2c[MT6375_BANK_PMU] = i2c;
++	data->i2c[MT6375_BANK_TCPC] = devm_i2c_new_dummy_device(dev, i2c->adapter,
++								MT6375_TCPC_I2C_ADDR);
++	if (IS_ERR(data->i2c[MT6375_BANK_TCPC]))
++		return dev_err_probe(dev, PTR_ERR(data->i2c[MT6375_BANK_TCPC]),
++				     "Failed to add the TCPC I2C client\n");
++
++	regmap = devm_regmap_init(dev, &mt6375_regmap_bus, data,
+ 				  &mt6375_regmap_config);
+ 	if (IS_ERR(regmap))
+ 		return dev_err_probe(dev, PTR_ERR(regmap),
+@@ -186,8 +314,23 @@ static int mt6375_probe(struct i2c_client *i2c)
+ 	dev_info(dev, "MT6375 revision %lu\n",
+ 		 FIELD_GET(MT6375_REV_MASK, devinfo));
+ 
+-	return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO, mt6375_devices,
+-				    ARRAY_SIZE(mt6375_devices), NULL, 0, NULL);
++	if (i2c->irq <= 0)
++		return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO, mt6375_devices,
++					    ARRAY_SIZE(mt6375_devices), NULL, 0,
++					    NULL);
++
++	ret = mt6375_quiet_irqs(regmap);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to mask the interrupts\n");
++
++	ret = devm_regmap_add_irq_chip(dev, regmap, i2c->irq, IRQF_ONESHOT, 0,
++				       &mt6375_irq_chip, &irq_data);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to add the irq chip\n");
++
++	return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO, mt6375_irq_devices,
++				    ARRAY_SIZE(mt6375_irq_devices), NULL, 0,
++				    regmap_irq_get_domain(irq_data));
+ }
+ 
+ static const struct of_device_id mt6375_of_match[] = {

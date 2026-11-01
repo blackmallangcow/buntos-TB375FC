@@ -106,6 +106,17 @@
 # 벤더 코드와 같은 모델에서 레지스터 쓰기와 링 메모리를 맞댔다(어긋남 0, 보고서 참조). 기기에서 돌린 적이 없다
 0085-dt-bindings-net-bluetooth-add-the-MediaTek-MT6897-built-in-Bluetooth.patch
 0086-Bluetooth-btmtkbeif-add-the-MediaTek-shared-memory-HCI-transport.patch
+# 0090~0093: MT6375 배터리 충전(2e). 드라이버는 값 검사를 코어에 두고, 배터리 설명과 게이지가 있어야 넘겨받는다.
+# 값은 순정 트리에서만 왔다. 기기 확인 뒤 업스트림에 낸다
+0090-dt-bindings-power-supply-mt6375-charger-add-the-battery-and-its-gauge.patch
+0091-mfd-mt6375-refuse-writes-that-would-harm-the-battery.patch
+0092-power-supply-mt6375-charger-show-the-state-of-charging.patch
+0093-power-supply-mt6375-charger-take-over-charging.patch
+# 0094~0097: MT6375 인터럽트와 TCPC. tcpci 위의 글루이고 처음에는 PD 없이 쓴다
+0094-dt-bindings-usb-add-MediaTek-MT6375-TCPC.patch
+0095-mfd-mt6375-add-the-interrupts-and-the-TCPC.patch
+0096-usb-typec-tcpci_mt6375-add-MediaTek-MT6375.patch
+0097-power-supply-mt6375-charger-use-the-interrupts.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 드라이버가 없다):
 #  - pmdomain: mediatek: mtk-mfg MT6897 GPUEB 변형
 #  - wifi: mt76: mt7921 SoC의 레거시 명령 길(기기에서 uni cmd를 받지 않을 때)

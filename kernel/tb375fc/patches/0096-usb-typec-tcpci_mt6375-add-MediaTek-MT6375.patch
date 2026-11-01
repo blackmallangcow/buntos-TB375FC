@@ -1,0 +1,552 @@
+From: buntOS contributors
+Subject: [PATCH] usb: typec: tcpci_mt6375: add MediaTek MT6375
+
+Add the glue for the TCPC of MT6375 on top of TCPCI, modelled on the one
+of MT6370. The vendor registers, their values and order come from the
+MediaTek driver in the OnePlus MT6897 kernel, without its water, foreign
+object and cable type detection and its low power mode.
+
+A few things go another way than on MT6370 because of what is known about
+this chip. The MediaTek driver never sends the commands of TCPCI that
+switch VBUS, so neither does this: sourcing goes through the boost of the
+charger and sinking needs no switching. Auto discharge stays off for the
+same reason. tcpci_register_port() leaves the alerts masked, so this
+unmasks them after requesting the interrupt.
+
+The USB gadget can be the only way into a tablet being brought up, so
+the pins get Rd right after the reset of the controller, as stock does,
+and get it back when the driver goes away or the system shuts down, for
+USB to work in whatever runs next. Nothing is written before the chip is
+known and the port is registered. A USB host that is there when the port
+comes up gives no alert and TCPM ignores the pins during its port reset,
+so this has it look once more after that.
+
+The MediaTek driver reads VBUS from a vendor status register, while this
+uses the standard one through TCPCI. The upstream MT6360 glue does the
+same for a chip whose MediaTek driver also reads the vendor register, but
+it is not known to work here until tried on a device.
+
+---
+ drivers/usb/typec/tcpm/Kconfig        |  11 +
+ drivers/usb/typec/tcpm/Makefile       |   1 +
+ drivers/usb/typec/tcpm/tcpci_mt6375.c | 478 ++++++++++++++++++++++++++
+ 3 files changed, 490 insertions(+)
+
+diff --git a/drivers/usb/typec/tcpm/Kconfig b/drivers/usb/typec/tcpm/Kconfig
+index 00baa75..6a6b590 100644
+--- a/drivers/usb/typec/tcpm/Kconfig
++++ b/drivers/usb/typec/tcpm/Kconfig
+@@ -35,6 +35,17 @@ config TYPEC_MT6360
+ 	  USB Type-C. It works with Type-C Port Controller Manager
+ 	  to provide USB PD and USB Type-C functionalities.
+ 
++config TYPEC_TCPCI_MT6375
++	tristate "MediaTek MT6375 Type-C driver"
++	depends on MFD_MT6375
++	help
++	  MediaTek MT6375 is a multi-functional IC that includes a USB Type-C
++	  port controller. It works with Type-C Port Controller Manager to
++	  provide USB Type-C and PD functions.
++
++	  If you choose to build this driver as a dynamically linked module, the
++	  module will be called "tcpci_mt6375".
++
+ config TYPEC_TCPCI_MT6370
+ 	tristate "MediaTek MT6370 Type-C driver"
+ 	depends on MFD_MT6370
+diff --git a/drivers/usb/typec/tcpm/Makefile b/drivers/usb/typec/tcpm/Makefile
+index 7a8cad0..860dd95 100644
+--- a/drivers/usb/typec/tcpm/Makefile
++++ b/drivers/usb/typec/tcpm/Makefile
+@@ -7,6 +7,7 @@ obj-$(CONFIG_TYPEC_TCPCI)		+= tcpci.o
+ obj-$(CONFIG_TYPEC_RT1711H)		+= tcpci_rt1711h.o
+ obj-$(CONFIG_TYPEC_MT6360)		+= tcpci_mt6360.o
+ obj-$(CONFIG_TYPEC_TCPCI_MT6370)	+= tcpci_mt6370.o
++obj-$(CONFIG_TYPEC_TCPCI_MT6375)	+= tcpci_mt6375.o
+ obj-$(CONFIG_TYPEC_TCPCI_MAXIM)		+= tcpci_maxim.o
+ tcpci_maxim-y				+= tcpci_maxim_core.o maxim_contaminant.o
+ obj-$(CONFIG_TYPEC_QCOM_PMIC)		+= qcom/
+diff --git a/drivers/usb/typec/tcpm/tcpci_mt6375.c b/drivers/usb/typec/tcpm/tcpci_mt6375.c
+new file mode 100644
+index 0000000..875a135
+--- /dev/null
++++ b/drivers/usb/typec/tcpm/tcpci_mt6375.c
+@@ -0,0 +1,478 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek MT6375 USB Type-C port controller
++ *
++ * A TCPCI controller in the SubPMIC. The vendor registers, their values and
++ * their order come from the MediaTek driver in the OnePlus MT6897 kernel, without
++ * its water, foreign object and cable type detection, and its low power mode.
++ *
++ * The USB gadget can be the only way into a tablet being brought up. So until the
++ * port is registered this only reads, and it does not use the commands of TCPCI
++ * that switch VBUS, which the MediaTek driver never sends to this chip. Sourcing
++ * VBUS goes through the boost of the charger, and sinking needs no switching.
++ *
++ * Copyright (c) 2026 buntOS contributors
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/devm-helpers.h>
++#include <linux/err.h>
++#include <linux/interrupt.h>
++#include <linux/kernel.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pm_wakeirq.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++#include <linux/usb/tcpci.h>
++#include <linux/usb/tcpm.h>
++#include <linux/workqueue.h>
++
++#define MT6375_VENDOR_ID		0x29cf
++#define MT6375_PRODUCT_ID		0x6375
++
++#define MT6375_REG_PHYCTRL1		0x80
++#define MT6375_REG_PHYCTRL2		0x81
++#define MT6375_REG_PHYCTRL3		0x82
++#define MT6375_REG_PHYCTRL7		0x86
++#define MT6375_REG_VCONCTRL2		0x8b
++#define MT6375_VCON_RVPCPEN		BIT(1)
++#define MT6375_VCON_RVPEN		BIT(3)
++#define MT6375_VCON_OVCCEN		BIT(7)
++#define MT6375_VCON_PROTEN		(MT6375_VCON_RVPEN | MT6375_VCON_OVCCEN | \
++					 MT6375_VCON_RVPCPEN)
++#define MT6375_REG_VCONCTRL3		0x8c
++#define MT6375_VCON_OVPEN		BIT(4)
++#define MT6375_REG_SYSCTRL1		0x8f
++#define MT6375_REG_SYSCTRL2		0x90
++#define MT6375_BMCIOOSC_EN		BIT(0)
++#define MT6375_VBUSDET_EN		BIT(1)
++#define MT6375_REG_MTMASK1		0x91
++#define MT6375_REG_MTINT1		0x98
++#define MT6375_REG_MTST2		0xa0
++#define MT6375_VCON_FAULT		(BIT(0) | BIT(1) | BIT(2) | BIT(4) | BIT(5))
++#define MT6375_REG_PHYCTRL9		0xac
++#define MT6375_REG_SYSCTRL3		0xb0
++#define MT6375_SW_RESET			BIT(0)
++#define MT6375_REG_TCPCCTRL1		0xb1
++#define MT6375_REG_TCPCCTRL2		0xb2
++#define MT6375_REG_TCPCCTRL3		0xb3
++#define MT6375_REG_LPWRCTRL3		0xbb
++#define MT6375_REG_WATCHDOGCTRL		0xbe
++#define MT6375_VBUSDISCHG_OPT		BIT(6)
++#define MT6375_REG_I2CTORSTCTRL		0xbf
++#define MT6375_VCONN_UVP_OCP_CPEN	(BIT(4) | BIT(5))
++#define MT6375_REG_HILOCTRL9		0xc8
++#define MT6375_REG_SHIELDCTRL1		0xca
++#define MT6375_OPEN40MS_EN		BIT(4)
++#define MT6375_REG_FODCTRL		0xcf
++#define MT6375_FOD_SNK_EN		BIT(6)
++
++#define MT6375_NUM_VEND_INT		7
++
++/* As tcpci_init() would have it. tcpci_register_port() does not unmask them */
++#define MT6375_ALERT_MASK		(TCPC_ALERT_TX_SUCCESS | TCPC_ALERT_TX_FAILED | \
++					 TCPC_ALERT_TX_DISCARDED | TCPC_ALERT_RX_STATUS | \
++					 TCPC_ALERT_RX_HARD_RST | TCPC_ALERT_CC_STATUS | \
++					 TCPC_ALERT_POWER_STATUS)
++
++/* TCPM takes 100 + 920 ms for its port reset with VBUS present, by default */
++#define MT6375_CC_RECHECK_MS		2000
++
++struct mt6375_tcpc {
++	struct device *dev;
++	struct delayed_work cc_work;
++	struct regulator *vbus;
++	struct tcpci *tcpci;
++	struct tcpci_data tcpci_data;
++	int irq;
++	bool irq_ready;
++	bool vbus_on;
++};
++
++/* What the MediaTek driver clears at probe */
++static const u8 mt6375_vend_int_clear[MT6375_NUM_VEND_INT] = {
++	0x3f, 0xfd, 0xf0, 0xe3, 0xff, 0xf8, 0x3f,
++};
++
++static const struct reg_sequence mt6375_tcpc_settings[] = {
++	{ MT6375_REG_TCPCCTRL1, 0x0a },		/* tTCPCFilter = 250 us */
++	{ MT6375_REG_TCPCCTRL2, 0x00 },		/* DRP toggle cycle = 51.2 ms */
++	{ MT6375_REG_TCPCCTRL3, 0x34 },		/* DRP duty 308/1024, 30% */
++	{ MT6375_REG_TCPCCTRL3 + 1, 0x01 },
++	{ MT6375_REG_PHYCTRL1, 0x74 },
++	{ MT6375_REG_PHYCTRL2, 0x3a },
++	{ MT6375_REG_PHYCTRL3, 0x82 },
++	{ MT6375_REG_PHYCTRL7, 0x36 },
++	{ MT6375_REG_PHYCTRL9, 0x3c },
++	{ MT6375_REG_VCONCTRL3, 0x11 },		/* VCONN current limit, 100 mA */
++	{ MT6375_REG_HILOCTRL9, 0xaa },
++};
++
++/* The last of the init in the MediaTek driver */
++static const struct reg_sequence mt6375_tcpc_idle_settings[] = {
++	{ MT6375_REG_LPWRCTRL3, 0xd8 },
++	{ MT6375_REG_SYSCTRL1, 0xb8, 1000 },	/* Shipping off, autoidle on */
++	{ MT6375_REG_SYSCTRL2, MT6375_VBUSDET_EN | MT6375_BMCIOOSC_EN },
++};
++
++static int mt6375_tcpc_write16(struct regmap *regmap, unsigned int reg, u16 val)
++{
++	return regmap_raw_write(regmap, reg, &val, sizeof(val));
++}
++
++static int mt6375_tcpc_reset(struct regmap *regmap)
++{
++	int ret;
++
++	ret = regmap_write(regmap, MT6375_REG_SYSCTRL3, MT6375_SW_RESET);
++	if (ret)
++		return ret;
++
++	usleep_range(1000, 2000);
++
++	return 0;
++}
++
++static int mt6375_tcpc_set_rd(struct regmap *regmap)
++{
++	return regmap_write(regmap, TCPC_ROLE_CTRL,
++			    FIELD_PREP(TCPC_ROLE_CTRL_CC1, TCPC_ROLE_CTRL_CC_RD) |
++			    FIELD_PREP(TCPC_ROLE_CTRL_CC2, TCPC_ROLE_CTRL_CC_RD));
++}
++
++static int mt6375_tcpc_init(struct tcpci *tcpci, struct tcpci_data *data)
++{
++	struct mt6375_tcpc *priv = container_of(data, struct mt6375_tcpc, tcpci_data);
++	struct regmap *regmap = data->regmap;
++	u8 mask[MT6375_NUM_VEND_INT] = { };
++	int ret;
++
++	ret = mt6375_tcpc_reset(regmap);
++	if (ret)
++		return ret;
++
++	/* Rd on both, at once: a USB host must not see the pins open for long */
++	ret = mt6375_tcpc_set_rd(regmap);
++	if (ret)
++		return ret;
++
++	/* TCPM comes back here after the chip has lost its state, with alerts in use */
++	ret = mt6375_tcpc_write16(regmap, TCPC_ALERT_MASK,
++				  priv->irq_ready ? MT6375_ALERT_MASK : 0);
++	if (ret)
++		return ret;
++
++	ret = regmap_bulk_write(regmap, MT6375_REG_MTMASK1, mask, sizeof(mask));
++	if (ret)
++		return ret;
++
++	ret = regmap_bulk_write(regmap, MT6375_REG_MTINT1, mt6375_vend_int_clear,
++				sizeof(mt6375_vend_int_clear));
++	if (ret)
++		return ret;
++
++	/* There is no foreign object detection here to listen to it */
++	ret = regmap_clear_bits(regmap, MT6375_REG_FODCTRL, MT6375_FOD_SNK_EN);
++	if (ret)
++		return ret;
++
++	ret = regmap_multi_reg_write(regmap, mt6375_tcpc_settings,
++				     ARRAY_SIZE(mt6375_tcpc_settings));
++	if (ret)
++		return ret;
++
++	/* CC open for 40 ms when the system voltage collapses */
++	ret = regmap_set_bits(regmap, MT6375_REG_SHIELDCTRL1, MT6375_OPEN40MS_EN);
++	if (ret)
++		return ret;
++
++	/* For about 12 mA less, and bleed discharge off for about 2 mA */
++	ret = regmap_set_bits(regmap, MT6375_REG_WATCHDOGCTRL, MT6375_VBUSDISCHG_OPT);
++	if (ret)
++		return ret;
++
++	ret = regmap_clear_bits(regmap, TCPC_POWER_CTRL,
++				TCPC_POWER_CTRL_BLEED_DISCHARGE);
++	if (ret)
++		return ret;
++
++	return regmap_multi_reg_write(regmap, mt6375_tcpc_idle_settings,
++				      ARRAY_SIZE(mt6375_tcpc_idle_settings));
++}
++
++/*
++ * tcpci_set_vconn() writes the enable bit after this, too late for the order of
++ * the MediaTek driver. Doing it here makes that write do nothing.
++ */
++static int mt6375_tcpc_set_vconn(struct tcpci *tcpci, struct tcpci_data *data,
++				 bool enable)
++{
++	struct regmap *regmap = data->regmap;
++	unsigned int stat;
++	int ret;
++
++	if (enable) {
++		ret = regmap_set_bits(regmap, MT6375_REG_VCONCTRL3, MT6375_VCON_OVPEN);
++		if (ret)
++			return ret;
++
++		ret = regmap_set_bits(regmap, MT6375_REG_VCONCTRL2, MT6375_VCON_PROTEN);
++		if (ret)
++			return ret;
++
++		usleep_range(20, 50);
++
++		ret = regmap_read(regmap, MT6375_REG_MTST2, &stat);
++		if (ret)
++			return ret;
++		if (stat & MT6375_VCON_FAULT)
++			return -EIO;
++
++		ret = regmap_set_bits(regmap, TCPC_POWER_CTRL,
++				      TCPC_POWER_CTRL_VCONN_ENABLE);
++		if (ret)
++			return ret;
++	} else {
++		/*
++		 * TCPM gets here twice at probe, with one CC pin left open in
++		 * between for the polarity it starts from. A USB host on that pin
++		 * must not see it open for longer than needed.
++		 */
++		ret = regmap_read(regmap, TCPC_POWER_CTRL, &stat);
++		if (ret)
++			return ret;
++		if (!(stat & TCPC_POWER_CTRL_VCONN_ENABLE))
++			return 0;
++
++		ret = regmap_clear_bits(regmap, TCPC_POWER_CTRL,
++					TCPC_POWER_CTRL_VCONN_ENABLE);
++		if (ret)
++			return ret;
++
++		ret = regmap_clear_bits(regmap, MT6375_REG_VCONCTRL2, MT6375_VCON_PROTEN);
++		if (ret)
++			return ret;
++
++		ret = regmap_clear_bits(regmap, MT6375_REG_VCONCTRL3, MT6375_VCON_OVPEN);
++		if (ret)
++			return ret;
++	}
++
++	usleep_range(1000, 2000);
++
++	return regmap_update_bits(regmap, MT6375_REG_I2CTORSTCTRL,
++				  MT6375_VCONN_UVP_OCP_CPEN,
++				  enable ? MT6375_VCONN_UVP_OCP_CPEN : 0);
++}
++
++/* A positive return keeps tcpci_set_vbus() from sending its commands */
++static int mt6375_tcpc_set_vbus(struct tcpci *tcpci, struct tcpci_data *data,
++				bool source, bool sink)
++{
++	struct mt6375_tcpc *priv = container_of(data, struct mt6375_tcpc, tcpci_data);
++	int ret;
++
++	if (source == priv->vbus_on)
++		return 1;
++
++	if (!priv->vbus)
++		return -EOPNOTSUPP;
++
++	ret = source ? regulator_enable(priv->vbus) : regulator_disable(priv->vbus);
++	if (ret)
++		return ret;
++
++	priv->vbus_on = source;
++
++	return 1;
++}
++
++static irqreturn_t mt6375_tcpc_irq(int irq, void *dev_id)
++{
++	struct mt6375_tcpc *priv = dev_id;
++
++	return tcpci_irq(priv->tcpci);
++}
++
++/*
++ * A USB host or charger that is there when the port comes up gives no alert: the
++ * pins settle during the init, whose alerts tcpci_init() clears. TCPM ignores the
++ * pins during its port reset, and a port that does not toggle then waits for a
++ * change that does not come. So tell it to look once more after that.
++ */
++static void mt6375_tcpc_recheck_cc(struct work_struct *work)
++{
++	struct mt6375_tcpc *priv = container_of(to_delayed_work(work),
++						struct mt6375_tcpc, cc_work);
++
++	tcpm_cc_change(tcpci_get_tcpm_port(priv->tcpci));
++}
++
++static int mt6375_tcpc_check_chip(struct mt6375_tcpc *priv)
++{
++	struct regmap *regmap = priv->tcpci_data.regmap;
++	u16 vid, pid;
++	int ret;
++
++	ret = regmap_raw_read(regmap, TCPC_VENDOR_ID, &vid, sizeof(vid));
++	if (ret)
++		return ret;
++
++	ret = regmap_raw_read(regmap, TCPC_PRODUCT_ID, &pid, sizeof(pid));
++	if (ret)
++		return ret;
++
++	if (vid != MT6375_VENDOR_ID || pid != MT6375_PRODUCT_ID)
++		return dev_err_probe(priv->dev, -ENODEV,
++				     "Unknown vendor and product ID %04x:%04x\n",
++				     vid, pid);
++
++	return 0;
++}
++
++static void mt6375_tcpc_unregister_port(void *tcpci)
++{
++	tcpci_unregister_port(tcpci);
++}
++
++/*
++ * Leaves Rd on the pins, also after sourcing VBUS, so that a USB host gives VBUS
++ * to whatever runs next. The MediaTek driver resets it on its way down too.
++ */
++static void mt6375_tcpc_leave(struct regmap *regmap)
++{
++	if (mt6375_tcpc_reset(regmap) || mt6375_tcpc_set_rd(regmap))
++		pr_err("mt6375-tcpc: failed to leave Rd on the pins\n");
++}
++
++static void mt6375_tcpc_leave_action(void *regmap)
++{
++	mt6375_tcpc_leave(regmap);
++}
++
++static int mt6375_tcpc_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct fwnode_handle *connector;
++	struct mt6375_tcpc *priv;
++	int ret;
++
++	/* The core driver adds this device with or without a node for it */
++	connector = device_get_named_child_node(dev, "connector");
++	if (!connector)
++		return -ENODEV;
++	fwnode_handle_put(connector);
++
++	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
++	if (!priv)
++		return -ENOMEM;
++
++	priv->dev = dev;
++	priv->tcpci_data.regmap = dev_get_regmap(dev->parent, NULL);
++	if (!priv->tcpci_data.regmap)
++		return dev_err_probe(dev, -ENODEV, "Failed to get regmap\n");
++
++	ret = mt6375_tcpc_check_chip(priv);
++	if (ret)
++		return ret;
++
++	priv->irq = platform_get_irq_byname(pdev, "pd_evt");
++	if (priv->irq < 0)
++		return priv->irq;
++
++	priv->vbus = devm_regulator_get_optional(dev, "vbus");
++	if (IS_ERR(priv->vbus)) {
++		if (PTR_ERR(priv->vbus) != -ENODEV)
++			return dev_err_probe(dev, PTR_ERR(priv->vbus),
++					     "Failed to get the VBUS regulator\n");
++		priv->vbus = NULL;
++	}
++
++	/* The MediaTek driver writes the count, the header and the data in one go */
++	priv->tcpci_data.TX_BUF_BYTE_x_hidden = 1;
++	priv->tcpci_data.init = mt6375_tcpc_init;
++	priv->tcpci_data.set_vconn = mt6375_tcpc_set_vconn;
++	priv->tcpci_data.set_vbus = mt6375_tcpc_set_vbus;
++
++	priv->tcpci = tcpci_register_port(dev, &priv->tcpci_data);
++	if (IS_ERR(priv->tcpci))
++		return dev_err_probe(dev, PTR_ERR(priv->tcpci),
++				     "Failed to register the port\n");
++
++	/* Runs after the port is gone, whichever way this ends from here */
++	ret = devm_add_action(dev, mt6375_tcpc_leave_action, priv->tcpci_data.regmap);
++	if (ret) {
++		tcpci_unregister_port(priv->tcpci);
++		return ret;
++	}
++
++	ret = devm_add_action_or_reset(dev, mt6375_tcpc_unregister_port, priv->tcpci);
++	if (ret)
++		return ret;
++
++	ret = devm_delayed_work_autocancel(dev, &priv->cc_work, mt6375_tcpc_recheck_cc);
++	if (ret)
++		return ret;
++
++	ret = devm_request_threaded_irq(dev, priv->irq, NULL, mt6375_tcpc_irq,
++					IRQF_ONESHOT, dev_name(dev), priv);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to request the interrupt\n");
++
++	priv->irq_ready = true;
++	ret = mt6375_tcpc_write16(priv->tcpci_data.regmap, TCPC_ALERT_MASK,
++				  MT6375_ALERT_MASK);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to unmask the alerts\n");
++
++	schedule_delayed_work(&priv->cc_work, msecs_to_jiffies(MT6375_CC_RECHECK_MS));
++
++	platform_set_drvdata(pdev, priv);
++	device_init_wakeup(dev, true);
++	dev_pm_set_wake_irq(dev, priv->irq);
++
++	return 0;
++}
++
++static void mt6375_tcpc_remove(struct platform_device *pdev)
++{
++	dev_pm_clear_wake_irq(&pdev->dev);
++	device_init_wakeup(&pdev->dev, false);
++}
++
++static void mt6375_tcpc_shutdown(struct platform_device *pdev)
++{
++	struct mt6375_tcpc *priv = platform_get_drvdata(pdev);
++
++	if (!priv)
++		return;
++
++	disable_irq(priv->irq);
++	cancel_delayed_work_sync(&priv->cc_work);
++	mt6375_tcpc_leave(priv->tcpci_data.regmap);
++}
++
++static const struct of_device_id mt6375_tcpc_of_match[] = {
++	{ .compatible = "mediatek,mt6375-tcpc" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, mt6375_tcpc_of_match);
++
++static struct platform_driver mt6375_tcpc_driver = {
++	.probe = mt6375_tcpc_probe,
++	.remove = mt6375_tcpc_remove,
++	.shutdown = mt6375_tcpc_shutdown,
++	.driver = {
++		.name = "mt6375-tcpc",
++		.of_match_table = mt6375_tcpc_of_match,
++	},
++};
++module_platform_driver(mt6375_tcpc_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6375 USB Type-C port controller driver");
++MODULE_LICENSE("GPL");
