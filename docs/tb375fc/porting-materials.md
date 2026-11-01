@@ -103,15 +103,16 @@
 
 ## 5. 부트 체인과 복구
 
-언락 go/no-go(설계안 2.1절)를 판단하려고 2026-11-01에 찾았다. LK와 펌웨어 묶음은 앞서 받아 둔 글로벌판 ZUI 17.0.04.266과 중국판 ZUI 16.0.20.091이다.
+언락 go/no-go(설계안 2.1절)를 판단하려고 2026-11-01에 찾았다. LK와 펌웨어 묶음은 앞서 받아 둔 글로벌판 ZUI 17.0.04.266과 중국판 ZUI 16.0.20.091이다. XDA 글타래는 사이트가 자동 접근을 막아(403), 내장 브라우저로 원글과 1쪽·10쪽을 읽었다.
 
 | 항목 | 내용 | 확인 |
 |---|---|---|
 | 언락 방식 | 두 판의 LK 문자열이 같다. 개발자 옵션의 OEM 토글, 일련번호에 묶인 레노버 서명 언락 이미지(머리·서명·일련번호 검사), `fastboot oem unlock`·`oem unlock-flash`·`flashing unlock`이 있다 | ✔ LK 문자열 |
-| 언락 보고 | TrebleDroid 위키: 중국판 ZUI 16.0.20.091에서 언락·AVB 해제 뒤 GSI 부팅(2025-08). 언락 방법은 적혀 있지 않다. XDA의 LK 파티션 교체 방법은 원글을 찾지 못했다. 커뮤니티 포트 둘에도 언락 절차가 없다 | ✔ 위키, 미확인 XDA |
+| 언락 보고 | XDA 원글(2025-02-09, 방법을 만든 사람): 중국판 ZUI 16.0.20.022에서 순정 LK가 `fastboot flash lk`를 받는다. 개발용 펌웨어 덤프의 `lk_a`(MD5 `2c01c2ec…`)를 구운 뒤 `fastboot flashing unlock_critical`로 언락한다. 다른 사용자 여럿이 .022·.041에서 성공했다(2025-02). TrebleDroid 위키는 .091에서 언락한 뒤 GSI를 띄웠다(2025-08). 2026-09에 .091에서 같은 `lk_a`로 실패한 보고가 있다. 2026-06에 LineageOS 23.2가 나왔다. 개발용 LK의 출처(4pda 덤프)는 확인할 수 없다. 커뮤니티 포트 둘에는 언락 절차가 없다 | ✔ 원문(브라우저), 포럼 보고 |
 | 펌웨어 묶음의 인증 | 중국판 묶음에 `da.auth`, 인증 DA `DA_BR.bin`, SP Flash Tool용 `SLA_Challenge`가 있다. DA 인증(DAA)과 SLA가 켜져 있다는 뜻이다 | ✔ 묶음 목록 |
 | mtkclient | MT6897은 hwcode `0x1203`, DA 방식 XML(V6)이다. BROM 익스플로잇 값(blacklist, send_ptr, cmd_handler 등)과 payload가 모두 주석이다. 토론 #113의 채택된 답(2026-03-14): V6라 서명된 DA가 있어야 하고, 그래도 Carbonara나 Heapbait에 취약해야 한다 | ✔ 소스, ✔ 토론 |
-| 레노버 공식 복구 | Rescue and Smart Assistant가 있다. TB375FC·TB373FU를 지원하는지, 일련번호·레노버 서버에 묶이는지는 확인하지 못했다 | ○ |
+| SP Flash Tool | 원글 작성자가 TB373FU 펌웨어의 DA·preloader·auth로 이 기기용 scatter와 readback 설정을 만들었다. SP Flash Tool로 개발용 ROM을 굽거나 백업을 되돌린 보고가 여럿이다. 중국판 백업을 되돌린 뒤 OTA가 되고 다시 잠글 수 있었다는 보고도 있다. 128GB 기기에 256GB 기기의 덤프를 구우면 실패한다 | ✔ 원문(브라우저), 포럼 보고 |
+| 레노버 공식 복구 | Rescue and Smart Assistant(Lenovo Software Fix)가 있다. 이 기기의 ROM을 그 앱으로 받았다는 보고가 있다. 일련번호·레노버 서버에 묶이는지는 확인하지 못했다 | ○ 포럼 보고 |
 | `fastboot boot` | LK fastboot 명령 표에 `download:`, `boot`, `flash:`, `erase:`, `getvar:`, `continue`, `set_active:`가 있다. LK는 boot·init_boot·vendor_boot 머리를 읽고 장치 트리를 `mb_dtb`로 넘긴다 | ✔ LK 문자열 |
 | 헤더 v4의 장치 트리 | 장치 트리는 vendor_boot에 있고, 부트로더가 boot와 vendor_boot를 함께 읽어 램디스크를 잇는다. `fastboot boot`일 때 어떻게 잇는지는 문서에 정해져 있지 않다 | ✔ AOSP 문서 |
 
@@ -146,5 +147,6 @@
   - MFD v12와 리뷰, 이어받기 제안: linux-mediatek 보관소 http://lists.infradead.org/pipermail/linux-mediatek/ (2026-05, 2026-10)
 - 부트 체인과 복구(5절):
   - TrebleDroid 위키: https://github.com/TrebleDroid/treble_experimentations/wiki/Lenovo-Idea-Tab-Pro---Lenovo-Xiaoxin-Pad-Pro-2025---Motorola-Moto-Pad-60-Pro
+  - XDA 비공식 언락 글타래(포럼, 2025-02~2026-10): https://xdaforums.com/t/unofficial-unlocking-lenovo-xiaoxin-pad-pro-2025-tb375fc.4717695/
   - mtkclient: https://github.com/bkerler/mtkclient/blob/main/mtkclient/config/brom_config.py , https://github.com/bkerler/mtkclient/discussions/113
   - AOSP: https://source.android.com/docs/core/architecture/partitions/vendor-boot-partitions , https://android.googlesource.com/platform/system/core/+/refs/heads/main/fastboot/README.md
