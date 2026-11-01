@@ -8,6 +8,8 @@
 #   쓰는 곳   그것을 읽는 쪽과 단계
 #   확인      확인함 / 확인 필요(이름이나 자리를 기기에서 본다)
 # Mali CSF(arm/mali/arch11.8/mali_csffw.bin)는 linux-firmware에서 오므로 여기 없다. GPUEB(gpueb.img)는 LK가 올린다.
+# vendor/ 파일 이름은 기기(ZUXOS 1.5.10.044)의 /vendor/firmware 목록으로 확인했다(2026-11-01). adb 셸은 그 파일을 읽지
+# 못하므로, 파일은 root나 파티션 백업(super의 vendor)에서 얻는다.
 partition	gpueb	-	LK가 올린다. 리눅스에는 필요 없고 기록으로만 둔다	확인함(펌웨어 묶음의 gpueb.img)
 partition	scp	-	센서 허브 SCP(3단계)	확인 필요(파티션 이름)
 partition	connsys_wifi	-	Wi-Fi soc7_0(2d)	확인함(펌웨어 묶음의 connsys_wifi.img), 파티션 이름 확인 필요
@@ -18,7 +20,14 @@ partition	persist	-	보정값 둘레(2d)	확인함(원래 fstab의 /mnt/vendor/p
 file	nvdata/APCFG/APRDEB/WIFI	-	Wi-Fi NVRAM(보정값·MAC), mt76 soc7_0(2d)	확인 필요(MediaTek 관례 경로)
 file	nvdata/APCFG/APRDEB/WIFI_CUSTOM	-	Wi-Fi NVRAM 덧값(2d)	확인 필요(MediaTek 관례 경로)
 file	nvdata/APCFG/APRDEB/BT_Addr	-	Bluetooth 주소(2d)	확인 필요(MediaTek 관례 경로)
-file	vendor/firmware/novatek_ts_fw_boe.bin	-	NT36532 SPI 터치, BOE 패널(2c). 부팅마다 내려 준다	확인함(설계안 7장)
-file	vendor/firmware/novatek_ts_fw_tm.bin	-	NT36532 SPI 터치, Tianma 패널(2c)	확인함(설계안 7장)
-file	vendor/firmware/*soc7_0*	-	Wi-Fi·BT soc7_0 ROM 패치, RAM 코드(2d)	확인 필요(파일 이름)
-file	vendor/firmware/*aw883*	-	스마트 앰프 AW883xx ACF(3단계)	확인 필요(파일 이름)
+file	vendor/firmware/novatek_ts_fw_boe.bin	-	NT36532 SPI 터치, BOE 패널(2c). 부팅마다 내려 준다	확인함(설계안 7장, 기기 목록)
+file	vendor/firmware/novatek_ts_fw_tm.bin	-	NT36532 SPI 터치, Tianma 패널(2c)	확인함(설계안 7장, 기기 목록)
+file	vendor/firmware/*soc7_0*	-	soc7_0 BT·MCU RAM 코드 1·1a·1b판(2d). Wi-Fi RAM 코드는 vendor에 없고 LK가 싣는다	확인함(기기 목록)
+file	vendor/firmware/BT_FW.cfg	-	Bluetooth 설정(2d)	확인함(기기 목록)
+file	vendor/firmware/wifi.cfg	-	Wi-Fi 드라이버 설정(2d)	확인함(기기 목록)
+file	vendor/firmware/connfem.cfg	-	Wi-Fi 앞단(FEM) 설정(2d, W5)	확인함(기기 목록)
+file	vendor/firmware/conninfra.cfg	-	conninfra 설정(2d)	확인함(기기 목록)
+file	vendor/firmware/txpowerctrl.cfg	-	Wi-Fi 송신 출력 제어(2d)	확인함(기기 목록)
+file	vendor/firmware/*aw883*	-	스마트 앰프 AW883xx ACF(3단계)	확인함(기기 목록: aw883xx_acf_gyt.bin, aw883xx_acf_yc.bin)
+file	vendor/firmware/awinic_*params.bin	-	스마트 앰프 매개변수(3단계)	확인함(기기 목록)
+file	vendor/firmware/remoteproc_scp	-	센서 허브 SCP 펌웨어(3단계, 자동 회전·조도)	확인함(기기 목록)

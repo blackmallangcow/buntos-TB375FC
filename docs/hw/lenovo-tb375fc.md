@@ -132,24 +132,24 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 | 살아 있는 트리 | `/proc/device-tree`의 노드와 속성 이름은 보이고 값은 막혀 있다(root 필요). 이름을 보면 LK가 `chosen`에 `atag,videolfb`(framebuffer 주소·크기)와 `bootargs`를 넣고, `reserved-memory`에 `mblock-*` 44개를 더한다. 그 가운데 `mblock-14-framebuffer`, `mblock-2-pstore`, `mblock-4-BL31-reserved`, `mblock-16-gz`, `mblock-38-consys_emi_reserved`, `mblock-42-me_GPUEB_SHARED`가 있다 |
 | `/proc/iomem` | 막혀 있다(root 필요) |
 | 가상화 | `/dev/kvm`과 `/dev/gzvm`이 없다. GenieZone 예약(`mblock-16-gz`)이 있다 |
-| vendor 펌웨어(`/vendor/firmware`, 40개) | 터치 `novatek_ts_fw_boe.bin`·`novatek_ts_fw_tm.bin`(과 MP 시험용), 앰프 보정 `aw883xx_acf_gyt.bin`·`aw883xx_acf_yc.bin`, `mali_csffw.bin`, `remoteproc_scp`, soc7_0의 BT·MCU RAM 코드(`soc7_0_ram_bt_1_1_hdr.bin`, `soc7_0_ram_mcu_1_1_hdr.bin`과 각 1a·1b판), `BT_FW.cfg`, `wifi.cfg`. Wi-Fi RAM 코드(`WIFI_RAM_CODE_soc7_0…`)는 없다 |
+| vendor 펌웨어(`/vendor/firmware`, 40개) | 터치 `novatek_ts_fw_boe.bin`·`novatek_ts_fw_tm.bin`(과 MP 시험용), 앰프 보정 `aw883xx_acf_gyt.bin`·`aw883xx_acf_yc.bin`, `mali_csffw.bin`, `remoteproc_scp`, soc7_0의 BT·MCU RAM 코드(`soc7_0_ram_bt_1_1_hdr.bin`, `soc7_0_ram_mcu_1_1_hdr.bin`과 각 1a·1b판), `BT_FW.cfg`, `wifi.cfg`. 그 밖에 `connfem.cfg`, `conninfra.cfg`, `txpowerctrl.cfg`, `awinic_*params.bin`, FM 라디오 펌웨어, 카메라 `lib3a.ccu`가 있다. Wi-Fi RAM 코드(`WIFI_RAM_CODE_soc7_0…`)는 없다. 이름만 보이고 파일은 내용도 크기도 읽지 못한다(SELinux. `pull-android.sh`로 시도) |
 | 커널 모듈 | 453개가 올라와 있다. `tn_keyboard`, `nt36532`, `hall`, `wlan_drv_gen4m_6897`, `bt_drv_6897`, `conninfra`, `gpueb`, `mali_kbase_mt6897_r44`, `snd_soc_aw883xx`, NT36532 패널 셋 |
 | 무선 | `persist.vendor.connsys.chipid=0x6897`, `fm_chipid=connac2x` |
 | 센서 | 가속도·자이로 LSM6DSO(ST), 조도 TCS37013(ams). 그 위에 MTK의 가상 센서(중력, 회전 벡터, 걸음 수 등)가 있다. 펌웨어의 AP 장치 트리에는 이 센서 노드가 없고 SCP(`scp@1c400000`)가 켜져 있어, SCP 펌웨어(센서 허브)가 다룬다 |
 | 지문·진동 | 지문 센서가 있다(`android.hardware.fingerprint`, 센서 하나). 진동은 컨트롤러가 등록되지 않았다. 진동 모터가 없거나 쓰지 않는다 |
-| 업데이트 | 시스템 업데이트 앱은 `com.lenovo.ota`이고 켜져 있다. AOSP의 자동 시스템 업데이트 설정(`ota_disable_automatic_update`)은 1(꺼짐)이다. 키보드 펌웨어 업데이트 앱(`com.zui.keyboardupdate`, `.olympia`)도 있다 |
+| 업데이트 | 시스템 업데이트 앱은 `com.lenovo.ota`다. 판을 지키려고 2026-11-01에 이 앱을 껐다(`pm disable-user --user 0`, 되돌리기는 `pm enable com.lenovo.ota`). AOSP의 자동 시스템 업데이트 설정(`ota_disable_automatic_update`)은 1(꺼짐)이다. 키보드 펌웨어 업데이트 앱(`com.zui.keyboardupdate`, `.olympia`)도 있다 |
 
 포팅에 닿는 것:
 - **언락:** Android 16 판이다. 포크 설계안 2.1절대로 중국판 16.0.20.091로 내린 뒤 언락하는 길을 쓴다. 128GB 기기라 SP Flash Tool의 scatter도 128GB에 맞춘다.
 - **2a 장치 트리:** framebuffer 꼴(2944×1840, stride 11776)이 맞다. framebuffer 주소와 pstore·BL31 자리는 값이 막혀 있어 언락하고 root를 얻은 뒤 읽는다. LK가 화면 영역을 `mblock-14-framebuffer`로 예약하므로, 우리 트리에도 같은 예약을 더하면 `framebuffer_mem` 노드는 필요 없다.
 - **화면 방향:** 패널의 자연 방향은 가로다. buntOS가 가로를 기본으로 쓰면 화면과 터치를 돌리지 않아도 된다. 세로로 쓸 때는 컴포지터가 돌린다.
 - **자동 회전:** 센서는 있지만 SCP 뒤에 있다. buntOS에서 자동 회전을 하려면 SCP 길이 필요하다(포크 설계안 8절). 그 전에는 수동 회전이다.
-- **펌웨어:** 터치, 앰프, BT·MCU RAM 코드는 `/vendor/firmware`에서 뽑을 수 있다(ADR-012). Wi-Fi RAM 코드는 LK가 싣는다.
+- **펌웨어:** 터치, 앰프, BT·MCU RAM 코드, Wi-Fi 설정, SCP 펌웨어가 `/vendor/firmware`에 있다. 다만 adb 셸로는 읽지 못하므로, root(언락 뒤)나 SP Flash Tool readback으로 뜬 super에서 vendor를 풀어 얻는다(ADR-012). Wi-Fi RAM 코드는 LK가 싣는다.
 - **지문 센서**가 있다. 포팅 블록 표(포크 설계안 5절)에 아직 없다.
 
 ## 8. 남은 것
 
-- super.img의 vendor·vendor_dlkm에서 모듈 파일을 뽑는다. 목록은 기기에서 읽었다(7절). 파일 자체는 root나 super.img가 필요하다(ADR-012의 재배포 분류).
+- super.img의 vendor·vendor_dlkm에서 모듈과 펌웨어 파일을 뽑는다. 목록은 기기에서 읽었다(7절). 파일 자체는 root나 super.img가 필요하다(ADR-012의 재배포 분류). SP Flash Tool readback으로 super를 뜨면 `extract.sh`에 super를 풀어 `vendor/`를 만드는 단계(lpunpack 등)를 더해야 한다.
 - root가 필요한 것(언락 뒤): `getevent -lp`, 살아 있는 트리의 값(framebuffer 주소·크기, pstore·BL31 자리, 메모리 배치), `/proc/iomem`, 파티션 표
 - 12.1절 EL2 판정(2a 첫 부팅)
 - 지문 센서의 칩과 연결(SPI 등)을 장치 트리에서 확인한다

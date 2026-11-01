@@ -5,7 +5,8 @@
 # 남겨 둔 안드로이드 슬롯이 켜져 있을 때 adb로 읽을 수 있는 펌웨어와 판 정보를 extract.sh의 원천 꼴로 받는다.
 # root 없이 되는 것만 한다: /vendor/firmware 같은 읽을 수 있는 디렉터리, getprop, 그 목록. nvdata는 root가 있어야 해서
 # 여기서 받지 않는다(파티션 백업이나 buntOS initramfs에서 얻는다). 기기에 아무것도 쓰지 않는다.
-# 뼈대다. SELinux가 adb 셸의 읽기를 막는 디렉터리가 있을 수 있으니 기기에서 확인한다.
+# SELinux가 adb 셸의 읽기를 막을 수 있다. ZUXOS 1.5.10.044(2026-11-01)에서는 /vendor/firmware의 이름만 보이고
+# 파일은 읽지 못했다. 그때는 이름 목록만 남기고, 파일은 root나 파티션 백업(super의 vendor)에서 얻는다.
 #
 # 사용법: pull-android.sh <원천 디렉터리>   (호스트에서. adb가 기기 하나에 붙어 있어야 한다)
 set -euo pipefail
@@ -29,5 +30,9 @@ for d in /vendor/firmware /vendor/etc/firmware /odm/firmware; do
 	adb shell "ls -lR $d" >"$dst/info/$(echo "${d#/}" | tr / _).txt" || true
 	mkdir -p "$dst$(dirname "$d")"
 	adb pull "$d" "$dst$(dirname "$d")/" || echo "일부를 받지 못했다: $d (권한)"
+	# 읽기가 막히면 adb pull은 빈 디렉터리만 만든다
+	if [[ -z $(find "$dst$d" -type f -print -quit 2>/dev/null) ]]; then
+		echo "받은 파일이 없다: $d (이름만 info/에 남겼다. root나 파티션 백업에서 얻는다)"
+	fi
 done
 echo "원천: $dst (다음: extract.sh $dst <출력>)"
