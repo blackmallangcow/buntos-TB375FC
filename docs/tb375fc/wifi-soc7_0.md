@@ -1,6 +1,7 @@
 # TB375FC Wi-Fi·Bluetooth: MediaTek connsys soc7_0
 
 - 작성일: 2026-11-01
+- 고친 날: 2026-11-01. 오픈소스 쪽 2차 조사(MCU 명령, LK 적재, Bluetooth, conninfra)를 반영했다
 - 목적: "MT6897의 내장 Wi-Fi는 칩 ID `0x7961`인 soc7_0 코어에 RF 칩 MT6637을 붙인 구성"이라는 단서(GitHub 이슈)를 기기 펌웨어와 공개 소스로 다시 확인하고, 포팅 길을 정한다
 
 ## 1. 결론
@@ -9,12 +10,17 @@
   - CONNAC2X 계열이고, 칩 ID는 `0x7961`이다.
   - 여기에 RF 칩(A-die) **MT6637**이 붙는다.
   - 기기 펌웨어, 공개 벤더 소스, GitHub 이슈 셋이 서로 맞는다.
+  - soc7_0은 MT6878과 MT6899도 쓴다(5절).
 - 칩 ID `0x7961`은 업스트림 mt76의 **MT7921**(PCIe)과 같은 번호다. 벤더 드라이버도 MT7921과 같은 CONNAC2X WFDMA 구조를 쓴다.
   - 다만 이 기기에서는 PCIe가 아니라 SoC 버스(AXI)에 붙는다.
-  - 전원, 클럭, A-die는 connsys 기반부(conninfra)가 다룬다.
+  - 전원, 클럭, A-die는 connsys 기반부(conninfra)가 다룬다. 이 기기에서는 그 대부분을 TF-A SIP 호출로 한다.
+- **펌웨어는 LK가 싣는다.** LK가 부팅 때 Wi-Fi·BT 펌웨어를 conninfra 예약 메모리(EMI)에 올리고, 커널 드라이버는 시작 명령만 보낸다(3절). 그래서 리눅스 쪽에는 펌웨어 파일이 필요 없다.
 - 업스트림에는 "SoC 안의 Wi-Fi + SPI로 붙은 A-die" 구조의 선례가 있다. `mt76/mt7915/soc.c`(MT7986·MT7981 라우터 SoC)다.
-- 그래서 포팅 길은 새 드라이버를 처음부터 쓰는 것이 아니다. mt76의 MT7921 코드에 **SoC(AXI) 버스와 conninfra 전원 순서를 더하는** 것이다(4절).
-- 위험은 "방식 미확인"에서 "구조를 아는 큰 일"로 줄었다. 다만 펌웨어 명령이 업스트림 MT7921과 같은지는 아직 모른다.
+- 그래서 포팅 길은 새 드라이버를 처음부터 쓰는 것이 아니다. mt76의 MT7921 코드에 **SoC(AXI) 버스, conninfra 전원 순서, LK 적재본 기동을 더하는** 것이다(4절).
+- MCU 명령의 머리 꼴과 레거시 명령 번호는 MT7921과 같다(6절).
+  - 다른 것은 펌웨어 기동, 보정값 전달, DMA 링 배치다.
+  - 펌웨어가 uni cmd를 받는지는 아직 모른다.
+- Bluetooth 전송은 UART(BTIF)가 아니라 EMI 안의 공유 메모리 링(BEIF)이다. HCI 위의 WMT 명령은 업스트림 btmtk와 같은 꼴이다.
 
 ## 2. 근거
 
@@ -29,12 +35,13 @@
 
 장치 트리에서 읽은 것:
 - 노드: `wifi@18000000`(`mediatek,wifi`), `bt@18000000`(`mediatek,bt`), `gps@18c00000`, `connfem`
+- connsys 노드의 compatible은 `mediatek,mt6897-consys-atf`다(전원 순서를 TF-A에 맡긴다)
 - PMIC가 주는 connsys 전원: `mt6363-consys`, `mt6368-consys`, `mt6685-consys`
 - Wi-Fi 앞단(FEM) 조합 표: `wlan7207h/c`, Qorvo `qm42195`·`qm45197`, Skyworks `sky85732` 등
 
 ### 2.2 공개 벤더 소스 (GPL)
 
-Xiaomi `MiCode/MTK_kernel_modules`의 `bsp-rodin-v-oss` 갈래(Android 15):
+Xiaomi `MiCode/MTK_kernel_modules`의 `bsp-rodin-v-oss` 갈래(Android 15). rodin은 MT6899 기기다(`MiCode/MTK_kernel_device_modules`의 `rodin.dts`가 `rodin-mt6899-common.dtsi`를 include한다).
 - `connectivity/wlan/core/gen4m/chips/soc7_0/`에 세 파일이 있다.
   - `soc7_0.c`(2,845줄, 91,724바이트)
   - `dbg_soc7_0.c`
@@ -46,17 +53,18 @@ Xiaomi `MiCode/MTK_kernel_modules`의 `bsp-rodin-v-oss` 갈래(Android 15):
   - `SOC7_0_REMAP_BASE_ADDR 0x7c500000`
 - `soc7_0.c`의 구조:
   - CONNAC2X WFDMA 함수(`soc7_0asicConnac2x…`)를 쓴다.
-  - `_HIF_PCIE`와 `_HIF_AXI` 빌드가 둘 다 있다. AXI 쪽 CR 매핑은 `WF_MCU_BUS_CR_REMAP 0x830c0000 → +0x400000` 등이고, 주석에 "HIF only ioremap 700k range (refer to dts)"라고 적혀 있다.
+  - `_HIF_PCIE`와 `_HIF_AXI` 빌드가 둘 다 있다. AXI 쪽 CR 매핑은 `WF_MCU_BUS_CR_REMAP 0x830c0000 → +0x400000` 등이다. 주석에 "HIF only ioremap 700k range (refer to dts)"라고 적혀 있는데, DT의 reg는 `0x700000`(7 MiB)이다.
   - conninfra와 이어진다(`CFG_SUPPORT_CONNINFRA`, `wake_up_conninfra_off`, sleep protect 폴링).
-  - MCU ROM 이미지를 예약 메모리(EMI)에 내려받는다(`soc7_0_SetupRomEmi`, `request_firmware` 길).
-  - 펌웨어 파일 이름은 `WIFI_RAM_CODE_soc7_0_<버전>_1.bin`, `soc7_0_ram_wmmcu_<버전>_<x>_hdr.bin`이다.
+  - MCU ROM 이미지를 예약 메모리(EMI)에 내려받는 길(`soc7_0_SetupRomEmi`, `request_firmware`)이 있다. 다만 MT6897·MT6878 빌드는 `CFG_WLAN_LK_FWDL_SUPPORT=1`이라 이 길이 꺼진다(3절).
+  - 펌웨어 파일 이름은 LK를 쓰지 않는 빌드에서만 쓰인다: `WIFI_RAM_CODE_soc7_0_1_1.bin`, `soc7_0_ram_wmmcu_1_1_hdr.bin`. 따로 된 패치 파일은 없다.
 - 같은 갈래의 `connectivity/` 아래에 `conninfra`, `connfem`, `bt`, `gps`, `fmradio`가 있다.
 
 같은 SoC 태블릿의 OEM 공식 저장소에도 있다. 이쪽이 더 좋은 출처다.
 - OnePlus Pad(`OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6897`, 갈래 `oneplus/mt6897_b_16.0.0_oneplus_pad`)
 - OPPO Pad 3(`oppo-source/android_kernel_modules_and_devicetree_oppo_mt6897`, 갈래 `oppo/mt6897_b_16.0_pad_3`)
 - 둘 다 경로는 `vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/chips/soc7_0`이다(✔ 갈래의 칩 목록을 직접 확인).
-- Motorola의 `vendor-mediatek-kernel_modules-connectivity-wlan-core-gen4m` 저장소에도 있다고 보고되었다(○).
+- OPPO Pad 3의 soc7_0 파일, conninfra의 MT6897 파일, BT 플랫폼 헤더는 OnePlus와 같은 파일이다(✔).
+- Motorola의 `vendor-mediatek-kernel_modules-connectivity-wlan-core-gen4m` 저장소에도 있다(✔, 파일은 OnePlus와 다르다).
 
 빠진 곳:
 - Xiaomi `bsp-duchamp-u-oss`(Dimensity 8300 기기)의 `gen4-mt79xx/chips`는 `soc5_0`까지다. `soc7_0`이 없다.
@@ -75,47 +83,85 @@ Dimensity 8300 기기의 속성으로 적힌 값이다. 2.1의 기기 펌웨어�
 
 - `drivers/net/wireless/mediatek/mt76/mt7921/pci.c`: `PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7961)`이다. 칩 ID 0x7961을 MT7921로 받고, MT7920 구분(`MT_HW_BOUND`)도 같은 칩 ID에서 한다.
 - `drivers/net/wireless/mediatek/mt76/mt7915/soc.c`: MT7986·MT7981의 SoC Wi-Fi(WMAC)다. A-die 레지스터를 SPI로 읽고 쓰고(`mt76_wmac_spi_read/write`, `mt7986_wmac_adie_efuse_read`), SoC 전원 순서를 드라이버 안에 둔다. 이 기기 구조의 선례다.
+- 움직임: mt76의 SoC 변형은 MT7986·MT7981뿐이다. soc7_0, MT6897, conninfra, BEIF를 다룬 패치는 없다(patchwork 제목 검색, `openwrt/mt76` 2026-10-24 기준).
 
 ## 3. 펌웨어
 
-리눅스 드라이버는 펌웨어를 파일로 읽는다(`request_firmware`). 필요한 것은 세 가지다.
-- MCU ROM EMI 이미지(`soc7_0_ram_wmmcu_…_hdr.bin`)
-- 패치(시작 주소 `0x00900000`)
-- RAM 코드(`WIFI_RAM_CODE_soc7_0_…_1.bin`)
-
-받을 곳과 할 일:
-- 펌웨어 파일은 기기의 vendor 파티션(`/vendor/firmware`, super.img 안)에 있을 것이다.
-- `connsys_wifi` 파티션과의 관계(같은 이미지인지, 부트로더가 따로 올리는지)는 기기에서 확인한다.
-- 재배포할 수 있는지 모른다. 그래서 linux-firmware처럼 이미지에 넣지 않고, 설치할 때 기기에서 뽑는 길을 먼저 둔다(buntOS ADR-012).
+- **LK가 싣는다.** MT6897의 gen4m 빌드는 `CFG_WLAN_LK_FWDL_SUPPORT=1`이다. 코드 주석에도 드라이버가 펌웨어를 내려받지 않는다고 적혀 있다.
+  - 커널 드라이버는 EMI의 manifest(+0xB00024)만 읽고 시작 명령(INIT 0x42)을 보낸다.
+  - 커널에는 파티션을 읽는 코드가 없다.
+  - Bluetooth도 같다(`SUPPORT_BIN2IMG=1`). EMI에서 버전만 읽는다.
+- **무엇이 실리나:** `connsys_wifi`·`connsys_bt` 파티션의 서명된 이미지일 것이다. LK 소스가 없어 추정이지만 근거는 강하다. 기기에서 EMI의 manifest로 확인한다.
+- **예약 메모리**(펌웨어 트리):
+  - `consys@18000000`: 12 MiB. RO 6.5 MiB(Wi-Fi 3 MiB, BT 2.875 MiB, GNSS 640 KiB)와 RW 4.5 MiB다. `emi-addr`는 LK가 채운다.
+  - `wifi@18000000`: 20 MiB. 호스트 DMA 링과 버퍼를 두는 칸이고, MPU는 LK가 연다. gen4m은 `memory-region`이 없으면 probe에 실패하므로 LK가 이 속성을 붙여 준다고 본다.
+- **linux-firmware에는 soc7_0 파일이 없다.** vendor 파티션의 .bin도 커널이 요청하지 않으니 없을 수 있다.
+- **방침:** Wi-Fi·BT 펌웨어는 뽑아 둘 파일이 아니라 지켜 둘 파티션이다. `connsys_wifi`·`connsys_bt`를 건드리지 않고 LK 적재본을 쓴다. 재배포 문제도 피한다(buntOS ADR-012).
 
 ## 4. 포팅 설계
 
 | 단계 | 할 일 | 참고 |
 |---|---|---|
-| W1 conninfra 최소 | connsys 전원 켜기: PMIC의 consys 전원(MT6363·MT6368·MT6685), conn_infra 클럭과 sleep protect, 버스 깨우기, A-die MT6637 전원과 SPI | 벤더 `connectivity/conninfra`(rodin), 업스트림 `mt7915/soc.c`의 SoC 전원 순서 |
-| W2 mt76 SoC 버스 | DT의 `wifi@18000000` 영역 MMIO 매핑(AXI CR 표), 인터럽트, WFDMA 링 | 업스트림 `mt7921`/`mt792x` 공통 코드, 벤더 `soc7_0.c`의 `_HIF_AXI` 표 |
-| W3 펌웨어 내려받기 | ROM EMI 이미지를 예약 메모리에, 패치와 RAM 코드를 MCU에 | 벤더 `soc7_0_SetupRomEmi`, mt7921 MCU 내려받기 |
-| W4 MCU 명령 | 업스트림 mt7921의 CONNAC2 MCU 명령으로 동작하는지 확인. 다르면 soc7_0 전용 경로를 둔다 | 벤더 gen4m의 명령 정의 |
+| W1 conninfra 최소 | connsys 전원 켜기. 기기 트리가 `mediatek,mt6897-consys-atf`라 init, A-die, AFE, PLL, 저전력 단계를 TF-A SIP 호출(`0xC2000534`)로 한다. 커널 몫은 넷이다: PMIC 전원(MT6363 VCN13·VRFIO18, MT6368 VCN33_1·VCN33_2·VANT18), 클럭 방식(MT6685 DCXO), CONN 전원 도메인, AP2CONN·CONN2AP sleep protect 해제. A-die MT6637은 conn_infra RF SPI 마스터와 하드웨어 세마포어로 닿는다 | 벤더 `conninfra/conn_drv/connv2/platform/mt6897`(OnePlus 공식), 업스트림 `mt7915/soc.c`(같은 RF SPI·세마포어 절차) |
+| W2 mt76 SoC 버스 | `wifi@18000000` 영역의 MMIO 매핑. AXI 표는 0x7c000000→+0, 0x830c0000→+0x400000이고 창은 7 MiB다. 인터럽트는 889(WFDMA)다. 링 배치는 명령 TX 15, RX 이벤트 2 | 업스트림 `mt7921`/`mt792x` 공통 코드, MT7902의 TXQ 15 분기(DMA 배치 선례), 벤더 `soc7_0.c`의 `_HIF_AXI` 표 |
+| W3 펌웨어 기동 | LK가 실은 것을 쓴다. EMI 주소(DT `emi-addr`)를 받아 remap하고, MCU를 기동한 뒤 시작 명령 INIT 0x42를 보낸다. 그 앞에 시간 동기(INIT 0x09)와 PHY action(INIT 0x08: FEM, NVRAM, 보정)이 있다. DMA는 LK가 연 20 MiB 칸 안에서만 한다 | 벤더 `chips/common/fw_dl.c`, `pre_cal.c` |
+| W4 MCU 명령 | 머리 꼴과 레거시 명령 번호는 mt7921과 같다(6절). 펌웨어가 uni cmd(DEV_INFO, BSS_INFO, STA_REC, ROC)를 받는지 2d에서 시험한다. 안 받으면 레거시 경로(CMD 0x11~0x14 등)를 둔다. 보정값은 NVRAM 2,048바이트를 CMD 0x48 조각으로 보낸다 | 6절 표, 벤더 `nic_cmd_event.h` |
 | W5 FEM | `connfem` 표에서 이 기기의 조합을 골라 RF 앞단 설정 | 벤더 `connectivity/connfem` |
-| B1 Bluetooth | connsys BT 전송(conninfra 위)과 펌웨어 내려받기. HCI 위는 업스트림 btmtk를 다시 쓸 수 있는지 본다 | 벤더 `connectivity/bt` |
+| B1 Bluetooth | 전송은 공유 메모리 링 BEIF(EMI+0xBA0000, 32 KiB)와 IRQ 셋이다. 펌웨어는 LK가 싣는다. hci_dev와 WMT-over-HCI(0xFC6F) 머리는 업스트림 btmtk와 같으므로 다시 쓴다. 전송 드라이버는 새로 쓴다. 업스트림의 SoC 내장 BT 선례는 btmtkuart의 MT7622(BTIF 위 serdev)뿐이다 | 벤더 `bt/mt66xx/btif`(`SUPPORT_BEIF=1`), 업스트림 `drivers/bluetooth/btmtk.h` |
 
-- **순서:** W1은 2b의 플랫폼 기반(클럭, 전원 도메인, PMIC)이 먼저 있어야 한다. 그래서 Wi-Fi는 설계안의 2d 단계 그대로 둔다.
+- **순서:** W1은 2b의 플랫폼 기반(클럭, 핀, PMIC)이 먼저 있어야 한다. 그래서 Wi-Fi는 설계안의 2d 단계 그대로 둔다.
 - **우회:** 그 전에는 USB-C 쪽 업스트림 장치(USB Wi-Fi 동글 mt7921u, 유선 이더넷)로 네트워크를 쓴다. 2b에서 USB 호스트(mtu3·xHCI)가 되면 가능하다.
-- **업스트림 제출:** mt76 유지자에게 "MT7921의 SoC 변형"으로 제출하는 것을 목표로 한다. conninfra는 SoC 전원 드라이버로 따로 나눈다.
+- **업스트림 제출:**
+  - mt76 유지자에게 "MT7921의 SoC 변형"으로 제출하는 것을 목표로 한다.
+  - conninfra는 SoC 전원 드라이버로 따로 나눈다. TF-A SIP에 기대는 부분은 업스트림 UFS의 SIP 호출(`mediatek,ufs-rtff-mtcmos`)이 선례다.
+- **함께 일하기:** MT6878도 soc7_0이라 그 mainline 포트와 나눌 수 있다.
 
-## 5. 남은 확인
+## 5. soc7_0을 쓰는 SoC
 
-- soc7_0 펌웨어가 업스트림 MT7921의 MCU 명령과 같은지(W4)
-- vendor 파티션의 펌웨어 파일 이름과 버전, `connsys_wifi` 파티션의 쓰임(super.img 또는 기기에서)
-- rodin 갈래 기기의 SoC. soc7_0이 같으면 드라이버는 같다
-- Bluetooth 전송 방식(BTIF 또는 공유 메모리)과 업스트림 btmtk를 다시 쓸 수 있는지
+- MT6878, MT6897, MT6899가 gen4m에서 같은 칩 설정(`CONNAC2X2_SOC7_0`)을 쓰고, 셋 다 LK가 펌웨어를 싣는다(✔ MiCode `Kbuild.6878`·`Kbuild.6897`·`Kbuild.6899`, OnePlus `Kbuild.6878`).
+- Xiaomi rodin은 MT6899다(✔). 상품명은 확인하지 못했다.
+- gen4m의 soc7_0 블록에는 MT6983·MT6895·MT6879·MT6886 분기도 있다. 이 SoC들도 soc7_0을 쓰는지는 분기를 보고 미루어 본 것이다(○).
+
+## 6. MCU 명령 비교 (W4)
+
+OnePlus 공식 gen4m(MT6897 빌드)과 업스트림 mt76(7.3)을 대조했다(✔ 2026-11-01).
+
+| 항목 | soc7_0 | 업스트림 mt7921 | 판단 |
+|---|---|---|---|
+| 펌웨어 내려받기 | 없다. LK 적재본의 manifest를 읽고 시작 명령 INIT 0x42 하나를 보낸다. 패치 세마포어, `PATCH_START_REQ`, `FW_SCATTER`, `START_REQ`를 쓰지 않는다 | 패치와 RAM 코드를 내려받는다 | 다르다. 0x42는 업스트림에 없다 |
+| 그 앞 단계 | FWDL 모드, 시간 동기(INIT 0x09), PHY action(INIT 0x08) | 없다 | 새로 쓴다 |
+| 명령 머리 | `struct WIFI_CMD`(HW TXD 32바이트와 머리, 합계 64바이트) | `mt76_connac2_mcu_txd` | 같다(CONNAC2 레거시) |
+| uni cmd | soc7_0 빌드에 uni 지원 설정이 없다. BSS·STA·키·ROC·suspend를 레거시 명령으로 보낸다 | 여러 명령을 uni로 보낸다 | 모른다. gen4m은 MT7961도 레거시로 보내므로, 펌웨어가 uni를 못 받는다는 뜻은 아니다 |
+| 레거시 명령 번호 | CE 0x01·03·05·0a·0f·16·17·1b·1c·1d·33·5d·61·62·8a·a1·b0·c0·c5·ca·cd·d0과 EXT 0x05·08·21·2c가 같은 뜻이다 | 같다 | 같다. CE 0x5c(CLC)와 EXT 0xbd(RF pin)는 없다 |
+| 이벤트 | `WIFI_EVENT`(RXD 24바이트와 머리). 주요 EID가 같다 | `mt76_connac2_mcu_rxd` | 같다. RSSI 알림 번호만 다르다(0xa1, 업스트림 0x96) |
+| NIC 능력(0x8a) | 0x17은 P2P, 0x20은 MLR 능력 | 0x17은 WFDMA 재할당, 0x20은 칩 능력 | 뜻이 달라 따로 읽는다 |
+| 기능 플래그 | 펌웨어 파일이 없어 trailer의 feature_set을 읽을 수 없다 | `mt792x_get_offload_capability()`가 파일에서 읽는다 | CNM 여부를 다른 길로 정한다 |
+| 보정값 | NVRAM 2,048바이트를 CMD 0x48 조각으로 보낸다 | efuse 모드(EXT 0x21)뿐 | 새로 쓴다 |
+| DMA | 명령 TX 링 15. RX는 0·1 데이터, 2 이벤트, 3 tx-free | 명령 링 17, 이벤트 RX 0 | 다르다. MT7902의 TXQ 15 분기가 선례다 |
+| 레지스터 | MT7921과 같은 칩 주소 공간이다 | `fixed_map` | AXI 표만 새로 쓴다 |
+
+다시 쓰는 꼴:
+- mt792x 위에 플랫폼 버스(AXI 표, MT7902식 DMA 배치)를 더한다.
+- mcu_init은 `mt792x_load_firmware` 대신 conninfra 전원, MCU 기동, INIT 0x42 순서로 한다.
+- NVRAM 명령과 PHY action을 더한다.
+
+## 7. 남은 확인
+
+- **uni cmd:** soc7_0 펌웨어가 uni cmd를 받는지. 2d에서 INIT 0x42 뒤에 uni DEV_INFO 하나를 보내 본다.
+- **LK가 트리에 쓰는 값:** LK가 mainline 트리의 `consys@18000000`·`wifi@18000000`에 `emi-addr`·`memory-region`을 써 주는지, 노드를 이름으로 찾는지 compatible로 찾는지.
+- **LK의 펌웨어 적재:** 기기에서 EMI+0xB00024의 manifest로 확인한다.
+- **직접 레지스터 길:** `-atf` 대신 일반 세계에서 레지스터를 직접 쓸 수 있는지(DAPC). 모르면 SIP를 쓴다.
+- **NVRAM과 BT 주소:** gen4m 코드는 `/data/nvram/APCFG/APRDEB/WIFI`를 읽는다. 파티션은 nvdata다. BT 주소의 출처도 기기에서 확인한다.
 
 ## 출처
 
 - [OnePlus Pad 갈래의 gen4m/chips/soc7_0](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6897/tree/oneplus/mt6897_b_16.0.0_oneplus_pad/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/chips/soc7_0)
+- [OnePlus Pad 갈래의 connectivity](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6897/tree/oneplus/mt6897_b_16.0.0_oneplus_pad/vendor/mediatek/kernel_modules/connectivity): `wlan/core/gen4m/Kbuild.main`, `chips/common/fw_dl.c`, `conninfra/conn_drv/connv2/platform/mt6897`, `bt/mt66xx/btif`
 - [OPPO Pad 3 갈래](https://github.com/oppo-source/android_kernel_modules_and_devicetree_oppo_mt6897/tree/oppo/mt6897_b_16.0_pad_3)
-- [MiCode/MTK_kernel_modules `bsp-rodin-v-oss` 갈래: gen4m/chips/soc7_0](https://github.com/MiCode/MTK_kernel_modules/tree/bsp-rodin-v-oss/connectivity/wlan/core/gen4m/chips/soc7_0)
+- [Motorola gen4m chips/soc7_0](https://github.com/MotorolaMobilityLLC/vendor-mediatek-kernel_modules-connectivity-wlan-core-gen4m/tree/android-16-release-w1wn36.18-114/chips/soc7_0)
+- [MiCode/MTK_kernel_modules `bsp-rodin-v-oss` 갈래: gen4m/chips/soc7_0](https://github.com/MiCode/MTK_kernel_modules/tree/bsp-rodin-v-oss/connectivity/wlan/core/gen4m/chips/soc7_0), [MiCode/MTK_kernel_device_modules `bsp-rodin-v-oss`](https://github.com/MiCode/MTK_kernel_device_modules/tree/bsp-rodin-v-oss)
 - [MiCode/MTK_kernel_modules 이슈 #42](https://github.com/MiCode/MTK_kernel_modules/issues/42)
 - [Linux mt76 mt7921/pci.c](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/mediatek/mt76/mt7921/pci.c)
 - [Linux mt76 mt7915/soc.c](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/mediatek/mt76/mt7915/soc.c)
+- [openwrt/mt76](https://github.com/openwrt/mt76), [linux-firmware mediatek](https://gitlab.com/kernel-firmware/linux-firmware/-/tree/main/mediatek)
 - 기기 펌웨어: Lolinet 미러 `TB373FU_ROW_OPEN_USER_M21.814_V_ZUI_17.0.04.266_ST_251120.zip`의 `connsys_wifi.img`, `connsys_bt.img`

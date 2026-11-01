@@ -1,12 +1,14 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.1
+# buntOS TB375FC 포팅 최종 설계안 v1.2
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
+- v1.2(2026-11-01): 오픈소스 쪽 조사(부트 체인, 커뮤니티 포트, SoC 기반, 업스트림 진행, Wi-Fi)를 반영했다. 언락 go/no-go 넷 가운데 셋이 채워지지 않는다(2.1절). UFS·USB에 전원 도메인이 없어 2b에서 뺐다(3절). Wi-Fi·BT 펌웨어는 LK가 싣는다(6·7절)
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
   - [포팅 재료 조사](porting-materials.md)
   - [Wi-Fi·Bluetooth soc7_0](wifi-soc7_0.md)
+  - [커뮤니티 포트 분석](community-port.md)
   - buntOS의 [하드웨어 실측](../hw/lenovo-tb375fc.md)과 [설계안](../design/ARCHITECTURE.md)(4.2절, 12장)
 
 ## 0. 한눈에
@@ -22,15 +24,15 @@
 | 터치 | 같은 NT36532 칩의 터치(TDDI), SPI, 동시 10손가락, 펜. 플래시가 없어 부팅마다 펌웨어를 내려 준다 |
 | 저장장치·USB | UFS(`mediatek,mt8183-ufshci`, 업스트림이 MT6897 IP 판을 안다), mtu3 + xHCI + xsphy, USB-C(MT6375 TCPC), DP Alt |
 | 전원 | PMIC MT6363·MT6368·MT6319 ×3·MT6685·MT6375. 차지 펌프 NU2115 ×2·UPM6720 ×2, 게이지 MM8013 |
-| 무선 | connsys soc7_0(CONNAC2X, 칩 ID `0x7961` = MT7921 계열) + RF 칩 MT6637. 보정값은 nvdata 파티션 |
+| 무선 | connsys soc7_0(CONNAC2X, 칩 ID `0x7961` = MT7921 계열) + RF 칩 MT6637. 펌웨어는 LK가 싣고, 보정값은 nvdata 파티션에 있다 |
 | 그 밖 | 앰프 AW883xx ×4, 홀 센서 둘, 센서 허브 SCP(가속도·조도), UART 포고 키보드(Tinno MCU), SAR 둘 |
 | 부팅 | LK가 boot v4 + vendor_boot v4(장치 트리는 DT 표) + dtbo를 읽는다. GenieZone이 EL2를 차지할 가능성이 높다 |
 
 **가장 큰 재료 넷**([조사](porting-materials.md)).
 1. 이 기기의 벤더 모듈 소스 미러(`mt8792/android_kernel_lenovo_mt8792-modules`, 6.1.138): 패널·터치·앰프·홀·포고 키보드 드라이버가 그대로 있다.
-2. 이 기기의 커뮤니티 mainline 포트(`u0n0u/tb375fc-linux`, Linux 7.2): UART·저장장치가 되고 터치·Wi-Fi·GPU·충전은 작업 중이다.
-3. 같은 SoC의 완전한 벤더 트리: OPPO Pad 3·OnePlus Pad(같은 MT8792 태블릿 보드), Motorola(가장 새것)
-4. 업스트림 견본: MT6895-Mainline(PMIC 조합이 같다), MT6878-mainline(최소 부팅), mainline에 이미 있는 NT36532 패널·panthor G615·pinctrl-mt6878
+2. 이 기기의 커뮤니티 mainline 포트(`u0n0u/tb375fc-linux`, Linux 7.2): LK가 켠 화면(fbcon)과 UFS, USB 가젯까지 띄웠다. UART는 쓰지 않는다. 터치·Wi-Fi·GPU·충전은 작업 중이고, 2026-09-23 뒤로 멈췄다([분석](community-port.md)).
+3. 같은 SoC의 완전한 벤더 트리: OPPO Pad 3·OnePlus Pad(같은 MT8792 태블릿 보드), Motorola(가장 새것). 클럭·전원 도메인·핀·SPMI 표가 셋 모두 같은 파일로 들어 있다.
+4. 업스트림 견본: MT8196(clk·pmdomain·SPMI), pinctrl-mt6878, MT6895-Mainline(PMIC 조합이 같다), MT6878-mainline(최소 부팅), mainline에 이미 있는 NT36532 패널·panthor G615
 
 **가장 큰 일과 위험.**
 - 큰 일:
@@ -39,7 +41,7 @@
   - Wi-Fi(soc7_0)
   - 오디오(AFE + MT6368)
 - 위험:
-  - 언락 중 벽돌
+  - 언락: 레노버 언락 파일이 필요하고, 언락 전 백업과 BROM 복구 길이 없다(2.1절)
   - EL2 점유(가상화 불가)
   - 센서 허브(자동 회전이 막힐 수 있다)
   - 펌웨어 재배포
@@ -48,12 +50,12 @@
 
 | # | 결정 | 까닭 |
 |---|---|---|
-| D1 | **mainline 커널.** buntOS 이미지와 같은 Debian forky 커널(지금 7.2.12)에 보드 설정과 제출 대기 패치를 더한다. 벤더 GKI는 쓰지 않는다 | buntOS 설계안 4.2.2절. 필요한 업스트림 기능(6.18~7.0)이 7.2에 다 있다. 패널 드라이버만 7.4라 백포트한다 |
-| D2 | **업스트림 꼴로 짠다.** `mt6897.dtsi` + `mt6897-lenovo-tb375fc.dts`, clk·pinctrl·pmdomain은 업스트림 틀(mt8196·mt6878 견본)에 MT6897 데이터를 넣는다 | 제출할 수 있어야 유지할 수 있다. 커뮤니티 포트는 클럭·핀 드라이버 없이 fixed-clock과 부트로더 상태에 기대는 구조다. 그래서 사실 확인용과 협력 상대로 쓰고, 기반으로는 쓰지 않는다 |
+| D1 | **mainline 커널.** buntOS 이미지와 같은 Debian forky 커널(지금 7.2.12)에 보드 설정과 제출 대기 패치를 더한다. 벤더 GKI는 쓰지 않는다 | buntOS 설계안 4.2.2절. 필요한 업스트림 기능(6.16~7.0)이 7.2에 다 있다. 7.4 병합 창에 들어온 패널 드라이버와 SPMI 고침만 백포트한다 |
+| D2 | **업스트림 꼴로 짠다.** `mt6897.dtsi` + `mt6897-lenovo-tb375fc.dts`. 핀은 업스트림 `pinctrl-mt6878`을, clk·pmdomain·SPMI는 MT8196을 틀로 삼는다. MT6897 데이터는 OEM 공식 소스(OnePlus·OPPO·Motorola, GPL-2.0)에서 가져온다 | 제출할 수 있어야 유지할 수 있다. 커뮤니티 포트는 클럭·핀 드라이버 없이 fixed-clock과 부트로더 상태에 기대고, 장치 트리를 커널에 넣어 LK가 준 트리를 바꿔 끼우는 구조다. 그래서 사실 확인용과 협력 상대로 쓰고, 기반으로는 쓰지 않는다([분석](community-port.md)) |
 | D3 | **처음에는 LK가 직접 띄운다.** boot v4 + vendor_boot v4(DT 표) + 빈 dtbo, `fastboot boot`로 RAM에서. 2b부터는 U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다 | 파티션을 건드리지 않는 첫 부팅. EFI가 되면 buntOS의 QEMU 이미지 꼴과 같아진다(D3 동등성). MT6878-mainline도 U-Boot를 권한다 |
 | D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 업스트림 시리즈를 따라 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다 |
-| D5 | **Wi-Fi는 mt76에 "MT7921의 SoC 변형"을 더한다.** conninfra 전원, nvdata 보정값을 쓴다. 그 전에는 USB 동글로 우회한다 | 칩 ID와 구조가 MT7921과 같고 SoC Wi-Fi 선례(mt7915/soc.c)가 있다([설계](wifi-soc7_0.md)) |
-| D6 | **펌웨어는 설치할 때 기기에서 뽑는다.** Mali CSF만 linux-firmware에서 온다. GPUEB는 LK가 올린다 | 재배포할 수 있는지 모른다(buntOS ADR-012). 안드로이드 슬롯 하나를 남긴다 |
+| D5 | **Wi-Fi는 mt76에 "MT7921의 SoC 변형"을 더한다.** 펌웨어는 LK가 실은 것을 쓰고, conninfra 전원은 TF-A SIP 호출로 켜고, nvdata 보정값은 NVRAM 명령으로 넘긴다. 그 전에는 USB 동글로 우회한다 | 칩 ID와 구조가 MT7921과 같고, 명령 머리와 레거시 명령 번호도 같다. SoC Wi-Fi 선례(mt7915/soc.c)가 있다([설계](wifi-soc7_0.md)) |
+| D6 | **펌웨어는 설치할 때 기기에서 뽑는다.** Mali CSF만 linux-firmware에서 온다. GPUEB와 Wi-Fi·BT는 LK가 올리므로, 그 파티션(GPUEB, `connsys_wifi`, `connsys_bt`)을 지킨다 | 재배포할 수 있는지 모른다(buntOS ADR-012). 안드로이드 슬롯 하나를 남긴다 |
 | D7 | **GPU는 panthor + MT6897 GPUEB 변형이다.** 이미지에 Mesa 26.3 이상이 필요하다 | panthor·펌웨어·Mesa가 이미 G615를 안다. 전원은 MT8196 드라이버에 공유 메모리 오프셋만 다른 변형을 더한다 |
 | D8 | **가상화는 2a에서 EL을 본 뒤 정한다.** GenieZone이 EL2를 차지하면 KVM을 포기하고, gzvm(미병합)을 나중에 검토한다. TEE를 고쳐 EL2를 빼앗는 실험(`mtk-mod-tee-nogz`)은 쓰지 않는다 | 서명 우회가 필요하고 벽돌 위험이 크다 |
 
@@ -62,14 +64,30 @@
 ### 2.1 부트 체인과 언락
 
 - **부트 체인:** BROM → preloader → ATF·TEE·GenieZone → LK → 커널. LK는 AVB로 boot, vendor_boot, dtbo를 검증한다.
-- **언락:** 공식 길이 없다. CN 펌웨어 ZUI 16.0.20.091에서 언락과 AVB 해제가 됐다는 보고가 있고, 그 펌웨어의 위치를 확인해 두었다(Lolinet 미러, 지금은 지웠다).
-  - 진행 조건은 buntOS 설계안 4.2.3절의 go/no-go 넷이다. 하나라도 빠지면 언락하지 않는다.
-    1. 전체 파티션 백업과 해시 확인
-    2. 독립된 보고 둘 이상으로 교차 확인
-    3. MT6897 BROM 복구 길(mtkclient) 확인
-    4. OTA 차단
-  - nvdata·nvram 계열에는 Wi-Fi MAC과 보정값이 있다. 잃으면 되살릴 수 없다.
+- **언락 방식:** 공개된 공식 길이 없다. LK 문자열을 보면 레노버가 발급하는 언락 파일이 있어야 한다. 글로벌판과 중국판 LK가 같다.
+  - 개발자 옵션에서 OEM 잠금 해제를 켠다.
+  - 일련번호에 묶이고 레노버가 서명한 언락 이미지를 넣는다. LK는 이 이미지의 머리, 서명, 일련번호를 검사한다.
+  - `fastboot oem unlock`(또는 `flashing unlock`)으로 푼다.
+- **언락 보고:** 공신력 있는 보고는 TrebleDroid 위키 하나다. 중국판 ZUI 16.0.20.091에서 언락하고 AVB를 끈 뒤 GSI를 띄웠다(2025-08). 그 펌웨어의 위치도 확인해 두었다(Lolinet 미러, 지금은 지웠다).
+  - 위키에 언락 방법은 적혀 있지 않다.
+  - v1.1까지 적었던 XDA의 LK 파티션 교체 방법은 원글을 찾지 못했다.
+  - 커뮤니티 포트 둘도 언락 절차를 적지 않았다.
 - **슬롯:** 한쪽 슬롯과 recovery는 안드로이드로 남긴다. 정보원이자, 펌웨어를 뽑는 곳이자, 복귀 길이다.
+
+**go/no-go.** 진행 조건은 buntOS 설계안 4.2.3절의 넷이다. 하나라도 빠지면 언락하지 않는다. 2026-11-01 조사로는 셋이 채워지지 않는다. 근거는 [조사](porting-materials.md) 5절에 있다.
+
+| 조건 | 지금 | 까닭 |
+|---|---|---|
+| 1. 전체 파티션 백업과 해시 확인 | 언락 전에는 길이 없다 | 언락 전에는 root가 없고, fastboot로는 파티션을 읽지 못한다. mtkclient로 읽으려면 기기에서 DA가 돌아야 한다. 그런데 MT6897은 V6 DA이고, 펌웨어 묶음을 보면 DA 인증(DAA)과 SLA가 켜져 있다. 서명된 DA가 없으면 읽지 못한다 |
+| 2. 독립된 보고 둘 이상으로 교차 확인 | 하나뿐이다 | 위 "언락 보고" |
+| 3. MT6897 BROM 복구 길 | 불확실(사실상 없다) | mtkclient는 MT6897을 알지만 BROM 익스플로잇 값이 모두 비어 있다. mtkclient 토론의 채택된 답(2026-03)은 서명된 DA가 있어야 하고, 그래도 Carbonara나 Heapbait에 취약해야 한다고 한다. 레노버 공식 복구 도구(Rescue and Smart Assistant)가 이 모델을 지원하는지는 확인하지 못했다 |
+| 4. OTA 차단 | 기기에서 한다 | — |
+
+- 그래서 지금 근거로는 언락하지 않는다. 기기가 오면 언락 전에 두 가지를 확인한다.
+  - 이 기기의 일련번호로 레노버 언락 파일을 받을 수 있는지
+  - Rescue and Smart Assistant가 이 모델을 순정 펌웨어로 되돌릴 수 있는지
+- 백업 조건(1번)을 "언락 직후, 다른 것을 굽기 전에 root로 전체 백업"으로 바꿀지는 위 둘을 확인한 뒤 정한다. 바꾸면 buntOS 설계안 4.2.3절도 함께 고친다.
+- nvdata·nvram 계열에는 Wi-Fi MAC과 보정값이 있다. 잃으면 되살릴 수 없다.
 
 ### 2.2 이미지 꼴
 
@@ -81,34 +99,42 @@
 | dtbo | 빈 오버레이 하나 | LK가 dtbo를 기본 트리에 입힌다. 벤더 dtbo를 남기면 벤더 노드 경로를 기대하는 fixup이 실패할 수 있다 |
 
 - 이미지 만들기는 이 폴더의 `boot/`에 둔다. buntOS `tools/hw/bootimg.py`의 반대 방향으로, `mkbootimg` v4 꼴과 DT 표를 그대로 따른다.
-- **LK와 `/chosen`:** "LK가 `/chosen`을 덮어써서 커뮤니티 포트가 장치 트리를 커널에 넣어 우회한다"는 조사 보고가 있다. README에는 없는 내용이라 미확인이다.
-  - 커널 명령줄은 boot·vendor_boot 이미지의 명령줄로 준다.
-  - 모자라면 커널 `CMDLINE_EXTEND`를 쓴다. DTB를 커널에 넣는 우회는 하지 않는다.
+- **LK와 `/chosen`:** 커뮤니티 포트에 그 우회가 있다(코드로 확인). 커널에 넣은 장치 트리로 LK가 준 트리를 바꿔 끼우고, 그 트리의 `/chosen`에서 명령줄을 다시 읽는다([분석](community-port.md) 4절).
+  - 우회하는 까닭은 "LK가 boot·vendor_boot 명령줄을 무시하고 `/chosen`을 덮어쓴다"는 것이다. 다만 MT6895 xaga 포트에서 물려받은 주석이고, MT6897 LK에 vendor_boot DT 표로 트리를 넣어 시험한 기록은 없다.
+  - 이 우회는 LK가 더하는 메모리 크기, mblock 예약, bootargs를 버린다. 그래서 커뮤니티 포트는 12GiB 기기의 예약을 고정값으로 적었고, 8GB 판에는 맞지 않는다.
+  - 우리는 커널 명령줄을 boot·vendor_boot 이미지의 명령줄로 준다. 2a에서 `/proc/cmdline`으로 들어왔는지 보고, 모자라면 커널 `CMDLINE`과 `CMDLINE_EXTEND`를 쓴다.
+  - DTB를 커널에 넣는 우회는 기본 길로 삼지 않는다(2.4절의 시험용 커널만 예외).
   - 2a에서 LK가 우리 트리의 무엇을 고치는지 살아 있는 트리로 확인한다.
 
 ### 2.3 장치 트리 방침
 
-- **2a:** 처음부터 업스트림 꼴로 짠다(v1.0의 "벤더 트리를 줄여 출발"을 바꿨다). 커뮤니티 포트가 이 꼴의 트리로 LK에서 UART 콘솔과 저장장치까지 띄웠다. 주소와 인터럽트는 커뮤니티 포트의 `mt6897.dtsi`, 벤더 `mt6897.dts`, 우리가 뽑은 트리 셋을 대조한다(`kernel/tb375fc/dts/README.md`).
+- **2a:** 처음부터 업스트림 꼴로 짠다(v1.0의 "벤더 트리를 줄여 출발"을 바꿨다). 커뮤니티 포트가 이 꼴의 트리를 커널에 넣어 LK에서 화면 콘솔과 저장장치까지 띄웠다. 주소와 인터럽트는 커뮤니티 포트의 `mt6897.dtsi`, 벤더 `mt6897.dts`, 우리가 뽑은 트리 셋을 대조한다(`kernel/tb375fc/dts/README.md`).
   - LK가 찾는 패널 경로(`/soc/dsi@1400d000/panel1@0` 등)는 화면을 붙이는 2c에서 더한다.
   - 첫 부팅 뒤 LK가 우리 트리의 무엇을 고치는지 살아 있는 트리로 견준다.
-- **2b부터:** 꺼 둔 노드(UFS, USB, SPMI 등)를 클럭·핀·전원 도메인 패치와 함께 하나씩 켠다.
+- **2b부터:** 꺼 둔 노드(UFS, USB, SPMI 등)를 핀·클럭 패치와 함께 하나씩 켠다. UFS와 USB에는 전원 도메인이 없다(펌웨어 트리, 벤더 scpsys 표).
 - **최종 꼴:** `mt6897.dtsi`(SoC)와 `mt6897-lenovo-tb375fc.dts`(보드)다. TB373FU는 같은 dts에 `model`만 다르다.
 - **framebuffer:** 정적 트리에 없다. LK가 부팅 화면을 켠 영역을 기기에서 읽는다(안드로이드의 `/proc/iomem`, 살아 있는 트리). 그 주소로 `simple-framebuffer`를 만든다. 화면은 1472×1840 두 줄을 합친 2944×1840이고, LK가 DSC까지 켜 둔다.
+  - 커뮤니티 포트는 LK 기록(mblock 할당, `atag,videolfb`)에서 읽은 `0xfc16f000`으로 fbcon을 띄웠다(12GiB 기기). 8GB 판에서도 같은지 기기에서 본다.
 - **예약 메모리:** 정적 트리에는 동적 할당 셋(modem 버퍼, CMA 256MB, 커널 보호)뿐이다. TEE, GenieZone, connsys, framebuffer의 고정 예약은 preloader·LK가 부팅 때 더한다.
   - 그래서 우리 트리에도 `/reserved-memory`(셀 2)를 남긴다.
+  - LK가 예약을 더하지 않는 길(커널에 넣은 장치 트리 등)에서는 BL31(`0x48800000`, 2MB)을 직접 예약해야 한다. 커뮤니티 포트에 따르면, 안 하면 보조 CPU와 서스펜드가 멈춘다.
   - 기기에서 실제 배치를 본 뒤 pstore 칸을 정한다.
 
 ### 2.4 처음 띄우는 법과 디버그 채널
 
-- 첫 부팅은 `fastboot boot`로 RAM에서 한다. 지원하지 않으면 비운 슬롯에 굽는다.
-  - `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있어서, LK가 이 둘을 굽혀 있는 원래 파티션에서 읽을 가능성이 높다(AOSP 부트로더의 동작이다. MT6897 LK에서는 확인하지 않았다).
+- 첫 부팅은 `fastboot boot`로 RAM에서 한다. LK의 fastboot 명령 표에 `download:`와 `boot`가 있어 이 길을 지원한다(LK 문자열). 서명하지 않은 이미지라 언락 상태여야 한다.
+  - `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있다(AOSP 문서).
+  - LK는 boot·init_boot·vendor_boot 머리를 모두 읽고, 장치 트리를 예약 메모리 `mb_dtb`로 읽어 커널에 넘긴다(LK 문자열). 그래서 RAM으로 보낸 boot.img에 굽혀 있는 원래 vendor_boot·init_boot를 붙일 가능성이 높다. 이 결합만 기기에서 확인하지 않았다.
   - 그래서 init이 vendor_boot의 표지로 LK가 우리 vendor_boot를 읽었는지 알린다. initramfs를 boot.img에도 넣은 이미지(`mkimages.sh --boot-ramdisk`)로 LK가 그 램디스크를 쓰는지도 본다.
   - 원래 장치 트리로 뜨면 비운 슬롯에 넷을 굽는 길로 간다.
+  - 굽기 전에 한 번 더 보려면, 커뮤니티 포트처럼 장치 트리를 커널에 넣은 시험용 커널을 `fastboot boot`로 띄울 수 있다. 이 커널은 LK가 더하는 메모리·예약 값을 버리므로, 그 기기의 메모리 크기에 맞춘 예약을 함께 넣어야 한다. 업스트림에는 내지 않는다.
 - 디버그 채널:
-  1. **UART:** 커뮤니티 포트는 UART 콘솔을 쓴다. 기기 밖 단자는 없으니 위치(시험 패드나 포고 핀의 UART3)를 그 포트와 `tb375fc-linux-utils`에서 확인한다. 포고 핀 UART3(GPIO180·181)은 키보드가 쓰는 줄이다.
-  2. **화면 콘솔:** simple-framebuffer + simpledrm
-  3. **pstore/ramoops:** 직전 부팅의 커널 기록을 남긴다
+  1. **화면 콘솔:** simple-framebuffer + simpledrm. 커뮤니티 포트도 LK 화면 위의 fbcon을 첫 통로로 썼다. 부팅 단계마다 화면에 블록을 그리는 카나리와 `panic=0`(패닉 화면을 남긴다)도 쓸 수 있다
+  2. **pstore/ramoops:** 직전 부팅의 커널 기록을 남긴다. 벤더와 같은 자리(LK가 명령줄로 주는 `0x48090000`)에 두고, 순정 recovery로 재부팅해 읽는다
+  3. **LK 기록:** expdb 파티션에 남는다. 순정 recovery에서 뜬다
   4. **USB 가젯(2b):** configfs ACM + NCM. initramfs 첫 단계에서 띄워 호스트에서 SSH로 들어간다
+  5. **UART:** 커뮤니티 포트도 쓰지 않았고(uart0을 꺼 둠), 시험 패드 위치와 전압이 공개된 곳이 없다. 기기를 열어 찾는다. 포고 핀 UART3(GPIO180·181)은 키보드 줄이다.
+- recovery는 따로 된 파티션이 없고 vendor_boot 안에 있다(중국판 펌웨어 묶음에 recovery.img가 없다). 그래서 우리 vendor_boot를 구운 슬롯에서는 순정 recovery를 쓸 수 없다. 남겨 둔 슬롯으로 바꿔 recovery를 쓴다.
 - 루트 파일 시스템:
   - 2a는 initramfs다.
   - 2b부터는 UFS의 비운 슬롯이나 userdata 일부, 또는 USB-C 저장장치를 쓴다.
@@ -117,25 +143,29 @@
 
 | 단계 | 할 일 | 종료 조건 |
 |---|---|---|
-| 2a 첫 부팅 | 줄인 벤더 트리(CPU, GIC, 타이머, PSCI, 메모리, simple-framebuffer, ramoops, UART), 이미지 꼴, Debian 커널 그대로 | initramfs 셸이 화면이나 UART에 뜬다. 커널 기록으로 EL2 판정(12.1절) |
-| 2b 저장장치·디버그 | 핀(mt6878 틀), 전원 도메인(mt8196 틀), 클럭(처음에는 fixed + `clk_ignore_unused`), SPMI, PMIC MT6363·MT6319(MFD 패치), UFS, USB(mtu3·xHCI·xsphy), cpufreq-hw | UFS의 Debian 루트, USB 가젯 SSH, USB 호스트(동글·키보드) |
+| 2a 첫 부팅 | 업스트림 꼴 트리(CPU, GIC, 타이머, PSCI, 메모리, simple-framebuffer, ramoops, UART), 이미지 꼴, Debian 커널 그대로 | initramfs 셸이 화면이나 UART에 뜬다. 커널 기록으로 EL2 판정(12.1절) |
+| 2b 저장장치·디버그 | UFS(`ufs-rtff-mtcmos`, 처음에는 MCQ 끔), USB(mtu3·xHCI·xsphy), 핀·EINT(mt6878 틀), 클럭(처음에는 fixed + `clk_ignore_unused`), SPMI(MT8196 데이터, P 버스 끔), MT6319(DT만), MFD·MT6363, cpufreq-hw. UFS는 LK가 켜 둔 클럭과 `regulator-fixed`로 먼저 띄울 수 있다. PMIC 쪽은 핀(EINT) → SPMI → MT6319 → MFD·MT6363 순서다 | UFS의 Debian 루트, USB 가젯 SSH, USB 호스트(동글·키보드) |
 | 2c 화면·입력 (1차) | simple-framebuffer로 buntOS 데스크톱, NT36532 SPI 터치(펌웨어 내려받기), 펜, 홀 센서(gpio-keys), 포고 키보드(serdev) | 2944×1840으로 buntOS 로그인 화면, 터치·펜 조작, 키보드 커버를 붙이면 포인터 모드 |
-| 2d 무선 | conninfra, mt76 soc7_0, 펌웨어·nvdata 보정값, FEM, Bluetooth | Wi-Fi 연결, Bluetooth 키보드·이어폰 |
+| 2d 무선 | conninfra(SIP 호출, PMIC 전원, conn 전원 도메인), mt76 soc7_0(LK 적재본 기동), nvdata 보정값, FEM, Bluetooth(BEIF) | Wi-Fi 연결, Bluetooth 키보드·이어폰 |
 | 2e GPU·전원 | panthor + GPUEB 변형, Mesa 26.3, 클럭 드라이버 완성(`clk_ignore_unused` 빼기), LVTS 열, MT6375 충전·TCPC, MM8013, 서스펜드 | GLES로 컴포지터, 서스펜드·복귀 반복, 배터리·충전 표시 |
 | 2c 화면 (2차) | mediatek-drm의 MT6897 데이터, dual-DSI, DSC, NT36532 패널 셋(업스트림 드라이버 + compatible 셋) | 주사율·밝기 조절, 화면 끄고 켜기 |
 | 3 최적화 | 8절, 오디오, 외부 화면 | buntOS 설계안 9.3절 스모크 시험 |
 
-화면 2차를 2e 뒤로 둔 것은 업스트림의 DSC·mediatek-drm 재구성 시리즈를 기다리기 위해서다(D4).
+- 화면 2차를 2e 뒤로 둔 것은 업스트림의 DSC·mediatek-drm 재구성 시리즈를 기다리기 위해서다(D4). 두 시리즈 모두 7.4 병합 창에 들어가지 않아 빨라야 7.5다(2026-11-01).
+- 전원 도메인은 UFS·USB에 필요 없어 2b에서 뺐다. 필요한 단계에서 그 도메인부터 더한다: 2d(conn), 2e(GPU), 2c 2차(화면).
 
 ## 4. 커널 구성
 
 - **기반:** Debian forky 커널(buntOS 이미지와 같은 판, 지금 7.2.12)을 쓴다. 포팅이 진행되면 그때의 Debian 판을 따라간다.
 - **설정과 패치:** 보드 설정 조각(`kernel/config/tb375fc.config`)과 업스트림 제출 대기 패치 대기열(`kernel/patches/`)을 둔다. 대기열에 처음 들어갈 것:
-  - NT36532 패널 드라이버 백포트(7.4)와 compatible 셋
-  - MFD `mtk-spmi-pmic`(v12, MT6363 regulator·키, MT6685가 의존)
-  - `pinctrl-mt6897`, `mt6897` 전원 도메인 데이터, `clk-mt6897`
-  - NT36532 SPI 터치, 포고 키보드(v6 시리즈 위)
-  - mt76 soc7_0과 conninfra
+  - NT36532 패널 드라이버 백포트(7.4 병합 창, `47b823940e38`)와 BOE·Tianma 패널 compatible
+  - `spmi-mtk-pmif` 고침 백포트: FSM 멈춤 우회(`84c72fc05f73`, 7.4 병합 창), 클럭 참조 누수(`636c4c026f47`). 코드 대조에서 나온 결함 둘(rcs 디먹스, 채널 설정 순서)은 기기에서 확인한 뒤 낸다
+  - `pinctrl-mt6897`(EINT 포함)
+  - `clk-mt6897`. FENC 없는 HW voter 먹스와 PLL HW voter를 업스트림 틀에 더해야 한다
+  - MFD `mtk-spmi-pmic`: v12에 리뷰 지적을 고쳐 둔다. 새 판이 나오면 따른다. MT6363 regulator와 MT6685가 의존하고, MT6363 키 드라이버는 따로 필요하다. MT6319는 MFD 없이 `mt6315-regulator`에 DT만 쓴다
+  - `mt6897` 전원 도메인 데이터(2d 뒤)
+  - NT36532 SPI 터치와 펜, 포고 키보드(v6 시리즈 위, compatible별 CRC 초기값)
+  - conninfra(SIP 호출과 PMIC 전원), mt76 mt7921의 SoC(AXI) 변형, Bluetooth BEIF 전송
   - GPUEB MT6897 변형
 - **2a에 필요한 설정**(Debian 기본에 대부분 있다):
   - `ARCH_MEDIATEK`, `SERIAL_8250_MT6577`
@@ -152,18 +182,18 @@
 |---|---|---|---|---|
 | CPU·GIC·PSCI·타이머 | 전부 | DT | 작음 | 2a |
 | CPU 주파수 | `mediatek-cpufreq-hw` | DT(도메인 셋), 더미 `cpu-supply` | 작음 | 2b |
-| 핀 제어 | `pinctrl-mt6878`(틀) | `pinctrl-mt6897`(벤더 표) | 중간 | 2b |
-| 전원 도메인 | `mtk-pm-domains`(MT8196) | MT6897 데이터 | 중간 | 2b |
-| 클럭 | `clk-mt8196-*`(틀) | `clk-mt6897`(벤더 표) | 큼 | 2b~2e |
-| SPMI·MT6363·MT6319 | `spmi-mtk-pmif`, `mt6363-regulator`, `mt6315-regulator` | compatible, MFD 패치 | 작음~중간 | 2b |
+| 핀 제어 | `pinctrl-mt6878`(틀) | `pinctrl-mt6897`(OEM 표: 핀 232, EINT 250). 벤더 전용 기능은 업스트림 mt6878처럼 `DRV_ADV`로 바꾸거나 뺀다 | 중간 | 2b |
+| 전원 도메인 | `mtk-pm-domains`(MT8196) | MT6897 데이터(SPM 33개, GPU 12개, 그 가운데 HW voter 7개). UFS·USB에는 없다 | 중간 | 2d·2e·2c(2차) |
+| 클럭 | `clk-mt8196-*`(틀) | `clk-mt6897`(OEM 표). FENC 없는 HW voter 먹스와 PLL HW voter를 더한다 | 큼 | 2b~2e |
+| SPMI·MT6363·MT6319 | `spmi-mtk-pmif`, `mt6363-regulator`, `mt6315-regulator` | SPMI는 MT8196 대체 compatible(P 버스 끔)과 고침 백포트, MT6319는 DT만, MT6363은 MFD 패치 | 작음~중간 | 2b |
 | MT6368·MT6685·MT6375 | 없음 | MT6895 포크 견본으로 새로 | 중간~큼 | 2b·2e·3 |
-| UFS | `ufs-mediatek`, `phy-mtk-ufs` | ufscfg 클럭·리셋, VCC, 전원 도메인 | 작음~중간 | 2b |
+| UFS | `ufs-mediatek`, `phy-mtk-ufs` | ufscfg 클럭·리셋, VCC, `ufs-rtff-mtcmos`(전원 도메인이 아니다), PHY 클럭 둘, 바인딩 패치 | 작음~중간 | 2b |
 | USB | `mtu3`, `xhci-mtk`, `phy-mtk-xsphy` | DT, 역할 전환은 TCPC 뒤 | 작음 | 2b |
-| 화면 파이프라인 | MT8195·MT8188까지. DSC·dual-DSI 없음 | MT6897 데이터, dual-DSI, DSC | 큼 | 2c(2차) |
-| 패널 NT36532 | `panel-novatek-nt36532`(7.4) | compatible 셋과 초기화 순서 | 작음 | 2c(2차) |
-| 터치 NT36532 SPI + 펜 | I2C 드라이버뿐 | SPI 드라이버, 펌웨어 내려받기, 펜 장치 | 중간 | 2c |
+| 화면 파이프라인 | MT8195·MT8188까지. DSC v9·재구성 v2 시리즈는 미병합, dual-DSI는 아무도 맡지 않았다 | MT6897 데이터, dual-DSI, DSC(1.1과 패널 RC 표) | 큼 | 2c(2차) |
+| 패널 NT36532 | `panel-novatek-nt36532`(7.4 병합 창). 패널 쪽 dual-DSI와 DSC가 있다 | compatible 셋, 초기화 순서. 업스트림 패널은 DSC 1.2이고 이 기기 BOE 패널은 DSC 1.1이다 | 작음 | 2c(2차) |
+| 터치 NT36532 SPI + 펜 | I2C 드라이버뿐(SPI RFC 둘은 미병합) | SPI 드라이버, 펌웨어 내려받기, 펜 장치. 펜은 TB371FC 포트가 가까운 참고다 | 중간 | 2c |
 | 홀 센서 | `gpio-keys` | DT(`SW_TABLET_MODE`, `SW_LID`) | 작음 | 2c |
-| 포고 키보드 | v6 시리즈(리뷰 중) | serdev 드라이버, 프레이밍 확인 | 중간 | 2c |
+| 포고 키보드 | v6 시리즈(미병합, Qualcomm 기기용) | serdev 드라이버. 같은 Tinno 단선 프로토콜로 보이나 이 기기 드라이버 소스는 없다. compatible별 CRC 초기값, TX 핀 pinctrl 전환, UART3 설정(pericfg_ao `0x11036050`) | 중간 | 2c |
 | Wi-Fi·BT | `mt7921`, `mt7915/soc.c`(선례) | soc7_0 버스, conninfra, 펌웨어, FEM, BT 전송 | 큼 | 2d |
 | GPU | panthor(G615), linux-firmware CSF | DT | 작음 | 2e |
 | GPU 전원 | `mtk-mfg-pmdomain`, `mtk-gpueb-mailbox`(MT8196) | MT6897 변형(공유 메모리 오프셋, 메일박스 표) | 중간 | 2e |
@@ -185,20 +215,27 @@
 | 내장 connsys soc7_0, 칩 ID `0x7961`(CONNAC2X), AXI·PCIe 두 빌드 | 벤더 소스 `soc7_0.h`의 `SOC7_0_CHIP_ID 0x7961`, `soc7_0.c` |
 | RF 칩(A-die) MT6637 | 기기 Wi-Fi 펌웨어의 소스 경로 `wifi/base/soc7_0/hal/phy/6637/…` |
 | 기기 펌웨어가 soc7_0용 | `connsys_wifi.img`·`connsys_bt.img`의 빌드 `t-neptune-main-soc7_0-2104-…-20250320113502` |
-| 벤더 드라이버 소스 | gen4m `chips/soc7_0`: Xiaomi rodin, OnePlus Pad A16, OPPO Pad 3, Motorola gen4m 저장소. Dimensity 8300 Xiaomi 갈래와 OPPO Reno13 A15에는 없다 |
-| 업스트림 길 | mt76 `mt7921`이 0x7961을 PCIe로 지원하고, `mt7915/soc.c`가 SoC Wi-Fi + SPI A-die 선례다 |
-| 보정값 | nvdata 파티션(커뮤니티 포트는 initramfs에서 nvdata를 마운트한다) |
+| 벤더 드라이버 소스 | gen4m `chips/soc7_0`: Xiaomi rodin(MT6899), OnePlus Pad A16, OPPO Pad 3, Motorola gen4m 저장소. Dimensity 8300 Xiaomi 갈래와 OPPO Reno13 A15에는 없다 |
+| 업스트림 길 | mt76 `mt7921`이 0x7961을 PCIe로 지원하고, `mt7915/soc.c`가 SoC Wi-Fi + SPI A-die 선례다. DMA 링 배치는 MT7902 분기가 선례다 |
+| 보정값 | nvdata 파티션의 `APCFG/APRDEB/WIFI`. MT6895 xaga의 initramfs는 이것을 펌웨어 폴더로 복사하고, 커뮤니티 커널은 `mediatek/mt6897/WIFI`로 읽는다(공개된 TB375FC initramfs는 nvdata를 마운트하지 않는다) |
+| 펌웨어는 LK가 conninfra EMI에 싣고, 드라이버는 시작 명령(INIT 0x42)만 보낸다 | gen4m `CFG_WLAN_LK_FWDL_SUPPORT=1`(MT6897·MT6878), `fw_dl.c`의 주석 |
+| conninfra 전원 순서의 대부분을 TF-A SIP 호출로 한다 | 기기 트리의 `mediatek,mt6897-consys-atf`, 벤더 `conninfra/conn_drv/connv2/platform/mt6897` |
+| Bluetooth 전송은 EMI 안의 공유 메모리 링(BEIF)이고, WMT 머리는 업스트림 btmtk와 같다 | 벤더 `bt/mt66xx/btif`(`SUPPORT_BEIF=1`) |
+| MCU 명령·이벤트의 머리와 레거시 명령 번호가 MT7921과 같다. uni cmd를 받는지는 모른다 | [Wi-Fi 문서](wifi-soc7_0.md) 6절 |
+| 업스트림에 soc7_0 움직임은 없다 | patchwork 제목 검색, `openwrt/mt76` |
 
 **설계.**
 - 방식: mt76에 "MT7921의 SoC 변형"을 더한다. 할 일은 다음과 같다.
-  - AXI MMIO 버스
-  - conninfra 전원 순서
-  - 예약 메모리에 ROM 이미지 올리기
-  - nvdata 보정값 넘기기
+  - AXI MMIO 버스와 MT7902식 DMA 링 배치
+  - conninfra 전원 순서(TF-A SIP 호출, PMIC 전원)
+  - LK 적재본 기동: EMI 주소를 받아 remap하고 시작 명령을 보낸다. DMA는 LK가 연 20 MiB 칸 안에서만 한다
+  - nvdata 보정값을 NVRAM 명령(CMD 0x48)으로 넘기기
   - FEM 고르기
-- 순서: 2b의 클럭·PMIC가 먼저다.
+  - 펌웨어가 uni cmd를 받지 않으면 BSS·STA·키·ROC를 레거시 명령으로 보내는 길
+  - Bluetooth: BEIF 전송 드라이버를 새로 쓰고, HCI와 WMT는 btmtk를 다시 쓴다
+- 순서: 2b의 클럭·핀·PMIC가 먼저다.
 - 우회: 그 전에는 USB 동글(mt7921u)이나 USB 이더넷을 쓴다.
-- 함께 일하기: 커뮤니티 포트의 soc7_0 플랫폼 작업과 겹치므로 같이 할 수 있는지 먼저 본다.
+- 함께 일하기: 커뮤니티 포트는 벤더 gen4m과 conninfra를 옮겨 왔고, WF ROM이 아직 뜨지 않는다. 코드는 겹치지 않으므로 레지스터 사실만 나눈다([분석](community-port.md)). MT6878도 soc7_0이라 그 mainline 포트와도 나눌 수 있다.
 
 ## 7. 펌웨어 방침
 
@@ -207,8 +244,8 @@
 | Mali CSF(`arm/mali/arch11.8/mali_csffw.bin`) | linux-firmware | 커널(panthor) | 가능 |
 | GPUEB(`gpueb.img`) | 기기 파티션 | **LK**(벤더 커널에 request_firmware가 없다) | 해당 없음 |
 | 터치 NT36532(`novatek_ts_fw_boe.bin`, `novatek_ts_fw_tm.bin`) | 기기 vendor | 커널(부팅마다) | 미확인. 기기에서 뽑는다 |
-| Wi-Fi·BT soc7_0(ROM EMI, 패치, RAM 코드) | 기기 vendor | 커널 | 미확인. 기기에서 뽑는다 |
-| Wi-Fi 보정값·MAC | 기기 nvdata | 커널(initramfs가 넘긴다) | 기기마다 다르다 |
+| Wi-Fi·BT soc7_0 | 기기 파티션(`connsys_wifi`, `connsys_bt`) | **LK**(conninfra EMI에 싣는다. 커널은 시작만 시킨다) | 해당 없음. 파티션을 지킨다 |
+| Wi-Fi 보정값·MAC | 기기 nvdata | 커널(NVRAM 명령으로 넘긴다. initramfs가 nvdata를 붙인다) | 기기마다 다르다 |
 | 앰프 AW883xx ACF, SCP·오디오 DSP | 기기 vendor·파티션 | 커널 | 미확인 |
 
 - 펌웨어 추출 스크립트는 `firmware/`에 두고, 펌웨어 파일 자체는 저장소에 넣지 않는다(buntOS ADR-012).
@@ -256,34 +293,40 @@ buntos-TB375FC/                 buntOS 포크 (원격 buntos = 원본)
 
 | 위험 | 영향 | 대응 |
 |---|---|---|
-| 언락 중 벽돌, nvdata 손실 | 개발 중단, Wi-Fi 보정값 잃음 | 예비 1대, go/no-go 넷, 전체 백업, BROM 복구 길 사전 확인 |
+| 언락 중 벽돌, nvdata 손실 | 개발 중단, Wi-Fi 보정값 잃음 | 예비 1대, go/no-go 넷. 지금은 언락 전 백업과 BROM 복구 길이 없다(2.1절). 레노버 언락 파일과 공식 복구 도구를 기기에서 확인할 때까지 언락하지 않는다 |
+| 레노버 언락 파일을 받지 못함 | 포팅을 시작할 수 없다 | 기기에서 일련번호로 발급을 확인한다. 안 되면 buntOS ADR-011(기기 선택)을 다시 본다 |
 | GenieZone의 EL2 점유 | KVM 불가 | 2a에서 판정(D8). "불가"면 buntOS ADR-011 재검토, gzvm은 미병합이라 나중 |
 | 화면: dual-DSI + DSC가 업스트림에 없음 | 주사율·밝기·화면 끄기가 늦어진다 | simple-framebuffer로 데스크톱(D4), 업스트림 DSC·재구성 시리즈를 따라가고 dual-DSI는 우리가 맡을 수도 있다 |
 | 센서 허브(SCP nanohub) | 자동 회전·조도 없음 | 수동 회전, SCP 길은 3단계에서 조사 |
-| MFD `mtk-spmi-pmic` 미병합 | PMIC가 늦어진다 | 패치 대기열에 넣고 업스트림 판을 따라간다 |
+| MFD `mtk-spmi-pmic` 미병합 | PMIC가 늦어진다 | 패치 대기열에 넣고 업스트림 판을 따라간다. v12(2026-05) 뒤로 새 판이 없고, BayLibre가 이어받겠다고 했다(2026-10) |
 | Mesa 26.3 의존 | GPU 가속이 늦어진다 | 이미지의 Mesa 판 확인, 그 전에는 CPU 렌더링(buntOS는 이미 llvmpipe에서 돈다) |
-| Wi-Fi 펌웨어 명령이 MT7921과 다름 | 2d 지연 | USB 동글 우회, soc7_0 전용 경로 |
+| Wi-Fi 펌웨어가 uni cmd를 받지 않음 | 2d 지연 | 레거시 명령 경로(BSS·STA·키·ROC), USB 동글 우회 |
+| LK가 mainline 트리의 connsys 노드에 `emi-addr`·`memory-region`을 써 주지 않음 | Wi-Fi·BT가 펌웨어를 찾지 못한다 | 2d에서 살아 있는 트리로 확인한다. 안 되면 LK가 찾는 노드 이름과 compatible을 맞춘다 |
+| conninfra가 벤더 TF-A SIP 호출에 기댐 | 업스트림 제출이 어렵다 | 업스트림 UFS의 SIP 호출이 선례다. 일반 세계에서 레지스터를 직접 쓸 수 있는지도 본다 |
 | 펌웨어 재배포 불가 | 배포 꼴 | 설치할 때 기기에서 뽑기(D6) |
 | 소스 출처 | 법적 불확실 | 이 기기 모듈 미러는 제3자다. 참고만 하고 코드는 업스트림 꼴로 다시 쓰며, GPL 출처(OEM 공식 저장소)를 우선한다 |
-| 커뮤니티 포트와 겹침 | 중복 작업 | 연락해 나눌 수 있는 일(soc7_0, 터치, 충전)을 맞춘다 |
+| 커뮤니티 포트와 겹침 | 중복 작업 | 이슈 트래커로 연락할 수 있다. 나눌 일은 `pinctrl-mt6897`(그쪽 터치 IRQ를 푼다), 터치, 살아 있는 트리·LK 기록이다. 그쪽은 2026-09-23 뒤로 멈췄다 |
 | 생산 시기별 부품 차이 | 일부 기기만 다름 | Wi-Fi FEM은 가장 새 펌웨어의 표, 패널은 LK가 고른 노드를 읽는다 |
 
 ## 11. 일정과 다음 작업
 
 1. **지금(기기 없이):**
-   - 2a 장치 트리 초안(벤더 트리 줄이기, 커뮤니티 dtsi 대조)
-   - `boot/` 이미지 만들기 스크립트
-   - Debian 7.2 커널 설정 확인
-   - 커뮤니티 포트의 커밋 12개를 읽고 겹침을 정리
+   - 끝냄:
+     - 2a 장치 트리(업스트림 꼴)
+     - `boot/` 이미지 도구
+     - 커뮤니티 포트의 커밋 13개와 겹침 정리([분석](community-port.md))
+     - 오픈소스 쪽 조사(v1.2)
+   - 남음: Debian 7.2 커널 설정 확인, 2b 첫 패치(`pinctrl-mt6897`)
 2. **기기 도착 직후(언락 전, ADB):** buntOS 설계안 12장 항목을 잰다.
+   - 레노버 언락 파일을 이 기기의 일련번호로 받을 수 있는지, Rescue and Smart Assistant가 이 모델을 지원하는지(2.1절)
    - `getevent -lp`
-   - framebuffer 주소, 살아 있는 트리
    - 파티션
    - vendor 펌웨어 목록
    - UART 위치
+   - framebuffer 주소와 살아 있는 트리: 안드로이드는 root가 아니면 `/proc/iomem`의 주소를 0으로 보여 주고, `/sys/firmware/fdt`도 root만 읽는다. `/proc/device-tree`는 SELinux가 막지 않으면 root 없이 읽힐 수 있으니 먼저 해 본다. 안 되면 언락하고 root를 얻은 뒤에 읽는다
 3. **언락:** go/no-go를 통과한 뒤 2a를 한다(`fastboot boot`).
 4. **2b → 2c(1차) → 2d → 2e → 2c(2차) → 3:** 각 단계의 종료 조건을 buntOS 저장소의 개발 환경 검증 기록에 남긴다.
 
 ## 12. 출처
 
-[포팅 재료 조사](porting-materials.md) 5절과 [Wi-Fi 문서](wifi-soc7_0.md)의 출처 목록을 따른다.
+[포팅 재료 조사](porting-materials.md) 6절, [Wi-Fi 문서](wifi-soc7_0.md), [커뮤니티 포트 분석](community-port.md)의 출처를 따른다.

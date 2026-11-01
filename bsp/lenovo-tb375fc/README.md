@@ -46,10 +46,10 @@ LK처럼 vendor_boot의 램디스크 조각을 initramfs 앞에 이어 붙여 `-
 
 ## 기기에서 띄우기 전에
 
-- 언락과 굽기는 buntOS 설계안 4.2.3절의 go/no-go 넷을 통과한 뒤에 한다. 파티션 이름과 슬롯은 기기에서 `fastboot getvar all`로 확인한다.
-- **`fastboot boot`와 헤더 v4.** `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있으므로, LK는 이 둘을 굽혀 있는 파티션(원래 것)에서 읽을 가능성이 높다(AOSP 부트로더의 동작이다. MT6897 LK에서는 확인하지 않았다).
+- 언락과 굽기는 buntOS 설계안 4.2.3절의 go/no-go 넷을 통과한 뒤에 한다. 2026-11-01 조사로는 넷 가운데 셋이 채워지지 않는다([TB375FC 설계안](../../docs/tb375fc/DESIGN.md) 2.1절). 파티션 이름과 슬롯은 기기에서 `fastboot getvar all`로 확인한다.
+- **`fastboot boot`와 헤더 v4.** LK는 `fastboot boot`를 지원한다(LK의 fastboot 명령 표). 다만 `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있으므로, LK는 이 둘을 굽혀 있는 파티션(원래 것)에서 읽을 가능성이 높다. LK가 세 이미지의 머리를 모두 읽는 것은 LK 문자열로 확인했고, RAM으로 받은 boot.img와 어떻게 잇는지는 기기에서 본다.
   - 그러면 우리 커널이 원래 장치 트리로 뜬다. `--boot-ramdisk`로 만든 boot.img는 initramfs를 boot.img에도 넣어, LK가 그 램디스크를 쓰는지 보게 한다.
   - init은 vendor_boot 표지(`/etc/buntos/vendor_boot`)로 LK가 우리 vendor_boot를 읽었는지 알린다.
   - 우리 장치 트리로 띄우는 확실한 길은 비운 슬롯에 넷을 굽는 것이다(설계안 2.4절).
 - 원래 이미지와 달리 AVB 꼬리, 파티션 크기 채움, dtbo 뒤의 MediaTek 서명 블록(cert1·cert2)이 없다. LK가 언락 상태에서 이것을 요구하는지는 기기에서 본다.
-- 기본 커널 명령줄은 `console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused`다. initramfs 옵션(`buntos.wait`, `buntos.usbnet`, `buntos.telnet`, `buntos.debug`)은 `initramfs/init` 머리말에 있다.
+- 기본 커널 명령줄은 `console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused`다. MT6895 xaga 커뮤니티 포트는 LK가 boot·vendor_boot 이미지의 명령줄을 버린다고 적었다. 처음 띄우면 `/proc/cmdline`으로 들어왔는지 보고, 안 들어오면 커널 `CMDLINE`(+`CMDLINE_EXTEND`)로 준다. initramfs 옵션(`buntos.wait`, `buntos.usbnet`, `buntos.telnet`, `buntos.debug`)은 `initramfs/init` 머리말에 있다.

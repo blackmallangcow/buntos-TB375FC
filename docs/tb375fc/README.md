@@ -10,8 +10,9 @@
 | 문서 | 내용 |
 |---|---|
 | [DESIGN.md](DESIGN.md) | **최종 설계안.** 핵심 결정, 부팅 길, 단계별 bring-up, 블록별 포팅 계획, 기기 맞춤 최적화, 위험, 일정 |
-| [porting-materials.md](porting-materials.md) | 포팅 재료 조사: 블록마다 가까운 업스트림 드라이버, 공개 벤더 소스, 포팅 크기 |
-| [wifi-soc7_0.md](wifi-soc7_0.md) | Wi-Fi·Bluetooth(connsys soc7_0, A-die MT6637) 단서 확인과 포팅 설계 |
+| [porting-materials.md](porting-materials.md) | 포팅 재료 조사: 블록마다 가까운 업스트림 드라이버, 공개 벤더 소스, 포팅 크기, 업스트림 판, 부트 체인과 복구 |
+| [wifi-soc7_0.md](wifi-soc7_0.md) | Wi-Fi·Bluetooth(connsys soc7_0, A-die MT6637) 단서 확인, LK 적재, MCU 명령 비교, 포팅 설계 |
+| [community-port.md](community-port.md) | 이 기기의 커뮤니티 mainline 포트 분석: 커밋, 우리 계획과 겹침, 부팅과 기록, 협력할 일 |
 | [../hw/lenovo-tb375fc.md](../hw/lenovo-tb375fc.md) | 펌웨어에서 읽은 하드웨어 실측(장치 트리, 부트 이미지, 커널), 중국판·글로벌판 비교 |
 | [../design/ARCHITECTURE.md](../design/ARCHITECTURE.md) | buntOS 설계안(4.2절 실기기, 12장 Phase 0 실측 항목) |
 
@@ -33,4 +34,5 @@
 
 - 펌웨어 파일(레노버·MediaTek 저작물)과 펌웨어에서 푼 벤더 장치 트리는 저장소에 넣지 않는다. 읽어 낸 사실과 우리 코드만 둔다.
 - 벤더 커널 소스(OPPO, OnePlus, Motorola, GPL)는 참고만 한다. 옮겨 쓰는 코드는 출처와 원래 저작권 줄을 남기고 업스트림 꼴로 다시 쓴다.
-- 실기기 작업은 buntOS 설계안 4.2.3절의 안전 수칙(전체 파티션 백업, 언락 진행 조건)을 따른다.
+- 실기기 작업은 buntOS 설계안 4.2.3절의 안전 수칙(전체 파티션 백업, 언락 진행 조건)을 따른다. 2026-11-01 조사로는 언락 진행 조건 넷 가운데 셋이 채워지지 않는다([DESIGN.md](DESIGN.md) 2.1절).
+- 조사는 공신력 있는 출처만 쓴다: 업스트림 커널, AOSP, OEM 공식 저장소, 이름난 오픈소스 프로젝트. 이 기기의 개인 저장소와 제3자 미러는 그렇다고 밝히고 쓰며, 블로그와 뉴스는 쓰지 않는다.
