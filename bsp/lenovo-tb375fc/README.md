@@ -55,7 +55,7 @@ buntOS 이미지는 공통 레시피(`image/`)에 이 폴더의 `mkosi.conf`를 
 - 공통 레시피의 `Bootable=yes`, `Bootloader=systemd-boot`는 보드 프로필에서 바꿀 수 없다(mkosi가 보드 프로필을 먼저 읽는다). 그래서 이미지에는 ESP, systemd-boot, UKI가 그대로 생긴다. U-Boot로 EFI 부팅을 하게 되면(설계안 D3) 그대로 쓴다.
 - 커널 꾸러미는 커널을 `/boot/vmlinuz-<판>`에 두고, mkosi가 그것을 `/usr/lib/modules/<판>/vmlinuz`로 복사해 UKI를 만든다.
 - LK로 띄울 때는 루트 파티션(`buntos.root-arm64.raw`)만 기기에 굽는다. 부트 이미지는 같은 커널 꾸러미의 Image·장치 트리·모듈로 `boot/mkimages.sh`가 만든다(꾸러미를 `dpkg-deb -x`로 풀어 `--kernel`, `--dtb`, `mkinitramfs.sh --modules`에 준다).
-- 루트 파티션을 둘 자리, 루트로 넘기는 initramfs, 기기에서 커널을 바꾸는 길은 아직 정하지 않았다(설계안 4절).
+- 루트로 넘기는 initramfs는 우리 initramfs에 더하기로 정했고 아직 만들지 않았다. 루트 파티션은 userdata를 줄여 만드는 새 GPT 파티션이다(설계안 4절). 기기에서 커널을 바꾸는 길은 아직 정하지 않았다.
 
 ## 기기에서 띄우기 전에
 
