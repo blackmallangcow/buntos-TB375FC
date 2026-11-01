@@ -1,0 +1,2171 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt7921: add the MT6897 SoC bus variant
+
+The Wi-Fi of the MT6897 connsys ("soc7_0" in the vendor driver) has chip
+ID 0x7961 and the WFDMA of a PCIe MT7921, with an MT6637 RF chip. This
+adds what differs. Registers, sequences, rings and command numbers have
+been compared with the vendor driver by a script that reads its source.
+
+The bus: the registers are in a 7 MiB window of the AXI bus with another
+address map, translated like the PCIe one. The rings have other numbers:
+data 0, events 2, TX free events 3, commands 15.
+
+DMA: the bus master can only reach a 20 MiB no-map region that the
+bootloader reserves and opens in the EMI MPU. The DMA API can't be
+pointed at it, as a restricted-dma-pool needs a region in the linear map
+under its own compatible and the bootloader decides both. So this
+bounces all DMA through the region in a set of dma_map_ops of its own,
+as the vendor driver's copy path does. That needs ARCH_HAS_DMA_OPS,
+which arm64 only selects with Xen.
+
+Power: the connsys driver powers the common part, and the WF MCU is
+brought up to its ROM here, as in the vendor driver. Its reset is a
+power cycle.
+
+The firmware: the bootloader has loaded it, so the driver hands over the
+board's calibration data, front end chips and a time, and sends the
+start command. There is no trailer to read the release from, so that
+comes from memory. It is a different build from the MT7921 file, so what
+it supports isn't known either: the vendor driver only uses the legacy
+commands, and the mt76 code needs unified commands for BSS, station, key
+and remain-on-channel. Whether it answers those can't be told from the
+image, so this tries one and stops if it doesn't get an answer. Unless
+told otherwise the driver assumes a firmware without CNM, which is what
+mt7921 does without the feature flag.
+
+The calibration data is a file with the MAC address of the device in it,
+which the system has to copy from the nvdata partition.
+
+A register access to the WF side or the WFDMA while the WF part is off
+hangs the bus rather than fail. A restart that fails leaves it off, and
+the common code goes on trying to use the chip after that. So while it
+is off the address translation refuses those registers, the ring
+registers, which the common code reaches past the bus ops, point at
+memory, commands are refused and the interrupt is disabled.
+
+Left out for now: pre-calibration backup (it calibrates at each power
+on, which the vendor driver does when it has no backup), runtime power
+management, the notice to the modem of the power state and the second
+interrupt, the assert notice.
+
+All steps are logged, as a wrong one can hang the bus without a word.
+None of this has run on hardware.
+---
+ .../net/wireless/mediatek/mt76/mt7921/Kconfig |   14 +
+ .../wireless/mediatek/mt76/mt7921/Makefile    |    2 +
+ .../net/wireless/mediatek/mt76/mt7921/soc.c   | 1204 +++++++++++++++++
+ .../net/wireless/mediatek/mt76/mt7921/soc.h   |   61 +
+ .../wireless/mediatek/mt76/mt7921/soc_dma.c   |  289 ++++
+ .../wireless/mediatek/mt76/mt7921/soc_mcu.c   |  489 +++++++
+ 6 files changed, 2059 insertions(+)
+
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/Kconfig b/drivers/net/wireless/mediatek/mt76/mt7921/Kconfig
+index 37b5f46..bf814c5 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/Kconfig
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/Kconfig
+@@ -14,6 +14,20 @@ config MT7921E
+ 
+ 	  To compile this driver as a module, choose M here.
+ 
++config MT7921_SOC
++	tristate "MediaTek MT7921 on the SoC bus (MT6897) support"
++	select ARCH_HAS_DMA_OPS
++	select MT7921_COMMON
++	depends on MAC80211
++	depends on MTK_CONNSYS
++	depends on OF_RESERVED_MEM
++	help
++	  This adds support for the 802.11ax 2x2:2SS wireless part of the
++	  connectivity subsystem of the MediaTek MT6897, which is an MT7921
++	  on the SoC bus whose firmware the bootloader loads.
++
++	  To compile this driver as a module, choose M here.
++
+ config MT7921S
+ 	tristate "MediaTek MT7921S (SDIO) support"
+ 	select MT76_SDIO
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/Makefile b/drivers/net/wireless/mediatek/mt76/mt7921/Makefile
+index 3ef7c9c..d60822a 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/Makefile
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/Makefile
+@@ -2,11 +2,13 @@
+ 
+ obj-$(CONFIG_MT7921_COMMON) += mt7921-common.o
+ obj-$(CONFIG_MT7921E) += mt7921e.o
++obj-$(CONFIG_MT7921_SOC) += mt7921soc.o
+ obj-$(CONFIG_MT7921S) += mt7921s.o
+ obj-$(CONFIG_MT7921U) += mt7921u.o
+ 
+ mt7921-common-y := mac.o mcu.o regd.o main.o init.o debugfs.o
+ mt7921-common-$(CONFIG_NL80211_TESTMODE) += testmode.o
+ mt7921e-y := pci.o pci_mac.o pci_mcu.o
++mt7921soc-y := soc.o soc_dma.o soc_mcu.o
+ mt7921s-y := sdio.o sdio_mac.o sdio_mcu.o
+ mt7921u-y := usb.o
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+new file mode 100644
+index 0000000..16040b1
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+@@ -0,0 +1,1204 @@
++// SPDX-License-Identifier: BSD-3-Clause-Clear
++/*
++ * The MT7921 on the SoC bus: the Wi-Fi of the MediaTek MT6897 connsys ("soc7_0").
++ *
++ * The chip has the ID and the WFDMA of a PCIe MT7921, but its registers are on
++ * the AXI bus of the SoC with another address map, the rings sit elsewhere, the
++ * connsys driver powers it and the bootloader has already loaded its firmware.
++ *
++ * Nothing here runs without a device tree node that says "okay", and every step
++ * of the way up is logged, as a mistake here hangs the bus without a word.
++ */
++
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/soc/mediatek/mtk-connsys.h>
++
++#include "mt7921.h"
++#include "soc.h"
++#include "mcu.h"
++#include "../dma.h"
++#include "../mt76_connac2_mac.h"
++
++/* The window of the AXI bus: 0x18000000 up to here */
++#define MT_SOC_BUS_BASE			0x18000000
++#define MT_SOC_BUS_SIZE			0x700000
++/* The second register range of the node */
++#define MT_SOC_INFRA_PCCIF_RST		0xbf0
++#define MT_SOC_INFRA_PCCIF_RST_WF	GENMASK(18, 16)
++/* The common code's WFDMA offsets are the ones of the PCIe BAR */
++#define MT_SOC_PCIE_WFDMA		0xd0000
++#define MT_SOC_PCIE_HOST_CSR		0xe0000
++#define MT_SOC_PCIE_CONN_INFRA		0xf0000
++#define MT_SOC_WFDMA			0x20000
++#define MT_SOC_HOST_CSR			0x60000
++#define MT_SOC_WF_OFS			0x400000
++
++#define MT_SOC_WFDMA0_BASE		0x24000
++#define MT_SOC_WFDMA0(ofs)		(MT_SOC_WFDMA0_BASE + (ofs))
++#define MT_SOC_WFDMA0_END		MT_SOC_WFDMA0(0x1000)
++#define MT_SOC_WFDMA0_HOST_INT_ENA	MT_SOC_WFDMA0(0x204)
++#define MT_SOC_TX_RING_BASE		MT_SOC_WFDMA0(0x300)
++#define MT_SOC_RX_RING_BASE		MT_SOC_WFDMA0(0x500)
++
++#define MT_SOC_WFSYS_ON_TOP_PWR_CTL	0x18000010
++#define MT_SOC_WFSYS_ON_TOP_KEY		GENMASK(31, 16)
++#define MT_SOC_WFSYS_ON_TOP_KEY_VAL	0x5746
++#define MT_SOC_WFSYS_ON_TOP_PWR_ON	BIT(7)
++#define MT_SOC_WFSYS_CPU_SW_RST_B	0x18000120
++#define MT_SOC_SEMA_M0_SW_RST_B		0x18000158
++#define MT_SOC_INFRA_CFG_PWRCTRL1	0x18001210
++#define MT_SOC_INFRA_CFG_RDY		BIT(16)
++#define MT_SOC_HOST_CSR_IRQ_EN		0x18001600
++#define MT_SOC_HOST_CSR_IRQ_ALL		0x3ff
++#define MT_SOC_WF_SLP_CTRL		0x18001440
++#define MT_SOC_WF_SLP_PROT_SW_EN	BIT(0)
++#define MT_SOC_WF_SLP_STATUS		0x18001444
++#define MT_SOC_WF_SLP_WFDMA2CONN_RDY	BIT(25)
++#define MT_SOC_WF_SLP_CONN2WF_RDY	BIT(29)
++#define MT_SOC_WF_SLP_WF2CONN_EN	BIT(30)
++#define MT_SOC_WF_SLP_WF2CONN_RDY	BIT(31)
++#define MT_SOC_TOP_CK_1			0x18003124
++#define MT_SOC_TOP_CK_1_EN		BIT(0)
++#define MT_SOC_TOP_CK_1_BSY		BIT(1)
++#define MT_SOC_INFRA_IP_VERSION		0x18011000
++#define MT_SOC_INFRA_IP_VERSION_VAL	0x02050400
++#define MT_SOC_EMI_CTL_WF		0x18011114
++#define MT_SOC_EMI_CTL_WF_EMI_REQ	BIT(0)
++#define MT_SOC_EMI_CTL_WF_INFRA_REQ	BIT(5)
++#define MT_SOC_COEX_0_SET		0x18012064
++#define MT_SOC_COEX_0_CLR		0x18012068
++#define MT_SOC_COEX_0_PTA		0x01010101
++#define MT_SOC_COEX_1_SET		0x18012074
++#define MT_SOC_COEX_1_CLR		0x18012078
++#define MT_SOC_COEX_1_PTA		0x00000101
++#define MT_SOC_WF2AP_CCIF_ACK		0x1803d014
++#define MT_SOC_INFRA_WAKEUP_WF		0x180601a4
++#define MT_SOC_PWR_STATES		0x18060a10
++#define MT_SOC_PWR_STATES_WF_HRST_B	BIT(30)
++#define MT_SOC_MONFLG_EN		0x18060b00
++#define MT_SOC_MONFLG_SEL		0x18060b04
++#define MT_SOC_MONFLG_SEL_MASK		GENMASK(4, 0)
++#define MT_SOC_MONFLG_SEL_MAILBOX	0xc
++#define MT_SOC_MONFLG_OUT		0x18060b10
++#define MT_SOC_MONFLG_ROM_DONE		0x1d1e
++#define MT_SOC_AP2WF_REMAP_1		0x18400120
++#define MT_SOC_WF_TOP_IP_VERSION	0x184b0010
++#define MT_SOC_WF_TOP_IP_VERSION_VAL	0x02040200
++#define MT_SOC_ROMCODE_INDEX		0x184c1604
++#define MT_SOC_SLPPROT_STATUS		0x184c300c
++#define MT_SOC_SLPPROT_TX		BIT(23)
++#define MT_SOC_SLPPROT_RX		BIT(21)
++#define MT_SOC_BUSHANGCR		0x184f0440
++#define MT_SOC_BUSHANGCR_LIMIT		GENMASK(7, 0)
++#define MT_SOC_BUSHANGCR_EN		(BIT(31) | BIT(28))
++#define MT_SOC_DEBUG_CTRL_AO_CHIP	0x810f0000
++#define MT_SOC_DEBUG_CTRL_AO_CTRL0	0x18500000
++#define MT_SOC_DEBUG_CTRL_AO_CTRL3	0x1850000c
++#define MT_SOC_DEBUG_THRES		GENMASK(31, 16)
++#define MT_SOC_DEBUG_THRES_VAL		0x04f5
++#define MT_SOC_DEBUG_TIMEOUT_CLR	BIT(9)
++#define MT_SOC_DEBUG_EN_DEBUGTOP	BIT(4)
++#define MT_SOC_DEBUG_CKEN		BIT(3)
++#define MT_SOC_DEBUG_EN			BIT(2)
++#define MT_SOC_DEBUG_MASK_BUSY		BIT(8)
++
++/* Where the firmware says where its release string is in its region */
++#define MT_SOC_EMI_FW_VER_OFS		0xb00024
++#define MT_SOC_EMI_ADDR_MASK		GENMASK(23, 0)
++
++/* WFDMA rings: data 0 is band 0, 2 takes events and 3 the TX free events */
++#define MT_SOC_TXQ_DATA			0
++#define MT_SOC_TXQ_MCU_WM		15
++#define MT_SOC_TXQ_FWDL			16
++#define MT_SOC_RXQ_DATA			0
++#define MT_SOC_RXQ_EVENT		2
++#define MT_SOC_RXQ_TX_FREE		3
++
++#define MT_SOC_TX_RING_SIZE		1024
++#define MT_SOC_TX_MCU_RING_SIZE		256
++#define MT_SOC_TX_FWDL_RING_SIZE	128
++#define MT_SOC_RX_RING_SIZE		1024
++#define MT_SOC_RX_EVENT_RING_SIZE	512
++#define MT_SOC_RX_TX_FREE_RING_SIZE	128
++
++/* Every frame on its way holds window memory, and RX has to find room there too */
++#define MT_SOC_TOKEN_SIZE		2048
++
++static bool mt7921_soc_cnm;
++module_param_named(cnm, mt7921_soc_cnm, bool, 0444);
++MODULE_PARM_DESC(cnm, "let the firmware manage channels (CNM)");
++
++static const struct mt76_connac_reg_map mt7921_soc_map[] = {
++	{ 0x830c0000, 0x400000, 0x1000 },	/* WF_MCU_BUS_CR_REMAP */
++	{ 0x54000000, 0x402000, 0x1000 },	/* WFDMA PCIE0 MCU DMA0 */
++	{ 0x55000000, 0x403000, 0x1000 },	/* WFDMA PCIE0 MCU DMA1 */
++	{ 0x56000000, 0x404000, 0x1000 },	/* WFDMA reserved */
++	{ 0x57000000, 0x405000, 0x1000 },	/* WFDMA MCU wrap CR */
++	{ 0x58000000, 0x406000, 0x1000 },	/* WFDMA PCIE1 MCU DMA0 (MEM_DMA) */
++	{ 0x59000000, 0x407000, 0x1000 },	/* WFDMA PCIE1 MCU DMA1 */
++	{ 0x820c0000, 0x408000, 0x4000 },	/* WF_UMAC_TOP (PLE) */
++	{ 0x820c8000, 0x40c000, 0x2000 },	/* WF_UMAC_TOP (PSE) */
++	{ 0x820cc000, 0x40e000, 0x2000 },	/* WF_UMAC_TOP (PP) */
++	{ 0x83000000, 0x410000, 0x10000 },	/* WF_PHY_MAP3 */
++	{ 0x820e0000, 0x420000, 0x0400 },	/* WF_LMAC_TOP BN0 (WF_CFG) */
++	{ 0x820e1000, 0x420400, 0x0200 },	/* WF_LMAC_TOP BN0 (WF_TRB) */
++	{ 0x820e2000, 0x420800, 0x0400 },	/* WF_LMAC_TOP BN0 (WF_AGG) */
++	{ 0x820e3000, 0x420c00, 0x0400 },	/* WF_LMAC_TOP BN0 (WF_ARB) */
++	{ 0x820e4000, 0x421000, 0x0400 },	/* WF_LMAC_TOP BN0 (WF_TMAC) */
++	{ 0x820e5000, 0x421400, 0x0800 },	/* WF_LMAC_TOP BN0 (WF_RMAC) */
++	{ 0x820ce000, 0x421c00, 0x0200 },	/* WF_LMAC_TOP (WF_SEC) */
++	{ 0x820e7000, 0x421e00, 0x0200 },	/* WF_LMAC_TOP BN0 (WF_DMA) */
++	{ 0x820cf000, 0x422000, 0x1000 },	/* WF_LMAC_TOP (WF_PF) */
++	{ 0x820e9000, 0x423400, 0x0200 },	/* WF_LMAC_TOP BN0 (WF_WTBLOFF) */
++	{ 0x820ea000, 0x424000, 0x0200 },	/* WF_LMAC_TOP BN0 (WF_ETBF) */
++	{ 0x820eb000, 0x424200, 0x0400 },	/* WF_LMAC_TOP BN0 (WF_LPON) */
++	{ 0x820ec000, 0x424600, 0x0200 },	/* WF_LMAC_TOP BN0 (WF_INT) */
++	{ 0x820ed000, 0x424800, 0x0800 },	/* WF_LMAC_TOP BN0 (WF_MIB) */
++	{ 0x820ca000, 0x426000, 0x2000 },	/* WF_LMAC_TOP BN0 (WF_MUCOP) */
++	{ 0x820d0000, 0x430000, 0x10000 },	/* WF_LMAC_TOP (WF_WTBLON) */
++	{ 0x83080000, 0x450000, 0x10000 },	/* WF_PHY_MAP1 */
++	{ 0x83090000, 0x460000, 0x10000 },	/* WF_PHY_MAP2 */
++	{ 0xe0200000, 0x470000, 0x10000 },	/* WF_UMAC_SYSRAM */
++	{ 0x00400000, 0x480000, 0x10000 },	/* WF_MCU_SYSRAM */
++	{ 0x00410000, 0x490000, 0x10000 },	/* WF_MCU_SYSRAM (config register) */
++	{ 0x820f0000, 0x4a0000, 0x0400 },	/* WF_LMAC_TOP BN1 (WF_CFG) */
++	{ 0x820f1000, 0x4a0600, 0x0200 },	/* WF_LMAC_TOP BN1 (WF_TRB) */
++	{ 0x820f2000, 0x4a0800, 0x0400 },	/* WF_LMAC_TOP BN1 (WF_AGG) */
++	{ 0x820f3000, 0x4a0c00, 0x0400 },	/* WF_LMAC_TOP BN1 (WF_ARB) */
++	{ 0x820f4000, 0x4a1000, 0x0400 },	/* WF_LMAC_TOP BN1 (WF_TMAC) */
++	{ 0x820f5000, 0x4a1400, 0x0800 },	/* WF_LMAC_TOP BN1 (WF_RMAC) */
++	{ 0x820f7000, 0x4a1e00, 0x0200 },	/* WF_LMAC_TOP BN1 (WF_DMA) */
++	{ 0x820f9000, 0x4a3400, 0x0200 },	/* WF_LMAC_TOP BN1 (WF_WTBLOFF) */
++	{ 0x820fa000, 0x4a4000, 0x0200 },	/* WF_LMAC_TOP BN1 (WF_ETBF) */
++	{ 0x820fb000, 0x4a4200, 0x0400 },	/* WF_LMAC_TOP BN1 (WF_LPON) */
++	{ 0x820fc000, 0x4a4600, 0x0200 },	/* WF_LMAC_TOP BN1 (WF_INT) */
++	{ 0x820fd000, 0x4a4800, 0x0800 },	/* WF_LMAC_TOP BN1 (WF_MIB) */
++	{ 0x820c4000, 0x4a8000, 0x4000 },	/* WF_LMAC_TOP BN1 (WF_UWTBL) */
++	{ 0x820b0000, 0x4ae000, 0x1000 },	/* [APB2] WFSYS_ON */
++	{ 0x80020000, 0x4b0000, 0x10000 },	/* WF_TOP_MISC_OFF */
++	{ 0x81020000, 0x4c0000, 0x10000 },	/* WF_TOP_MISC_ON */
++	{ 0x80010000, 0x4d4000, 0x1000 },	/* WF_AXIDMA */
++	{ 0x83010000, 0x4e0000, 0x10000 },	/* WF_PHY_MAP4 */
++	{ 0x88000000, 0x4f0000, 0x10000 },	/* WF_MCU_CFG_LS */
++	{ 0x7c000000, 0x000000, 0x100000 },	/* CONN_INFRA */
++	{ 0x7c500000, 0x500000, 0x200000 },	/* WF_MCU debug window */
++};
++
++/* U32_MAX: no such register on this bus */
++static u32 mt7921_soc_reg_addr(struct mt792x_dev *dev, u32 addr)
++{
++	int i;
++
++	if (addr < 0x100000) {
++		/* mt76_set_irq_mask() goes to the bus without the bus ops */
++		if (addr >= MT_SOC_WFDMA0_BASE && addr < MT_SOC_WFDMA0_END)
++			return addr;
++		if (addr >= MT_SOC_PCIE_CONN_INFRA)
++			return addr - MT_SOC_PCIE_CONN_INFRA;
++		if (addr >= MT_SOC_PCIE_HOST_CSR)
++			return addr - MT_SOC_PCIE_HOST_CSR + MT_SOC_HOST_CSR;
++		if (addr >= MT_SOC_PCIE_WFDMA)
++			return addr - MT_SOC_PCIE_WFDMA + MT_SOC_WFDMA;
++		/* PCIE_MAC: the PCIe interrupt enable, the L0s switch */
++		if (addr >= MT_PCIE_MAC_BASE && addr < MT_PCIE_MAC_BASE + 0x10000)
++			return U32_MAX;
++		return addr + MT_SOC_WF_OFS;
++	}
++
++	if (addr >= MT_SOC_BUS_BASE && addr < MT_SOC_BUS_BASE + MT_SOC_BUS_SIZE)
++		return addr - MT_SOC_BUS_BASE;
++
++	for (i = 0; i < ARRAY_SIZE(mt7921_soc_map); i++) {
++		u32 ofs;
++
++		if (addr < mt7921_soc_map[i].phys)
++			continue;
++
++		ofs = addr - mt7921_soc_map[i].phys;
++		if (ofs >= mt7921_soc_map[i].size)
++			continue;
++
++		return mt7921_soc_map[i].maps + ofs;
++	}
++
++	dev_err(dev->mt76.dev, "no way to reach address %08x\n", addr);
++
++	return U32_MAX;
++}
++
++/* U32_MAX for what must not be touched now: it would hang the bus, not just fail */
++static u32 mt7921_soc_reg_addr_now(struct mt792x_dev *dev, u32 offset)
++{
++	u32 addr = mt7921_soc_reg_addr(dev, offset);
++	bool wf_side = addr >= MT_SOC_WF_OFS ||
++		       (addr >= MT_SOC_WFDMA && addr < MT_SOC_WFDMA + 0x10000);
++
++	if (addr == U32_MAX || !wf_side || READ_ONCE(mt7921_soc_of(dev)->wf_on))
++		return addr;
++
++	dev_err_ratelimited(dev->mt76.dev, "%08x while the WF part is off\n", offset);
++
++	return U32_MAX;
++}
++
++static u32 mt7921_soc_rr(struct mt76_dev *mdev, u32 offset)
++{
++	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
++	u32 addr = mt7921_soc_reg_addr_now(dev, offset);
++
++	return addr == U32_MAX ? 0 : dev->bus_ops->rr(mdev, addr);
++}
++
++static void mt7921_soc_wr(struct mt76_dev *mdev, u32 offset, u32 val)
++{
++	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
++	u32 addr = mt7921_soc_reg_addr_now(dev, offset);
++
++	if (addr != U32_MAX)
++		dev->bus_ops->wr(mdev, addr, val);
++}
++
++static u32 mt7921_soc_rmw(struct mt76_dev *mdev, u32 offset, u32 mask, u32 val)
++{
++	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
++	u32 addr = mt7921_soc_reg_addr_now(dev, offset);
++
++	return addr == U32_MAX ? 0 : dev->bus_ops->rmw(mdev, addr, mask, val);
++}
++
++/* Waits as long as the vendor driver does. All of this runs in process context. */
++static int mt7921_soc_poll(struct mt792x_dev *dev, const char *what, u32 addr,
++			   u32 mask, u32 want, int count, int us)
++{
++	u32 val;
++	int i;
++
++	for (i = 0; ; i++) {
++		val = mt76_rr(dev, addr);
++		if ((val & mask) == want)
++			return 0;
++		if (i > count)
++			break;
++		fsleep(us);
++	}
++
++	dev_err(dev->mt76.dev, "%s: %08x = %08x, want %08x in %08x\n", what, addr,
++		val, want, mask);
++
++	return -ETIMEDOUT;
++}
++
++static int mt7921_soc_wake_infra(struct mt792x_dev *dev)
++{
++	int i, ret;
++
++	for (i = 0; i < 10; i++) {
++		mt76_set(dev, MT_SOC_INFRA_WAKEUP_WF, BIT(0));
++		fsleep(1000);
++		if (mt76_rr(dev, MT_SOC_INFRA_WAKEUP_WF) & BIT(0))
++			break;
++	}
++
++	ret = mt7921_soc_poll(dev, "conninfra version", MT_SOC_INFRA_IP_VERSION,
++			      U32_MAX, MT_SOC_INFRA_IP_VERSION_VAL, 10, 1000);
++	if (ret)
++		return ret;
++
++	return mt7921_soc_poll(dev, "conninfra ready", MT_SOC_INFRA_CFG_PWRCTRL1,
++			       MT_SOC_INFRA_CFG_RDY, MT_SOC_INFRA_CFG_RDY, 10, 500);
++}
++
++static void mt7921_soc_on_top_pwr(struct mt792x_dev *dev, bool on)
++{
++	u32 val = mt76_rr(dev, MT_SOC_WFSYS_ON_TOP_PWR_CTL);
++
++	val &= ~(MT_SOC_WFSYS_ON_TOP_KEY | MT_SOC_WFSYS_ON_TOP_PWR_ON);
++	val |= FIELD_PREP(MT_SOC_WFSYS_ON_TOP_KEY, MT_SOC_WFSYS_ON_TOP_KEY_VAL);
++	if (on)
++		val |= MT_SOC_WFSYS_ON_TOP_PWR_ON;
++	mt76_wr(dev, MT_SOC_WFSYS_ON_TOP_PWR_CTL, val);
++}
++
++/* Up to the WM MCU idling in its ROM */
++static int mt7921_soc_wf_power_on(struct mt792x_dev *dev)
++{
++	struct device *d = dev->mt76.dev;
++	int ret;
++
++	dev_info(d, "WF: wake conninfra\n");
++	ret = mt7921_soc_wake_infra(dev);
++	if (ret)
++		return ret;
++
++	dev_info(d, "WF: PTA clocks, CPU in reset, bus protection off\n");
++	mt76_wr(dev, MT_SOC_COEX_0_SET, MT_SOC_COEX_0_PTA);
++	mt76_wr(dev, MT_SOC_COEX_1_SET, MT_SOC_COEX_1_PTA);
++	mt76_clear(dev, MT_SOC_WFSYS_CPU_SW_RST_B, BIT(0));
++	mt76_clear(dev, MT_SOC_WF_SLP_CTRL, MT_SOC_WF_SLP_PROT_SW_EN);
++
++	dev_info(d, "WF: top on\n");
++	mt7921_soc_on_top_pwr(dev, true);
++
++	ret = mt7921_soc_poll(dev, "wfsys reset", MT_SOC_PWR_STATES,
++			      MT_SOC_PWR_STATES_WF_HRST_B,
++			      MT_SOC_PWR_STATES_WF_HRST_B, 10, 500);
++	if (ret)
++		return ret;
++
++	/* Reading the WF side with these on hangs the bus */
++	ret = mt7921_soc_poll(dev, "conninfra-wfsys protection",
++			      MT_SOC_WF_SLP_STATUS,
++			      MT_SOC_WF_SLP_WF2CONN_RDY | MT_SOC_WF_SLP_CONN2WF_RDY,
++			      0, 100, 500);
++	if (ret)
++		return ret;
++
++	dev_info(d, "WF: first read of the WF side\n");
++	WRITE_ONCE(mt7921_soc_of(dev)->wf_on, true);
++	ret = mt7921_soc_poll(dev, "WFDMA TX protection", MT_SOC_SLPPROT_STATUS,
++			      MT_SOC_SLPPROT_TX, 0, 100, 500);
++	if (ret)
++		return ret;
++
++	ret = mt7921_soc_poll(dev, "WFDMA RX protection", MT_SOC_SLPPROT_STATUS,
++			      MT_SOC_SLPPROT_RX, 0, 100, 500);
++	if (ret)
++		return ret;
++
++	ret = mt7921_soc_poll(dev, "wfsys version", MT_SOC_WF_TOP_IP_VERSION,
++			      U32_MAX, MT_SOC_WF_TOP_IP_VERSION_VAL, 10, 500);
++	if (ret)
++		return ret;
++
++	dev_info(d, "WF: bus timeouts\n");
++	mt76_rmw_field(dev, MT_SOC_BUSHANGCR, MT_SOC_BUSHANGCR_LIMIT, 3);
++	mt76_set(dev, MT_SOC_BUSHANGCR, MT_SOC_BUSHANGCR_EN);
++
++	mt76_wr(dev, MT_SOC_AP2WF_REMAP_1, MT_SOC_DEBUG_CTRL_AO_CHIP);
++	mt76_set(dev, MT_SOC_DEBUG_CTRL_AO_CTRL0, MT_SOC_DEBUG_CKEN);
++	mt76_set(dev, MT_SOC_DEBUG_CTRL_AO_CTRL0, MT_SOC_DEBUG_TIMEOUT_CLR);
++	mt76_clear(dev, MT_SOC_DEBUG_CTRL_AO_CTRL0, MT_SOC_DEBUG_TIMEOUT_CLR);
++	mt76_rmw_field(dev, MT_SOC_DEBUG_CTRL_AO_CTRL0, MT_SOC_DEBUG_THRES,
++		       MT_SOC_DEBUG_THRES_VAL);
++	mt76_set(dev, MT_SOC_DEBUG_CTRL_AO_CTRL3, MT_SOC_DEBUG_MASK_BUSY);
++	mt76_set(dev, MT_SOC_DEBUG_CTRL_AO_CTRL0,
++		 MT_SOC_DEBUG_EN | MT_SOC_DEBUG_CKEN | MT_SOC_DEBUG_EN_DEBUGTOP);
++
++	/* Show the mailbox of the WF MCU to the host */
++	mt76_set(dev, MT_SOC_MONFLG_EN, BIT(0));
++	mt76_rmw_field(dev, MT_SOC_MONFLG_SEL, MT_SOC_MONFLG_SEL_MASK,
++		       MT_SOC_MONFLG_SEL_MAILBOX);
++
++	dev_info(d, "WF: CPU out of reset\n");
++	mt76_set(dev, MT_SOC_WFSYS_CPU_SW_RST_B, BIT(0));
++
++	ret = mt7921_soc_poll(dev, "WF ROM", MT_SOC_MONFLG_OUT, U32_MAX,
++			      MT_SOC_MONFLG_ROM_DONE, 1000, 1000);
++	if (ret) {
++		dev_err(d, "ROM code index %08x\n",
++			mt76_rr(dev, MT_SOC_ROMCODE_INDEX));
++		return ret;
++	}
++
++	mt76_clear(dev, MT_SOC_INFRA_WAKEUP_WF, BIT(0));
++	dev_info(d, "WF: ROM idle\n");
++
++	return 0;
++}
++
++/*
++ * The ring registers are read and written all over the common code, without the
++ * bus ops. They hang the bus like the rest while the WF part is off, so the rings
++ * get memory to point at until it is back.
++ */
++static void mt7921_soc_ring_regs(struct mt792x_dev *dev, bool on)
++{
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++	struct mt76_queue_regs __iomem *scratch;
++	struct mt76_dev *mdev = &dev->mt76;
++	struct mt76_queue *q;
++	int i;
++
++	scratch = (__force struct mt76_queue_regs __iomem *)&soc->ring_scratch;
++
++	for (i = 0; i < ARRAY_SIZE(dev->mphy.q_tx); i++) {
++		q = dev->mphy.q_tx[i];
++		if (q)
++			q->regs = on ? mdev->mmio.regs + MT_SOC_TX_RING_BASE +
++				       q->hw_idx * MT_RING_SIZE : scratch;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(mdev->q_mcu); i++) {
++		q = mdev->q_mcu[i];
++		if (q)
++			q->regs = on ? mdev->mmio.regs + MT_SOC_TX_RING_BASE +
++				       q->hw_idx * MT_RING_SIZE : scratch;
++	}
++
++	mt76_for_each_q_rx(mdev, i) {
++		q = &mdev->q_rx[i];
++		q->regs = on ? mdev->mmio.regs + MT_SOC_RX_RING_BASE +
++			       q->hw_idx * MT_RING_SIZE : scratch;
++	}
++}
++
++/* From here on nothing may touch the WF side or the WFDMA */
++static void mt7921_soc_wf_gone(struct mt792x_dev *dev)
++{
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++
++	WRITE_ONCE(soc->wf_on, false);
++
++	if (soc->irq_requested && !soc->irq_off) {
++		disable_irq(soc->irq);
++		soc->irq_off = true;
++	}
++	tasklet_unlock_wait(&dev->mt76.irq_tasklet);
++
++	mt7921_soc_ring_regs(dev, false);
++}
++
++static void mt7921_soc_wf_power_off(struct mt792x_dev *dev)
++{
++	int i;
++
++	mt7921_soc_wf_gone(dev);
++
++	if (mt7921_soc_wake_infra(dev))
++		return;
++
++	mt76_set(dev, MT_SOC_WF_SLP_CTRL, MT_SOC_WF_SLP_PROT_SW_EN);
++	mt7921_soc_poll(dev, "WFDMA protection", MT_SOC_WF_SLP_STATUS,
++			MT_SOC_WF_SLP_WFDMA2CONN_RDY,
++			MT_SOC_WF_SLP_WFDMA2CONN_RDY, 100, 500);
++
++	/* Either of these will do */
++	for (i = 0; i <= 100; i++) {
++		if (mt76_rr(dev, MT_SOC_WF_SLP_STATUS) &
++		    (MT_SOC_WF_SLP_WF2CONN_RDY | MT_SOC_WF_SLP_WF2CONN_EN))
++			break;
++		fsleep(500);
++	}
++
++	mt7921_soc_on_top_pwr(dev, false);
++	if (mt7921_soc_poll(dev, "wfsys reset", MT_SOC_PWR_STATES,
++			    MT_SOC_PWR_STATES_WF_HRST_B, 0, 10, 500))
++		return;
++
++	/* Whatever hardware semaphores the WF MCU held */
++	mt76_clear(dev, MT_SOC_SEMA_M0_SW_RST_B, BIT(0));
++	mt76_set(dev, MT_SOC_SEMA_M0_SW_RST_B, BIT(0));
++
++	mt76_set(dev, MT_SOC_WF2AP_CCIF_ACK, 0xff);
++
++	dev_dbg(dev->mt76.dev, "A-die top_ck_en_1: %08x\n",
++		mt76_rr(dev, MT_SOC_TOP_CK_1));
++	fsleep(50);
++
++	mt76_clear(dev, MT_SOC_TOP_CK_1, MT_SOC_TOP_CK_1_EN);
++	mt7921_soc_poll(dev, "A-die clock", MT_SOC_TOP_CK_1, MT_SOC_TOP_CK_1_BSY,
++			0, 100, 500);
++
++	mt76_set(dev, MT_SOC_EMI_CTL_WF, MT_SOC_EMI_CTL_WF_EMI_REQ);
++	mt76_clear(dev, MT_SOC_EMI_CTL_WF, MT_SOC_EMI_CTL_WF_EMI_REQ);
++	mt76_set(dev, MT_SOC_EMI_CTL_WF, MT_SOC_EMI_CTL_WF_INFRA_REQ);
++	mt76_clear(dev, MT_SOC_EMI_CTL_WF, MT_SOC_EMI_CTL_WF_INFRA_REQ);
++
++	mt76_wr(dev, MT_SOC_COEX_0_CLR, MT_SOC_COEX_0_PTA);
++	mt76_wr(dev, MT_SOC_COEX_1_CLR, MT_SOC_COEX_1_PTA);
++
++	mt76_clear(dev, MT_SOC_INFRA_WAKEUP_WF, BIT(0));
++}
++
++/*
++ * What the vendor driver for this SoC does before it looks at the ownership: it
++ * says the interrupt enable of the host CSR can get lost.
++ */
++static int mt7921_soc_force_host_csr_irq(struct mt792x_dev *dev)
++{
++	int ret;
++
++	mt76_set(dev, MT_SOC_INFRA_WAKEUP_WF, BIT(0));
++	fsleep(1200);
++
++	ret = mt7921_soc_poll(dev, "conninfra version", MT_SOC_INFRA_IP_VERSION,
++			      U32_MAX, MT_SOC_INFRA_IP_VERSION_VAL, 10, 1000);
++	if (!ret)
++		ret = mt7921_soc_poll(dev, "conninfra ready",
++				      MT_SOC_INFRA_CFG_PWRCTRL1,
++				      MT_SOC_INFRA_CFG_RDY, MT_SOC_INFRA_CFG_RDY,
++				      10, 500);
++	if (!ret)
++		mt76_wr(dev, MT_SOC_HOST_CSR_IRQ_EN, MT_SOC_HOST_CSR_IRQ_ALL);
++
++	mt76_clear(dev, MT_SOC_INFRA_WAKEUP_WF, BIT(0));
++
++	return ret;
++}
++
++static int mt7921_soc_drv_own(struct mt792x_dev *dev)
++{
++	int ret;
++
++	if (!READ_ONCE(mt7921_soc_of(dev)->wf_on))
++		return -EIO;
++
++	ret = mt7921_soc_force_host_csr_irq(dev);
++	if (ret)
++		return ret;
++
++	return mt792xe_mcu_drv_pmctrl(dev);
++}
++
++/*
++ * The vendor driver writes this after each power on and before each power off
++ * of the WF MCU. It also tells the modem, which does not run here.
++ */
++static void mt7921_soc_pccif_reset(struct mt792x_dev *dev)
++{
++	writel(MT_SOC_INFRA_PCCIF_RST_WF,
++	       mt7921_soc_of(dev)->infra + MT_SOC_INFRA_PCCIF_RST);
++}
++
++/* From the power of the WF part being off to the driver owning a ready chip */
++static int mt7921_soc_wf_start(struct mt792x_dev *dev)
++{
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++	int ret;
++
++	ret = mt7921_soc_wf_power_on(dev);
++	if (ret)
++		goto err;
++
++	/* Only for the state to be known: the vendor driver does not wait for it */
++	ret = mt792xe_mcu_fw_pmctrl(dev);
++	if (ret)
++		dev_warn(dev->mt76.dev, "no firmware own after the ROM: %d\n", ret);
++
++	mt7921_soc_pccif_reset(dev);
++
++	ret = mt7921_soc_force_host_csr_irq(dev);
++	if (ret)
++		goto err;
++
++	ret = __mt792xe_mcu_drv_pmctrl(dev);
++	if (ret)
++		goto err;
++
++	mt7921_soc_ring_regs(dev, true);
++
++	if (soc->irq_off) {
++		soc->irq_off = false;
++		enable_irq(soc->irq);
++	}
++
++	return 0;
++
++err:
++	mt7921_soc_wf_power_off(dev);
++
++	return ret;
++}
++
++static void mt7921_soc_wf_stop(struct mt792x_dev *dev)
++{
++	mt7921_soc_pccif_reset(dev);
++	mt7921_soc_wf_power_off(dev);
++}
++
++#define PREFETCH(base, depth)	((base) << 16 | (depth))
++
++/* The rings the hardware has for the host and the modem, in the vendor's order */
++static void mt7921_soc_dma_prefetch(struct mt792x_dev *dev)
++{
++	static const u32 regs[] = {
++		MT_WFDMA0_RX_RING0_EXT_CTRL, MT_WFDMA0_RX_RING1_EXT_CTRL,
++		MT_WFDMA0_RX_RING2_EXT_CTRL, MT_WFDMA0_RX_RING3_EXT_CTRL,
++		MT_WFDMA0_RX_RING4_EXT_CTRL, MT_WFDMA0_RX_RING5_EXT_CTRL,
++		MT_WFDMA0_RX_RING6_EXT_CTRL, MT_WFDMA0_RX_RING7_EXT_CTRL,
++		MT_WFDMA0_TX_RING0_EXT_CTRL, MT_WFDMA0_TX_RING1_EXT_CTRL,
++		MT_WFDMA0_TX_RING2_EXT_CTRL, MT_WFDMA0_TX_RING15_EXT_CTRL,
++		MT_WFDMA0_TX_RING16_EXT_CTRL, MT_WFDMA0(0x620), MT_WFDMA0(0x624),
++		MT_WFDMA0(0x628), MT_WFDMA0(0x638),
++	};
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(regs); i++)
++		mt76_wr(dev, regs[i], PREFETCH(i * 0x40, 0x4));
++
++	/* The priority interrupts of the modem's RX rings */
++	mt76_set(dev, MT_WFDMA0_INT_RX_PRI, GENMASK(7, 4));
++
++	mt76_wr(dev, MT_WFDMA0_RST_DRX_PTR, ~0);
++}
++
++static int mt7921_soc_dma_init(struct mt792x_dev *dev)
++{
++	static const struct mt792x_dma_layout layout = {
++		.tx_data0 = mt792x_dma_ring(MT_SOC_TXQ_DATA, MT_SOC_TX_RING_SIZE,
++					    MT_SOC_TX_RING_BASE),
++		.tx_mcu = mt792x_dma_ring(MT_SOC_TXQ_MCU_WM,
++					  MT_SOC_TX_MCU_RING_SIZE,
++					  MT_SOC_TX_RING_BASE),
++		.tx_fwdl = mt792x_dma_ring(MT_SOC_TXQ_FWDL,
++					   MT_SOC_TX_FWDL_RING_SIZE,
++					   MT_SOC_TX_RING_BASE),
++		.rx_data = mt792x_dma_ring(MT_SOC_RXQ_DATA, MT_SOC_RX_RING_SIZE,
++					   MT_SOC_RX_RING_BASE),
++		.rx_mcu = mt792x_dma_ring(MT_SOC_RXQ_EVENT,
++					  MT_SOC_RX_EVENT_RING_SIZE,
++					  MT_SOC_RX_RING_BASE),
++	};
++	int ret;
++
++	ret = mt792x_dma_alloc_queues(dev, &layout);
++	if (ret)
++		return ret;
++
++	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU_WA],
++			       MT_SOC_RXQ_TX_FREE, MT_SOC_RX_TX_FREE_RING_SIZE,
++			       MT_RX_BUF_SIZE, MT_SOC_RX_RING_BASE);
++	if (ret)
++		return ret;
++
++	ret = mt76_init_queues(dev, mt792x_poll_rx);
++	if (ret < 0)
++		return ret;
++
++	netif_napi_add_tx(dev->mt76.tx_napi_dev, &dev->mt76.tx_napi,
++			  mt792x_poll_tx);
++	napi_enable(&dev->mt76.tx_napi);
++
++	return mt792x_dma_enable(dev);
++}
++
++static int mt7921_soc_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
++				       int cmd, int *seq)
++{
++	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
++	int ret;
++
++	if (!READ_ONCE(mt7921_soc_of(dev)->wf_on)) {
++		dev_kfree_skb(skb);
++		return -EIO;
++	}
++
++	ret = mt76_connac2_mcu_fill_message(mdev, skb, cmd, seq);
++	if (ret)
++		return ret;
++
++	/* The calibration of the PHY action command takes its time */
++	mdev->mcu.timeout = cmd == MT7921_SOC_CMD_PHY_ACTION ? 10 * HZ : 3 * HZ;
++
++	/* This ring has no TX done interrupt of its own */
++	mt76_queue_tx_cleanup(dev, mdev->q_mcu[MT_MCUQ_WM], false);
++
++	return mt76_tx_queue_skb_raw(dev, mdev->q_mcu[MT_MCUQ_WM], skb, 0);
++}
++
++/* The answers of the ROM have the 8 bytes after the RXD, not the 12 of an event */
++static int mt7921_soc_mcu_parse_response(struct mt76_dev *mdev, int cmd,
++					 struct sk_buff *skb, int seq)
++{
++	struct mt76_connac2_mcu_rxd *rxd;
++
++	if (!skb || (cmd != MT7921_SOC_CMD_PHY_ACTION &&
++		     cmd != MT7921_SOC_CMD_LOG_TIME_SYNC &&
++		     cmd != MT7921_SOC_CMD_FW_IMAGE_START))
++		return mt7921_mcu_parse_response(mdev, cmd, skb, seq);
++
++	rxd = (struct mt76_connac2_mcu_rxd *)skb->data;
++	if (seq != rxd->seq)
++		return -EAGAIN;
++
++	skb_pull(skb, sizeof(*rxd) - 4);
++
++	return 0;
++}
++
++static int mt7921_soc_mcu_init(struct mt792x_dev *dev)
++{
++	static const struct mt76_mcu_ops mt7921_soc_mcu_ops = {
++		.headroom = sizeof(struct mt76_connac2_mcu_txd),
++		.mcu_skb_send_msg = mt7921_soc_mcu_send_message,
++		.mcu_parse_response = mt7921_soc_mcu_parse_response,
++	};
++	int err;
++
++	dev->mt76.mcu_ops = &mt7921_soc_mcu_ops;
++
++	err = mt7921_run_firmware(dev);
++	if (err)
++		return err;
++
++	mt7921_soc_set_mac_addr(dev);
++
++	return 0;
++}
++
++/*
++ * The reset of the PCIe chip does not exist on this bus, the power cycle is what
++ * the vendor driver has. The firmware stays where the bootloader put it.
++ */
++static int mt7921_soc_wf_restart(struct mt792x_dev *dev, bool powered, bool owned)
++{
++	int ret;
++
++	if (owned) {
++		ret = mt792x_dma_disable(dev, false);
++		if (ret)
++			dev_warn(dev->mt76.dev, "WFDMA still busy: %d\n", ret);
++	}
++
++	if (powered)
++		mt7921_soc_wf_stop(dev);
++
++	ret = mt7921_soc_wf_start(dev);
++	if (ret)
++		return ret;
++
++	return mt792x_wpdma_reset(dev, false);
++}
++
++static int mt7921_soc_mac_reset(struct mt792x_dev *dev)
++{
++	/* After a restart that failed, there is nothing left to talk to */
++	bool powered = READ_ONCE(mt7921_soc_of(dev)->wf_on);
++	bool owned = powered;
++	int i, err;
++
++	if (powered) {
++		mt7921_soc_force_host_csr_irq(dev);
++		owned = !__mt792xe_mcu_drv_pmctrl(dev);
++	}
++
++	/* A hung MCU does not give up the ownership, and the WFDMA needs that */
++	if (owned)
++		mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
++	else
++		mt7921_soc_wf_gone(dev);
++
++	mt76_connac_free_pending_tx_skbs(&dev->pm, NULL);
++
++	set_bit(MT76_MCU_RESET, &dev->mphy.state);
++	wake_up(&dev->mt76.mcu.wait);
++	skb_queue_purge(&dev->mt76.mcu.res_q);
++
++	if (owned)
++		mt76_txq_schedule_all(&dev->mphy);
++
++	mt76_worker_disable(&dev->mt76.tx_worker);
++	mt76_for_each_q_rx(&dev->mt76, i) {
++		napi_disable(&dev->mt76.napi[i]);
++	}
++	napi_disable(&dev->mt76.tx_napi);
++
++	mt76_connac2_tx_token_put(&dev->mt76);
++	idr_init(&dev->mt76.token);
++
++	err = mt7921_soc_wf_restart(dev, powered, owned);
++
++	mt76_for_each_q_rx(&dev->mt76, i) {
++		napi_enable(&dev->mt76.napi[i]);
++	}
++
++	if (err) {
++		/* The rings and the interrupts stay as they are until the next try */
++		dev_err(dev->mt76.dev, "WF restart failed: %d\n", err);
++		napi_enable(&dev->mt76.tx_napi);
++		mt76_worker_enable(&dev->mt76.tx_worker);
++		return err;
++	}
++
++	local_bh_disable();
++	mt76_for_each_q_rx(&dev->mt76, i) {
++		napi_schedule(&dev->mt76.napi[i]);
++	}
++	local_bh_enable();
++
++	dev->fw_assert = false;
++	clear_bit(MT76_MCU_RESET, &dev->mphy.state);
++
++	mt76_wr(dev, dev->irq_map->host_irq_enable,
++		dev->irq_map->tx.all_complete_mask |
++		dev->irq_map->rx.data_complete_mask |
++		dev->irq_map->rx.wm_complete_mask |
++		dev->irq_map->rx.wm2_complete_mask | MT_INT_MCU_CMD);
++
++	err = mt7921_soc_mcu_init(dev);
++	if (err)
++		goto out;
++
++	err = mt7921_mcu_set_eeprom(dev);
++	if (err)
++		goto out;
++
++	err = mt7921_mac_init(dev);
++	if (err)
++		goto out;
++
++	err = __mt7921_start(&dev->phy);
++out:
++	napi_enable(&dev->mt76.tx_napi);
++	local_bh_disable();
++	napi_schedule(&dev->mt76.tx_napi);
++	local_bh_enable();
++
++	mt76_worker_enable(&dev->mt76.tx_worker);
++
++	return err;
++}
++
++/**
++ * mt7921_soc_read_manifest() - Read the release string of the firmware in memory
++ * @dev: the device
++ * @buf: where to put it
++ * @size: its size
++ *
++ * This shows what the bootloader loaded, if it did.
++ */
++void mt7921_soc_read_manifest(struct mt792x_dev *dev, char *buf, size_t size)
++{
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++	u32 ofs;
++
++	strscpy(buf, "(unknown)", size);
++
++	if (!soc->emi || soc->emi_size < MT_SOC_EMI_FW_VER_OFS + sizeof(ofs))
++		return;
++
++	/* It is an address on the bus of the MCU */
++	ofs = readl(soc->emi + MT_SOC_EMI_FW_VER_OFS) & MT_SOC_EMI_ADDR_MASK;
++	if (ofs + size > soc->emi_size)
++		return;
++
++	memcpy_fromio(buf, soc->emi + ofs, size - 1);
++	buf[size - 1] = '\0';
++}
++
++static int mt7921_soc_parse_fem(struct mt7921_soc *soc, struct device *dev)
++{
++	struct mt7921_soc_phy_fem *fem = &soc->fem;
++	u8 pins[MT7921_SOC_FEM_MAX_PINS * 3];
++	u32 parts[4] = {};
++	int n, i;
++
++	/* No such property means no front end chips, as on the vendor's default */
++	if (of_property_read_u32_array(dev->of_node, "mediatek,fem-parts", parts,
++				       ARRAY_SIZE(parts)))
++		return 0;
++
++	fem->id = cpu_to_le32(parts[0] << 20 | parts[1] << 8 | parts[2] << 16 |
++			      parts[3]);
++
++	n = of_property_count_u8_elems(dev->of_node, "mediatek,fem-pins");
++	if (n <= 0)
++		return 0;
++	if (n % 3 || n > sizeof(pins))
++		return dev_err_probe(dev, -EINVAL, "bad mediatek,fem-pins\n");
++
++	if (of_property_read_u8_array(dev->of_node, "mediatek,fem-pins", pins, n))
++		return dev_err_probe(dev, -EINVAL, "bad mediatek,fem-pins\n");
++
++	fem->n_pin = cpu_to_le32(n / 3);
++	for (i = 0; i < n / 3; i++) {
++		fem->pin[i].antsel = pins[i * 3];
++		fem->pin[i].fem = pins[i * 3 + 1];
++		fem->pin[i].polarity = pins[i * 3 + 2];
++	}
++
++	return 0;
++}
++
++static void mt7921_soc_irq_tasklet(unsigned long data)
++{
++	struct mt792x_dev *dev = (struct mt792x_dev *)data;
++
++	if (READ_ONCE(mt7921_soc_of(dev)->wf_on))
++		mt792x_irq_tasklet(data);
++}
++
++static const struct mt76_driver_ops mt7921_soc_drv_ops = {
++	/* txwi_size = txd size + txp size */
++	.txwi_size = MT_TXD_SIZE + sizeof(struct mt76_connac_hw_txp),
++	.drv_flags = MT_DRV_TXWI_NO_FREE | MT_DRV_HW_MGMT_TXQ |
++		     MT_DRV_AMSDU_OFFLOAD,
++	.survey_flags = SURVEY_INFO_TIME_TX | SURVEY_INFO_TIME_RX |
++			SURVEY_INFO_TIME_BSS_RX,
++	.token_size = MT_SOC_TOKEN_SIZE,
++	.tx_prepare_skb = mt7921e_tx_prepare_skb,
++	.tx_complete_skb = mt76_connac_tx_complete_skb,
++	.rx_check = mt7921_rx_check,
++	.rx_skb = mt7921_queue_rx_skb,
++	.rx_poll_complete = mt792x_rx_poll_complete,
++	.sta_add = mt7921_mac_sta_add,
++	.sta_event = mt7921_mac_sta_event,
++	.sta_remove = mt7921_mac_sta_remove,
++	.update_survey = mt792x_update_channel,
++	.set_channel = mt7921_set_channel,
++};
++
++static const struct mt792x_hif_ops mt7921_soc_hif_ops = {
++	.reset = mt7921_soc_mac_reset,
++	.mcu_init = mt7921_soc_mcu_init,
++	.drv_own = mt7921_soc_drv_own,
++	.fw_own = mt792xe_mcu_fw_pmctrl,
++	.dma_prefetch = mt7921_soc_dma_prefetch,
++	.load_firmware = mt7921_soc_load_firmware,
++	.set_eeprom = mt7921_soc_set_nvram,
++};
++
++static const struct mt792x_irq_map mt7921_soc_irq_map = {
++	.host_irq_enable = MT_SOC_WFDMA0_HOST_INT_ENA,
++	.tx = {
++		.all_complete_mask = HOST_TX_DONE_INT_ENA0 |
++				     HOST_TX_DONE_INT_ENA16 |
++				     HOST_TX_DONE_INT_ENA17,
++		.mcu_complete_mask = HOST_TX_DONE_INT_ENA16 |
++				     HOST_TX_DONE_INT_ENA17,
++	},
++	.rx = {
++		.data_complete_mask = HOST_RX_DONE_INT_ENA0,
++		.wm_complete_mask = HOST_RX_DONE_INT_ENA2,
++		.wm2_complete_mask = HOST_RX_DONE_INT_ENA3,
++	},
++};
++
++static int mt7921_soc_probe(struct platform_device *pdev)
++{
++	struct device *d = &pdev->dev;
++	struct ieee80211_ops *ops;
++	struct mt76_bus_ops *bus_ops;
++	struct mtk_connsys *connsys;
++	struct mt7921_soc *soc;
++	struct mt792x_dev *dev;
++	struct mt76_dev *mdev;
++	void __iomem *regs, *infra;
++	struct resource *res;
++	phys_addr_t emi_addr;
++	int irq, ret, i;
++
++	connsys = devm_mtk_connsys_get(d);
++	if (IS_ERR(connsys))
++		return dev_err_probe(d, PTR_ERR(connsys), "no connsys\n");
++
++	irq = platform_get_irq(pdev, 0);
++	if (irq < 0)
++		return irq;
++
++	regs = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(regs))
++		return PTR_ERR(regs);
++
++	/* Registers in the block of others, so it can't be claimed */
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
++	if (!res)
++		return dev_err_probe(d, -EINVAL, "no infrastructure registers\n");
++
++	infra = devm_ioremap(d, res->start, resource_size(res));
++	if (!infra)
++		return -ENOMEM;
++
++	ret = mt7921_soc_dma_window_init(pdev);
++	if (ret)
++		return ret;
++
++	ret = dma_set_mask_and_coherent(d, DMA_BIT_MASK(32));
++	if (ret)
++		return dev_err_probe(d, ret, "the DMA window is out of reach\n");
++
++	ops = devm_kmemdup(d, &mt7921_ops, sizeof(mt7921_ops), GFP_KERNEL);
++	if (!ops)
++		return -ENOMEM;
++
++	/* No firmware file to read the feature flags from */
++	if (!mt7921_soc_cnm) {
++		ops->remain_on_channel = NULL;
++		ops->cancel_remain_on_channel = NULL;
++		ops->add_chanctx = ieee80211_emulate_add_chanctx;
++		ops->remove_chanctx = ieee80211_emulate_remove_chanctx;
++		ops->change_chanctx = ieee80211_emulate_change_chanctx;
++		ops->switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx;
++		ops->assign_vif_chanctx = NULL;
++		ops->unassign_vif_chanctx = NULL;
++		ops->mgd_prepare_tx = NULL;
++		ops->mgd_complete_tx = NULL;
++	}
++
++	mdev = mt76_alloc_device(d, sizeof(*soc), ops, &mt7921_soc_drv_ops);
++	if (!mdev)
++		return -ENOMEM;
++
++	/* The debugfs files of the common code take this from the device */
++	platform_set_drvdata(pdev, mdev);
++
++	dev = container_of(mdev, struct mt792x_dev, mt76);
++	soc = mt7921_soc_of(dev);
++	soc->connsys = connsys;
++	soc->irq = irq;
++	soc->infra = infra;
++
++	ret = mt7921_soc_parse_fem(soc, d);
++	if (ret)
++		goto err_free_dev;
++
++	ret = mt7921_soc_nvram_load(dev);
++	if (ret)
++		goto err_free_dev;
++
++	/* Not write-combined: this has no business reading ahead in there */
++	mtk_connsys_get_emi(connsys, &emi_addr, &soc->emi_size);
++	soc->emi = devm_ioremap(d, emi_addr, soc->emi_size);
++
++	dev->fw_features = mt7921_soc_cnm ? MT792x_FW_CAP_CNM : 0;
++	dev->hif_ops = &mt7921_soc_hif_ops;
++	dev->irq_map = &mt7921_soc_irq_map;
++	mt76_mmio_init(&dev->mt76, regs);
++	tasklet_init(&mdev->irq_tasklet, mt7921_soc_irq_tasklet, (unsigned long)dev);
++
++	dev->phy.dev = dev;
++	dev->phy.mt76 = &dev->mt76.phy;
++	dev->mt76.phy.priv = &dev->phy;
++	dev->bus_ops = dev->mt76.bus;
++	bus_ops = devm_kmemdup(d, dev->bus_ops, sizeof(*bus_ops), GFP_KERNEL);
++	if (!bus_ops) {
++		ret = -ENOMEM;
++		goto err_free_dev;
++	}
++
++	bus_ops->rr = mt7921_soc_rr;
++	bus_ops->wr = mt7921_soc_wr;
++	bus_ops->rmw = mt7921_soc_rmw;
++	dev->mt76.bus = bus_ops;
++
++	dev_info(d, "powering connsys\n");
++	ret = mtk_connsys_power_on(connsys, MTK_CONNSYS_RADIO_WIFI);
++	if (ret)
++		goto err_free_dev;
++
++	ret = mt7921_soc_wf_start(dev);
++	if (ret)
++		goto err_power_off;
++
++	/*
++	 * The chip has this ID but no MT_HW_CHIPID to read it from on this bus.
++	 * The revision does not matter, there are no patches to choose from.
++	 */
++	mdev->rev = 0x7961 << 16;
++	dev_info(d, "ASIC revision: %04x, driver own\n", mdev->rev);
++
++	mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
++
++	ret = devm_request_irq(d, irq, mt792x_irq_handler, IRQF_SHARED,
++			       KBUILD_MODNAME, dev);
++	if (ret)
++		goto err_wf_off;
++
++	soc->irq_requested = true;
++
++	dev_info(d, "DMA rings\n");
++	ret = mt7921_soc_dma_init(dev);
++	if (ret)
++		goto err_stop_dma;
++
++	ret = mt7921_register_device(dev);
++	if (ret)
++		goto err_cleanup_dma;
++
++	return 0;
++
++err_cleanup_dma:
++	mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
++	devm_free_irq(d, irq, dev);
++	soc->irq_requested = false;
++	mt76_for_each_q_rx(mdev, i)
++		napi_disable(&mdev->napi[i]);
++	mt792x_dma_cleanup(dev);
++	tasklet_kill(&mdev->irq_tasklet);
++	goto err_wf_off;
++err_stop_dma:
++	mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
++	devm_free_irq(d, irq, dev);
++	soc->irq_requested = false;
++	tasklet_kill(&mdev->irq_tasklet);
++	mt792x_dma_disable(dev, true);
++err_wf_off:
++	mt7921_soc_wf_stop(dev);
++err_power_off:
++	mtk_connsys_power_off(connsys, MTK_CONNSYS_RADIO_WIFI);
++err_free_dev:
++	mt76_free_device(&dev->mt76);
++
++	return ret;
++}
++
++static void mt7921_soc_remove(struct platform_device *pdev)
++{
++	struct mt76_dev *mdev = platform_get_drvdata(pdev);
++	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++	struct mt76_connac_pm *pm = &dev->pm;
++	bool powered, owned;
++	int i;
++
++	cancel_work_sync(&dev->init_work);
++
++	/* A reset that starts from here on would meet the NAPI below */
++	dev->hw_init_done = false;
++	cancel_work_sync(&dev->reset_work);
++
++	mt76_unregister_device(&dev->mt76);
++	mt76_for_each_q_rx(&dev->mt76, i)
++		napi_disable(&dev->mt76.napi[i]);
++	cancel_delayed_work_sync(&pm->ps_work);
++	cancel_work_sync(&pm->wake_work);
++	cancel_work_sync(&dev->reset_work);
++
++	mt76_connac2_tx_token_put(&dev->mt76);
++
++	powered = READ_ONCE(soc->wf_on);
++	owned = powered && !__mt792x_mcu_drv_pmctrl(dev);
++	if (owned)
++		mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
++	else
++		mt7921_soc_wf_gone(dev);
++
++	set_bit(MT76_REMOVED, &dev->mt76.phy.state);
++	devm_free_irq(&pdev->dev, soc->irq, dev);
++	soc->irq_requested = false;
++
++	mt792x_dma_cleanup(dev);
++	tasklet_kill(&dev->mt76.irq_tasklet);
++
++	if (powered)
++		mt7921_soc_wf_stop(dev);
++
++	skb_queue_purge(&dev->mt76.mcu.res_q);
++	mtk_connsys_power_off(soc->connsys, MTK_CONNSYS_RADIO_WIFI);
++	mt76_free_device(&dev->mt76);
++}
++
++static const struct of_device_id mt7921_soc_of_match[] = {
++	{ .compatible = "mediatek,mt6897-wifi" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, mt7921_soc_of_match);
++
++static struct platform_driver mt7921_soc_driver = {
++	.probe = mt7921_soc_probe,
++	.remove = mt7921_soc_remove,
++	.driver = {
++		.name = KBUILD_MODNAME,
++		.of_match_table = mt7921_soc_of_match,
++	},
++};
++module_platform_driver(mt7921_soc_driver);
++
++MODULE_DESCRIPTION("MediaTek MT7921 on the SoC bus (MT6897 connsys) wireless driver");
++MODULE_LICENSE("Dual BSD/GPL");
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+new file mode 100644
+index 0000000..182ed99
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+@@ -0,0 +1,61 @@
++/* SPDX-License-Identifier: BSD-3-Clause-Clear */
++
++#ifndef __MT7921_SOC_H
++#define __MT7921_SOC_H
++
++#include "mt7921.h"
++
++struct mtk_connsys;
++struct platform_device;
++
++#define MT7921_SOC_FEM_MAX_PINS		32
++
++/* Commands to the ROM, like the firmware download ones in mt76_connac_mcu.h */
++#define MT7921_SOC_INIT_CMD(_id)	FIELD_PREP(__MCU_CMD_FIELD_ID, (_id))
++#define MT7921_SOC_CMD_PHY_ACTION	MT7921_SOC_INIT_CMD(0x08)
++#define MT7921_SOC_CMD_LOG_TIME_SYNC	MT7921_SOC_INIT_CMD(0x09)
++#define MT7921_SOC_CMD_FW_IMAGE_START	MT7921_SOC_INIT_CMD(0x42)
++
++/* How the ROM is told about the RF front end chips and their control lines */
++struct mt7921_soc_phy_fem {
++	__le32 id;
++	__le32 n_pin;
++	struct {
++		u8 antsel;
++		u8 fem;
++		u8 polarity;
++	} __packed pin[MT7921_SOC_FEM_MAX_PINS];
++} __packed;
++
++struct mt7921_soc {
++	struct mt792x_dev dev; /* must be first */
++	struct mtk_connsys *connsys;
++	/* The WF side and the WFDMA hang the bus if touched while this is false */
++	bool wf_on;
++	/* Where the ring registers point meanwhile */
++	struct mt76_queue_regs ring_scratch;
++	int irq;
++	bool irq_requested;
++	bool irq_off;
++	void __iomem *infra;
++	void __iomem *emi;
++	u32 emi_size;
++	u8 *nvram;
++	size_t nvram_size;
++	size_t nvram_total;
++	struct mt7921_soc_phy_fem fem;
++};
++
++static inline struct mt7921_soc *mt7921_soc_of(struct mt792x_dev *dev)
++{
++	return container_of(dev, struct mt7921_soc, dev);
++}
++
++int mt7921_soc_dma_window_init(struct platform_device *pdev);
++int mt7921_soc_nvram_load(struct mt792x_dev *dev);
++int mt7921_soc_load_firmware(struct mt792x_dev *dev);
++int mt7921_soc_set_nvram(struct mt792x_dev *dev);
++void mt7921_soc_set_mac_addr(struct mt792x_dev *dev);
++void mt7921_soc_read_manifest(struct mt792x_dev *dev, char *buf, size_t size);
++
++#endif /* __MT7921_SOC_H */
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc_dma.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc_dma.c
+new file mode 100644
+index 0000000..0a675d0
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc_dma.c
+@@ -0,0 +1,289 @@
++// SPDX-License-Identifier: BSD-3-Clause-Clear
++/*
++ * The DMA window of the MT7921 on the MT6897 SoC bus.
++ *
++ * The connsys bus master may only reach memory that the bootloader opened to
++ * it in the EMI MPU. That is a 20 MiB no-map region the bootloader also picks
++ * and names. The DMA API has the right tool, a restricted-dma-pool, but it wants
++ * memory in the linear map under its own compatible, and neither can be changed
++ * here, as the bootloader builds the node and the bootloader is signed. So this
++ * bounces everything through the region itself, the way the vendor driver's
++ * copy path does: it maps the region write-combined, which needs no cache
++ * maintenance, and hands out the coherent allocations from it as well.
++ */
++
++#include <linux/bitmap.h>
++#include <linux/dma-map-ops.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/platform_device.h>
++#include <linux/spinlock.h>
++#include <linux/vmalloc.h>
++
++#include "mt7921.h"
++#include "soc.h"
++
++#define MT7921_SOC_DMA_SLOT_SHIFT	8
++#define MT7921_SOC_DMA_SLOT_SIZE	BIT(MT7921_SOC_DMA_SLOT_SHIFT)
++#define MT7921_SOC_DMA_PAGE_ALIGN_MASK	(BIT(PAGE_SHIFT - MT7921_SOC_DMA_SLOT_SHIFT) - 1)
++
++struct mt7921_soc_dma {
++	void *vaddr;
++	phys_addr_t base;
++	unsigned long slots;
++	/* Protects map and next */
++	spinlock_t lock;
++	unsigned long *map;
++	/* Most of the window is free, and mappings come and go all the time */
++	unsigned long next;
++	/* The memory each slot shadows; a mapping is contiguous on both sides */
++	phys_addr_t *orig;
++};
++
++static struct mt7921_soc_dma *mt7921_soc_dma_of(struct device *dev)
++{
++	return dev_get_platdata(dev);
++}
++
++static void *mt7921_soc_dma_va(struct mt7921_soc_dma *dma, dma_addr_t addr)
++{
++	return dma->vaddr + (addr - dma->base);
++}
++
++static phys_addr_t mt7921_soc_dma_orig(struct mt7921_soc_dma *dma,
++				       dma_addr_t addr)
++{
++	unsigned long ofs = addr - dma->base;
++
++	return dma->orig[ofs >> MT7921_SOC_DMA_SLOT_SHIFT] +
++	       (ofs & (MT7921_SOC_DMA_SLOT_SIZE - 1));
++}
++
++static void mt7921_soc_dma_to_device(struct mt7921_soc_dma *dma, dma_addr_t addr,
++				     size_t size)
++{
++	memcpy(mt7921_soc_dma_va(dma, addr),
++	       phys_to_virt(mt7921_soc_dma_orig(dma, addr)), size);
++	/* Push the write-combining buffer out before the doorbell */
++	wmb();
++}
++
++static void mt7921_soc_dma_to_cpu(struct mt7921_soc_dma *dma, dma_addr_t addr,
++				  size_t size)
++{
++	/* Not before the done bit of the descriptor has been seen */
++	dma_rmb();
++	memcpy(phys_to_virt(mt7921_soc_dma_orig(dma, addr)),
++	       mt7921_soc_dma_va(dma, addr), size);
++}
++
++static unsigned long mt7921_soc_dma_nr_slots(size_t size)
++{
++	return DIV_ROUND_UP(size, MT7921_SOC_DMA_SLOT_SIZE);
++}
++
++static dma_addr_t mt7921_soc_dma_get(struct mt7921_soc_dma *dma, size_t size,
++				     unsigned long align_mask)
++{
++	unsigned long nr = mt7921_soc_dma_nr_slots(size);
++	unsigned long flags, pos;
++
++	spin_lock_irqsave(&dma->lock, flags);
++	pos = bitmap_find_next_zero_area(dma->map, dma->slots, dma->next, nr,
++					 align_mask);
++	if (pos >= dma->slots)
++		pos = bitmap_find_next_zero_area(dma->map, dma->slots, 0, nr,
++						 align_mask);
++	if (pos < dma->slots) {
++		bitmap_set(dma->map, pos, nr);
++		dma->next = pos + nr;
++	}
++	spin_unlock_irqrestore(&dma->lock, flags);
++
++	if (pos >= dma->slots)
++		return DMA_MAPPING_ERROR;
++
++	return dma->base + (pos << MT7921_SOC_DMA_SLOT_SHIFT);
++}
++
++static void mt7921_soc_dma_put(struct mt7921_soc_dma *dma, dma_addr_t addr,
++			       size_t size)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&dma->lock, flags);
++	bitmap_clear(dma->map, (addr - dma->base) >> MT7921_SOC_DMA_SLOT_SHIFT,
++		     mt7921_soc_dma_nr_slots(size));
++	spin_unlock_irqrestore(&dma->lock, flags);
++}
++
++static dma_addr_t mt7921_soc_dma_map_phys(struct device *dev, phys_addr_t phys,
++					  size_t size,
++					  enum dma_data_direction dir,
++					  unsigned long attrs)
++{
++	struct mt7921_soc_dma *dma = mt7921_soc_dma_of(dev);
++	unsigned long slot, i;
++	dma_addr_t addr;
++
++	if (attrs & DMA_ATTR_MMIO)
++		return DMA_MAPPING_ERROR;
++
++	/* Keeping pages whole leaves the page pool what it expects */
++	addr = mt7921_soc_dma_get(dma, size,
++				  size >= PAGE_SIZE ? MT7921_SOC_DMA_PAGE_ALIGN_MASK : 0);
++	if (addr == DMA_MAPPING_ERROR) {
++		dev_warn_ratelimited(dev, "DMA window full, %zu bytes\n", size);
++		return DMA_MAPPING_ERROR;
++	}
++
++	slot = (addr - dma->base) >> MT7921_SOC_DMA_SLOT_SHIFT;
++	for (i = 0; i < mt7921_soc_dma_nr_slots(size); i++)
++		dma->orig[slot + i] = phys + i * MT7921_SOC_DMA_SLOT_SIZE;
++
++	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC) &&
++	    (dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL))
++		mt7921_soc_dma_to_device(dma, addr, size);
++
++	return addr;
++}
++
++static void mt7921_soc_dma_unmap_phys(struct device *dev, dma_addr_t addr,
++				      size_t size, enum dma_data_direction dir,
++				      unsigned long attrs)
++{
++	struct mt7921_soc_dma *dma = mt7921_soc_dma_of(dev);
++
++	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC) &&
++	    (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL))
++		mt7921_soc_dma_to_cpu(dma, addr, size);
++
++	mt7921_soc_dma_put(dma, addr, size);
++}
++
++static void mt7921_soc_dma_sync_for_cpu(struct device *dev, dma_addr_t addr,
++					size_t size,
++					enum dma_data_direction dir)
++{
++	if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL)
++		mt7921_soc_dma_to_cpu(mt7921_soc_dma_of(dev), addr, size);
++}
++
++static void mt7921_soc_dma_sync_for_device(struct device *dev, dma_addr_t addr,
++					   size_t size,
++					   enum dma_data_direction dir)
++{
++	if (dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL)
++		mt7921_soc_dma_to_device(mt7921_soc_dma_of(dev), addr, size);
++}
++
++static void *mt7921_soc_dma_alloc(struct device *dev, size_t size,
++				  dma_addr_t *addr, gfp_t gfp,
++				  unsigned long attrs)
++{
++	struct mt7921_soc_dma *dma = mt7921_soc_dma_of(dev);
++	void *va;
++
++	*addr = mt7921_soc_dma_get(dma, size, MT7921_SOC_DMA_PAGE_ALIGN_MASK);
++	if (*addr == DMA_MAPPING_ERROR)
++		return NULL;
++
++	va = mt7921_soc_dma_va(dma, *addr);
++	memset(va, 0, size);
++
++	return va;
++}
++
++static void mt7921_soc_dma_free(struct device *dev, size_t size, void *va,
++				dma_addr_t addr, unsigned long attrs)
++{
++	mt7921_soc_dma_put(mt7921_soc_dma_of(dev), addr, size);
++}
++
++static int mt7921_soc_dma_supported(struct device *dev, u64 mask)
++{
++	struct mt7921_soc_dma *dma = mt7921_soc_dma_of(dev);
++
++	return dma->base + (dma->slots << MT7921_SOC_DMA_SLOT_SHIFT) - 1 <= mask;
++}
++
++static const struct dma_map_ops mt7921_soc_dma_ops = {
++	.alloc = mt7921_soc_dma_alloc,
++	.free = mt7921_soc_dma_free,
++	.map_phys = mt7921_soc_dma_map_phys,
++	.unmap_phys = mt7921_soc_dma_unmap_phys,
++	.sync_single_for_cpu = mt7921_soc_dma_sync_for_cpu,
++	.sync_single_for_device = mt7921_soc_dma_sync_for_device,
++	.dma_supported = mt7921_soc_dma_supported,
++};
++
++static void mt7921_soc_dma_free_orig(void *data)
++{
++	vfree(data);
++}
++
++static void mt7921_soc_dma_remove(void *data)
++{
++	struct device *dev = data;
++
++	set_dma_ops(dev, NULL);
++	/* The platform device would free it when it goes */
++	dev->platform_data = NULL;
++}
++
++/**
++ * mt7921_soc_dma_window_init() - Keep all DMA of a device in the bootloader's region
++ * @pdev: the device, with a memory-region property the bootloader wrote
++ *
++ * Return: 0 or a negative error code
++ */
++int mt7921_soc_dma_window_init(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt7921_soc_dma *dma;
++	struct reserved_mem *rmem;
++	struct device_node *np;
++	int ret;
++
++	np = of_parse_phandle(dev->of_node, "memory-region", 0);
++	if (!np)
++		return dev_err_probe(dev, -ENODEV,
++				     "the bootloader gave no DMA region (memory-region)\n");
++
++	rmem = of_reserved_mem_lookup(np);
++	of_node_put(np);
++	if (!rmem)
++		return dev_err_probe(dev, -ENODEV, "no reserved DMA region\n");
++
++	dma = devm_kzalloc(dev, sizeof(*dma), GFP_KERNEL);
++	if (!dma)
++		return -ENOMEM;
++
++	dma->base = rmem->base;
++	dma->slots = rmem->size >> MT7921_SOC_DMA_SLOT_SHIFT;
++	spin_lock_init(&dma->lock);
++	dev_info(dev, "DMA window at %pa, %llu MiB\n", &dma->base,
++		 (u64)rmem->size / SZ_1M);
++
++	dma->vaddr = devm_memremap(dev, dma->base, rmem->size, MEMREMAP_WC);
++	if (IS_ERR(dma->vaddr))
++		return PTR_ERR(dma->vaddr);
++
++	dma->map = devm_bitmap_zalloc(dev, dma->slots, GFP_KERNEL);
++	if (!dma->map)
++		return -ENOMEM;
++
++	dma->orig = vcalloc(dma->slots, sizeof(*dma->orig));
++	if (!dma->orig)
++		return -ENOMEM;
++
++	ret = devm_add_action_or_reset(dev, mt7921_soc_dma_free_orig, dma->orig);
++	if (ret)
++		return ret;
++
++	dev->platform_data = dma;
++	set_dma_ops(dev, &mt7921_soc_dma_ops);
++
++	return devm_add_action_or_reset(dev, mt7921_soc_dma_remove, dev);
++}
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+new file mode 100644
+index 0000000..eb5f0cf
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+@@ -0,0 +1,489 @@
++// SPDX-License-Identifier: BSD-3-Clause-Clear
++/*
++ * The MCU of the MT7921 on the MT6897 SoC bus: firmware start, calibration data.
++ *
++ * The bootloader has loaded the firmware, so there is nothing to download, and
++ * there is no firmware file to read a release trailer from. The driver reports
++ * the board's data to the ROM and asks it to start the image. After that the
++ * command headers and the legacy command numbers are the ones of the MT7921.
++ */
++
++#include <linux/etherdevice.h>
++#include <linux/firmware.h>
++#include <linux/ktime.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#include "mt7921.h"
++#include "soc.h"
++#include "../mt76_connac2_mac.h"
++
++/* Hands the driver's copy of the calibration data to the firmware, in pieces */
++#define MT7921_SOC_CE_CMD_SET_NVRAM \
++	(__MCU_CMD_FIELD_CE | FIELD_PREP(__MCU_CMD_FIELD_ID, 0x48))
++
++#define MT7921_SOC_NVRAM_MIN_SIZE	2048
++#define MT7921_SOC_NVRAM_MAX_SIZE	SZ_8K
++/* After a fixed part with the MAC address, the rest is a tag-length-value list */
++#define MT7921_SOC_NVRAM_MAC_OFS	4
++#define MT7921_SOC_NVRAM_TLV_OFS	256
++#define MT7921_SOC_NVRAM_TLV_HDR	3
++#define MT7921_SOC_NVRAM_FRAGMENT_SIZE	1500
++
++#define MT7921_SOC_NVRAM_TAG_CTRL	0
++/* What calibration needs of the list */
++#define MT7921_SOC_NVRAM_TAG_2G4_COMMON	7
++#define MT7921_SOC_NVRAM_TAG_5G_COMMON	8
++#define MT7921_SOC_NVRAM_TAG_SYSTEM	9
++#define MT7921_SOC_NVRAM_TAG_6G_COMMON	21
++#define MT7921_SOC_NVRAM_TAG_FOR_CAL	BIT(7)
++#define MT7921_SOC_NVRAM_FOR_CAL_MAX	1024UL
++
++#define MT7921_SOC_PHY_ACTION_MAGIC	0x556789aa
++#define MT7921_SOC_PHY_ACTION_VERSION	0x01
++#define MT7921_SOC_PHY_ACTION_FORCE_CAL	0x01
++
++enum {
++	MT7921_SOC_PHY_TAG_NVRAM,
++	MT7921_SOC_PHY_TAG_CAL,
++	MT7921_SOC_PHY_TAG_COM_FEM,
++	MT7921_SOC_PHY_TAG_LAA,
++};
++
++struct mt7921_soc_phy_action {
++	__le32 magic;
++	u8 n_tag;
++	u8 version;
++	__le16 len;
++} __packed;
++
++struct mt7921_soc_phy_tlv {
++	__le16 tag;
++	__le16 len;
++} __packed;
++
++struct mt7921_soc_phy_cal {
++	u8 cmd;
++	u8 save_result;
++	u8 skip_cal;
++	u8 rsv;
++} __packed;
++
++struct mt7921_soc_phy_laa {
++	__le32 chip_id;
++	__le32 n_pin;
++	struct {
++		__le16 gpio;
++		u8 wf_mode;
++		u8 md_mode;
++	} __packed pin[8];
++} __packed;
++
++struct mt7921_soc_phy_rsp {
++	struct mt7921_soc_phy_action hdr;
++	struct mt7921_soc_phy_tlv tlv;
++	u8 event;
++	u8 status;
++	u8 rsv[2];
++	__le32 emi_addr;
++	__le32 emi_len;
++	__le32 temperature;
++} __packed;
++
++struct mt7921_soc_cmd_result {
++	u8 status;
++	u8 cid;
++	u8 rsv[2];
++} __packed;
++
++/* The first entry of the list says where the list ends */
++static size_t mt7921_soc_nvram_end(const u8 *nvram, size_t size)
++{
++	const u8 *ctrl = nvram + MT7921_SOC_NVRAM_TLV_OFS;
++	size_t end;
++
++	if (ctrl[0] != MT7921_SOC_NVRAM_TAG_CTRL)
++		return 0;
++
++	end = MT7921_SOC_NVRAM_TLV_OFS + (ctrl[4] | ctrl[5] << 8);
++
++	return min(end, size);
++}
++
++static int mt7921_soc_tlv_end(const struct mt7921_soc *soc, size_t ofs,
++			      size_t *end, u8 *tag)
++{
++	const u8 *nvram = soc->nvram;
++	size_t len;
++
++	if (ofs + MT7921_SOC_NVRAM_TLV_HDR > soc->nvram_size)
++		return -ENOENT;
++
++	*tag = nvram[ofs];
++	len = nvram[ofs + 1] | nvram[ofs + 2] << 8;
++	if (!*tag && !len)
++		return -ENOENT;
++
++	*end = ofs + MT7921_SOC_NVRAM_TLV_HDR + len;
++
++	return *end > soc->nvram_size ? -EINVAL : 0;
++}
++
++/**
++ * mt7921_soc_nvram_load() - Read the calibration data of this device
++ * @dev: the device
++ *
++ * The data lives in the nvdata partition, which makes the file something the
++ * system copies from there; it belongs to this one device and must not go in
++ * any image. Nothing is powered until it is here, so a missing file costs nothing.
++ *
++ * Return: 0 or a negative error code
++ */
++int mt7921_soc_nvram_load(struct mt792x_dev *dev)
++{
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++	struct device *d = dev->mt76.dev;
++	const struct firmware *fw;
++	const char *name;
++	int ret;
++
++	if (soc->nvram)
++		return 0;
++
++	ret = of_property_read_string(d->of_node, "firmware-name", &name);
++	if (ret) {
++		dev_err(d, "no firmware-name for the calibration data\n");
++		return ret;
++	}
++
++	ret = request_firmware(&fw, name, d);
++	if (ret) {
++		dev_err(d, "no calibration data, %s: %d\n", name, ret);
++		return ret;
++	}
++
++	if (fw->size < MT7921_SOC_NVRAM_MIN_SIZE ||
++	    fw->size > MT7921_SOC_NVRAM_MAX_SIZE) {
++		dev_err(d, "calibration data of %zu bytes\n", fw->size);
++		ret = -EINVAL;
++	} else if (mt7921_soc_nvram_end(fw->data, fw->size) <=
++		   MT7921_SOC_NVRAM_TLV_OFS) {
++		dev_err(d, "calibration data without a list\n");
++		ret = -EINVAL;
++	} else {
++		soc->nvram = devm_kmemdup(d, fw->data, fw->size, GFP_KERNEL);
++		soc->nvram_size = fw->size;
++		soc->nvram_total = mt7921_soc_nvram_end(fw->data, fw->size);
++		ret = soc->nvram ? 0 : -ENOMEM;
++	}
++	if (!ret)
++		dev_info(d, "calibration data: %s, %zu of %zu bytes in the list\n",
++			 name, soc->nvram_total, fw->size);
++
++	release_firmware(fw);
++
++	return ret;
++}
++
++static int mt7921_soc_nvram_for_cal(struct mt7921_soc *soc, u8 *buf)
++{
++	size_t ofs = MT7921_SOC_NVRAM_TLV_OFS, end, n = 0;
++	u8 tag;
++	int ret = 0;
++
++	while (ofs < soc->nvram_total &&
++	       !(ret = mt7921_soc_tlv_end(soc, ofs, &end, &tag))) {
++		if (tag == MT7921_SOC_NVRAM_TAG_2G4_COMMON ||
++		    tag == MT7921_SOC_NVRAM_TAG_5G_COMMON ||
++		    tag == MT7921_SOC_NVRAM_TAG_6G_COMMON ||
++		    tag == MT7921_SOC_NVRAM_TAG_SYSTEM ||
++		    tag & MT7921_SOC_NVRAM_TAG_FOR_CAL) {
++			/* A command takes no more than this, as in the vendor driver */
++			size_t len = min(end - ofs, MT7921_SOC_NVRAM_FOR_CAL_MAX - n);
++
++			memcpy(buf + n, soc->nvram + ofs, len);
++			n += len;
++		}
++		ofs = end;
++	}
++
++	return !ret || ret == -ENOENT ? ALIGN(n, 4) : ret;
++}
++
++static u8 *mt7921_soc_tlv(u8 *p, u16 tag, const void *data, size_t len)
++{
++	struct mt7921_soc_phy_tlv *tlv = (void *)p;
++
++	tlv->tag = cpu_to_le16(tag);
++	tlv->len = cpu_to_le16(len);
++	if (data)
++		memcpy(tlv + 1, data, len);
++
++	return p + sizeof(*tlv) + len;
++}
++
++/*
++ * The vendor driver calibrates once at boot and restores the result at every
++ * power-on after that. Calibrating at every power-on is what it does when it has
++ * no result, so it is the simple form of the same thing.
++ */
++static int mt7921_soc_phy_action(struct mt792x_dev *dev)
++{
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++	struct mt7921_soc_phy_cal cal = {
++		.cmd = MT7921_SOC_PHY_ACTION_FORCE_CAL,
++		.save_result = 1,
++	};
++	struct mt7921_soc_phy_laa laa = {};
++	struct mt7921_soc_phy_action *hdr;
++	struct mt7921_soc_phy_rsp *rsp;
++	struct sk_buff *skb;
++	u8 *cmd, *nvram, *p;
++	int ret, n;
++
++	cmd = kzalloc(MT7921_SOC_NVRAM_FOR_CAL_MAX + 256, GFP_KERNEL);
++	nvram = kzalloc(MT7921_SOC_NVRAM_FOR_CAL_MAX, GFP_KERNEL);
++	if (!cmd || !nvram) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	n = mt7921_soc_nvram_for_cal(soc, nvram);
++	if (n < 0) {
++		dev_err(dev->mt76.dev, "bad calibration data: %d\n", n);
++		ret = n;
++		goto out;
++	}
++
++	hdr = (void *)cmd;
++	hdr->magic = cpu_to_le32(MT7921_SOC_PHY_ACTION_MAGIC);
++	hdr->version = MT7921_SOC_PHY_ACTION_VERSION;
++	hdr->n_tag = 4;
++
++	p = cmd + sizeof(*hdr);
++	p = mt7921_soc_tlv(p, MT7921_SOC_PHY_TAG_CAL, &cal, sizeof(cal));
++	p = mt7921_soc_tlv(p, MT7921_SOC_PHY_TAG_NVRAM, nvram, n);
++	p = mt7921_soc_tlv(p, MT7921_SOC_PHY_TAG_COM_FEM, &soc->fem,
++			   sizeof(soc->fem));
++	p = mt7921_soc_tlv(p, MT7921_SOC_PHY_TAG_LAA, &laa, sizeof(laa));
++	hdr->len = cpu_to_le16(p - cmd - sizeof(*hdr));
++
++	dev_info(dev->mt76.dev, "PHY action: calibrate, %d bytes of data, FEM %#x\n",
++		 n, le32_to_cpu(soc->fem.id));
++	ret = mt76_mcu_send_and_get_msg(&dev->mt76, MT7921_SOC_CMD_PHY_ACTION,
++					cmd, p - cmd, true, &skb);
++	if (ret) {
++		dev_err(dev->mt76.dev, "PHY action failed: %d\n", ret);
++		goto out;
++	}
++
++	rsp = (void *)skb->data;
++	if (skb->len < sizeof(*rsp) ||
++	    rsp->hdr.magic != cpu_to_le32(MT7921_SOC_PHY_ACTION_MAGIC)) {
++		dev_err(dev->mt76.dev, "bad PHY action answer\n");
++		ret = -EIO;
++	} else {
++		/* The vendor driver doesn't stop at a bad status either */
++		dev_info(dev->mt76.dev, "PHY action: event %#x, status %u, temperature %u\n",
++			 rsp->event, rsp->status, le32_to_cpu(rsp->temperature));
++	}
++	dev_kfree_skb(skb);
++out:
++	kfree(nvram);
++	kfree(cmd);
++
++	return ret;
++}
++
++static int mt7921_soc_log_time_sync(struct mt792x_dev *dev)
++{
++	struct mt76_connac_config cfg = {};
++	struct timespec64 ts;
++	int len;
++
++	ktime_get_real_ts64(&ts);
++	len = scnprintf(cfg.data, sizeof(cfg.data), "SyncTime %u %u",
++			(u32)ts.tv_sec, (u32)(ts.tv_nsec / NSEC_PER_USEC));
++	cfg.data_size = cpu_to_le16(len);
++
++	return mt76_mcu_send_msg(&dev->mt76, MT7921_SOC_CMD_LOG_TIME_SYNC, &cfg,
++				 sizeof(cfg), true);
++}
++
++static int mt7921_soc_fw_image_start(struct mt792x_dev *dev)
++{
++	struct mt7921_soc_cmd_result *res;
++	struct {
++		__le32 override;
++		__le32 addr;
++	} req = {};
++	struct sk_buff *skb;
++	int ret;
++
++	dev_info(dev->mt76.dev, "starting the firmware the bootloader loaded\n");
++	ret = mt76_mcu_send_and_get_msg(&dev->mt76, MT7921_SOC_CMD_FW_IMAGE_START,
++					&req, sizeof(req), true, &skb);
++	if (ret) {
++		dev_err(dev->mt76.dev, "firmware start failed: %d\n", ret);
++		return ret;
++	}
++
++	res = (void *)skb->data;
++	if (skb->len < sizeof(*res))
++		ret = -EIO;
++	else if (res->status)
++		ret = -EIO;
++	if (ret)
++		dev_err(dev->mt76.dev, "firmware start refused: %*ph\n",
++			min_t(int, skb->len, sizeof(*res)), skb->data);
++	dev_kfree_skb(skb);
++
++	return ret;
++}
++
++/*
++ * Whether the firmware takes unified commands can't be told from the image, and
++ * the mt7921 code sends the BSS, station, key and remain-on-channel commands
++ * that way. Taking down a device that was never set up is the command with the
++ * smallest effect there is. No answer is the answer here, so this can't be left
++ * to the time-out path of a real command.
++ */
++static int mt7921_soc_probe_uni_cmd(struct mt792x_dev *dev)
++{
++	struct {
++		struct {
++			u8 omac_idx;
++			u8 band_idx;
++			__le16 pad;
++		} __packed hdr;
++		struct {
++			__le16 tag;
++			__le16 len;
++			u8 active;
++			u8 link_idx;
++			u8 omac_addr[ETH_ALEN];
++		} __packed tlv;
++	} req = {
++		.tlv = {
++			.tag = cpu_to_le16(DEV_INFO_ACTIVE),
++			.len = cpu_to_le16(sizeof(req.tlv)),
++		},
++	};
++	int ret;
++
++	ret = mt76_mcu_send_msg(&dev->mt76, MCU_UNI_CMD(DEV_INFO_UPDATE), &req,
++				sizeof(req), true);
++	dev_info(dev->mt76.dev, "unified command probe: %d\n", ret);
++
++	if (ret == -ETIMEDOUT) {
++		dev_err(dev->mt76.dev,
++			"the firmware does not answer unified commands, which this driver needs\n");
++		return -EOPNOTSUPP;
++	}
++
++	return 0;
++}
++
++/**
++ * mt7921_soc_load_firmware() - Start the firmware the bootloader loaded
++ * @dev: the device
++ *
++ * Return: 0 or a negative error code
++ */
++int mt7921_soc_load_firmware(struct mt792x_dev *dev)
++{
++	char manifest[64];
++	int ret;
++
++	mt7921_soc_read_manifest(dev, manifest, sizeof(manifest));
++	dev_info(dev->mt76.dev, "firmware in memory: %s\n", manifest);
++
++	ret = mt7921_soc_log_time_sync(dev);
++	if (ret)
++		dev_warn(dev->mt76.dev, "time sync failed: %d\n", ret);
++
++	ret = mt7921_soc_phy_action(dev);
++	if (ret)
++		return ret;
++
++	ret = mt7921_soc_fw_image_start(dev);
++	if (ret)
++		return ret;
++
++	if (!mt76_poll_msec(dev, MT_CONN_ON_MISC, MT_TOP_MISC2_FW_N9_RDY,
++			    MT_TOP_MISC2_FW_N9_RDY, 2500)) {
++		dev_err(dev->mt76.dev, "timeout for the firmware, misc %#x\n",
++			mt76_rr(dev, MT_CONN_ON_MISC));
++		return -EIO;
++	}
++	dev_info(dev->mt76.dev, "firmware running\n");
++
++#ifdef CONFIG_PM
++	dev->mt76.hw->wiphy->wowlan = &mt76_connac_wowlan_support;
++#endif /* CONFIG_PM */
++
++	return mt7921_soc_probe_uni_cmd(dev);
++}
++
++/**
++ * mt7921_soc_set_nvram() - Give the running firmware the calibration data
++ * @dev: the device
++ *
++ * Return: 0 or a negative error code
++ */
++int mt7921_soc_set_nvram(struct mt792x_dev *dev)
++{
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++	size_t start = 0, ofs = MT7921_SOC_NVRAM_TLV_OFS, end;
++	u8 *buf;
++	u8 tag;
++	int ret, n = 0;
++
++	if (!soc->nvram)
++		return -ENOENT;
++
++	buf = kmalloc(MT7921_SOC_NVRAM_FRAGMENT_SIZE, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	while (!(ret = mt7921_soc_tlv_end(soc, ofs, &end, &tag))) {
++		if (end - start > MT7921_SOC_NVRAM_FRAGMENT_SIZE) {
++			ret = -E2BIG;
++			break;
++		}
++
++		memset(buf, 0, MT7921_SOC_NVRAM_FRAGMENT_SIZE);
++		memcpy(buf, soc->nvram + start, end - start);
++		ret = mt76_mcu_send_msg(&dev->mt76, MT7921_SOC_CE_CMD_SET_NVRAM,
++					buf, MT7921_SOC_NVRAM_FRAGMENT_SIZE, false);
++		if (ret)
++			break;
++
++		start = end;
++		ofs = end;
++		n++;
++	}
++	kfree(buf);
++
++	if (ret != -ENOENT) {
++		dev_err(dev->mt76.dev, "bad calibration data at %zu: %d\n", ofs, ret);
++		return ret;
++	}
++	dev_info(dev->mt76.dev, "calibration data sent in %d pieces\n", n);
++
++	return 0;
++}
++
++/**
++ * mt7921_soc_set_mac_addr() - Use the MAC address from the calibration data
++ * @dev: the device
++ */
++void mt7921_soc_set_mac_addr(struct mt792x_dev *dev)
++{
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++
++	if (soc->nvram &&
++	    is_valid_ether_addr(soc->nvram + MT7921_SOC_NVRAM_MAC_OFS))
++		ether_addr_copy(dev->mphy.macaddr,
++				soc->nvram + MT7921_SOC_NVRAM_MAC_OFS);
++}

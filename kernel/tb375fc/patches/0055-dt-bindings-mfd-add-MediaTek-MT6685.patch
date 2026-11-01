@@ -1,0 +1,58 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: mfd: add MediaTek MT6685
+
+The MT6685 is the SPMI PMIC with the clock buffer of the MT6897 boards.
+Linux has no driver for it, but a node gives its registers a device on
+the SPMI bus, and the connectivity subsystem has to read one of them.
+---
+ .../bindings/mfd/mediatek,mt6685.yaml         | 42 +++++++++++++++++++
+ 1 file changed, 42 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
+new file mode 100644
+index 0000000..74ecfcb
+--- /dev/null
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
+@@ -0,0 +1,42 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/mfd/mediatek,mt6685.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6685 SPMI PMIC
++
++maintainers:
++  - Matthias Brugger <matthias.bgg@gmail.com>
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++
++description:
++  The clock buffer of the SoC together with an RTC and some auxiliary functions.
++  Other devices read the state of the clock buffer from it.
++
++properties:
++  compatible:
++    const: mediatek,mt6685
++
++  reg:
++    maxItems: 1
++
++required:
++  - compatible
++  - reg
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/spmi/spmi.h>
++
++    spmi {
++        #address-cells = <2>;
++        #size-cells = <0>;
++
++        pmic@9 {
++            compatible = "mediatek,mt6685";
++            reg = <0x9 SPMI_USID>;
++        };
++    };

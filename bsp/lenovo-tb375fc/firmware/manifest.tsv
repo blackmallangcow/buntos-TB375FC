@@ -17,7 +17,7 @@ partition	connsys_bt	-	Bluetooth soc7_0(2d)	확인함(펌웨어 묶음의 connsy
 partition	nvdata	-	Wi-Fi·BT 보정값과 MAC이 든 ext4 원본(2d). 기기마다 다르다	확인함(원래 fstab의 /mnt/vendor/nvdata)
 partition	nvcfg	-	보정값 둘레(2d)	확인함(원래 fstab의 /mnt/vendor/nvcfg)
 partition	persist	-	보정값 둘레(2d)	확인함(원래 fstab의 /mnt/vendor/persist)
-file	nvdata/APCFG/APRDEB/WIFI	-	Wi-Fi NVRAM(보정값·MAC), mt76 soc7_0(2d)	확인 필요(MediaTek 관례 경로)
+file	nvdata/APCFG/APRDEB/WIFI	lenovo/tb375fc/wifi-nvram.bin	Wi-Fi NVRAM(보정값·MAC), mt76 soc7_0(2d). 장치 트리의 firmware-name	확인 필요(MediaTek 관례 경로)
 file	nvdata/APCFG/APRDEB/WIFI_CUSTOM	-	Wi-Fi NVRAM 덧값(2d)	확인 필요(MediaTek 관례 경로)
 file	nvdata/APCFG/APRDEB/BT_Addr	-	Bluetooth 주소(2d)	확인 필요(MediaTek 관례 경로)
 file	vendor/firmware/novatek_ts_fw_boe.bin	lenovo/tb375fc/novatek_ts_fw_boe.bin	NT36532 터치·펜(novatek-nvt-spi, 2c), BOE 패널(패널 ID GPIO184 = 0). 터치를 열 때와 깨어날 때마다 내려 준다. 이름은 보드 dts의 firmware-name	확인함(기기 목록)

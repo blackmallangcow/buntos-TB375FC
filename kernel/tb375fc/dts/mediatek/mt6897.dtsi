@@ -995,6 +995,64 @@
 			};
 		};
 
+		/*
+		 * Wi-Fi and Bluetooth/GNSS common part. The bootloader looks these
+		 * nodes up by their paths, without their unit addresses, and does
+		 * not read their status. Only when it finds consys, wifi, gps and
+		 * connscp, all of them, does it carve out the firmware memory, load
+		 * the firmware and write emi-addr here and memory-region in the
+		 * wifi node, so the sizes below are what it reads. gps and connscp
+		 * stay out of this tree until the bring-up, which keeps the
+		 * bootloader away from all of this before then.
+		 * TODO(2d): add them and enable these.
+		 */
+		wifi: wifi@18000000 {
+			compatible = "mediatek,mt6897-wifi";
+			reg = <0 0x18000000 0 0x700000>,
+			      <0 0x10001000 0 0x1000>;
+			interrupts = <GIC_SPI 889 IRQ_TYPE_LEVEL_HIGH 0>;
+			mediatek,connsys = <&consys>;
+			emi-size = <0x1400000>;
+			emi-alignment = <0x1000000>;
+			emi-max-addr = <0xc0000000>;
+			status = "disabled";
+		};
+
+		consys: consys@18001000 {
+			compatible = "mediatek,mt6897-consys";
+			reg = <0 0x18001000 0 0x1000>,
+			      <0 0x11b20000 0 0x1000>;
+			reg-names = "cfg-on", "iocfg-rt";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_CONN>;
+			emi-addr = /bits/ 64 <0>;
+			emi-size = <0xc00000>;
+			ro-emi-size = <0x680000>;
+			rw-emi-size = <0x480000>;
+			ro-bt-emi-size = <0x2e0000>;
+			ro-gps-emi-size = <0xa0000>;
+			ro-wifi-emi-size = <0x300000>;
+			emi-alignment = <0x100000>;
+			emi-max-addr = <0x90000000>;
+			status = "disabled";
+		};
+
+		/*
+		 * The Bluetooth radio. The bootloader has no use for this node;
+		 * what it loads for it depends on the consys and wifi nodes above.
+		 * TODO(2d): enable this after those.
+		 */
+		bluetooth: bluetooth@18800000 {
+			compatible = "mediatek,mt6897-bluetooth";
+			reg = <0 0x18800000 0 0x21000>,
+			      <0 0x18000000 0 0x80000>;
+			reg-names = "bgf", "conn";
+			interrupts = <GIC_SPI 614 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 891 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "sw", "bus-hang";
+			mediatek,connsys = <&consys>;
+			status = "disabled";
+		};
+
 		/* TOPRGU, already running when the bootloader hands over */
 		watchdog: watchdog@1c00a000 {
 			compatible = "mediatek,mt6897-wdt", "mediatek,mt6589-wdt";

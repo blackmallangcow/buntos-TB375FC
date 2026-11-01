@@ -1,0 +1,147 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: net: wireless: mt76: add the MT6897 Wi-Fi
+
+The Wi-Fi of the MT6897 connsys is an MT7921 on the SoC bus. Its
+firmware does not come from a file: the bootloader loads it and writes
+memory-region, the only memory the bus master can reach, in a node it
+finds by its path. It reads the emi properties for that. What is left
+for a file is the calibration data of the device.
+
+The RF front end chips can't be told from the hardware. The stock kernel
+has them as properties and a table of pin functions, which is the form
+they take here.
+---
+ .../bindings/net/wireless/mediatek,mt76.yaml  | 94 +++++++++++++++++++
+ 1 file changed, 94 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/net/wireless/mediatek,mt76.yaml b/Documentation/devicetree/bindings/net/wireless/mediatek,mt76.yaml
+index ae6b97c..720afff 100644
+--- a/Documentation/devicetree/bindings/net/wireless/mediatek,mt76.yaml
++++ b/Documentation/devicetree/bindings/net/wireless/mediatek,mt76.yaml
+@@ -18,11 +18,17 @@ description: |
+   node of the PCI controller to which the wireless chip is connected.
+   Alternatively, it can specify the wireless part of the MT7628/MT7688
+   or MT7622/MT7986 SoC.
++  The wireless part of the connectivity subsystem of the MT6897 SoC is an
++  MT7921 on the SoC bus, whose firmware the bootloader loads. The bootloader
++  finds that node by its path, /soc/wifi or /wifi with any unit address,
++  whatever its status, reads what it has to carve out from the emi properties
++  and writes memory-region.
+ 
+ properties:
+   compatible:
+     enum:
+       - mediatek,mt76
++      - mediatek,mt6897-wifi
+       - mediatek,mt7628-wmac
+       - mediatek,mt7622-wmac
+       - mediatek,mt7981-wmac
+@@ -48,6 +54,47 @@ properties:
+   memory-region:
+     maxItems: 1
+ 
++  firmware-name:
++    maxItems: 1
++    description:
++      The calibration data of this device, which the MT6897 keeps in a device
++      specific file. It has the MAC address in it, so no image can carry it.
++
++  emi-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description:
++      The size of the region all DMA has to stay in, for the bootloader
++
++  emi-alignment:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The alignment of that region, for the bootloader
++
++  emi-max-addr:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The end of the memory that region may be in, for the bootloader
++
++  mediatek,connsys:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: The connectivity subsystem that powers this device
++
++  mediatek,fem-parts:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    description:
++      The RF front end chips, by the vendor and part IDs of the firmware. No
++      property means none.
++    items:
++      - description: vendor of the 2.4 GHz chip
++      - description: part of the 2.4 GHz chip
++      - description: vendor of the 5 GHz chip
++      - description: part of the 5 GHz chip
++
++  mediatek,fem-pins:
++    $ref: /schemas/types.yaml#/definitions/uint8-array
++    description:
++      The control lines of the RF front end chips, each as the antenna selection
++      line, the function on it and its polarity. Their pads are in pinctrl-0.
++    maxItems: 96
++
+   resets:
+     maxItems: 1
+     description:
+@@ -287,6 +334,33 @@ required:
+ 
+ allOf:
+   - $ref: ieee80211.yaml#
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6897-wifi
++    then:
++      properties:
++        reg:
++          items:
++            - description: The window of the connectivity subsystem on the bus
++            - description: The always-on infrastructure registers of the SoC
++      required:
++        - interrupts
++        - firmware-name
++        - emi-size
++        - emi-alignment
++        - emi-max-addr
++        - mediatek,connsys
++    else:
++      properties:
++        firmware-name: false
++        emi-size: false
++        emi-alignment: false
++        emi-max-addr: false
++        mediatek,connsys: false
++        mediatek,fem-parts: false
++        mediatek,fem-pins: false
+   - if:
+       properties:
+         compatible:
+@@ -306,6 +380,26 @@ allOf:
+ unevaluatedProperties: false
+ 
+ examples:
++  - |
++    #include <dt-bindings/interrupt-controller/arm-gic.h>
++    #include <dt-bindings/interrupt-controller/irq.h>
++
++    soc {
++      #address-cells = <2>;
++      #size-cells = <2>;
++
++      wifi@18000000 {
++        compatible = "mediatek,mt6897-wifi";
++        reg = <0 0x18000000 0 0x700000>, <0 0x10001000 0 0x1000>;
++        interrupts = <GIC_SPI 889 IRQ_TYPE_LEVEL_HIGH 0>;
++        mediatek,connsys = <&consys>;
++        firmware-name = "lenovo/tb375fc/wifi-nvram.bin";
++        emi-size = <0x1400000>;
++        emi-alignment = <0x1000000>;
++        emi-max-addr = <0xc0000000>;
++      };
++    };
++
+   - |
+     pcie0 {
+       #address-cells = <3>;

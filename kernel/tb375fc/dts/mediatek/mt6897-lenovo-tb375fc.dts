@@ -397,6 +397,47 @@
 			output-low;
 		};
 	};
+
+	/*
+	 * The interface of the RF chip. The driver also switches the pull of
+	 * GPIO193 and GPIO202, which the stock kernel does without touching
+	 * their pull resistor selection.
+	 */
+	conn_pins_off: conn-off-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO192__FUNC_GPIO192>,
+				 <PINMUX_GPIO193__FUNC_GPIO193>,
+				 <PINMUX_GPIO194__FUNC_GPIO194>,
+				 <PINMUX_GPIO195__FUNC_GPIO195>,
+				 <PINMUX_GPIO196__FUNC_GPIO196>,
+				 <PINMUX_GPIO197__FUNC_GPIO197>,
+				 <PINMUX_GPIO198__FUNC_GPIO198>,
+				 <PINMUX_GPIO199__FUNC_GPIO199>,
+				 <PINMUX_GPIO200__FUNC_GPIO200>,
+				 <PINMUX_GPIO201__FUNC_GPIO201>,
+				 <PINMUX_GPIO202__FUNC_GPIO202>;
+		};
+	};
+
+	conn_pins_on: conn-on-pins {
+		pins-reset {
+			pinmux = <PINMUX_GPIO194__FUNC_CONN_HRST_B>;
+		};
+
+		pins-bus {
+			pinmux = <PINMUX_GPIO192__FUNC_CONN_TOP_CLK>,
+				 <PINMUX_GPIO193__FUNC_CONN_TOP_DATA>,
+				 <PINMUX_GPIO195__FUNC_CONN_WF_CTRL0>,
+				 <PINMUX_GPIO196__FUNC_CONN_WF_CTRL1>,
+				 <PINMUX_GPIO197__FUNC_CONN_WF_CTRL2>,
+				 <PINMUX_GPIO198__FUNC_CONN_WF_CTRL3>,
+				 <PINMUX_GPIO199__FUNC_CONN_WF_CTRL4>,
+				 <PINMUX_GPIO200__FUNC_CONN_WB_PTA>,
+				 <PINMUX_GPIO201__FUNC_CONN_BT_CLK>,
+				 <PINMUX_GPIO202__FUNC_CONN_BT_DATA>;
+			drive-strength = <4>;
+		};
+	};
 };
 
 &reserved_memory {
@@ -552,6 +593,19 @@
 				regulator-always-on;
 			};
 
+			/*
+			 * Disabled rails stay as they are, like the ones left out
+			 * of this node. They wait for the connectivity bring-up.
+			 */
+			mt6363_vcn13: vcn13 {
+				regulator-name = "mt6363_vcn13";
+				regulator-min-microvolt = <1350000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-enable-ramp-delay = <180>;
+				regulator-allowed-modes = <0 2>;
+				status = "disabled";
+			};
+
 			mt6363_vemc: vemc {
 				regulator-name = "vufs_vcc";
 				regulator-enable-ramp-delay = <680>;
@@ -573,6 +627,16 @@
 				regulator-name = "mt6363_vm18";
 				regulator-enable-ramp-delay = <280>;
 				regulator-always-on;
+			};
+
+			/* Feeds the 1.8 V side of the RF chip, at 1.7 V as the stock driver does */
+			mt6363_vrfio18: vrf-io18 {
+				regulator-name = "mt6363_vrfio18";
+				regulator-min-microvolt = <1700000>;
+				regulator-max-microvolt = <1700000>;
+				regulator-enable-ramp-delay = <180>;
+				regulator-allowed-modes = <0 2>;
+				status = "disabled";
 			};
 
 			mt6363_vs1: vs1 {
@@ -667,6 +731,13 @@
 			compatible = "mediatek,mt6368-regulator";
 			reg = <0x30>;
 
+			mt6368_vant18: vant18 {
+				regulator-name = "mt6368_vant18";
+				regulator-enable-ramp-delay = <680>;
+				regulator-allowed-modes = <0 2>;
+				status = "disabled";
+			};
+
 			mt6368_vbuck2: vbuck2 {
 				regulator-name = "vgpu";
 				regulator-enable-ramp-delay = <200>;
@@ -683,6 +754,20 @@
 				regulator-name = "mt6368_vbuck6";
 				regulator-enable-ramp-delay = <180>;
 				regulator-always-on;
+			};
+
+			mt6368_vcn33_1: vcn33-1 {
+				regulator-name = "mt6368_vcn33_1";
+				regulator-enable-ramp-delay = <680>;
+				regulator-allowed-modes = <0 2>;
+				status = "disabled";
+			};
+
+			mt6368_vcn33_2: vcn33-2 {
+				regulator-name = "mt6368_vcn33_2";
+				regulator-enable-ramp-delay = <680>;
+				regulator-allowed-modes = <0 2>;
+				status = "disabled";
 			};
 
 			mt6368_vio28: vio28 {
@@ -784,6 +869,17 @@
 			};
 		};
 	};
+
+	/*
+	 * Clock buffer, RTC and more. It has no driver; the connectivity driver
+	 * reads the frequency of the RF chip's clock from it.
+	 * TODO(2d): enable with consys.
+	 */
+	mt6685: pmic@9 {
+		compatible = "mediatek,mt6685";
+		reg = <0x9 SPMI_USID>;
+		status = "disabled";
+	};
 };
 
 /*
@@ -841,4 +937,26 @@
 &ufshci {
 	vcc-supply = <&mt6363_vemc>;
 	vccq-supply = <&mt6319_8_vbuck3>;
+};
+
+&consys {
+	vcn13-supply = <&mt6363_vcn13>;
+	vrfio18-supply = <&mt6363_vrfio18>;
+	vcn33-1-supply = <&mt6368_vcn33_1>;
+	vcn33-2-supply = <&mt6368_vcn33_2>;
+	vant18-supply = <&mt6368_vant18>;
+	mediatek,dcxo = <&mt6685>;
+	pinctrl-names = "default", "active";
+	pinctrl-0 = <&conn_pins_off>;
+	pinctrl-1 = <&conn_pins_on>;
+};
+
+/*
+ * The stock tree picks the RF front end by a hardware ID property it does not
+ * have, which makes it none, unless a file on the device says otherwise. Leaving
+ * out mediatek,fem-parts says none. TODO(2d): compare with the "FemInfo" line of
+ * the stock driver's log.
+ */
+&wifi {
+	firmware-name = "lenovo/tb375fc/wifi-nvram.bin";
 };

@@ -1,0 +1,748 @@
+From: buntOS contributors
+Subject: [PATCH] soc: mediatek: add the MT6897 connectivity subsystem power driver
+
+The connsys of the MT6897 powers its radios and an RF chip on an
+internal SPI bus. Linux owns the PMIC rails, the pads of the interface
+to the RF chip and the CONN power domain. The secure firmware does the
+rest of the sequence on request, as SIP calls. The order here is that of
+the stock driver, and the calls and their arguments have been compared
+with it by a script.
+
+This does not do everything the stock driver does:
+
+ - The rails stay on in the normal mode while a radio is on, where the
+   stock driver gives them to the SRCLKEN hardware request and the low
+   power mode at the end of power on. That costs idle power, and it
+   can't get a mode wrong.
+ - There is no thermal query, power dump or debug path.
+ - The clock type comes from the MT6685 only. The stock driver also knows
+   of a TCXO configuration which this board does not have.
+
+The bootloader writes the address of the firmware in the node of the
+device in the boot modes where it loads the firmware, and not in
+recovery or power-off charging. Without it the driver does not touch any
+hardware.
+
+Each step of a power on is logged, as a wrong step can hang the bus
+without a word and the last line says where. It stays that way until the
+driver has seen real use.
+---
+ drivers/soc/mediatek/Kconfig             |  14 +
+ drivers/soc/mediatek/Makefile            |   1 +
+ drivers/soc/mediatek/mtk-connsys.c       | 638 +++++++++++++++++++++++
+ include/linux/soc/mediatek/mtk-connsys.h |  27 +
+ 4 files changed, 680 insertions(+)
+
+diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
+index d729397..488471c 100644
+--- a/drivers/soc/mediatek/Kconfig
++++ b/drivers/soc/mediatek/Kconfig
+@@ -17,6 +17,20 @@ config MTK_CMDQ
+ 	  time limitation, such as updating display configuration during the
+ 	  vblank.
+ 
++config MTK_CONNSYS
++	tristate "MediaTek connectivity subsystem base power driver"
++	depends on ARCH_MEDIATEK || COMPILE_TEST
++	depends on ARM64 && HAVE_ARM_SMCCC
++	depends on OF && REGULATOR && SPMI
++	depends on PINCTRL
++	select REGMAP
++	help
++	  Say yes here to add support for the base part of the connectivity
++	  subsystem of the MediaTek MT6897. It powers the Wi-Fi and Bluetooth
++	  radios of the SoC and their RF chip, with the help of the secure
++	  firmware, and tells the radio drivers where the bootloader has put
++	  their firmware.
++
+ config MTK_DEVAPC
+ 	tristate "Mediatek Device APC Support"
+ 	help
+diff --git a/drivers/soc/mediatek/Makefile b/drivers/soc/mediatek/Makefile
+index 0665573..6f38c34 100644
+--- a/drivers/soc/mediatek/Makefile
++++ b/drivers/soc/mediatek/Makefile
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_MTK_CMDQ) += mtk-cmdq-helper.o
++obj-$(CONFIG_MTK_CONNSYS) += mtk-connsys.o
+ obj-$(CONFIG_MTK_DEVAPC) += mtk-devapc.o
+ obj-$(CONFIG_MTK_DVFSRC) += mtk-dvfsrc.o
+ obj-$(CONFIG_MTK_INFRACFG) += mtk-infracfg.o
+diff --git a/drivers/soc/mediatek/mtk-connsys.c b/drivers/soc/mediatek/mtk-connsys.c
+new file mode 100644
+index 0000000..f2b18cf
+--- /dev/null
++++ b/drivers/soc/mediatek/mtk-connsys.c
+@@ -0,0 +1,638 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek connectivity subsystem (connsys) base power driver
++ *
++ * The connsys of the smartphone SoCs holds the Wi-Fi, Bluetooth and GNSS
++ * radios behind a common "conninfra" part, with an RF chip (A-die) on an
++ * internal SPI bus. On MT6897 the Linux side only owns the PMIC rails, the pads
++ * of the A-die interface and the CONN power domain; the secure firmware does
++ * the rest of the power-on sequence on request, which is what the "SIP" calls
++ * below are.
++ *
++ * The bootloader loads the radio firmware into a carved-out memory region and
++ * opens it to the connsys bus master, so nothing is downloaded from here.
++ *
++ * A wrong step here can hang the bus, so power on says what it is about to do.
++ */
++
++#include <linux/arm-smccc.h>
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++#include <linux/soc/mediatek/mtk-connsys.h>
++#include <linux/soc/mediatek/mtk_sip_svc.h>
++#include <linux/spmi.h>
++
++#define MTK_SIP_KERNEL_CONNSYS_CONTROL		MTK_SIP_SMC_CMD(0x534)
++
++/* Operations of the SIP call, in its second argument */
++enum mtk_connsys_sip_op {
++	CONNSYS_SIP_INIT_ATF_DATA = 0,
++	CONNSYS_SIP_POLLING_CHIPID = 10,
++	CONNSYS_SIP_D_DIE_CFG = 11,
++	CONNSYS_SIP_SPI_MASTER_CFG = 12,
++	CONNSYS_SIP_A_DIE_CFG = 13,
++	CONNSYS_SIP_AFE_SW_PATCH = 14,
++	CONNSYS_SIP_AFE_WBG_CAL = 15,
++	CONNSYS_SIP_SUBSYS_PLL_INITIAL = 16,
++	CONNSYS_SIP_LOW_POWER_SETTING = 17,
++	CONNSYS_SIP_CONNINFRA_WAKEUP = 18,
++	CONNSYS_SIP_CONNINFRA_SLEEP = 19,
++	CONNSYS_SIP_SUBSYS_STATUS_UPDATE = 24,
++	CONNSYS_SIP_EMI_SET_REMAPPING_REG = 70,
++};
++
++/* The third argument of CONNSYS_SIP_INIT_ATF_DATA; the second is always 0 */
++enum mtk_connsys_clock_type {
++	CONNSYS_CLOCK_26M_COCLOCK = 0,
++	CONNSYS_CLOCK_52M_COCLOCK = 1,
++};
++
++/* MT6685 clock buffer PMIC: bit 0 tells a 52 MHz crystal path to the A-die */
++#define MT6685_DCXO_DIGCLK_ELR			0x7f4
++
++/*
++ * The SW_OP_EN bit of an LDO lets its software enable bit count. The regulator
++ * drivers leave it alone, so it is set here. The regmaps of the regulator
++ * drivers start at the 0x30 of the "regulators@30" nodes.
++ */
++#define MT63XX_REGULATOR_BASE			0x30
++#define MT63XX_LDO_SW_OP_EN			BIT(7)
++#define MT6363_VRFIO18_SW_OP_EN			(0x1bd4 - MT63XX_REGULATOR_BASE)
++#define MT6363_VCN13_SW_OP_EN			(0x1d16 - MT63XX_REGULATOR_BASE)
++#define MT6368_VANT18_SW_OP_EN			(0x1c2a - MT63XX_REGULATOR_BASE)
++#define MT6368_VCN33_1_SW_OP_EN			(0x1cc7 - MT63XX_REGULATOR_BASE)
++#define MT6368_VCN33_2_SW_OP_EN			(0x1cd5 - MT63XX_REGULATOR_BASE)
++
++#define MT6897_VRFIO18_UV			1700000
++#define MT6897_VCN13_UV				1350000
++
++/* GPIO193 and GPIO202, pull up while powered and pull down while not */
++#define MT6897_IOCFG_RT_PUPD_CFG0		0xd0
++#define MT6897_IOCFG_RT_PUPD_A_DIE		(BIT(1) | BIT(3))
++
++struct mtk_connsys {
++	struct device *dev;
++	/* Serialises the radios */
++	struct mutex lock;
++	struct regulator *vcn13;
++	struct regulator *vrfio18;
++	struct regulator *vcn33_1;
++	struct regulator *vcn33_2;
++	struct regulator *vant18;
++	struct pinctrl *pinctrl;
++	struct pinctrl_state *pins_default;
++	struct pinctrl_state *pins_active;
++	void __iomem *iocfg_rt;
++	struct spmi_device *dcxo;
++	phys_addr_t emi_addr;
++	u32 emi_size;
++	unsigned int radios;
++	bool atf_data_sent;
++};
++
++static long mtk_connsys_sip(struct mtk_connsys *cs, const char *name,
++			    unsigned long op, unsigned long a2, unsigned long a3,
++			    unsigned long *a1)
++{
++	struct arm_smccc_res res;
++
++	dev_info(cs->dev, "SIP %s(%lu, %lu)\n", name, a2, a3);
++	arm_smccc_smc(MTK_SIP_KERNEL_CONNSYS_CONTROL, op, a2, a3, 0, 0, 0, 0,
++		      &res);
++	if (a1)
++		*a1 = res.a1;
++	if ((int)res.a0)
++		dev_warn(cs->dev, "SIP %s returned %d\n", name, (int)res.a0);
++
++	return (int)res.a0;
++}
++
++static int mtk_connsys_clock_type(struct mtk_connsys *cs)
++{
++	u8 val;
++	int ret;
++
++	ret = spmi_ext_register_readl(cs->dcxo, MT6685_DCXO_DIGCLK_ELR, &val, 1);
++	if (ret) {
++		dev_err(cs->dev, "can't read the DCXO: %d\n", ret);
++		return ret;
++	}
++
++	dev_info(cs->dev, "A-die clock: %s MHz co-clock\n",
++		 val & BIT(0) ? "52" : "26");
++
++	return val & BIT(0) ? CONNSYS_CLOCK_52M_COCLOCK :
++			      CONNSYS_CLOCK_26M_COCLOCK;
++}
++
++/*
++ * The stock kernel gives these LDOs to the SRCLKEN hardware request and to the
++ * low power mode at the end of power on. Here they are simply on, in the normal
++ * mode, while a radio is on: that costs idle power but can't get a mode wrong.
++ */
++static int mtk_connsys_ldo_on(struct mtk_connsys *cs, const char *name,
++			      struct regulator *reg, unsigned int sw_op_en)
++{
++	struct regmap *map = regulator_get_regmap(reg);
++	int ret;
++
++	dev_info(cs->dev, "rail %s\n", name);
++
++	if (IS_ERR(map) || regmap_set_bits(map, sw_op_en, MT63XX_LDO_SW_OP_EN))
++		dev_warn(cs->dev, "can't set SW_OP_EN of %s\n", name);
++
++	ret = regulator_enable(reg);
++	if (ret) {
++		dev_err(cs->dev, "can't enable %s: %d\n", name, ret);
++		return ret;
++	}
++
++	/* Not every LDO has a software mode to change, so this is only a wish */
++	if (regulator_set_mode(reg, REGULATOR_MODE_NORMAL))
++		dev_dbg(cs->dev, "can't set the mode of %s\n", name);
++
++	return 0;
++}
++
++static int mtk_connsys_core_rails_on(struct mtk_connsys *cs)
++{
++	int ret;
++
++	ret = regulator_set_voltage(cs->vrfio18, MT6897_VRFIO18_UV,
++				    MT6897_VRFIO18_UV);
++	if (ret) {
++		dev_err(cs->dev, "can't set VRFIO18: %d\n", ret);
++		return ret;
++	}
++
++	ret = regulator_set_voltage(cs->vcn13, MT6897_VCN13_UV, MT6897_VCN13_UV);
++	if (ret) {
++		dev_err(cs->dev, "can't set VCN13: %d\n", ret);
++		return ret;
++	}
++
++	ret = mtk_connsys_ldo_on(cs, "VRFIO18", cs->vrfio18,
++				 MT6363_VRFIO18_SW_OP_EN);
++	if (ret)
++		return ret;
++
++	ret = mtk_connsys_ldo_on(cs, "VCN13", cs->vcn13, MT6363_VCN13_SW_OP_EN);
++	if (ret)
++		regulator_disable(cs->vrfio18);
++
++	return ret;
++}
++
++static void mtk_connsys_core_rails_off(struct mtk_connsys *cs)
++{
++	regulator_disable(cs->vcn13);
++	regulator_disable(cs->vrfio18);
++}
++
++static int mtk_connsys_rf_rails_on(struct mtk_connsys *cs)
++{
++	int ret;
++
++	ret = mtk_connsys_ldo_on(cs, "VCN33_1", cs->vcn33_1,
++				 MT6368_VCN33_1_SW_OP_EN);
++	if (ret)
++		return ret;
++
++	ret = mtk_connsys_ldo_on(cs, "VCN33_2", cs->vcn33_2,
++				 MT6368_VCN33_2_SW_OP_EN);
++	if (ret)
++		goto err_vcn33_1;
++
++	ret = mtk_connsys_ldo_on(cs, "VANT18", cs->vant18,
++				 MT6368_VANT18_SW_OP_EN);
++	if (ret)
++		goto err_vcn33_2;
++
++	return 0;
++
++err_vcn33_2:
++	regulator_disable(cs->vcn33_2);
++err_vcn33_1:
++	regulator_disable(cs->vcn33_1);
++	return ret;
++}
++
++static void mtk_connsys_rf_rails_off(struct mtk_connsys *cs)
++{
++	regulator_disable(cs->vant18);
++	regulator_disable(cs->vcn33_2);
++	regulator_disable(cs->vcn33_1);
++	/* The core rails must stay up for 1 ms after these */
++	usleep_range(1000, 2000);
++}
++
++static int mtk_connsys_pads(struct mtk_connsys *cs, bool on)
++{
++	u32 val;
++	int ret;
++
++	ret = pinctrl_select_state(cs->pinctrl, on ? cs->pins_active :
++						     cs->pins_default);
++	if (ret) {
++		dev_err(cs->dev, "can't set the A-die pads: %d\n", ret);
++		return ret;
++	}
++
++	val = readl(cs->iocfg_rt + MT6897_IOCFG_RT_PUPD_CFG0);
++	if (on)
++		val &= ~MT6897_IOCFG_RT_PUPD_A_DIE;
++	else
++		val |= MT6897_IOCFG_RT_PUPD_A_DIE;
++	writel(val, cs->iocfg_rt + MT6897_IOCFG_RT_PUPD_CFG0);
++
++	return 0;
++}
++
++static int mtk_connsys_first_power_on(struct mtk_connsys *cs, unsigned int next,
++				      enum mtk_connsys_radio radio)
++{
++	unsigned long a1;
++	int clock, ret;
++
++	clock = mtk_connsys_clock_type(cs);
++	if (clock < 0)
++		return clock;
++
++	if (!cs->atf_data_sent) {
++		mtk_connsys_sip(cs, "init_atf_data", CONNSYS_SIP_INIT_ATF_DATA, 0,
++				clock, NULL);
++		cs->atf_data_sent = true;
++	}
++
++	ret = mtk_connsys_core_rails_on(cs);
++	if (ret)
++		return ret;
++
++	ret = mtk_connsys_pads(cs, true);
++	if (ret)
++		goto err_rails;
++
++	dev_info(cs->dev, "CONN power domain\n");
++	ret = pm_runtime_resume_and_get(cs->dev);
++	if (ret) {
++		dev_err(cs->dev, "can't power the CONN domain: %d\n", ret);
++		goto err_pads;
++	}
++
++	ret = mtk_connsys_sip(cs, "polling_chipid", CONNSYS_SIP_POLLING_CHIPID,
++			      0, 0, NULL);
++	if (ret) {
++		dev_err(cs->dev, "the D-die does not answer: %d\n", ret);
++		ret = -EIO;
++		goto err_power;
++	}
++
++	/* The secure firmware has the addresses from the bootloader */
++	mtk_connsys_sip(cs, "emi_set_remapping_reg",
++			CONNSYS_SIP_EMI_SET_REMAPPING_REG, 0, 0, NULL);
++	mtk_connsys_sip(cs, "d_die_cfg", CONNSYS_SIP_D_DIE_CFG, 0, 0, NULL);
++	mtk_connsys_sip(cs, "spi_master_cfg", CONNSYS_SIP_SPI_MASTER_CFG, 0, next,
++			NULL);
++
++	ret = mtk_connsys_sip(cs, "a_die_cfg", CONNSYS_SIP_A_DIE_CFG, 0, next, &a1);
++	if (ret) {
++		dev_err(cs->dev, "A-die configuration failed: %d\n", ret);
++		ret = -EIO;
++		goto err_power;
++	}
++	dev_info(cs->dev, "A-die version %#lx\n", a1);
++
++	mtk_connsys_sip(cs, "afe_sw_patch", CONNSYS_SIP_AFE_SW_PATCH, 0, 0, NULL);
++	mtk_connsys_sip(cs, "afe_wbg_cal", CONNSYS_SIP_AFE_WBG_CAL, 0, 0, NULL);
++	mtk_connsys_sip(cs, "subsys_pll_initial", CONNSYS_SIP_SUBSYS_PLL_INITIAL,
++			0, 0, NULL);
++	mtk_connsys_sip(cs, "subsys_status_update",
++			CONNSYS_SIP_SUBSYS_STATUS_UPDATE, 1, radio, NULL);
++	mtk_connsys_sip(cs, "low_power_setting", CONNSYS_SIP_LOW_POWER_SETTING, 0,
++			next, NULL);
++
++	ret = mtk_connsys_rf_rails_on(cs);
++	if (ret)
++		goto err_power;
++
++	return 0;
++
++err_power:
++	pm_runtime_put_sync(cs->dev);
++err_pads:
++	mtk_connsys_pads(cs, false);
++err_rails:
++	mtk_connsys_core_rails_off(cs);
++
++	return ret;
++}
++
++static int mtk_connsys_add_radio(struct mtk_connsys *cs, unsigned int curr,
++				 unsigned int next, enum mtk_connsys_radio radio)
++{
++	int ret;
++
++	ret = mtk_connsys_sip(cs, "conninfra_wakeup", CONNSYS_SIP_CONNINFRA_WAKEUP,
++			      0, 0, NULL);
++	if (ret) {
++		dev_err(cs->dev, "can't wake conninfra: %d\n", ret);
++		return -EIO;
++	}
++
++	mtk_connsys_sip(cs, "a_die_cfg", CONNSYS_SIP_A_DIE_CFG, curr, next, NULL);
++	mtk_connsys_sip(cs, "subsys_status_update",
++			CONNSYS_SIP_SUBSYS_STATUS_UPDATE, 1, radio, NULL);
++	mtk_connsys_sip(cs, "spi_master_cfg", CONNSYS_SIP_SPI_MASTER_CFG, curr,
++			next, NULL);
++	mtk_connsys_sip(cs, "low_power_setting", CONNSYS_SIP_LOW_POWER_SETTING,
++			curr, next, NULL);
++	mtk_connsys_sip(cs, "conninfra_sleep", CONNSYS_SIP_CONNINFRA_SLEEP, 0, 0,
++			NULL);
++
++	return 0;
++}
++
++/**
++ * mtk_connsys_power_on() - Power a radio of the connsys
++ * @cs: the connsys
++ * @radio: which radio
++ *
++ * The first radio powers the common part as well.
++ *
++ * Return: 0 or a negative error code
++ */
++int mtk_connsys_power_on(struct mtk_connsys *cs, enum mtk_connsys_radio radio)
++{
++	unsigned int next;
++	int ret;
++
++	mutex_lock(&cs->lock);
++
++	if (cs->radios & BIT(radio)) {
++		ret = 0;
++		goto out;
++	}
++
++	next = cs->radios | BIT(radio);
++	if (cs->radios)
++		ret = mtk_connsys_add_radio(cs, cs->radios, next, radio);
++	else
++		ret = mtk_connsys_first_power_on(cs, next, radio);
++	if (!ret)
++		cs->radios = next;
++
++	dev_info(cs->dev, "radio %d power on: %d, radios %#x\n", radio, ret,
++		 cs->radios);
++out:
++	mutex_unlock(&cs->lock);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_connsys_power_on);
++
++/**
++ * mtk_connsys_power_off() - Take the power from a radio of the connsys
++ * @cs: the connsys
++ * @radio: which radio
++ *
++ * The last radio powers the common part off as well.
++ */
++void mtk_connsys_power_off(struct mtk_connsys *cs, enum mtk_connsys_radio radio)
++{
++	unsigned int curr, next;
++
++	mutex_lock(&cs->lock);
++
++	curr = cs->radios;
++	if (!(curr & BIT(radio)))
++		goto out;
++
++	next = curr & ~BIT(radio);
++	if (next) {
++		if (!mtk_connsys_sip(cs, "conninfra_wakeup",
++				     CONNSYS_SIP_CONNINFRA_WAKEUP, 0, 0, NULL)) {
++			mtk_connsys_sip(cs, "subsys_status_update",
++					CONNSYS_SIP_SUBSYS_STATUS_UPDATE, 0,
++					radio, NULL);
++			mtk_connsys_sip(cs, "spi_master_cfg",
++					CONNSYS_SIP_SPI_MASTER_CFG, curr, next,
++					NULL);
++			mtk_connsys_sip(cs, "low_power_setting",
++					CONNSYS_SIP_LOW_POWER_SETTING, curr, next,
++					NULL);
++			mtk_connsys_sip(cs, "conninfra_sleep",
++					CONNSYS_SIP_CONNINFRA_SLEEP, 0, 0, NULL);
++		}
++	} else {
++		pm_runtime_put_sync(cs->dev);
++		mtk_connsys_pads(cs, false);
++		mtk_connsys_rf_rails_off(cs);
++		mtk_connsys_core_rails_off(cs);
++	}
++	cs->radios = next;
++	dev_info(cs->dev, "radio %d power off, radios %#x\n", radio, next);
++out:
++	mutex_unlock(&cs->lock);
++}
++EXPORT_SYMBOL_GPL(mtk_connsys_power_off);
++
++/**
++ * mtk_connsys_get_emi() - Tell where the bootloader put the radio firmware
++ * @cs: the connsys
++ * @addr: the physical address of the region
++ * @size: the size of the region
++ */
++void mtk_connsys_get_emi(struct mtk_connsys *cs, phys_addr_t *addr, u32 *size)
++{
++	*addr = cs->emi_addr;
++	*size = cs->emi_size;
++}
++EXPORT_SYMBOL_GPL(mtk_connsys_get_emi);
++
++static void mtk_connsys_put_device(void *data)
++{
++	put_device(data);
++}
++
++/**
++ * devm_mtk_connsys_get() - Look up the connsys of a radio device
++ * @dev: the device of the radio, with a mediatek,connsys property
++ *
++ * Return: the connsys, or an ERR_PTR
++ */
++struct mtk_connsys *devm_mtk_connsys_get(struct device *dev)
++{
++	struct platform_device *pdev;
++	struct device_node *np;
++	struct mtk_connsys *cs;
++	int ret;
++
++	np = of_parse_phandle(dev->of_node, "mediatek,connsys", 0);
++	if (!np)
++		return ERR_PTR(-ENODEV);
++
++	pdev = of_find_device_by_node(np);
++	of_node_put(np);
++	if (!pdev)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	ret = devm_add_action_or_reset(dev, mtk_connsys_put_device, &pdev->dev);
++	if (ret)
++		return ERR_PTR(ret);
++
++	cs = platform_get_drvdata(pdev);
++	if (!cs)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	if (!device_link_add(dev, &pdev->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
++		return ERR_PTR(-EINVAL);
++
++	return cs;
++}
++EXPORT_SYMBOL_GPL(devm_mtk_connsys_get);
++
++static void mtk_connsys_put_dcxo(void *data)
++{
++	put_device(data);
++}
++
++static int mtk_connsys_get_dcxo(struct mtk_connsys *cs)
++{
++	struct device *dev = cs->dev;
++	struct device_node *np;
++
++	np = of_parse_phandle(dev->of_node, "mediatek,dcxo", 0);
++	if (!np)
++		return dev_err_probe(dev, -EINVAL, "no mediatek,dcxo\n");
++
++	cs->dcxo = spmi_find_device_by_of_node(np);
++	of_node_put(np);
++	if (!cs->dcxo)
++		return dev_err_probe(dev, -EPROBE_DEFER, "no DCXO device\n");
++
++	return devm_add_action_or_reset(dev, mtk_connsys_put_dcxo, &cs->dcxo->dev);
++}
++
++static int mtk_connsys_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mtk_connsys *cs;
++	struct resource *res;
++	u64 emi_addr;
++	int ret;
++
++	cs = devm_kzalloc(dev, sizeof(*cs), GFP_KERNEL);
++	if (!cs)
++		return -ENOMEM;
++
++	cs->dev = dev;
++	ret = devm_mutex_init(dev, &cs->lock);
++	if (ret)
++		return ret;
++
++	/*
++	 * The bootloader writes the address in the tree when it has loaded the
++	 * firmware, which it does not do in every boot mode. Nothing can run
++	 * without it, so don't touch any hardware then.
++	 */
++	ret = of_property_read_u64(dev->of_node, "emi-addr", &emi_addr);
++	if (ret || !emi_addr)
++		return dev_err_probe(dev, -ENODEV,
++				     "the bootloader has not loaded the firmware (emi-addr)\n");
++
++	ret = of_property_read_u32(dev->of_node, "emi-size", &cs->emi_size);
++	if (ret)
++		return dev_err_probe(dev, ret, "no emi-size\n");
++
++	cs->emi_addr = emi_addr;
++	dev_info(dev, "firmware region at %pa, %#x bytes\n", &cs->emi_addr,
++		 cs->emi_size);
++
++	/* A register of the pin controller, so it can't be claimed */
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "iocfg-rt");
++	if (!res)
++		return dev_err_probe(dev, -EINVAL, "no iocfg-rt\n");
++
++	cs->iocfg_rt = devm_ioremap(dev, res->start, resource_size(res));
++	if (!cs->iocfg_rt)
++		return -ENOMEM;
++
++	cs->vcn13 = devm_regulator_get(dev, "vcn13");
++	if (IS_ERR(cs->vcn13))
++		return dev_err_probe(dev, PTR_ERR(cs->vcn13), "no VCN13\n");
++
++	cs->vrfio18 = devm_regulator_get(dev, "vrfio18");
++	if (IS_ERR(cs->vrfio18))
++		return dev_err_probe(dev, PTR_ERR(cs->vrfio18), "no VRFIO18\n");
++
++	cs->vcn33_1 = devm_regulator_get(dev, "vcn33-1");
++	if (IS_ERR(cs->vcn33_1))
++		return dev_err_probe(dev, PTR_ERR(cs->vcn33_1), "no VCN33_1\n");
++
++	cs->vcn33_2 = devm_regulator_get(dev, "vcn33-2");
++	if (IS_ERR(cs->vcn33_2))
++		return dev_err_probe(dev, PTR_ERR(cs->vcn33_2), "no VCN33_2\n");
++
++	cs->vant18 = devm_regulator_get(dev, "vant18");
++	if (IS_ERR(cs->vant18))
++		return dev_err_probe(dev, PTR_ERR(cs->vant18), "no VANT18\n");
++
++	cs->pinctrl = devm_pinctrl_get(dev);
++	if (IS_ERR(cs->pinctrl))
++		return dev_err_probe(dev, PTR_ERR(cs->pinctrl), "no pinctrl\n");
++
++	cs->pins_default = pinctrl_lookup_state(cs->pinctrl,
++						PINCTRL_STATE_DEFAULT);
++	if (IS_ERR(cs->pins_default))
++		return dev_err_probe(dev, PTR_ERR(cs->pins_default),
++				     "no default pins\n");
++
++	cs->pins_active = pinctrl_lookup_state(cs->pinctrl, "active");
++	if (IS_ERR(cs->pins_active))
++		return dev_err_probe(dev, PTR_ERR(cs->pins_active),
++				     "no active pins\n");
++
++	ret = mtk_connsys_get_dcxo(cs);
++	if (ret)
++		return ret;
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++
++	/* The radio firmware must not lose power across system sleep */
++	dev_pm_syscore_device(dev, true);
++
++	platform_set_drvdata(pdev, cs);
++
++	return 0;
++}
++
++static const struct of_device_id mtk_connsys_of_match[] = {
++	{ .compatible = "mediatek,mt6897-consys" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, mtk_connsys_of_match);
++
++static struct platform_driver mtk_connsys_driver = {
++	.probe = mtk_connsys_probe,
++	.driver = {
++		.name = "mtk-connsys",
++		.of_match_table = mtk_connsys_of_match,
++	},
++};
++module_platform_driver(mtk_connsys_driver);
++
++MODULE_DESCRIPTION("MediaTek connsys base power driver");
++MODULE_LICENSE("GPL");
+diff --git a/include/linux/soc/mediatek/mtk-connsys.h b/include/linux/soc/mediatek/mtk-connsys.h
+new file mode 100644
+index 0000000..49b2220
+--- /dev/null
++++ b/include/linux/soc/mediatek/mtk-connsys.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * MediaTek connectivity subsystem (connsys) base power driver
++ */
++
++#ifndef __SOC_MEDIATEK_MTK_CONNSYS_H
++#define __SOC_MEDIATEK_MTK_CONNSYS_H
++
++#include <linux/types.h>
++
++struct device;
++struct mtk_connsys;
++
++/* The numbers are the bits of the status words passed to the secure firmware */
++enum mtk_connsys_radio {
++	MTK_CONNSYS_RADIO_BT = 0,
++	MTK_CONNSYS_RADIO_FM = 1,
++	MTK_CONNSYS_RADIO_GPS = 2,
++	MTK_CONNSYS_RADIO_WIFI = 3,
++};
++
++struct mtk_connsys *devm_mtk_connsys_get(struct device *dev);
++int mtk_connsys_power_on(struct mtk_connsys *cs, enum mtk_connsys_radio radio);
++void mtk_connsys_power_off(struct mtk_connsys *cs, enum mtk_connsys_radio radio);
++void mtk_connsys_get_emi(struct mtk_connsys *cs, phys_addr_t *addr, u32 *size);
++
++#endif /* __SOC_MEDIATEK_MTK_CONNSYS_H */

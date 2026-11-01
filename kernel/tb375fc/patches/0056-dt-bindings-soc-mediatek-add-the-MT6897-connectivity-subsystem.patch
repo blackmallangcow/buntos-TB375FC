@@ -1,0 +1,275 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: soc: mediatek: add the MT6897 connectivity subsystem
+
+The common part of the Wi-Fi, Bluetooth and GNSS radios of the MT6897.
+
+The properties that start with emi and ro are not for Linux. The
+bootloader reads them from a node it finds by its path to know what
+memory to carve out for the radio firmware, and it refuses to load the
+firmware if one is missing. It does not look at the status of the node.
+They are in the binding because they have to be in the tree, with the
+numbers of the stock tree.
+
+The bootloader also wants a gps and a connscp node with their own sizes
+before it does anything. Nothing binds to those, so they have no
+compatible, and their schema goes by the node name.
+---
+ .../mediatek,mt6897-consys-carveouts.yaml     |  72 ++++++++
+ .../soc/mediatek/mediatek,mt6897-consys.yaml  | 171 ++++++++++++++++++
+ 2 files changed, 243 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-consys-carveouts.yaml b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-consys-carveouts.yaml
+new file mode 100644
+index 0000000..4cedf83
+--- /dev/null
++++ b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-consys-carveouts.yaml
+@@ -0,0 +1,72 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6897-consys-carveouts.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6897 connectivity memory for the bootloader
++
++maintainers:
++  - Matthias Brugger <matthias.bgg@gmail.com>
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++
++description:
++  The bootloader of the MT6897 carves out memory for the GNSS and the SCP side of
++  the connectivity subsystem as well, and loads no radio firmware at all unless
++  it finds these two nodes with their sizes, by their paths. Nothing binds to
++  them. Leaving them out keeps the bootloader from doing any of this.
++
++select:
++  properties:
++    $nodename:
++      enum:
++        - connscp
++        - gps
++  required:
++    - $nodename
++
++properties:
++  $nodename:
++    enum:
++      - connscp
++      - gps
++
++  emi-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The size of the GNSS region
++
++  emi-alignment:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The alignment of the GNSS region
++
++  emi-max-addr:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The end of the memory the GNSS region may be in
++
++  scp-shm-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The size of the memory shared with the SCP
++
++  scp-remap-offset:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The offset of that memory, in the bootloader's log only
++
++  scp-remap-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The size of the remapped part, in the bootloader's log only
++
++additionalProperties: false
++
++examples:
++  - |
++    connscp {
++        scp-shm-size = <0x20000>;
++        scp-remap-offset = <0x2100000>;
++        scp-remap-size = <0x20000>;
++    };
++  - |
++    gps {
++        emi-size = <0x100000>;
++        emi-alignment = <0x100000>;
++        emi-max-addr = <0xc0000000>;
++    };
+diff --git a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-consys.yaml b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-consys.yaml
+new file mode 100644
+index 0000000..296cb9f
+--- /dev/null
++++ b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-consys.yaml
+@@ -0,0 +1,171 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6897-consys.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6897 connectivity subsystem
++
++maintainers:
++  - Matthias Brugger <matthias.bgg@gmail.com>
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++
++description: |
++  The common part of the Wi-Fi, Bluetooth and GNSS radios of the SoC, which
++  powers them and an RF chip on an internal SPI bus. The secure firmware does
++  most of the power-on sequence.
++
++  The bootloader loads the radio firmware into memory it carves out, opens
++  that memory to the connsys bus master and tells the secure firmware about it.
++  It finds this node by its path, /soc/consys or /consys with any unit address,
++  whatever its status, reads what it has to carve out from the emi and ro
++  properties and refuses to load anything if one is missing. It writes emi-addr
++  back only in the boot modes where it does load the firmware.
++
++properties:
++  compatible:
++    const: mediatek,mt6897-consys
++
++  reg:
++    items:
++      - description: always-on configuration registers of the common part
++      - description: pad configuration of the A-die interface pins
++
++  reg-names:
++    items:
++      - const: cfg-on
++      - const: iocfg-rt
++
++  power-domains:
++    maxItems: 1
++
++  vcn13-supply:
++    description: 1.35 V for the A-die
++
++  vrfio18-supply:
++    description: 1.7 V for the A-die I/O
++
++  vcn33-1-supply:
++    description: 3.3 V for the RF front end
++
++  vcn33-2-supply:
++    description: 3.3 V for the RF front end
++
++  vant18-supply:
++    description: 1.8 V for the antenna switches
++
++  mediatek,dcxo:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      The SPMI PMIC with the clock buffer of the A-die, which tells its
++      frequency.
++
++  pinctrl-names:
++    items:
++      - const: default
++      - const: active
++
++  pinctrl-0:
++    maxItems: 1
++    description: The pads of the A-die interface while powered off
++
++  pinctrl-1:
++    maxItems: 1
++    description: The pads of the A-die interface while powered
++
++  emi-addr:
++    $ref: /schemas/types.yaml#/definitions/uint64
++    description:
++      Where the firmware is, written by the bootloader. Zero until then.
++
++  emi-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The size of the firmware region, for the bootloader
++
++  ro-emi-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The part of it for the read-only sections, for the bootloader
++
++  rw-emi-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The part of it for the writable sections, for the bootloader
++
++  ro-bt-emi-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The read-only part for Bluetooth, for the bootloader
++
++  ro-gps-emi-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The read-only part for GNSS, for the bootloader
++
++  ro-wifi-emi-size:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The read-only part for Wi-Fi, for the bootloader
++
++  emi-alignment:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The alignment of the firmware region, for the bootloader
++
++  emi-max-addr:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: The end of the memory the region may be in, for the bootloader
++
++required:
++  - compatible
++  - reg
++  - reg-names
++  - power-domains
++  - vcn13-supply
++  - vrfio18-supply
++  - vcn33-1-supply
++  - vcn33-2-supply
++  - vant18-supply
++  - mediatek,dcxo
++  - pinctrl-names
++  - pinctrl-0
++  - pinctrl-1
++  - emi-addr
++  - emi-size
++  - ro-emi-size
++  - rw-emi-size
++  - ro-bt-emi-size
++  - ro-gps-emi-size
++  - ro-wifi-emi-size
++  - emi-alignment
++  - emi-max-addr
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/power/mediatek,mt6897-power.h>
++
++    soc {
++        #address-cells = <2>;
++        #size-cells = <2>;
++
++        consys@18001000 {
++            compatible = "mediatek,mt6897-consys";
++            reg = <0 0x18001000 0 0x1000>, <0 0x11b20000 0 0x1000>;
++            reg-names = "cfg-on", "iocfg-rt";
++            power-domains = <&scpsys MT6897_POWER_DOMAIN_CONN>;
++            vcn13-supply = <&mt6363_vcn13>;
++            vrfio18-supply = <&mt6363_vrfio18>;
++            vcn33-1-supply = <&mt6368_vcn33_1>;
++            vcn33-2-supply = <&mt6368_vcn33_2>;
++            vant18-supply = <&mt6368_vant18>;
++            mediatek,dcxo = <&mt6685>;
++            pinctrl-names = "default", "active";
++            pinctrl-0 = <&conn_pins_off>;
++            pinctrl-1 = <&conn_pins_on>;
++            emi-addr = /bits/ 64 <0>;
++            emi-size = <0xc00000>;
++            ro-emi-size = <0x680000>;
++            rw-emi-size = <0x480000>;
++            ro-bt-emi-size = <0x2e0000>;
++            ro-gps-emi-size = <0xa0000>;
++            ro-wifi-emi-size = <0x300000>;
++            emi-alignment = <0x100000>;
++            emi-max-addr = <0x90000000>;
++        };
++    };
