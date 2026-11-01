@@ -4,12 +4,12 @@ TB375FC(MediaTek MT6897)의 mainline 장치 트리다. 설계안 [2.3절](../../
 
 | 파일 | 내용 |
 |---|---|
-| `mediatek/mt6897.dtsi` | SoC. CPU·GIC·아키텍처 타이머·PSCI·PMU·워치독·cpufreq-hw는 켜 두고, UART(보드가 켠다)·systimer·UFS·USB·SPMI는 `disabled`로 둔다 |
-| `mediatek/mt6897-lenovo-tb375fc.dts` | 보드. `chosen`, `memory`, UART0을 켠다. framebuffer·ramoops는 기기에서 확인할 때까지 `disabled` |
+| `mediatek/mt6897.dtsi` | SoC. CPU·GIC·아키텍처 타이머·PSCI·PMU·워치독·cpufreq-hw는 켜 두고, UART(보드가 켠다)·systimer·UFS·USB·pio·SPMI는 `disabled`로 둔다 |
+| `mediatek/mt6897-lenovo-tb375fc.dts` | 보드. `chosen`, `memory`, UART0을 켠다. framebuffer·ramoops는 기기에서 확인할 때까지 `disabled`. SPMI M 버스에 MT6319 셋을 둔다(SPMI는 2b까지 꺼져 있다) |
 | `mediatek/mt6897-lenovo-tb373fu.dts` | 글로벌판(Idea Tab Pro). tb375fc.dts를 include하고 `model`·`compatible`만 바꾼다 |
 
 - `build.sh`가 `mediatek/*.dts*`를 Linux 7.2.12의 `arch/arm64/boot/dts/mediatek/`에 복사하고, 패치 0001이 빌드 목록에 dtb 둘을 더한다.
-- include는 7.2.12에 있는 `dt-bindings` 헤더(`arm-gic.h`, `irq.h`, `phy.h`)만 쓴다.
+- include는 7.2.12에 있는 `dt-bindings` 헤더(`arm-gic.h`, `irq.h`, `phy.h`, `spmi.h`)만 쓴다. pio 바인딩과 `mt6897-pinfunc.h`는 패치 0004·0005가 더한다.
 - 라이선스는 업스트림 MediaTek DTS와 같은 `GPL-2.0-only OR BSD-2-Clause`다. 커뮤니티 포트의 글은 옮기지 않았고, 사실(주소·인터럽트)만 펌웨어 DT와 대조해 썼다.
 
 ## 검증
@@ -25,7 +25,14 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'K=~/buntos-build/tb375fc/
 | dtc 기본 검사 | 두 dtb 모두 오류·경고 0 |
 | 커널 `W=1`·`W=2`와 같은 dtc 플래그 | 오류·경고 0 |
 | `dt-validate`(dtschema 2026.9, 7.2.12 바인딩) | dtb마다 12건. 모두 아래 "바인딩에 더할 것"이다. 구조 오류는 없다 |
+| 패치를 얹은 트리의 `make W=1 CHECK_DTBS=y`(2026-11-01, pio·SPMI·MT6319를 더한 뒤) | dtc 경고 0. dt-validate는 위 12건 그대로다. pio는 패치 0004의 바인딩을, MT6319는 `mt6315-regulator.yaml`을 통과한다 |
 | 펌웨어 DT와 대조 | 켠 노드와 자리만 둔 노드의 `reg`·`interrupts`가 모두 같다(아래 표의 예외만 일부러 다르다) |
+
+패치를 얹은 트리로 보려면 `build.sh prepare` 뒤 다음을 돌린다(바인딩 스키마는 `out/`에 만든다).
+
+```bash
+limactl shell buntos-dev -- bash -lc 'export PATH=~/buntos-build/tb375fc/venv-dtschema/bin:$PATH; make -C ~/buntos-build/tb375fc/linux-7.2.12-tb375fc O=~/buntos-build/tb375fc/out ARCH=arm64 LOCALVERSION= W=1 CHECK_DTBS=y mediatek/mt6897-lenovo-tb375fc.dtb mediatek/mt6897-lenovo-tb373fu.dtb'
+```
 
 dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했다. pylibfdt를 빌드할 Python 헤더는 `apt-get download libpython3.13-dev`로 받아 venv 안에 풀었다(시스템 패키지는 그대로다).
 
@@ -64,7 +71,8 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `ufshci`, `ufsphy` | `0x112b0000`(0x3000) SPI 168, `0x112a0000`(0x10000) | 펌웨어 | `disabled`. compatible은 펌웨어 그대로 `mt8183`(7.2.12 바인딩이 받는다). MCQ 큐 인터럽트 SPI 177~184는 아직 넣지 않았다. 전원 도메인 없이 `mediatek,ufs-rtff-mtcmos`(SMC)로 켜고, `mediatek,ufs-broken-rtc`도 쓴다 |
 | `ssusb`, `xhci0` | mac `0x11201000`(0x2e00) + ippc `0x11203e00`(0x100) SPI 160, xHCI `0x11200000` SPI 161, xHCI `sys_ck` = clk26m | 펌웨어 | `disabled` |
 | `xsphy` | 공유 `0x11e43000`(0x200), U2 `0x11e40000`(0x400), U3 `0x11e43400`(0x500), `ref` = clk26m | 펌웨어 | `disabled`. 업스트림 이름 `xs-phy@`/`usb-phy@`로 바꿨다 |
-| `spmi` | M 버스: pmif `0x1cc04000` + spmimst `0x1cc01000`, P 버스: pmif `0x1cc06000` + spmimst `0x1cc00000` | 펌웨어 | `disabled`. 펌웨어는 한 노드에 영역 넷이다. 7.2.12의 MT8196(SPMI 2.0, 버스 둘) 꼴로 나눴다. pmif 크기는 펌웨어 `0x8ff`를 `0x900`으로 썼다(`spmi-pmif-mpu`가 `0x1cc04900`에서 시작). PMIC 여섯은 모두 M 버스에 있다(펌웨어에 `spmi-dev-mask`가 없어 벤더 드라이버가 모두 M 버스로 보낸다). 그래서 P 버스는 끈다 |
+| `pio` | `0x10005000` 외 핀 설정 영역 9개, EINT 영역 다섯(`0x11ce0000`·`0x11de0000`·`0x11e90000`·`0x11fe0000`·`0x1c01e000`), GIC SPI 309 | 펌웨어(pio와 EINT 노드) | `disabled`(2b에서 SPMI와 함께 켠다). 펌웨어는 핀과 EINT가 다른 노드(`mediatek,mt6983-eint`)다. 업스트림 MT6878처럼 한 노드로 합쳤다. `gpio-ranges`는 실제 핀 232개이고, GPIO가 없는 EINT 232~249는 드라이버가 가상 핀으로 둔다 |
+| `spmi` | M 버스: pmif `0x1cc04000` + spmimst `0x1cc01000`, P 버스: pmif `0x1cc06000` + spmimst `0x1cc00000` | 펌웨어 | `disabled`. 펌웨어는 한 노드에 영역 넷이다. 7.2.12의 MT8196(SPMI 2.0, 버스 둘) 꼴로 나눴다. pmif 크기는 펌웨어 `0x8ff`를 `0x900`으로 썼다(`spmi-pmif-mpu`가 `0x1cc04900`에서 시작). PMIC 여섯은 모두 M 버스에 있다(펌웨어에 `spmi-dev-mask`가 없어 벤더 드라이버가 모두 M 버스로 보낸다). 그래서 P 버스는 끈다. M 버스에는 `rcs` 인터럽트(pio EINT 248, 펌웨어 `rcs_irq`와 같다)와 클럭 셋을 준다. 클럭은 clk-mt6897 전까지 clk26m이 자리만 채운다(드라이버는 켜기만 하고 주파수를 쓰지 않는다) |
 
 **GIC 기준 주소.** 커뮤니티 dtsi는 펌웨어 값(`0x0c400000`)을 쓰면서, 업스트림 MTK 계열(MT8183~MT8195)처럼 `0x0c000000`/`0x0c040000`을 대안으로 적어 두었다. 이 트리는 펌웨어 값을 쓴다.
 - 펌웨어 SoC 트리와, 커뮤니티가 읽은 부트로더가 넘긴 트리가 모두 `0x0c400000`이다.
@@ -82,6 +90,8 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `memory@40000000` | 1GiB 자리 | 펌웨어 | 부트로더가 실제 크기(8·12GiB)로 고친다. 펌웨어 정적 트리도 1GiB 자리다 |
 | `framebuffer0` | `0xfc16f000`, 2944×1840, stride 11776, `a8r8g8b8` | 커뮤니티 | `disabled`. 바인딩대로 `/chosen` 아래에 둔다. 커뮤니티는 LK 기록(mblock 할당, `atag,videolfb`)에서 읽었고, 이 주소로 fbcon을 띄웠다(12GiB 기기) |
 | `framebuffer_mem` | `0xfc16f000`, 0x3e90000(LK가 할당한 크기, 세 화면보다 조금 크다), `no-map` | 커뮤니티 | `disabled`. 부트로더가 이미 예약하면 지운다 |
+| `aliases` | `spmi0 = &spmi_m` | 7.2.12 드라이버 | 버스가 둘인 MT8196 꼴은 버스마다 `spmiN` 별칭이 있어야 probe한다 |
+| MT6319 `pmic@6`~`pmic@8` | 6: vbuck1(`vmm`)·vbuck3(`vproc1`)·vbuck4(`vproc3`), 7: vbuck1(`vproc2`)·vbuck3, 8: vbuck3(`vufs_vccq`). 모두 0.3~1.19375V | 펌웨어 | `mediatek,mt6319-regulator` + `mt6315` 대체. 이름은 펌웨어의 소비자에서 땄다(ISP·카메라 전원 도메인, MCUPM CPU DVFS의 proc1~4, UFS VCCQ). 소비자가 아직 없어 모두 `regulator-always-on`이다. 펌웨어는 셋 모두 buck1+buck2 2상인데, 7.2.12 드라이버는 SID로 짝을 정해(6이면 1+2+4) 맞지 않으므로 동작 모드(`regulator-allowed-modes`)는 열지 않는다 |
 | `ramoops` | `0x48090000`, 0xe0000(record 0x20000, console 0x40000, pmsg 0x80000) | 커뮤니티 | `disabled`. `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`) 사이 틈이다. LK가 벤더 커널 명령줄에 넣는 `ramoops.*` 값과 같다(벤더 자신의 ramoops 자리) |
 
 ## 바인딩에 더할 것
@@ -123,7 +133,7 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
   - UFS: 호스트 `ufs`, PHY `unipro`·`mp`. USB: mtu3 `sys_ck`·`host_ck`(topckgen), `frmcnt_ck`(pericfg_ao). UART `bus`(pericfg_ao)
 - **UFS.**
   - 리셋: 펌웨어처럼 ufscfg_pdn의 `ti,syscon-reset`(업스트림 `reset-ti-syscon`)으로 `unipro_rst`·`crypto_rst`·`hci_rst`를 준다. 비트는 set `0x48`, clr `0x4c`의 0·1·2다
-  - 공급: `vcc` = MT6363 VEMC, `vccq` = MT6319(SPMI 8) vbuck3. PMIC 전에는 `regulator-fixed`로 둔다
+  - 공급: `vcc` = MT6363 VEMC, `vccq` = MT6319(SPMI 8) vbuck3(`mt6319_8_vbuck3`, 보드 dts에 있다). MT6363 전에는 `vcc`를 `regulator-fixed`로 둔다
   - 처음에는 `mediatek,ufs-disable-mcq`로 시작한다. MCQ를 켤 때는 큐 인터럽트 SPI 177~184를 넣는다
   - 전원 도메인은 필요 없다. 펌웨어처럼 `mediatek,ufs-rtff-mtcmos`(SMC)와 `mediatek,ufs-broken-rtc`를 쓴다
   - 바인딩은 클럭 `ufs` 하나만 받으므로 바인딩 패치가 필요하다. PHY(`phy-mtk-ufs`)는 `unipro`·`mp` 클럭이 필수인데, 펌웨어 PHY 노드에는 클럭이 없다
@@ -131,8 +141,9 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 - **SPMI.**
   - 벤더 레지스터 표는 업스트림 mt8195 표와 같다(2026-11-01 대조). 그래서 MT8196 데이터를 그대로 쓴다. 커뮤니티는 MT6895 데이터(같은 레지스터, 버스 하나)로 닿았다
   - PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다
-  - 업스트림은 자식마다 `rcs` 인터럽트(pio EINT 248)와 클럭 셋(`pmif_sys_ck`, `pmif_tmr_ck`, `spmimst_clk_mux`)을 요구한다. 없으면 probe가 실패한다. rcs 때문에 pinctrl-mt6897 뒤다. 클럭은 fixed-clock으로 시작한다
-- **핀.** pio `0x10005000` 외 9개 영역(펌웨어)
+  - 업스트림은 자식마다 `rcs` 인터럽트(pio EINT 248)와 클럭 셋(`pmif_sys_ck`, `pmif_tmr_ck`, `spmimst_clk_mux`)을 요구한다. 없으면 probe가 실패한다. rcs 때문에 pinctrl-mt6897 뒤다
+  - 노드는 다 있다(M 버스, 별칭, MT6319 셋). 2b에서 pio와 함께 `okay`로 바꾸고, 커널 기록으로 MT6319 셋의 probe와 전압 읽기를 본다. 드라이버 고침 둘(rcs 디먹스, 채널 설정 순서, 패치 0007·0008)도 이때 확인한다
+- **핀.** pio 노드와 드라이버(패치 0004~0006)가 있다. 켜면 probe가 EINT 마스크를 모두 세운다(업스트림 동작). 핀 상태(`pinctrl-0`)는 쓰는 노드가 생길 때 더한다
 - **cpufreq-hw.** 바인딩의 `reg` 개수를 고친다.
 
 ### 그 뒤

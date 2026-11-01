@@ -1,10 +1,11 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.4
+# buntOS TB375FC 포팅 최종 설계안 v1.5
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
 - v1.2(2026-11-01): 오픈소스 쪽 조사(부트 체인, 커뮤니티 포트, SoC 기반, 업스트림 진행, Wi-Fi)를 반영했다. 언락 go/no-go 넷 가운데 셋이 채워지지 않는다(2.1절). UFS·USB에 전원 도메인이 없어 2b에서 뺐다(3절). Wi-Fi·BT 펌웨어는 LK가 싣는다(6·7절)
 - v1.3(2026-11-01): 제품 라인을 나눴다(0절). buntOS 원본은 데스크톱 라인이고, 이 저장소는 태블릿 라인의 첫 포크다. XDA 언락 글타래를 브라우저로 확인해 언락 길과 go/no-go를 고쳤다(2.1절. v1.2의 "원글을 찾지 못했다"는 틀렸다). 다음 작업을 다시 적었다(11절)
 - v1.4(2026-11-01): 사용자의 기기(중국판 ZUXOS 1.5.10.044, Android 16)에 맞는 언락 정보를 찾아 2.1절과 11절을 고쳤다. v1.3에 적은 "16.0.20.091에서 실패한 보고"는 잘린 글만 읽은 것이었다. 그 글은 시스템으로 한 번 부팅하고 fastboot로 다시 들어가 언락에 성공했다
+- v1.5(2026-11-01): 11절의 기기 없이 할 일 다섯을 끝냈다. `pinctrl-mt6897`과 pio 노드, SPMI 고침과 M 버스·MT6319, 이미지용 설정 확인, 포크 정리, buntOS 합치기 차례다. 코드 대조로 찾은 SPMI 결함 둘은 고침을 대기열에 얹었다(4절). 다음 작업을 다시 적었다(11절)
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -177,8 +178,8 @@
 - **기반:** Debian forky 커널(buntOS 이미지와 같은 판, 지금 7.2.12)을 쓴다. 포팅이 진행되면 그때의 Debian 판을 따라간다.
 - **설정과 패치:** 보드 설정 조각(`kernel/config/tb375fc.config`)과 업스트림 제출 대기 패치 대기열(`kernel/patches/`)을 둔다. 대기열에 처음 들어갈 것:
   - NT36532 패널 드라이버 백포트(7.4 병합 창, `47b823940e38`)와 BOE·Tianma 패널 compatible
-  - `spmi-mtk-pmif` 고침 백포트: FSM 멈춤 우회(`84c72fc05f73`, 7.4 병합 창), 클럭 참조 누수(`636c4c026f47`). 코드 대조에서 나온 결함 둘(rcs 디먹스, 채널 설정 순서)은 기기에서 확인한 뒤 낸다
-  - `pinctrl-mt6897`(EINT 포함)
+  - `spmi-mtk-pmif` 고침 백포트(패치 0002·0003): FSM 멈춤 우회(`84c72fc05f73`, 7.4 병합 창), 클럭 참조 누수(`636c4c026f47`). 코드 대조에서 나온 결함 둘은 고침을 0007·0008로 얹었다. rcs 디먹스가 SID당 8비트를 7로 나눠 처리기가 끝나지 않을 수 있고, 채널 설정이 버스 등록 뒤에 있어 내장(=y) PMIC 드라이버가 채널 없이 버스를 쓸 수 있다. 기기에서 확인한 뒤 업스트림에 낸다
+  - `pinctrl-mt6897`(EINT 포함, 패치 0004~0006: 바인딩, pinmux 매크로, 드라이버). GPIO가 없는 EINT 232~249는 업스트림 MT8196처럼 가상 핀이다
   - `clk-mt6897`. FENC 없는 HW voter 먹스와 PLL HW voter를 업스트림 틀에 더해야 한다
   - MFD `mtk-spmi-pmic`: v12에 리뷰 지적을 고쳐 둔다. 새 판이 나오면 따른다. MT6363 regulator와 MT6685가 의존하고, MT6363 키 드라이버는 따로 필요하다. MT6319는 MFD 없이 `mt6315-regulator`에 DT만 쓴다
   - `mt6897` 전원 도메인 데이터(2d 뒤)
@@ -200,10 +201,10 @@
 |---|---|---|---|---|
 | CPU·GIC·PSCI·타이머 | 전부 | DT | 작음 | 2a |
 | CPU 주파수 | `mediatek-cpufreq-hw` | DT(도메인 셋), 더미 `cpu-supply` | 작음 | 2b |
-| 핀 제어 | `pinctrl-mt6878`(틀) | `pinctrl-mt6897`(OEM 표: 핀 232, EINT 250). 벤더 전용 기능은 업스트림 mt6878처럼 `DRV_ADV`로 바꾸거나 뺀다 | 중간 | 2b |
+| 핀 제어 | `pinctrl-mt6878`(틀) | `pinctrl-mt6897`(OEM 표: 핀 232, EINT 250). 벤더 전용 기능은 업스트림 mt6878처럼 `DRV_ADV`로 바꾸거나 뺀다. 패치 0004~0006과 pio 노드가 있다 | 중간 | 2b |
 | 전원 도메인 | `mtk-pm-domains`(MT8196) | MT6897 데이터(SPM 33개, GPU 12개, 그 가운데 HW voter 7개). UFS·USB에는 없다 | 중간 | 2d·2e·2c(2차) |
 | 클럭 | `clk-mt8196-*`(틀) | `clk-mt6897`(OEM 표). FENC 없는 HW voter 먹스와 PLL HW voter를 더한다 | 큼 | 2b~2e |
-| SPMI·MT6363·MT6319 | `spmi-mtk-pmif`, `mt6363-regulator`, `mt6315-regulator` | SPMI는 MT8196 대체 compatible(P 버스 끔)과 고침 백포트, MT6319는 DT만, MT6363은 MFD 패치 | 작음~중간 | 2b |
+| SPMI·MT6363·MT6319 | `spmi-mtk-pmif`, `mt6363-regulator`, `mt6315-regulator` | SPMI는 MT8196 대체 compatible(P 버스 끔)과 고침 넷(0002·0003·0007·0008), MT6319는 DT만, MT6363은 MFD 패치. SPMI 노드와 MT6319는 장치 트리에 있다 | 작음~중간 | 2b |
 | MT6368·MT6685·MT6375 | 없음 | MT6895 포크 견본으로 새로 | 중간~큼 | 2b·2e·3 |
 | UFS | `ufs-mediatek`, `phy-mtk-ufs` | ufscfg 클럭·리셋, VCC, `ufs-rtff-mtcmos`(전원 도메인이 아니다), PHY 클럭 둘, 바인딩 패치 | 작음~중간 | 2b |
 | USB | `mtu3`, `xhci-mtk`, `phy-mtk-xsphy` | DT, 역할 전환은 TCPC 뒤 | 작음 | 2b |
@@ -334,12 +335,21 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
    - 2a 장치 트리(업스트림 꼴), 커널 커스텀(`7.2.12-tb375fc`), `boot/` 이미지 도구와 첫 부팅 initramfs
    - 커뮤니티 포트의 커밋 13개와 겹침 정리([분석](community-port.md))
    - 오픈소스 쪽 조사(v1.2)와 제품 라인 정리, 언락 길 확인(v1.3)
+   - v1.5에 끝낸 것:
+     - `pinctrl-mt6897`(EINT 포함, 패치 0004~0006)과 pio 노드. 표는 OnePlus 공식 MT6897 커널에서 옮겼다
+     - SPMI: 고침 넷(0002·0003 백포트, 0007·0008), M 버스 노드(rcs는 EINT 248, 별칭 `spmi0`, P 버스는 끔), MT6319 셋(DT만). 소비자가 아직 없어 벅은 모두 always-on이다. pio와 SPMI는 2b까지 꺼 둔다
+     - 이미지용 설정: `kernel/tb375fc/debian-config.sh`가 이미지와 같은 시점의 Debian forky 7.2.12 설정에 조각을 얹어 본다. Debian은 SCSI·sd·USB·xHCI를 모듈로 두어 조각의 UFS·USB 값이 내려갔다. 조각에서 이 넷을 y로 올려 빠지는 값이 없다
+     - 포크 정리: 포크는 x86-64 이미지와 CI를 돌리지 않는다. GitHub 원격이 없어 `.github/workflows`가 돌 곳도 없다. 파일은 지우지 않는다. 지우면 buntOS가 그 파일을 고칠 때마다 합치기에서 충돌이 난다
+     - buntOS 합치기: buntOS main에 커밋이 쌓이면 포크 main에서 `git merge buntos/main`을 한다. 첫 합치기(c433a32)의 충돌은 README 머리뿐이었다
 2. **다음(기기 없이, 이 차례로):**
-   1. `pinctrl-mt6897`(EINT 포함)을 OEM 공식 표로 쓴다. SPMI의 rcs 인터럽트와 터치 IRQ가 이것을 기다린다
-   2. `spmi-mtk-pmif` 고침 둘을 백포트하고, SPMI 노드(M 버스만)와 MT6319 DT를 더한다
-   3. Debian forky 7.2 커널 설정에 보드 조각을 얹어 이미지용 커널을 확인한다(`bsp/lenovo-tb375fc`)
-   4. 이 포크를 arm64 전용으로 정리한다. x86-64 이미지와 CI는 포크에서 돌리지 않는다
-   5. 원본 buntOS(원격 `buntos`)를 받아 합치는 차례를 정한다. 충돌은 기기 쪽 파일과 README 머리에서만 나야 한다
+   1. `clk-mt6897`: 2b가 쓰는 블록(UFS, USB, SPMI, UART)의 클럭부터 쓴다. FENC 없는 HW voter 먹스와 PLL HW voter를 업스트림 틀에 더한다
+   2. MFD `mtk-spmi-pmic`(v12와 리뷰 고침)과 MT6363 regulator·키
+   3. UFS·USB 노드를 실제 클럭·리셋·전원으로 채운다. UFS VCCQ는 MT6319 8번의 vbuck3이다
+   4. 이미지용 커널을 빌드하기 전에 넷을 정한다:
+      - 소스: 원본 tarball이면 Debian 패치가 빠진다. 같은 시점의 Debian 소스 패키지 `linux 7.2.12-1`에 조각과 대기열을 얹는 길도 있다
+      - 툴체인: Debian과 같게 하려면 forky gcc-16과 bindgen이 있어야 한다. VM의 trixie 툴체인이면 Rust 쪽과 32비트 compat vDSO가 빠진다
+      - 디스크: Debian 설정은 DWARF 디버그 정보와 BTF를 켠다. 디버그 패키지만 약 7.2GiB다
+      - 판 이름: 조각이 `7.2.12-tb375fc`를 만든다. mkosi 이미지의 커널 패키지·모듈 경로와 맞추는 법은 `bsp/lenovo-tb375fc`에서 정한다
 3. **기기:** 사용자의 TB375FC는 중국판 ZUXOS 1.5.10.044(Android 16)다(2026-11-01). 이 판에서 바로 언락한 보고는 없으니, 16.0.20.091로 내린 뒤 언락하는 길을 쓴다(2.1절). 예비 기기를 살 때는 ZUI 16 기기가 낫다.
 4. **언락 전(지금 할 수 있는 것):**
    - 자동 업데이트를 끄고 1.5.10.044에 머문다(go/no-go 4번). 1.5.10.103 이후 판에서는 판 바꾸기 문제가 많이 보고됐다. 2026-11-01에 레노버 업데이트 앱(`com.lenovo.ota`)을 껐다(되돌리기는 `pm enable`)
