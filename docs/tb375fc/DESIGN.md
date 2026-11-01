@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.7
+# buntOS TB375FC 포팅 최종 설계안 v1.8
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -8,6 +8,7 @@
 - v1.5(2026-11-01): 11절의 기기 없이 할 일 다섯을 끝냈다. `pinctrl-mt6897`과 pio 노드, SPMI 고침과 M 버스·MT6319, 이미지용 설정 확인, 포크 정리, buntOS 합치기 차례다. 코드 대조로 찾은 SPMI 결함 둘은 고침을 대기열에 얹었다(4절). 다음 작업을 다시 적었다(11절)
 - v1.6(2026-11-01): `clk-mt6897`(패치 0009~0013)과 클럭 컨트롤러 노드를 더했다. 클럭 컨트롤러는 2b까지 끄고, 2a 콘솔(uart0)은 새 클럭 드라이버를 기다리지 않는다(11절)
 - v1.7(2026-11-01): 이미지용 커널의 소스를 kernel.org 원본으로 정했다(D1, 4절). Debian 소스 패키지(패치 77개)에는 MediaTek 관련이 없고 차이는 보안 기본값과 패키징이라 쓰지 않는다. 지금까지의 패치 대기열·장치 트리·조각·`debian-config.sh`는 그대로 쓴다. 이미지 빌드에서 정할 것을 4절과 11절에 적었다
+- v1.8(2026-11-01): 2b의 PMIC와 UFS를 세션 둘로 나눠 마쳤다(패치 0014~0022). PMIC는 MFD `mtk-spmi-pmic`(업스트림 v12 백포트와 인터럽트 고침), MT6363 키, 보드의 MT6363과 UFS 공급이다. UFS는 바인딩·드라이버와 UFS·USB 노드이고, 클럭·리셋 이름과 OPP는 업스트림 MT8196 시리즈(v14, 병합 전) 꼴을 따랐다. 이미지 커널의 디버그 정보는 Debian처럼 켠다(4절). 부트 명령줄에 `regulator_ignore_unused`를 더했다(D4)
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -64,7 +65,7 @@
 | D1 | **mainline 커널.** 소스는 kernel.org 원본이고, 판은 buntOS 이미지의 Debian forky 커널과 같다(지금 7.2.12). 여기에 제출 대기 패치를 더한다. 개발 빌드는 arm64 defconfig에, 이미지용은 같은 시점 Debian forky 커널 설정에 보드 조각을 얹는다. Debian 소스 패키지의 패치는 쓰지 않고, 필요한 것만 골라 대기열에 넣는다. 벤더 GKI는 쓰지 않는다 | buntOS 설계안 4.2.2절. 필요한 업스트림 기능(6.16~7.0)이 7.2에 다 있다. 7.4 병합 창에 들어온 패널 드라이버와 SPMI 고침만 백포트한다. 원본 소스이면 개발 빌드와 이미지가 같은 트리이고, 시험한 기반이 업스트림과 같아 제출이 쉽다. Debian `linux 7.2.12-1`의 패치 77개(버그 고침 28, 기능 14, Debian 전용 35)에는 MediaTek 관련이 없고, 차이는 보안 기본값과 패키징이다. Debian 패키징으로 빌드하려면 forky 툴체인과 큰 디스크가 든다(디버그 패키지만 약 7.2GiB). 2026-11-01에 견줘 정했다 |
 | D2 | **업스트림 꼴로 짠다.** `mt6897.dtsi` + `mt6897-lenovo-tb375fc.dts`. 핀은 업스트림 `pinctrl-mt6878`을, clk·pmdomain·SPMI는 MT8196을 틀로 삼는다. MT6897 데이터는 OEM 공식 소스(OnePlus·OPPO·Motorola, GPL-2.0)에서 가져온다 | 제출할 수 있어야 유지할 수 있다. 커뮤니티 포트는 클럭·핀 드라이버 없이 fixed-clock과 부트로더 상태에 기대고, 장치 트리를 커널에 넣어 LK가 준 트리를 바꿔 끼우는 구조다. 그래서 사실 확인용과 협력 상대로 쓰고, 기반으로는 쓰지 않는다([분석](community-port.md)) |
 | D3 | **처음에는 LK가 직접 띄운다.** boot v4 + vendor_boot v4(DT 표) + 빈 dtbo, `fastboot boot`로 RAM에서. 2b부터는 U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다 | 파티션을 건드리지 않는 첫 부팅. EFI가 되면 원본 buntOS(데스크톱 라인)의 arm64 이미지 꼴과 같아진다. MT6878-mainline도 U-Boot를 권한다 |
-| D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 업스트림 시리즈를 따라 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다 |
+| D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`, `regulator_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 업스트림 시리즈를 따라 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다 |
 | D5 | **Wi-Fi는 mt76에 "MT7921의 SoC 변형"을 더한다.** 펌웨어는 LK가 실은 것을 쓰고, conninfra 전원은 TF-A SIP 호출로 켜고, nvdata 보정값은 NVRAM 명령으로 넘긴다. 그 전에는 USB 동글로 우회한다 | 칩 ID와 구조가 MT7921과 같고, 명령 머리와 레거시 명령 번호도 같다. SoC Wi-Fi 선례(mt7915/soc.c)가 있다([설계](wifi-soc7_0.md)) |
 | D6 | **펌웨어는 설치할 때 기기에서 뽑는다.** Mali CSF만 linux-firmware에서 온다. GPUEB와 Wi-Fi·BT는 LK가 올리므로, 그 파티션(GPUEB, `connsys_wifi`, `connsys_bt`)을 지킨다 | 재배포할 수 있는지 모른다(buntOS ADR-012). 안드로이드 슬롯 하나를 남긴다 |
 | D7 | **GPU는 panthor + MT6897 GPUEB 변형이다.** 이미지에 Mesa 26.3 이상이 필요하다 | panthor·펌웨어·Mesa가 이미 G615를 안다. 전원은 MT8196 드라이버에 공유 메모리 오프셋만 다른 변형을 더한다 |
@@ -181,7 +182,7 @@
 - **이미지용 커널:** 같은 원본 소스와 대기열을 이미지와 같은 시점의 Debian forky 커널 설정 + 보드 조각으로 빌드한다(`kernel/tb375fc/debian-config.sh`가 설정을 만든다). 그래서 Debian 커널과 달라지는 것은 Debian 패치에만 있는 설정 셋(binder 모듈, UEFI Secure Boot 잠금, perf 제한)과 우리 대기열·조각이다. 남은 일:
   - `build.sh`에 이미지 단계를 더한다. `out-debian/.config`로 따로 빌드하고 `make bindeb-pkg`로 커널 .deb를 만든다
   - 툴체인: 지금은 빌드 VM의 trixie gcc-14로 한다. bindgen이 없어 Rust 쪽 기능이 빠지지만 이 기기가 쓰는 것은 없다. Debian과 같은 컴파일러가 필요해지면 forky 컨테이너를 쓴다
-  - 디버그 정보(정할 것): Debian 설정은 DWARF와 BTF를 켠다. BTF는 DWARF가 있어야 만들어지므로, 지키면 빌드 출력이 매우 크다. 끄면 디스크는 맞지만 BTF를 쓰는 BPF 기능(systemd의 일부 격리 기능, bpftrace 등)이 빠진다
+  - 디버그 정보(2026-11-01 결정): Debian 설정 그대로 DWARF·BTF를 켠다(배포판의 정석). 설치하는 커널·모듈은 strip하고, 디버그 기호는 따로 `-dbg` 패키지로 둔다. 그래서 늘어나는 것은 빌드 디스크다. 빌드 디스크가 빠듯하면 이미지 빌드에서만 디버그 섹션을 zstd로 압축한다(배포 커널은 같다). 빌드 공간을 위해 VM의 데스크톱 이전 빌드 산출물을 지웠다(맥 여유 27GB)
   - mkosi 이미지에서 Debian 커널 패키지 대신 이 .deb를 넣는 법과 판 이름(`7.2.12-tb375fc`)
   - Debian 패치에서 골라 넣을 후보: binder 모듈(안드로이드 앱 컨테이너를 쓸 때), perf 제한(보안 기본값), 무선 규제 DB 인증서(2d, Debian이 서명한 DB를 쓸 때)
 - **설정과 패치:** 보드 설정 조각(`kernel/config/tb375fc.config`)과 업스트림 제출 대기 패치 대기열(`kernel/patches/`)을 둔다. 대기열에 처음 들어갈 것:
@@ -189,7 +190,8 @@
   - `spmi-mtk-pmif` 고침 백포트(패치 0002·0003): FSM 멈춤 우회(`84c72fc05f73`, 7.4 병합 창), 클럭 참조 누수(`636c4c026f47`). 코드 대조에서 나온 결함 둘은 고침을 0007·0008로 얹었다. rcs 디먹스가 SID당 8비트를 7로 나눠 처리기가 끝나지 않을 수 있고, 채널 설정이 버스 등록 뒤에 있어 내장(=y) PMIC 드라이버가 채널 없이 버스를 쓸 수 있다. 기기에서 확인한 뒤 업스트림에 낸다
   - `pinctrl-mt6897`(EINT 포함, 패치 0004~0006: 바인딩, pinmux 매크로, 드라이버). GPIO가 없는 EINT 232~249는 업스트림 MT8196처럼 가상 핀이다
   - `clk-mt6897`(패치 0009~0013): 바인딩, HW voter syscon, FENC 없는 HW voter 먹스와 PLL HW voter(업스트림 틀에 더한 것), 2b 블록 일곱의 드라이버
-  - MFD `mtk-spmi-pmic`: v12에 리뷰 지적을 고쳐 둔다. 새 판이 나오면 따른다. MT6363 regulator와 MT6685가 의존하고, MT6363 키 드라이버는 따로 필요하다. MT6319는 MFD 없이 `mt6315-regulator`에 DT만 쓴다
+  - MFD `mtk-spmi-pmic`(패치 0014~0016): v12에 리뷰 지적과 인터럽트 고침(마스크 레지스터, 초기 마스크, RCS 완료, 깨우기)을 얹었다. 새 판이 나오면 따른다. MT6363 키(0017·0018)는 새로 썼다. MT6685는 범위 밖이다. MT6319는 MFD 없이 `mt6315-regulator`에 DT만 쓴다
+  - UFS(패치 0019~0022): MT6897 호스트·M-PHY 바인딩과 드라이버. 클럭·리셋 이름과 OPP는 업스트림 MT8196 시리즈(v14, 병합 전) 꼴이고, 그 시리즈가 들어오면 그 위로 다시 쓴다
   - `mt6897` 전원 도메인 데이터(2d 뒤)
   - NT36532 SPI 터치와 펜, 포고 키보드(v6 시리즈 위, compatible별 CRC 초기값)
   - conninfra(SIP 호출과 PMIC 전원), mt76 mt7921의 SoC(AXI) 변형, Bluetooth BEIF 전송
@@ -212,10 +214,10 @@
 | 핀 제어 | `pinctrl-mt6878`(틀) | `pinctrl-mt6897`(OEM 표: 핀 232, EINT 250). 벤더 전용 기능은 업스트림 mt6878처럼 `DRV_ADV`로 바꾸거나 뺀다. 패치 0004~0006과 pio 노드가 있다 | 중간 | 2b |
 | 전원 도메인 | `mtk-pm-domains`(MT8196) | MT6897 데이터(SPM 33개, GPU 12개, 그 가운데 HW voter 7개). UFS·USB에는 없다 | 중간 | 2d·2e·2c(2차) |
 | 클럭 | `clk-mt8196-*`(틀) | `clk-mt6897`(OEM 표). FENC 없는 HW voter 먹스와 PLL HW voter를 더한다. 2b 블록은 패치 0009~0013에 있다 | 큼 | 2b~2e |
-| SPMI·MT6363·MT6319 | `spmi-mtk-pmif`, `mt6363-regulator`, `mt6315-regulator` | SPMI는 MT8196 대체 compatible(P 버스 끔)과 고침 넷(0002·0003·0007·0008), MT6319는 DT만, MT6363은 MFD 패치. SPMI 노드와 MT6319는 장치 트리에 있다 | 작음~중간 | 2b |
-| MT6368·MT6685·MT6375 | 없음 | MT6895 포크 견본으로 새로 | 중간~큼 | 2b·2e·3 |
-| UFS | `ufs-mediatek`, `phy-mtk-ufs` | ufscfg 클럭·리셋, VCC, `ufs-rtff-mtcmos`(전원 도메인이 아니다), PHY 클럭 둘, 바인딩 패치 | 작음~중간 | 2b |
-| USB | `mtu3`, `xhci-mtk`, `phy-mtk-xsphy` | DT, 역할 전환은 TCPC 뒤 | 작음 | 2b |
+| SPMI·MT6363·MT6319 | `spmi-mtk-pmif`, `mt6363-regulator`, `mt6315-regulator` | SPMI는 MT8196 대체 compatible(P 버스 끔)과 고침 넷(0002·0003·0007·0008), MT6319는 DT만, MT6363은 MFD·키 패치(0014~0018). SPMI 노드, MT6363(키, 레일 23개), MT6319, UFS 공급은 장치 트리에 있다 | 작음~중간 | 2b |
+| MT6368·MT6685·MT6375 | 없음 | MT6895 포크 견본으로 새로. MT6368은 USB `vusb33`(VUSB)과 GPU 코어(VBUCK2), 진동·지문·오디오 레일을 낸다 | 중간~큼 | 2b·2e·3 |
+| UFS | `ufs-mediatek`, `phy-mtk-ufs` | 패치 0019~0022: MT6897 compatible(호스트는 match data로 `rtff-mtcmos`·`broken-rtc`·`pmc-via-fastauto`·`tx-skew-fix`), 리셋 셋, M-PHY 새 판(클럭·전원 순서 없음). VCC·VCCQ는 보드. 클럭 스케일링과 MCQ(큐 인터럽트 여덟)는 뒤로 | 작음~중간 | 2b |
+| USB | `mtu3`, `xhci-mtk`, `phy-mtk-xsphy` | DT(펌웨어의 eye 값). 역할 전환은 TCPC 뒤. xsphy MT6897 꼴(U2 INTR_CAL 칸과 efuse, U3 CDR 값)과 깨우기 접점(벤더 판 103)은 드라이버 고침이 필요하다 | 작음~중간 | 2b·3 |
 | 화면 파이프라인 | MT8195·MT8188까지. DSC v9·재구성 v2 시리즈는 미병합, dual-DSI는 아무도 맡지 않았다 | MT6897 데이터, dual-DSI, DSC(1.1과 패널 RC 표) | 큼 | 2c(2차) |
 | 패널 NT36532 | `panel-novatek-nt36532`(7.4 병합 창). 패널 쪽 dual-DSI와 DSC가 있다 | compatible 셋, 초기화 순서. 업스트림 패널은 DSC 1.2이고 이 기기 BOE 패널은 DSC 1.1이다 | 작음 | 2c(2차) |
 | 터치 NT36532 SPI + 펜 | I2C 드라이버뿐(SPI RFC 둘은 미병합) | SPI 드라이버, 펌웨어 내려받기, 펜 장치. 펜은 TB371FC 포트가 가까운 참고다 | 중간 | 2c |
@@ -327,7 +329,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | GenieZone의 EL2 점유 | KVM 불가 | 2a에서 판정(D8). "불가"면 buntOS ADR-011 재검토, gzvm은 미병합이라 나중 |
 | 화면: dual-DSI + DSC가 업스트림에 없음 | 주사율·밝기·화면 끄기가 늦어진다 | simple-framebuffer로 데스크톱(D4), 업스트림 DSC·재구성 시리즈를 따라가고 dual-DSI는 우리가 맡을 수도 있다 |
 | 센서 허브(SCP nanohub) | 자동 회전·조도 없음 | 수동 회전, SCP 길은 3단계에서 조사 |
-| MFD `mtk-spmi-pmic` 미병합 | PMIC가 늦어진다 | 패치 대기열에 넣고 업스트림 판을 따라간다. v12(2026-05) 뒤로 새 판이 없고, BayLibre가 이어받겠다고 했다(2026-10) |
+| MFD `mtk-spmi-pmic` 미병합 | PMIC가 늦어진다 | 패치 대기열에 넣고 업스트림 판을 따라간다. v12(2026-05) 뒤로 새 판이 없고, BayLibre가 이어받겠다고 했다(2026-10). v12의 인터럽트 결함(마스크가 늘 첫 그룹에 쓰인다)은 대기열에서 고쳤다. 업스트림에 알릴지는 정할 것이다 |
 | Mesa 26.3 의존 | GPU 가속이 늦어진다 | 이미지의 Mesa 판 확인, 그 전에는 CPU 렌더링(buntOS는 이미 llvmpipe에서 돈다) |
 | Wi-Fi 펌웨어가 uni cmd를 받지 않음 | 2d 지연 | 레거시 명령 경로(BSS·STA·키·ROC), USB 동글 우회 |
 | LK가 mainline 트리의 connsys 노드에 `emi-addr`·`memory-region`을 써 주지 않음 | Wi-Fi·BT가 펌웨어를 찾지 못한다 | 2d에서 살아 있는 트리로 확인한다. 안 되면 LK가 찾는 노드 이름과 compatible을 맞춘다 |
@@ -350,10 +352,15 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
      - 포크 정리: 포크는 x86-64 이미지와 CI를 돌리지 않는다. GitHub 원격이 없어 `.github/workflows`가 돌 곳도 없다. 파일은 지우지 않는다. 지우면 buntOS가 그 파일을 고칠 때마다 합치기에서 충돌이 난다
      - buntOS 합치기: buntOS main에 커밋이 쌓이면 포크 main에서 `git merge buntos/main`을 한다. 첫 합치기(c433a32)의 충돌은 README 머리뿐이었다
    - v1.6에 끝낸 것: `clk-mt6897`(패치 0009~0013, OEM 공식 표). 블록 일곱(topckgen, apmixedsys, vlpckgen, pericfg_ao, ufscfg_ao·pdn, HW voter)과 UART·SPMI·USB·UFS의 소비자 클럭을 장치 트리에 넣었다. 클럭 컨트롤러는 2b까지 꺼 두고, uart0은 2a 동안 clk26m을 버스 클럭으로 쓴다
+   - v1.8에 끝낸 것(세션 둘을 병렬로):
+     - PMIC(패치 0014~0018): MFD `mtk-spmi-pmic`(업스트림 v12 백포트와 고침)과 MT6363 키, 보드 dts의 MT6363(키, 레일 23개)과 UFS 공급. USB `vusb33`은 MT6368 VUSB라 드라이버가 생길 때까지 비워 둔다. VEMC 전압 읽기 결함은 업스트림 고침 후보로 남긴다
+     - UFS(패치 0019~0022): 바인딩은 MT6897 호스트(클럭 여섯, OPP 둘, 리셋 셋)와 M-PHY(클럭 없음, 리셋은 선택). 드라이버는 M-PHY에 전원 연산 없는 ops를 주고, 호스트는 펌웨어의 속성 넷을 compatible로 정하고 리셋을 바인딩 이름(`unipro`·`crypto`·`hci`)으로 받는다. dtsi는 `mediatek,ufs-disable-mcq`로 시작한다. USB는 펌웨어의 `maximum-speed`와 U2 eye 값을 넣었다
+     - 부트 명령줄에 `regulator_ignore_unused`를 더했다. 소비자가 아직 없는 레일(UFS가 붙기 전의 VEMC 등)이 늦은 정리에서 꺼지지 않는다
 2. **다음(기기 없이, 이 차례로):**
-   1. MFD `mtk-spmi-pmic`(v12와 리뷰 고침)과 MT6363 regulator·키
-   2. UFS 바인딩 패치(MT6897 compatible, 펌웨어의 클럭 열둘과 리셋 넷)와 UFS·USB 노드의 남은 것(리셋, `vcc`·`vccq` 공급, USB `vusb33`·efuse 보정). UFS VCCQ는 MT6319 8번의 vbuck3이다
-   3. 이미지용 커널 빌드 단계(D1, 4절): `build.sh`에 Debian 설정 + 조각으로 빌드해 .deb를 만드는 단계를 더하고, mkosi 이미지에 넣는다. 소스는 원본으로 정했다(v1.7). 디버그 정보(BTF를 지킬지)는 이때 정한다
+   1. 이미지용 커널 빌드 단계(D1, 4절): `build.sh`에 Debian 설정 + 조각으로 빌드해 .deb를 만드는 단계를 더하고, mkosi 이미지에 넣는다. 디버그 정보는 켠다(v1.8)
+   2. MT6368 regulator(2b의 남은 PMIC): USB `vusb33`(VUSB)과 GPU 코어(VBUCK2). MT6895 포크를 견본으로 새로 쓴다
+   3. 2c(1차) 입력: NT36532 SPI 터치와 펜, 포고 키보드(serdev), 홀 센서(gpio-keys)
+   4. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)
 3. **기기:** 사용자의 TB375FC는 중국판 ZUXOS 1.5.10.044(Android 16)다(2026-11-01). 이 판에서 바로 언락한 보고는 없으니, 16.0.20.091로 내린 뒤 언락하는 길을 쓴다(2.1절). 예비 기기를 살 때는 ZUI 16 기기가 낫다.
 4. **언락 전(지금 할 수 있는 것):**
    - 자동 업데이트를 끄고 1.5.10.044에 머문다(go/no-go 4번). 1.5.10.103 이후 판에서는 판 바꾸기 문제가 많이 보고됐다. 2026-11-01에 레노버 업데이트 앱(`com.lenovo.ota`)을 껐다(되돌리기는 `pm enable`)
