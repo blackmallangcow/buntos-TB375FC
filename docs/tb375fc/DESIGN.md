@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.16
+# buntOS TB375FC 포팅 최종 설계안 v1.17
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -17,6 +17,7 @@
 - v1.14(2026-11-01): 루트로 넘기는 initramfs를 만들었다(4절). 넘어간 뒤의 USB 가젯은 진짜 루트에서 새로 띄우고(`buntos.usbdebug=1`), 보드 프로필과 initramfs가 함께 systemd-repart와 gpt-auto 생성기를 가린다. QEMU에서 systemd와 가젯 너머의 SSH까지 시험했다
 - v1.15(2026-11-01): USB 호스트의 VBUS 드라이버(패치 0042~0049)를 더했다. 모두 꺼 둔 노드다. 순정을 읽어 보니 MT6375 OTG만으로는 5V가 커넥터까지 나가지 않을 수 있다. 순정 `extcon-mtk-usb`는 부스트를 켜기 전에 차지 펌프(NU2115 또는 UPM6720)에게 입력 FET를 닫게 한다. 그래서 그 스위치를 레귤레이터로 더해 부스트의 supply로 두었다. MT6375 쪽은 프로브와 등록에서 쓰기가 없고, 사용자 공간(`regulator-output`)이 켠다. `vbus-supply`는 otg 모드의 프로브마다 켜지므로 쓰지 않는다(4절). 사용자 기기의 차지 펌프는 UPM6720 @0x65다(adb)
 - v1.16(2026-11-01): 포고 키보드 드라이버의 독립 검토를 반영했다(패치 0033·0034). TX 게이트를 에코로 닫고(이전에는 프레임 뒤 4~8 ms 열려 있었다), 서스펜드에서 일을 끄고 키·손가락을 놓으며, SLEEP 응답의 상태를 본다. wake IRQ와 워크큐의 경합, 다시 붙일 때의 Caps LED, `SW_TABLET_MODE`가 실제와 어긋나는 길을 고쳤다. 드라이버를 사용자 공간 시뮬레이터로 돌려 확인했고 기기 시험은 없다(8·10절)
+- v1.17(2026-11-01): 기기에서 할 일을 [bring-up 체크리스트](bringup-checklist.md) 하나로 모았다. 세션 보고에만 있던 시험 차례를 저장소로 옮겼다. 3절 표의 낡은 말(2a의 Debian 커널, 2b의 fixed 클럭과 `regulator-fixed`)을 4·11절에 맞췄다
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -175,8 +176,8 @@
 
 | 단계 | 할 일 | 종료 조건 |
 |---|---|---|
-| 2a 첫 부팅 | 업스트림 꼴 트리(CPU, GIC, 타이머, PSCI, 메모리, simple-framebuffer, ramoops, UART), 이미지 꼴, Debian 커널 그대로 | initramfs 셸이 화면이나 UART에 뜬다. 커널 기록으로 EL2 판정(12.1절) |
-| 2b 저장장치·디버그 | UFS(`ufs-rtff-mtcmos`, 처음에는 MCQ 끔), USB 주변 장치(mtu3·xsphy), 핀·EINT(mt6878 틀), 클럭(처음에는 fixed + `clk_ignore_unused`), SPMI(MT8196 데이터, P 버스 끔), MT6319(DT만), MFD·MT6363, cpufreq-hw. UFS는 LK가 켜 둔 클럭과 `regulator-fixed`로 먼저 띄울 수 있다. PMIC 쪽은 핀(EINT) → SPMI → MT6319 → MFD·MT6363 순서다 | UFS의 Debian 루트, USB 가젯 SSH |
+| 2a 첫 부팅 | 업스트림 꼴 트리(CPU, GIC, 타이머, PSCI, 메모리, simple-framebuffer, ramoops, UART), 이미지 꼴, kernel.org 원본과 대기열의 커널 | initramfs 셸이 화면이나 UART에 뜬다. 커널 기록으로 EL2 판정(12.1절) |
+| 2b 저장장치·디버그 | UFS(`ufs-rtff-mtcmos`, 처음에는 MCQ 끔), USB 주변 장치(mtu3·xsphy), 핀·EINT(mt6878 틀), 클럭 컨트롤러 여섯(`clk_ignore_unused`는 둔다), SPMI(MT8196 데이터, P 버스 끔), MT6319(DT만), MFD·MT6363, cpufreq-hw. PMIC 쪽은 핀(EINT) → SPMI → MT6319 → MFD·MT6363 순서다 | UFS의 Debian 루트, USB 가젯 SSH |
 | 2c 화면·입력 (1차) | simple-framebuffer로 buntOS 데스크톱, NT36532 SPI 터치(펌웨어 내려받기), 펜, 홀 센서(gpio-keys), 포고 키보드(serdev) | 2944×1840으로 buntOS 로그인 화면, 터치·펜 조작, 키보드 커버를 붙이면 포인터 모드 |
 | 2d 무선 | conninfra(SIP 호출, PMIC 전원, conn 전원 도메인), mt76 soc7_0(LK 적재본 기동), nvdata 보정값, FEM, Bluetooth(BEIF) | Wi-Fi 연결, Bluetooth 키보드·이어폰 |
 | 2e GPU·전원 | panthor + GPUEB 변형, Mesa 26.3, 클럭 드라이버 완성(`clk_ignore_unused` 빼기), LVTS 열, MT6375 충전·TCPC, MM8013, 서스펜드 | GLES로 컴포지터, 서스펜드·복귀 반복, 배터리·충전 표시 |
@@ -378,7 +379,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | 루트 파티션을 위해 GPT를 고침 | preloader·LK가 읽지 못하면 부팅이 막힌다. userdata를 지운다 | 고치기 전의 GPT를 떠 둔다. 되돌리는 길은 언락 전 SP Flash 백업이다. 언락 직후라 잃을 데이터가 적을 때 한다(4절) |
 | 이미지의 systemd가 UFS의 GPT를 고침 | 안드로이드 파티션과 슬롯을 잃을 수 있다 | `systemd-repart`와 gpt-auto 생성기를 보드 프로필과 initramfs에서 가린다. 파일 시스템만 늘린다(4절). QEMU에서 GPT와 다른 파티션의 해시로 확인했다. 대조 시험에서는 가리지 않으면 파티션을 늘린다 |
 | USB 호스트의 VBUS가 MT6375와 차지 펌프에 달림 | USB 저장장치·동글·키보드·오디오 우회가 드라이버와 기기 확인을 기다린다 | 패치 0042~0049(꺼 둠). 그 전에는 USB 가젯으로 일한다 |
-| VBUS를 잘못 켜 USB 경로가 끊김 | 가젯이 유일한 디버그 길이라 기기를 구할 길이 줄어든다 | 프로브와 등록에서 쓰기 0번(실제 regulator 코어 위에서 시험), regmap 쓰기 허용 목록, 외부 VBUS가 있으면 켜지 않음, `vbus-supply` 안 씀, 꺼 둔 채 대기. 처음 켤 때의 차례는 보고 `.handoff/tb375fc-mt6375.md` 6절 |
+| VBUS를 잘못 켜 USB 경로가 끊김 | 가젯이 유일한 디버그 길이라 기기를 구할 길이 줄어든다 | 프로브와 등록에서 쓰기 0번(실제 regulator 코어 위에서 시험), regmap 쓰기 허용 목록, 외부 VBUS가 있으면 켜지 않음, `vbus-supply` 안 씀, 꺼 둔 채 대기. 처음 켤 때의 차례는 [체크리스트](bringup-checklist.md) 8절 |
 | 켠 채 충전기나 PC를 꽂음 | TCPC가 없어 두 전원이 VBUS에서 맞선다. 가드는 켜는 순간만 본다 | TCPC 전까지 사용자 공간에서 손으로만 켠다. 시험 때 꽂지 않는다 |
 | USB 커넥터 과열 보호 없음 | 순정은 충전 중 `usb_board_ntc`로 GPIO179를 올린다. 이 커널에는 그 센서 드라이버가 없다 | 2e 열 작업 때 넣는다. OTG 중에는 순정도 돌리지 않는다 |
 | 포고 키보드 프로토콜을 스톡 모듈에서 읽음 | 다른 판 키보드에서 다르면 키가 안 든다 | 글로벌판(TB373FU) 모듈 기준이다. 중국판 모듈과 실제 프레임은 기기에서 `dyndbg`로 본다. 코드는 사실만 옮겨 새로 썼다(표 8×16은 통신 상수다) |
@@ -413,7 +414,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
      - 기기 없이 벤더 표와 맞대고(헤더 379항목, 레일 표 746항목), 실제 드라이버 파일을 레지스터 모델 위에서 패치마다 돌렸다. 모델도 벤더 자료로 만든 것이라 실제 PMIC로 확인한 것은 아니다. 보드 방침을 바꿀지는 기기에서 `TOP_TRAP`과 VEMC 전압을 본 뒤 정한다
    - v1.13에 끝낸 것: 2c(1차) 입력의 포고 키보드 커버(패치 0032~0036과 장치 트리). 업스트림 v6에 리뷰 지적을 반영하고, 스톡 모듈에서 읽은 옛 꼴을 프로토콜 표로 더했다. CRC 초기값은 필요 없다(이 기기는 합을 쓰고, 0xA5C9는 OnePlus `dunhuang`의 값이다). GPIO26은 키보드 드라이버가 가진다. UART3 패드 모드는 OEM `uarthub` 코드의 뜻(bit 4: 1 패드, 0 허브)대로 8250_mtk가 probe·startup·resume에서 맞춘다
      - 보드 `&ssusb`에 `dr_mode = "peripheral"`을 넣었다. 문서에는 있다고 적혀 있었으나 파일에 없었고, 없으면 mtu3가 호스트 역할로 시작해 2b의 USB 가젯 셸이 뜨지 않는다
-   - v1.14에 끝낸 것: 루트로 넘기는 initramfs(4절). 넘어가지 못하는 경우 열아홉 가지가 패닉 없이 셸로 돌아오고, 진짜 systemd에서 `/run/buntos` 기록, 디스크 안전, 파일 시스템 늘리기, 가짜 UDC(`dummy_hcd`) 위의 ttyACM 셸·DHCP·SSH를 봤다. 시험은 `initramfs/test.sh`다. 기기에서만 볼 수 있는 것은 `.handoff/tb375fc-initramfs.md` 5절에 있다
+   - v1.14에 끝낸 것: 루트로 넘기는 initramfs(4절). 넘어가지 못하는 경우 열아홉 가지가 패닉 없이 셸로 돌아오고, 진짜 systemd에서 `/run/buntos` 기록, 디스크 안전, 파일 시스템 늘리기, 가짜 UDC(`dummy_hcd`) 위의 ttyACM 셸·DHCP·SSH를 봤다. 시험은 `initramfs/test.sh`다. 기기에서 볼 것은 [체크리스트](bringup-checklist.md) 6.8절에 있다
    - v1.15에 끝낸 것: USB 호스트의 VBUS(패치 0042~0049). I2C 바인딩·게이트·컨트롤러 14개, MT6375 MFD와 OTG 부스트, 차지 펌프 입력 FET 스위치, 보드 노드(모두 꺼 둠). 레지스터와 순서는 OEM·스톡 모듈과 맞댔고, 실제 커널의 i2c·regmap·regulator 코어 위에서 레지스터 모델로 돌렸다. 기기 시험은 없다
 2. **다음(기기 없이, 이 차례로):**
    1. 진행 중(세션): 전원 도메인(패치 0050~0054), Wi-Fi conninfra와 mt76 soc7_0(0055~0069), GPU 전원과 열·게이지(0070~0079)
@@ -421,14 +422,14 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
    3. 2c 전에: 안드로이드 파티션을 데스크톱에서 가린다. 전체 이미지에는 `udisks2`가 들어온다(`nautilus` → `gvfs`). 내부 디스크는 자동으로 붙지 않지만 파일 관리자에 보이고, 관리자 인증 뒤 쓰기 가능으로 붙을 수 있다. udev 규칙의 `UDISKS_IGNORE=1`로 가린다
    4. 출시 전에: 개발용 USB 길을 이미지에서 빼는 프로필, initramfs의 암호 없는 셸을 없애거나 막는 길, 공통 레시피의 `Autologin=yes`
    5. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)
-      - USB 호스트: 사용자 기기의 차지 펌프는 UPM6720 @0x65다(2026-11-01 adb, `/sys/bus/i2c/drivers/upm6720/10-0065`. NU2115에는 붙은 장치가 없다). 부품이 다른 기기가 있을 수 있어 `i2cdetect -r`로 다시 본 뒤 그 노드를 켠다. 시험 차례는 `.handoff/tb375fc-mt6375.md` 6절
-3. **기기:** 사용자의 TB375FC는 중국판 ZUXOS 1.5.10.044(Android 16)다(2026-11-01). 이 판에서 바로 언락한 보고는 없으니, 16.0.20.091로 내린 뒤 언락하는 길을 쓴다(2.1절). 예비 기기를 살 때는 ZUI 16 기기가 낫다.
+      - USB 호스트: 사용자 기기의 차지 펌프는 UPM6720 @0x65다(2026-11-01 adb, `/sys/bus/i2c/drivers/upm6720/10-0065`. NU2115에는 붙은 장치가 없다). 부품이 다른 기기가 있을 수 있어 `i2cdetect -r`로 다시 본 뒤 그 노드를 켠다. 시험 차례는 [체크리스트](bringup-checklist.md) 8절
+3. **기기:** 차례와 명령은 [bring-up 체크리스트](bringup-checklist.md)에 모았다. 사용자의 TB375FC는 중국판 ZUXOS 1.5.10.044(Android 16)다(2026-11-01). 이 판에서 바로 언락한 보고는 없으니, 16.0.20.091로 내린 뒤 언락하는 길을 쓴다(2.1절). 예비 기기를 살 때는 ZUI 16 기기가 낫다.
 4. **언락 전(지금 할 수 있는 것):**
    - 자동 업데이트를 끄고 1.5.10.044에 머문다(go/no-go 4번). 1.5.10.103 이후 판에서는 판 바꾸기 문제가 많이 보고됐다. 2026-11-01에 레노버 업데이트 앱(`com.lenovo.ota`)을 껐다(되돌리기는 `pm enable`)
    - 펌웨어: adb 셸은 `/vendor/firmware`의 이름만 보고 파일은 읽지 못한다(2026-11-01). 파일은 아래 readback 백업이나 언락 뒤 root로 얻는다
    - SP Flash Tool readback으로 전체 백업과 해시(go/no-go 1번). 인증 DA·auth는 그 판의 레노버 펌웨어 묶음에서 쓴다
    - ADB로 잰 것(2026-11-01, [실측 보고서](../hw/lenovo-tb375fc.md) 7절): 판, 잠금 상태, RAM 8GB와 저장장치 128GB, 화면(패널 버퍼 가로 2944×1840), 입력 장치 이름, vendor 펌웨어와 모듈 목록, 지문 센서, 센서(LSM6DSO, TCS37013, SCP 뒤)
-   - 파티션 표를 읽은 뒤 새 루트 파티션의 크기와 이름을 정한다(4절): GPT의 userdata 자리, LK fastboot가 새 항목에 굽는지
+   - 언락 뒤 root나 2b의 가젯 셸에서 파티션 표를 읽고 새 루트 파티션의 크기와 이름을 정한다(4절): GPT의 userdata 자리, LK fastboot가 새 항목에 굽는지
    - root가 필요한 것(언락 뒤): `getevent -lp`, framebuffer 주소와 살아 있는 트리의 값(`/proc/device-tree`는 이름만 보이고 값은 막혀 있다), `/proc/iomem`, 파티션 표
    - UART 위치는 기기를 열어 찾는다
 5. **언락:** 2.1절의 언락 순서대로 한다. 그 뒤 root로 framebuffer 주소와 살아 있는 트리를 읽어 장치 트리의 framebuffer·ramoops를 켜고, 2a를 한다(`fastboot boot`).

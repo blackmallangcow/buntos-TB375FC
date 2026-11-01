@@ -172,7 +172,7 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
   - 벤더 레지스터 표는 업스트림 mt8195 표와 같다(2026-11-01 대조). 그래서 MT8196 데이터를 그대로 쓴다. 커뮤니티는 MT6895 데이터(같은 레지스터, 버스 하나)로 닿았다
   - PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다
   - 업스트림은 자식마다 `rcs` 인터럽트(pio EINT 248)와 클럭 셋(`pmif_sys_ck`, `pmif_tmr_ck`, `spmimst_clk_mux`)을 요구한다. 없으면 probe가 실패한다. rcs 때문에 pinctrl-mt6897 뒤다
-  - 노드는 다 있다(M 버스, 별칭, MT6363, MT6368, MT6319 셋). 2b에서 pio와 함께 `okay`로 바꾸고, 커널 기록으로 MT6363 MFD·regulator·키, MT6368 MFD·regulator, MT6319 셋의 probe, `/sys/kernel/debug/regulator/regulator_summary`의 레일 이름, 전원 키 이벤트(`evtest`)를 본다. 드라이버 고침 둘(rcs 디먹스, 채널 설정 순서, 패치 0007·0008)과 MFD 인터럽트 고침(0016)도 이때 확인한다. 자세한 확인 목록은 PMIC·MT6368 작업 보고에 있다
+  - 노드는 다 있다(M 버스, 별칭, MT6363, MT6368, MT6319 셋). 2b에서 pio와 함께 `okay`로 바꾸고, 커널 기록으로 MT6363 MFD·regulator·키, MT6368 MFD·regulator, MT6319 셋의 probe, `/sys/kernel/debug/regulator/regulator_summary`의 레일 이름, 전원 키 이벤트(`evtest`)를 본다. 드라이버 고침 둘(rcs 디먹스, 채널 설정 순서, 패치 0007·0008)과 MFD 인터럽트 고침(0016)도 이때 확인한다. 자세한 확인 목록은 [체크리스트](../../../docs/tb375fc/bringup-checklist.md) 6.3~6.5절에 있다
 - **핀.** pio 노드와 드라이버(패치 0004~0006)가 있다. 켜면 probe가 EINT 마스크를 모두 세운다(업스트림 동작). 핀 상태(`pinctrl-0`)는 쓰는 노드가 생길 때 더한다
 - **cpufreq-hw.** 바인딩의 `reg` 개수를 고친다.
 
@@ -190,6 +190,6 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
     7. 서스펜드: 0x92/0x02 응답, 키로 깨우기(GPIO40), 붙이고 떼어 깨우기(GPIO26)
     8. TX 게이트와 응답 지연: `dyndbg`의 `gate shut after N us, reply after M us`. N에서 프레임 시간(25바이트면 271 µs), M에서 응답 프레임 시간(31바이트면 340 µs)을 뺀다. 로직 분석기가 있으면 GPIO71과 선을 함께 본다
     9. 잠든 사이 펼치기와 접기: 깬 뒤 SLEEP 0 다음에 MCU가 0x93/0x03을 다시 보내는지. 보내지 않으면 접은 것을 깬 뒤 알 수 없다
-  - 터치·펜·홀 센서: 패치 0027~0031과 노드가 있다(꺼 둠). 2c에서 pio·클럭 컨트롤러와 함께 spi2·gpio-keys·`vddio_1v8`을 켜고, spi2의 SCLK(9.6 MHz 아래, 깨지면 `cs-gpios`), 터치의 trim ID·패널 ID·펌웨어 내려받기, `evtest`의 좌표와 축 방향, 펜(압력·기울기·단추·호버, 펜 켜기 명령 `0x7B 0x01`), 서스펜드 뒤 터치, 덮개와 키보드에 따른 GPIO1·26 값을 본다(터치 작업 보고 8절)
+  - 터치·펜·홀 센서: 패치 0027~0031과 노드가 있다(꺼 둠). 2c에서 pio·클럭 컨트롤러와 함께 spi2·gpio-keys·`vddio_1v8`을 켜고, spi2의 SCLK(9.6 MHz 아래, 깨지면 `cs-gpios`), 터치의 trim ID·패널 ID·펌웨어 내려받기, `evtest`의 좌표와 축 방향, 펜(압력·기울기·단추·호버, 펜 켜기 명령 `0x7B 0x01`), 서스펜드 뒤 터치, 덮개와 키보드에 따른 GPIO1·26 값을 본다([체크리스트](../../../docs/tb375fc/bringup-checklist.md) 7절)
 - 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다
 - 2e: mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`

@@ -1,0 +1,745 @@
+# TB375FC bring-up 체크리스트
+
+- 작성일: 2026-11-01
+- 기준: [설계안](DESIGN.md) v1.16, 패치 대기열 0001~0049
+- 상태: **기기에서 돌린 항목이 아직 없다.** 기기 결과로 고친다
+- 관련 문서: [장치 트리 README](../../kernel/tb375fc/dts/README.md), [BSP README](../../bsp/lenovo-tb375fc/README.md), [하드웨어 실측](../hw/lenovo-tb375fc.md), [포팅 재료 조사](porting-materials.md), [buntOS 설계안](../design/ARCHITECTURE.md) 4.2.3절·12.1절
+
+## 1. 쓰는 법
+
+기기에서 할 일을 일어나는 차례로 모았다. 위에서 아래로 한다.
+
+- **아직 아무것도 기기에서 돌리지 않았다.** 사용자의 TB375FC는 잠겨 있다. 기기에서 한 일은 adb 읽기와 업데이트 앱 끄기뿐이다(2026-11-01). 아래 기대값은 펌웨어, OEM 코드, 스톡 모듈, QEMU, 레지스터 모델에서 왔다.
+- 단계마다 목표와 종료 조건으로 시작한다. 종료 조건을 채운 뒤 다음 단계로 간다. 결과는 이 포크의 문서에 남긴다(설계안 11절). 일련번호와 MAC 주소는 적지 않는다.
+- 항목의 차례를 지킨다. 읽기만 하는 확인이 켜는 일보다 먼저다.
+- 장치 트리의 노드는 대부분 꺼져 있다. 그 단계에서 말한 노드만 `status = "okay"`로 바꾸고 이미지를 다시 만든다. 노드의 값과 출처는 [장치 트리 README](../../kernel/tb375fc/dts/README.md)에, 이미지 만들기는 [BSP README](../../bsp/lenovo-tb375fc/README.md)의 "만들기"에 있다.
+- 시험 도구: 진짜 루트에는 보드 프로필의 `evtest`, `i2c-tools`, `gpiod`가 있다. 물리 주소는 `busybox devmem <주소> 32`로 읽는다. 이미지용 커널은 `CONFIG_IO_STRICT_DEVMEM=y`라 드라이버가 잡은 곳을 막으므로, 그런 주소를 읽을 때는 명령줄에 `iomem=relaxed`를 더한다. 개발용 커널은 이 값이 꺼져 있다.
+- 기본 커널 명령줄은 `console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused regulator_ignore_unused`다. 뒤의 셋은 소비자가 아직 없는 클럭·전원 도메인·레귤레이터를 늦은 정리에서 끄지 않게 한다. 이 목록의 단계에서는 빼지 않는다(`clk_ignore_unused`를 빼는 일은 2e다).
+
+위험 표시는 `위험:`으로 찾을 수 있다. 표시 안에 먼저 둘 것과 되돌리는 길을 적었다.
+
+| 표시 | 뜻 |
+|---|---|
+| `위험: 부팅 불가` | 기기가 부팅하지 못하게 될 수 있다 |
+| `위험: USB 끊김` | USB 디버그 길이 끊긴다. 포트가 하나라 화면 말고는 유일한 길이다 |
+| `위험: 데이터 손실` | 되살릴 수 없는 데이터나 userdata를 잃을 수 있다 |
+
+근거를 나타내는 말은 소스의 말을 그대로 옮겼다.
+
+| 말 | 뜻 |
+|---|---|
+| 실측 | 사용자 기기에서 adb로 읽었다(2026-11-01) |
+| 펌웨어 | 순정 펌웨어에서 읽었다 |
+| 코드로 본 것 | 소스나 역어셈블을 읽었고 기기에서 돌려 보지 않았다 |
+| 모델 값 | 벤더 자료로 만든 모델이나 시뮬레이터의 값이다. 실제 칩이 아니다 |
+| 포럼 보고 | XDA 글타래 등의 보고다. 우리가 기기에서 확인하지 않았다 |
+| 판단, 추론, 짐작 | 근거에서 미룬 해석이다. 틀릴 수 있다 |
+
+## 2. 언락 전
+
+**목표.** 언락 go/no-go 넷을 채운다. 기기에 아무것도 굽지 않는다.
+
+**종료 조건.** 2.4절의 넷을 모두 채웠다. 하나라도 빠지면 언락하지 않는다. 2026-11-01 조사로는 넷 모두 길이 보이지만, 모두 기기에서 확인해야 한다.
+
+### 2.1 판과 OTA
+
+1. [ ] 기기의 판을 적는다. 사용자 기기는 중국판 ZUXOS 1.5.10.044(Android 16)다(실측).
+2. [ ] OTA를 끈다(go/no-go 4). 언락 길이 ZUI 16에 묶여 있으니 받자마자 끈다. 1.5.10.103 이후 판에서는 판 바꾸기 문제가 많이 보고됐다(포럼 보고). 그래서 1.5.10.044에 머문다. 사용자 기기는 2026-11-01에 이미 껐다.
+
+    ```bash
+    adb shell pm disable-user --user 0 com.lenovo.ota
+    ```
+
+    되돌리기:
+
+    ```bash
+    adb shell pm enable com.lenovo.ota
+    ```
+
+### 2.2 adb로 읽기
+
+root 없이 읽기만 한다.
+
+1. [ ] 사용자 기기는 이미 읽었다([실측 보고서](../hw/lenovo-tb375fc.md) 7절): 판, 잠금 상태, RAM 8GB와 저장장치 128GB, 화면(패널 버퍼 가로 2944×1840), 입력 장치 이름, vendor 펌웨어와 모듈 목록, 지문 센서, 센서(LSM6DSO, TCS37013, SCP 뒤). 다른 기기를 쓰면 다시 읽는다.
+2. [ ] 차지 펌프가 어느 칩인지 본다.
+
+    ```bash
+    adb shell cat /sys/devices/platform/boardinfo/boardinfo
+    adb shell ls /sys/bus/i2c/drivers/nu2115 /sys/bus/i2c/drivers/upm6720
+    ```
+
+    - 첫째는 순정 `hardware_info`의 `boardinfo`로 충전 칩 이름이 들어 있다(코드로 본 것, 기기에서 돌려 보지 않았다). 둘째는 붙은 주소를 보여 준다. SELinux가 막을 수 있다.
+    - 사용자 기기는 UPM6720 @0x65다(실측: `/sys/bus/i2c/drivers/upm6720/10-0065`가 있고, NU2115에는 붙은 장치가 없다). 보드 dts의 `vbus-switch-supply`가 이 칩을 가리킨다.
+    - 부품이 다른 기기가 있을 수 있다. 그래서 8절 1단계에서 `i2cdetect -r`로 다시 본다.
+3. [ ] `/vendor/firmware`는 이름만 볼 수 있다. adb 셸은 파일을 읽지 못한다(실측). 파일은 2.3절 백업이나 언락 뒤 root로 얻는다(4절 8번). 이름과 판 정보는 [pull-android.sh](../../bsp/lenovo-tb375fc/firmware/pull-android.sh)로 받을 수 있다.
+
+### 2.3 전체 백업 (go/no-go 1)
+
+mtkclient로는 안 된다(V6 DA에 DAA·SLA). 순정 펌웨어 묶음의 인증 DA·auth와 SP Flash Tool로 readback한다. 이 길은 포럼 보고로 보았고, 기기에서 확인해야 한다.
+
+> **위험: 데이터 손실.** nvdata·nvram 계열에는 Wi-Fi MAC과 보정값이 있다. 잃으면 되살릴 수 없다. 이 백업을 해시로 확인하기 전에는 아무것도 굽지 않는다. 뒤의 판 내리기, 언락, GPT 고침을 되돌리는 길이 모두 이 백업이다.
+
+1. [ ] SP Flash Tool을 준비한다. Windows 도구다. 인증 DA·auth는 그 기기 판의 레노버 펌웨어 묶음에 든 것을 쓴다. 우리가 본 중국판 묶음에는 인증 DA(`DA_BR.bin`), `da.auth`, SLA 파일이 있다.
+2. [ ] scatter와 readback 설정을 기기 용량(128·256GB)에 맞춘다. 사용자 기기는 128GB다. XDA 원글 작성자가 이 기기용 scatter와 readback 설정을 만들었다(포럼 보고).
+3. [ ] 전체 파티션을 readback한다. 특히 `nvram`, `nvdata`, `nvcfg`, `protect1/2`, `persist` 계열을 본다([buntOS 설계안](../design/ARCHITECTURE.md) 4.2.3절).
+4. [ ] 다른 기기에 옮겨 해시로 확인한다.
+
+### 2.4 go/no-go
+
+| 조건 | 지금 | 확인 |
+|---|---|---|
+| 1. 전체 파티션 백업과 해시 확인 | 길이 있다. 기기에서 확인 | 2.3절 |
+| 2. 독립된 보고 둘 이상과 판 일치 | 보고는 여럿이다. 판 확인이 남았다 | 아래 1번 |
+| 3. BROM·preloader 복구 길 | 있다(포럼 보고). 기기에서 확인 | 아래 2번 |
+| 4. OTA 차단 | 기기에서 한다 | 2.1절 |
+
+1. [ ] 언락할 판(예: 16.0.20.091)으로 된 성공 보고를 확인한다. ZUXOS 기기는 그 판으로 내린 뒤다. 판마다 결과가 갈린다. 모두 포럼 보고다([조사](porting-materials.md) 5절).
+    - 16.0.20.022·.041: 원글 작성자와 다른 사용자 여럿이 성공했다(2025-02).
+    - 16.0.20.091: TrebleDroid 위키가 언락한 뒤 GSI를 띄웠다(2025-08). 성공 보고가 있다(2025-09, 2026-09). 256GB 기기가 16.0.20.130에서 .091로 내린 뒤 개발용 LK와 sn.img가 모두 실패한 보고도 있다(2025-12).
+    - 글로벌판 17.0.04.184(Android 15): 내리지 않고 개발용 LK로 언락한 보고가 있다(2025-10).
+    - ZUXOS 1.5.10.x: 바로 언락한 보고는 없다. 1.5.10.103 기기를 SP Flash Tool로 16.0.20.091까지 내린 뒤 언락한 보고가 있다(2026-09).
+    - 레노버가 발급한 sn.img와 개인이 만든 sn.img 웹 도구는 인증에 실패했다는 보고가 둘 있다(2025-09, 2025-12).
+2. [ ] 복구 길을 확인한다. mtkclient는 BROM 익스플로잇이 없다. SP Flash Tool과 순정 묶음의 인증 DA·auth로 굽고 되살린 보고가 여럿이다. 중국판 백업을 되돌린 뒤 OTA가 되고 다시 잠글 수 있었다는 보고도 있다(모두 포럼 보고).
+3. [ ] 예비 기기 1대를 둔다(설계안 10절). 살 때는 ZUI 16 기기가 낫다.
+
+### 2.5 UART
+
+1. [ ] 기기를 열어 UART 시험 패드를 찾는다. GPIO207이 TX, GPIO208이 RX다(벤더 pinfunc). 위치와 921600bps를 확인한다. 위치와 전압이 공개된 곳이 없다. 포고 핀 UART3(GPIO180·181)은 키보드 줄이다. 커뮤니티 포트는 UART를 쓰지 않았고, 그 포트의 "UART0이 키보드 줄"이라는 주석은 펌웨어와 맞지 않는다.
+
+## 3. 언락
+
+**목표.** 사용자 기기를 언락하고 바로 순정 LK로 되돌린다. 한쪽 슬롯과 recovery는 안드로이드로 남긴다.
+
+**종료 조건.** 기기가 언락 상태다(서명하지 않은 이미지를 `fastboot boot`로 올리려면 이 상태여야 한다). LK가 순정이고, AVB를 껐고, 남겨 둔 안드로이드 슬롯으로 돌아갈 수 있다.
+
+> **위험: 부팅 불가·데이터 손실.** 이 절 전체가 그렇다. 언락은 포럼 보고로만 아는 길이고 판에 묶여 있다.
+>
+> **먼저 둘 것.** 2.3절 백업과 해시 확인, 2.4절 go/no-go 넷, 예비 1대.
+>
+> **되돌리기.** 같은 도구(SP Flash Tool)와 순정 펌웨어 묶음으로 2.3절 백업을 되돌린다.
+
+1. [ ] ZUXOS(Android 16) 기기는 SP Flash Tool로 중국판 ZUI 16.0.20.091까지 내린다. 사용자 기기가 여기에 든다. 근거는 포럼 보고 하나이고, 1.5.10.044를 말한 글은 찾지 못했다.
+
+    > **위험: 부팅 불가·데이터 손실.**
+    >
+    > - preloader는 굽지 않는다. 구우면 벽돌이 된다는 보고가 있다.
+    > - 글로벌 ROM을 중국판 기기에 굽지 않는다. 부팅이 반복된다는 보고("Red State")가 있다.
+    > - Android 16 판(ZUXOS 1.5.10.103 이후, 글로벌 17.5.10.095)에서 다른 판의 이미지를 구우면 "Red State"로 부팅하지 못한다는 보고가 여럿이다. 1.5.10.103부터 LK가 글로벌 이미지를 거부한다는 글도 있으나, 작성자가 AI로 썼다고 밝힌 글이라 따로 확인해야 한다.
+    > - 128GB 기기에 256GB 기기의 덤프를 구우면 실패한다(포럼 보고).
+
+2. [ ] 언락할 판이 2.4절 1번에서 확인한 판과 같은지 본다.
+3. [ ] 파티션 이름과 슬롯을 본다.
+
+    ```bash
+    fastboot getvar all
+    ```
+
+4. [ ] 개발용 LK를 순정 LK와 견준다(문자열, 서명 영역). 개발용 LK는 4pda에 올라온 덤프에서 나와 출처를 확인할 수 없다. 남이 고친 부트로더를 굽는 위험이 있다.
+5. [ ] 개발용 LK(`lk_a`)를 굽는다. 중국판 ZUI 16의 순정 LK가 `fastboot flash lk`를 받는다(포럼 보고).
+
+    ```bash
+    fastboot flash lk <개발용 LK 파일>
+    ```
+
+    > **위험: 부팅 불가.** 출처를 확인할 수 없는 부트로더를 굽는다.
+    >
+    > **먼저 둘 것.** 4번의 비교, 7번에 쓸 순정 LK 파일.
+
+6. [ ] 언락한다. 언락 파일 없이 된다(포럼 보고).
+
+    ```bash
+    fastboot flashing unlock_critical
+    ```
+
+    - 안 되면: 2026-09 보고는 개발용 LK를 구운 뒤 시스템으로 한 번 부팅하고 fastboot로 다시 들어가야 언락됐다고 적었다.
+    - 순정 LK의 길은 개발자 옵션의 OEM 잠금 해제, 일련번호에 묶이고 레노버가 서명한 언락 이미지, `fastboot oem unlock`(또는 `flashing unlock`)이다(LK 문자열). 레노버가 이 모델에 언락 파일을 주는 길은 찾지 못했다.
+    - 그래도 안 되면 buntOS ADR-011(기기 선택)을 다시 본다.
+7. [ ] 바로 순정 LK로 되돌린다.
+
+    ```bash
+    fastboot flash lk <순정 LK 파일>
+    ```
+
+8. [ ] AVB를 끈다. vbmeta 셋을 `--disable-verity --disable-verification`으로 다시 굽는다(포럼 보고). 파티션 이름은 3번에서 본다.
+9. [ ] 슬롯을 지킨다. 한쪽 슬롯과 recovery는 안드로이드로 남긴다. 정보원이자, 펌웨어를 뽑는 곳이자, 복귀 길이다. recovery는 따로 된 파티션이 없고 vendor_boot 안에 있다. GPUEB, `connsys_wifi`, `connsys_bt` 파티션도 지킨다. 이 펌웨어는 LK가 올린다(설계안 D6).
+
+## 4. 언락 뒤 root로 읽기
+
+**목표.** 2a에 쓸 값을 남겨 둔 안드로이드에서 읽는다. 장치 트리의 framebuffer·ramoops를 켤 값과 루트 파티션 자리를 정할 표를 얻는다.
+
+**종료 조건.** framebuffer 주소·크기·형식, ramoops 틈, 예약 메모리 배치, 파티션 표를 적었다. 2a를 위해 `framebuffer0`·`ramoops`를 켤 수 있다.
+
+읽기만 한다.
+
+root는 Magisk를 1안으로 둔다. 기기에서 확인하지 않았다. [공식 안내](https://topjohnwu.github.io/Magisk/install.html)대로 램디스크가 든 파티션의 이미지를 기기에서 패치해 fastboot로 굽는다. 이 기기는 `init_boot`다.
+
+```bash
+fastboot flash init_boot <패치한 이미지>
+```
+
+> **위험: 부팅 불가·데이터 손실.** 안내는 남이 패치한 이미지를 쓰지 말고, 같은 모델이라도 다른 기기에서 패치하지 말라고 적었다. vbmeta를 끄는 일은 데이터를 지울 수 있다고 적었다.
+>
+> **먼저 둘 것.** 2.3절 백업, 패치 전의 `init_boot`.
+>
+> **되돌리기.** 패치 전의 `init_boot`를 다시 굽는다.
+
+1. [ ] `/proc/iomem`과 살아 있는 트리(`/proc/device-tree`)를 뜬다. root 없이는 `/proc/iomem`이 막혀 있었고, `/proc/device-tree`는 이름만 보이고 값은 막혀 있었다(실측).
+
+    ```bash
+    cat /proc/iomem
+    ```
+
+2. [ ] framebuffer 주소·크기·형식을 확인한다. `/chosen`의 `atag,videolfb`와 `/reserved-memory`를 본다. LK는 화면 영역을 `mblock-14-framebuffer`로 예약한다(이름은 실측). 패널이 그리는 버퍼는 가로 2944×1840이다(실측, SurfaceFlinger의 `framebufferSpace`. 화면 회전 설정과 상관없다).
+    - 후보(커뮤니티 포트): `0xfc16f000`, 2944×1840, stride 11776, `a8r8g8b8`, 예약 크기 `0x3e90000`(LK가 할당한 크기, 세 화면보다 조금 크다). 그 포트는 LK 기록(mblock 할당, `atag,videolfb`)에서 읽어 이 주소로 fbcon을 띄웠다(12GiB 기기). 우리 기기는 8GB다. 같은지 본다.
+    - 맞으면: `framebuffer0`을 켠다. 부트로더가 예약하지 않으면 `framebuffer_mem`도 켜고, 이미 예약하면 `framebuffer_mem`을 지운다.
+    - 다르면: 읽은 주소로 `simple-framebuffer`를 만든다.
+3. [ ] 화면의 실제 크기 약 273×171mm를 확인해 둔다. 2c에서 `panel` 노드의 `width-mm`·`height-mm`로 쓴다. DSI에는 EDID가 없다.
+4. [ ] ramoops 틈을 본다. 살아 있는 트리의 예약 영역으로 `0x48090000`~`0x4816ffff`가 비었는지 본다. 앞뒤는 `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`)다.
+    - LK는 pstore 자리를 `mblock-2-pstore`로 예약한다(이름은 실측, 값은 root 필요).
+    - LK가 명령줄에 `ramoops.*`를 넣으면 노드와 겹쳐 장치가 둘 생긴다. 하나만 둔다.
+    - 크기가 `0xe0000`을 넘으면 minirdump를 덮는다.
+5. [ ] 예약 메모리의 실제 배치를 본 뒤 pstore 칸을 정한다. 정적 트리에는 동적 할당 셋뿐이고, TEE, GenieZone, connsys, framebuffer의 고정 예약은 preloader·LK가 부팅 때 더한다. BL31 자리는 `0x48800000`, 2MB다.
+6. [ ] 입력 장치를 읽는다. 셸로는 열리지 않았다(실측).
+
+    ```bash
+    getevent -lp
+    ```
+
+7. [ ] 파티션 표를 뜬다. 기기 GPT의 형식 GUID는 아직 모른다. GPT의 userdata 자리를 보고, 새 루트 파티션의 크기와 이름을 정한다(보기: userdata 108G 가운데 32~48G). 여기서는 고치지 않는다. 고치는 일은 6.8절이다.
+8. [ ] 펌웨어 파일을 얻는다. 2c의 터치에 `vendor/firmware/novatek_ts_fw_boe.bin`과 `novatek_ts_fw_tm.bin`이 있어야 한다. 파일은 저장소에 넣지 않는다. 고르는 일은 [extract.sh](../../bsp/lenovo-tb375fc/firmware/extract.sh)와 [manifest.tsv](../../bsp/lenovo-tb375fc/firmware/manifest.tsv)가 한다.
+9. [ ] efuse 낱말 `0x1cc`(devinfo)의 [5:0]을 읽어 둔다. 6.7절 6번의 U2 INTR_CAL과 견준다.
+
+## 5. 2a 첫 부팅
+
+**목표.** 파티션을 건드리지 않고 `fastboot boot`로 RAM에서 우리 커널을 띄운다. 루트 파일 시스템은 initramfs다.
+
+**종료 조건.** initramfs 셸이 화면이나 UART에 뜬다. 커널 기록으로 EL2를 판정한다.
+
+통로는 화면 콘솔(simple-framebuffer + simpledrm), pstore/ramoops, LK 기록(expdb 파티션), UART다. USB 가젯은 아직 없다. UART를 찾지 못했으면 셸에 입력할 길이 없으므로, [init](../../bsp/lenovo-tb375fc/initramfs/init)이 화면에 찍는 줄(`cmdline:`, `vendor_boot:`, EL 줄)로 본다(이 문서의 해석이다. 10절 5번).
+
+### 5.1 준비
+
+1. [ ] 4절의 값으로 보드 dts의 `framebuffer0`·`ramoops`를 켠다. `uart0`은 켜져 있다. 2a 동안 uart0의 `bus`는 clk26m이다.
+2. [ ] 이미지 넷(boot, vendor_boot, init_boot, dtbo)을 만든다. [BSP README](../../bsp/lenovo-tb375fc/README.md) "만들기" 1~3번이다. 입력, 명령줄, 해시는 `images.txt`에 남는다. 기기 없이 할 수 있는 시험(`boot/test.sh`, QEMU 맛보기, `initramfs/test.sh`)도 그 README에 있다.
+3. [ ] `mkimages.sh --boot-ramdisk`로 만든 boot.img도 만들어 둔다. initramfs를 boot.img에도 넣은 이미지다.
+4. [ ] 멈춤을 볼 도구를 고른다. 부팅 단계마다 화면에 블록을 그리는 카나리와 `panic=0`(패닉 화면을 남긴다)을 쓸 수 있다.
+
+### 5.2 `fastboot boot`
+
+1. [ ] RAM으로 띄운다. LK의 fastboot 명령 표에 `download:`와 `boot`가 있다(LK 문자열). 파티션을 건드리지 않는 길이다(설계안 D3). 멈췄을 때 기기를 되살리는 키는 아직 모른다(10절 4번).
+
+    ```bash
+    fastboot boot boot.img
+    ```
+
+2. [ ] LK가 이미지를 받는지 본다. 원래 이미지와 달리 AVB 꼬리, 파티션 크기 채움, dtbo 뒤의 MediaTek 서명 블록(cert1·cert2)이 없다. LK가 언락 상태에서 이것을 요구하는지는 기기에서 본다.
+3. [ ] LK가 어느 vendor_boot·init_boot를 붙였는지 본다.
+    - `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있다.
+    - LK는 세 머리를 모두 읽고, 장치 트리를 예약 메모리 `mb_dtb`로 읽어 커널에 넘긴다(LK 문자열). 그래서 굽혀 있는 원래 vendor_boot·init_boot를 붙일 가능성이 높다. 이 결합만 기기에서 확인하지 않았다.
+    - init이 표지(`/etc/buntos/vendor_boot`)로 알린다. 표지가 없으면 `vendor_boot: no buntOS marker (the stock vendor_boot may be in use)`를 찍는다.
+    - `--boot-ramdisk`로 만든 boot.img로 LK가 그 램디스크를 쓰는지 본다.
+    - 원래 장치 트리로 뜨면 5.3절로 간다.
+4. [ ] 명령줄이 들어왔는지 본다. LK가 무엇을 덧붙이는지와 명령줄 길이 한도도 적는다. boot v4의 한도는 1536바이트다.
+
+    ```bash
+    cat /proc/cmdline
+    ```
+
+    - 근거: MT6895 xaga 포트의 주석이 LK가 boot·vendor_boot 명령줄을 버린다고 적었다. MT6897 LK에 vendor_boot DT 표로 트리를 넣어 시험한 기록은 없다.
+    - 순정 트리의 `/chosen`은 `root=/dev/ram`이고 탭이 섞여 있다. LK가 순정 vendor_boot를 쓰면 이 값이 온다.
+    - 안 들어오면: 커널 `CMDLINE`과 `CMDLINE_EXTEND`로 준다.
+    - DTB를 커널에 넣는 커뮤니티 포트의 우회는 기본 길로 삼지 않는다.
+
+### 5.3 비운 슬롯에 굽기 (원래 장치 트리로 떴을 때)
+
+1. [ ] 굽기 전에 한 번 더 보려면 장치 트리를 커널에 넣은 시험용 커널을 `fastboot boot`로 띄운다. 이 커널은 LK가 더하는 메모리·예약 값을 버리므로, 그 기기의 메모리 크기에 맞춘 예약을 함께 넣어야 한다. BL31(`0x48800000`, 2MB)도 직접 예약한다. 안 하면 보조 CPU와 서스펜드가 멈춘다(커뮤니티 포트). 그 포트의 12GiB 고정값은 8GB 판에 맞지 않는다. 업스트림에는 내지 않는다.
+2. [ ] 비운 슬롯에 넷을 굽는다. 파티션 이름과 슬롯은 `fastboot getvar all`로 확인한다. 우리 장치 트리로 띄우는 확실한 길이다.
+
+    > **위험: 부팅 불가.** 구운 슬롯이 부팅하지 못할 수 있고, 우리 vendor_boot를 구운 슬롯에서는 순정 recovery를 쓸 수 없다.
+    >
+    > **먼저 둘 것.** 남겨 둘 안드로이드 슬롯, 2.3절 백업.
+    >
+    > **되돌리기.** 남겨 둔 슬롯으로 바꾼다. LK의 fastboot 명령 표에 `set_active:`가 있다([조사](porting-materials.md) 5절).
+
+### 5.4 LK가 고치는 것
+
+1. [ ] `/sys/firmware/fdt`를 떠서 우리 dtb와 견준다. init이 같은 파일을 `/run/buntos/fdt.dtb`에 뜬다.
+    - `/chosen`의 자식 노드가 남는지 본다. 사라지면(MT6895 xaga 포트에서 보고됨) framebuffer를 루트로 옮긴다.
+    - `/chosen`을 다시 쓰면 `stdout-path`도 사라질 수 있다. 그래서 명령줄에 `console=`을 넣었다.
+    - `/memory`가 실제 크기로 바뀌는지 본다. 우리 트리는 1GiB 자리이고, 부트로더가 8·12GiB로 고친다.
+    - `/reserved-memory`에 `mblock-*` 노드가 붙는지 본다. BL31(`0x48800000`, 2MB)이 들어오지 않으면 직접 예약한다.
+    - `/cpus` 노드를 이름으로 건드리는지 본다. 우리 이름(`cpu@100`)이 펌웨어 이름(`cpu@100` = 첫 A715)과 가리키는 코어가 다르다.
+
+### 5.5 화면, pstore, UART
+
+1. [ ] 화면 콘솔이 뜨는지 본다. LK가 dual-DSI + DSC로 켜 둔 2944×1840 화면을 그대로 받는다.
+2. [ ] 따뜻한 재부팅 뒤 ramoops가 지워지지 않는지 본다. init이 직전 기록을 `/run/buntos/pstore`에 떠 둔다. pstore 기록이 있는 경우는 QEMU에 ramoops 백엔드가 없어 시험하지 못했다.
+3. [ ] 순정 recovery로 재부팅해 pstore와 LK 기록을 읽는 길을 본다. LK 기록은 expdb 파티션에 남고 순정 recovery에서 뜬다. 우리 vendor_boot를 구운 슬롯에서는 남겨 둔 슬롯으로 바꿔 recovery를 쓴다.
+4. [ ] UART0을 본다(TX GPIO207, RX GPIO208, 921600bps). 부트로더가 UART0 클럭을 끄고 넘기면 레지스터 접근이 멈출 수 있다. 그러면 `uart0`을 끄고 화면과 pstore로 본다.
+
+### 5.6 안정성
+
+1. [ ] 워치독이 커널이 넘겨받은 뒤 다시 켜지지 않는지 본다(`CONFIG_MEDIATEK_WATCHDOG=y`).
+2. [ ] idle·cpufreq를 본다. 멈추면 `cpuidle.off=1`, `initcall_blacklist=mtk_cpufreq_hw_driver_init`로 하나씩 뺀다.
+3. [ ] systimer는 첫 부팅이 된 뒤에 켜 본다. 펌웨어가 같은 채널(`+0x40`)을 쓰지 않는지(멈춤, 인터럽트 폭주) 본다. 그 전에는 `disabled`이고 hrtimer broadcast가 대신한다.
+
+### 5.7 EL2 판정
+
+1. [ ] 커널 기록의 `CPU: All CPU(s) started at EL2`(또는 `EL1`)와 kvm 초기화 메시지를 본다([buntOS 설계안](../design/ARCHITECTURE.md) 12.1절). 안드로이드 쪽 예비 판정은 GenieZone이 EL2를 차지할 가능성이 높다는 것이다.
+    - 가능: 커널이 EL2에서 시작하고 `/dev/kvm`이 생긴다.
+    - 불가(EL2 점유): 커널이 EL1에서 시작하고 GenieZone 흔적이 있다. KVM을 포기하고 gzvm(미병합)은 나중에 검토한다(설계안 D8). buntOS ADR-011을 다시 본다(설계안 10절).
+    - TEE를 고쳐 EL2를 빼앗는 실험(`mtk-mod-tee-nogz`)은 쓰지 않는다. 서명 우회가 필요하고 벽돌 위험이 크다.
+
+## 6. 2b 저장장치·디버그
+
+**목표.** UFS의 Debian 루트로 넘어가고, USB 가젯으로 기기에 들어간다.
+
+**종료 조건.** UFS의 Debian 루트, USB 가젯 SSH.
+
+- 꺼 둔 노드(UFS, USB, SPMI 등)를 핀·클럭 패치와 함께 하나씩 켠다. PMIC 쪽은 핀(EINT) → SPMI → MT6319 → MFD·MT6363 순서다.
+- UFS와 USB에는 전원 도메인이 없다(펌웨어 트리, 벤더 scpsys 표).
+- USB 호스트는 이 단계에 없다. `dr_mode = "peripheral"`로 둔다.
+- 읽기 명령은 셸이 있어야 한다. UART를 찾지 못했으면 USB 가젯이 뜨기 전에는 입력할 길이 없다. 가젯은 pio, 클럭, SPMI, MT6368이 있어야 뜬다(6.7절). 그 경우 6.1~6.5절의 노드를 켠 채 6.7절까지 간 뒤 앞 절의 읽기를 하고, 그때까지는 화면 콘솔과 pstore로 본다(이 문서의 해석이다. 10절 5번).
+
+### 6.1 핀(pio)
+
+1. [ ] `pio`를 켠다. 드라이버는 패치 0004~0006, 0027, 0028이다. 켜면 probe가 EINT 마스크를 모두 세운다(업스트림 동작). 핀 상태(`pinctrl-0`)는 쓰는 노드가 생길 때 더한다.
+
+### 6.2 클럭
+
+드라이버는 패치 0009~0013이다. 표는 OEM 코드에서 옮겼고 기기 시험은 없다.
+
+1. [ ] 클럭 컨트롤러 여섯(topckgen, apmixedsys, vlpckgen, pericfg_ao, ufscfg_ao, ufscfg_pdn)과 HW voter syscon(`0x10320000`)을 켠다. uart0의 `bus`를 pericfg_ao 게이트로 바꾼다. `clk_ignore_unused`는 그대로 둔다. 없으면 simple-framebuffer가 쓰는 화면 먹스(disp·ovl·mminfra)와 쓰지 않는 UFS 게이트가 늦은 초기화에서 닫힌다.
+2. [ ] apmixedsys가 뜨는지 **먼저** 본다. mainpll은 critical이라 등록할 때 바로 HW voter로 투표한다.
+    - 패치 0012의 순서가 틀리면 `critical clk 'mainpll' failed to prepare`가 난다. 그러면 apmixedsys가 실패해 모든 클럭이 고아가 되고, UART·UFS가 클럭을 기다리며 뜨지 않는다.
+    - 처음 부팅은 화면 콘솔과 pstore로 본다.
+3. [ ] 클럭 값을 읽는다.
+
+    ```bash
+    cat /sys/kernel/debug/clk/clk_summary
+    ```
+
+    - OEM 분수에서 거꾸로 짐작한 값과 견준다: mainpll 2184 MHz, univpll 2496 MHz, tvdpll 약 594 MHz, ulposc 588 MHz.
+    - 먹스의 부모가 LK가 정한 대로 읽히는지 본다: `uart`, `usb_top`, `ssusb_xhci`, `ufs`, `aes_ufsfde`, `vlp_spmi_m`, `vlp_pwrap_ulposc`.
+4. [ ] HW voter 시간을 본다. 먹스·게이트는 업스트림처럼 30µs 안에 DONE과 게이트 비트를 본다. OEM은 몇 초까지 기다리므로 짧을 수 있다. `-ETIMEDOUT`이 나면 늘린다. 2b에서 실제로 쓰는 HWV 클럭은 PLL이다. `i2c` 먹스(HWV CG 21)는 I2C 장치가 붙을 때 처음 쓴다(8절).
+5. [ ] UART 콘솔을 본다. 8250_mtk가 pericfg_ao 게이트를 기다리므로 probe가 pericfg_ao 뒤로 밀린다. earlycon이 그 사이를 메운다. 게이트를 켜도 부모 `uart` 먹스가 LK 상태(26M일 것)를 유지하는지 본다.
+6. [ ] USB는 `usb_top`·`ssusb_xhci` 게이트 먹스와 frmcnt 게이트를 켠다. 나머지는 LK 상태 그대로다. UFS 호스트의 클럭은 6.6절에서 본다.
+7. [ ] `clk32k`의 펌웨어 값 32000 Hz가 맞는지(26 MHz에서 나눈 32K인지, RTC 수정의 32768인지) 안드로이드나 커널 기록으로 본다. 2b 소비자에는 영향이 없다.
+
+### 6.3 SPMI
+
+고침은 패치 0002·0003(백포트)과 0007·0008이다.
+
+1. [ ] `pio`와 함께 SPMI를 `okay`로 바꾼다. PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다.
+2. [ ] probe가 클럭 때문에 실패하지 않는지 본다. 업스트림은 자식마다 `rcs` 인터럽트(pio EINT 248)와 클럭 셋(`pmif_sys_ck`, `pmif_tmr_ck`, `spmimst_clk_mux`)을 요구하고, 없으면 probe가 실패한다. PMIF 클럭으로 `vlp_pwrap_ulposc`를 준 것은 추론이다. `vlp_pwrap_ulposc`·`vlp_spmi_m`은 게이트가 없어 켜기가 아무 일도 하지 않는다.
+3. [ ] 패치 0007을 확인한다. 고치기 전 rcs 디먹스는 `bank = bit / 7`이라 bit 7, 14–15, 21–23, 28–31에서 bank가 하나 커지고, 원래 비트가 남아 체인 IRQ 처리기가 끝나지 않을 수 있었다(코드로 짐작). 6.4절 3번과 6.5절 4번에서 인터럽트가 가만히 있는지 본다.
+4. [ ] 패치 0008을 확인한다. 고치기 전에는 채널 설정이 버스 등록 뒤에 있어, 내장(=y) PMIC 드라이버가 먼저 probe하면 SWINF 상태 대신 `PMIF_INIT_DONE`을 읽고 명령도 그 자리에 썼다(코드로 짐작). rcs 인터럽트나 클럭을 기다리다 PMIF probe가 미뤄지면 이 경우에 든다. MT6363, MT6368, MT6319의 probe가 되는지 본다.
+5. [ ] 0007·0008은 기기에서 확인한 뒤 업스트림에 낸다.
+
+### 6.4 MT6319·MT6363
+
+패치 0014~0018(MFD, 키)과 0037~0041(regulator 고침)이다. MT6319는 DT만 쓴다. 고침은 코드와 레지스터 모델로 확인했을 뿐 기기에서 돌려 보지 않았다. 모델도 벤더 자료로 만든 것이다.
+
+이 단계에서는 보드 방침을 바꾸지 않는다. 전압 한계를 주지 않고, 펌웨어가 늘 켜 두는 레일은 always-on으로 둔다. 바꿀지는 `TOP_TRAP`과 VEMC 전압을 본 뒤 정한다. 벅 끄기를 일부러 시험하지 않는다. 소비자가 생길 때 VS1·VS3가 그대로인지 `regulator_summary`로 본다.
+
+1. [ ] probe를 본다. MT6363 MFD·regulator·키, MT6319 셋이다.
+
+    ```bash
+    dmesg | grep -i -E "spmi|mt6363|pmic|regulator"
+    ```
+
+    - `regulators@30` 아래 레일 등록을 본다. 노드가 있는 것은 23개이고 드라이버 표는 35개다. probe가 표 전체를 돌므로 `regulator_summary`에 몇 줄이 나올지는 기기에서 본다.
+    - 없어야 하는 줄: "Cannot mask interrupts", "Interrupt N is in no interrupt group", "Could not clear RCS flag".
+2. [ ] 레일을 읽는다.
+
+    ```bash
+    cat /sys/kernel/debug/regulator/regulator_summary
+    ```
+
+    - MT6363 23개와 MT6319 6개의 이름·켜짐을 본다.
+    - 기본 명령줄의 `regulator_ignore_unused` 때문에 늦은 정리는 레일을 끄지 않는다. 이 값을 뺀 시험에서는 30초 뒤 "disabling"이 나오는 것이 VEMC뿐이어야 하고, 그것도 `ufshci`가 켜져 있으면 나오지 않아야 한다.
+3. [ ] 인터럽트 폭주를 본다. `spmi_rcs`(EINT 248)와 `mtk-spmi-pmic` 줄이 가만히 있어야 한다. **차가운 부팅과 안드로이드에서 재부팅한 경우를 둘 다 본다.**
+
+    ```bash
+    cat /proc/interrupts
+    ```
+
+    - 앞 커널이 켜 둔 인터럽트는 패치 0016의 초기 마스크가 끈다.
+    - MT6363 그룹 HK는 80~87(레지스터 하나)이다. 벤더 번호 AUXADC_IMP·NAG_C_DLTV(88·89)가 켜져 있으면 HK 상태가 지워지지 않아 RCS가 거듭될 수 있다. 벤더도 그 둘을 쓰지 않으므로 꺼져 있을 것으로 본다.
+4. [ ] 키를 본다. `evtest`의 장치 이름은 `mtk-pmic-keys`다. 전원·볼륨 올림의 누름과 뗌을 본다. 아주 짧게 눌렀을 때 뗌이 누름보다 먼저 오지 않는지 본다(두 스레드 차례). 볼륨 내림은 SoC 키패드(`kp@1c00e000`, `mediatek,kp`, 행렬 0번 `KEY_VOLUMEDOWN`)라 아직 없다.
+
+    ```bash
+    evtest
+    ```
+
+5. [ ] 길게 누름 리셋을 본다. 전원+볼륨 올림을 길게 누르면 리셋되고 전원만으로는 되지 않아야 한다(보드는 모드 2, 시간 0. STRUP_CON11 `0xa0e` bit 2, STRUP_CON12 `0xa0f`). 문제가 있으면 `keys`의 `mediatek,long-press-mode`를 1(전원만)로 바꾼다. 8절의 되돌리는 길이 이 리셋이다.
+6. [ ] `TOP_TRAP`과 VEMC 필드를 읽는다.
+
+    ```bash
+    cat /sys/kernel/debug/regmap/0-04-regulator/registers
+    ```
+
+    - 주소: `0x6`(TOP_TRAP, 절대 주소 `0x36`), `0x1b10`(VOSEL), `0x1b1b`(VOCAL). 0x30을 뺀 값이고, 8비트가 되어 칸마다 한 레지스터다.
+    - TOP_TRAP이 1이면 VOCAL의 [7:4]와 [3:0]을 함께 적는다. TOP_TRAP=1의 VOCAL 위 네 비트는 MT6363에 대한 직접 근거가 없는 추정이고, 모델도 그 추정을 품는다. 틀리면 VOCAL 위 네 비트를 잘못 읽고 쓴다. 그 값이 11 이상으로 읽히면 다음 범위 전압이 되고, 선택자가 176을 넘을 수도 있다.
+    - TOP_TRAP이 0이면 이 길을 타지 않는다.
+    - TOP_TRAP이 1보다 크면 VEMC 콜백이 `-EINVAL`을 낸다.
+7. [ ] `regulator_summary`의 `vufs_vcc`(VEMC)를 본다. 7.2.12에서 1.2V나 1.3V로 나오던 값이 VOSEL 값과 같은 전압으로 나와야 한다(VOSEL 6 = 2.5V 등).
+8. [ ] 다른 LDO의 VOCAL이 11~15인 곳이 있는지 본다. 범위 모델은 VOCAL을 0~10으로 보고, 11 이상이면 다음 범위로 읽는다.
+9. [ ] `mt6363_vsram_cpub·cpum·cpul`이 켜져 있는지, 그 레지스터(`0x1dd7`, `0x1ded`, `0x1e57`)의 비트 0을 본다. 부트로더가 0으로 두었다면 always-on이 켜므로 부팅 기록에 이상이 없는지 본다(패치 0041).
+
+### 6.5 MT6368
+
+패치 0023~0026이다. 보드는 펌웨어가 늘 켜 두는 레일 6개를 둔다. ssusb는 이 PMIC의 VUSB(`vusb33-supply = <&mt6368_vusb>`)를 기다린다. `CONFIG_REGULATOR_MT6368=y`여야 하고, SPMI M 버스와 MFD가 함께 있어야 한다.
+
+1. [ ] probe를 본다.
+
+    ```bash
+    dmesg | grep -i -E "mt6368|spmi|regulator"
+    ```
+
+    `pmic@5` MFD probe(칩 ID는 SWCID 0xB), `0-05-regulator` 하위 장치, 레일 등록을 본다. 드라이버 표는 24개이고 노드가 있는 것은 6개다. "Cannot mask interrupts", "Interrupt N is in no interrupt group", "Could not clear RCS flag"가 없어야 한다.
+2. [ ] `regulator_summary`에서 `vgpu`, `vusb33`, vbuck5, vbuck6, vio28, vtp가 켜져 있고 늦은 정리에서 꺼지지 않는지 본다.
+    - 전압: vio28은 펌웨어대로 1.8V여야 한다. vusb33은 mtu3 바인딩이 말하는 USB AVDD 3.3V 공급이다. vgpu는 부트로더 값이다.
+    - VOCAL 모델이 맞는지 이것으로 본다. LDO 전압이 표 값 + 10mV×VOCAL과 어긋나면(특히 VOCAL이 11~15) 모델을 고친다.
+3. [ ] regmap debugfs로 VOCAL 레지스터 몇 개(vusb `0x1d94`, vio28 `0x1d9c`, 벤더 주소)를 읽어 둔다. 드라이버의 주소는 벤더 주소 − 0x30이다.
+4. [ ] `/proc/interrupts`의 `spmi_rcs`(EINT 248)와 `mtk-spmi-pmic` 줄이 가만히 있는지 본다. SID 5의 RCS가 pmif에서 bank 1(비트 8~15)로 오는지는 패치 0007과 함께 본다.
+5. [ ] 끈 뒤 전류가 0에 가까운지 본다(ELR5로 MT6368이 끄기 순서를 따르는지). 재부팅에 문제가 없는지 본다.
+
+    ```bash
+    poweroff
+    ```
+
+### 6.6 UFS
+
+패치 0019~0022이다. 클럭·리셋 이름과 OPP는 업스트림 MT8196 시리즈(v14, 병합 전) 꼴이다. 호스트 클럭은 게이트 여섯(`main`, `aes`, `unipro_sysclk`, `tx_symbol`, `rx_symbol0`, `rx_symbol1`)이고 PHY는 클럭을 받지 않는다. 클럭 스케일링은 없다. `vcc`는 MT6363 VEMC, `vccq`는 MT6319(SPMI 8) vbuck3다.
+
+> **위험: 데이터 손실.** UFS에는 안드로이드 파티션과 nvdata가 함께 있다. 6.8절의 GPT 고침 전에는 읽기만 한다. initramfs의 실패 길은 nvdata·nvcfg·persist를 읽기 전용(`blockdev --setro`, `ro,noload`)으로 붙인다.
+
+1. [ ] probe 차례를 본다: ufscfg_ao·pdn(클럭·리셋) → `112a0000.ufs-phy`(MT6897 ops) → `112b0000.ufshci`.
+    - 기대: 기록에 `caps: 0x7c0`, `clk "main" present` 등 여섯 줄, "Clk-scaling not ready. Feature disabled."가 나온다.
+    - "Failed to get resets"가 나오면 리셋 기술이 틀린 것이다. 리셋은 ufscfg_pdn의 set `0x48`·clr `0x4c` bit 0·1·2(UniPro, crypto, HCI)다.
+    - "mode operation not allowed"는 MT6319 벅에 `regulator-allowed-modes`가 없어 남는 기록이다. 동작에는 상관없다.
+2. [ ] RTFF MTCMOS SiP 호출을 본다. 초기화에서 MTCMOS를 끄고 켠다(벤더와 같은 순서). `caps` 줄 바로 뒤에서 멈추면 이 길이다. 그때는 match data에서 `UFS_MTK_CAP_RTFF_MTCMOS`를 빼 본다(드라이버 한 줄).
+3. [ ] 호스트 리셋을 본다. HCE enable 때 리셋 셋을 100µs 걸었다 푼다. "Host reset assert/deassert failed"가 없고 링크가 서는지 본다.
+4. [ ] 먹스 부모를 본다. `clk_summary`에서 `ufs`·`aes_ufsfde`의 주파수를 읽는다. LK가 26 MHz(부모 0)로 두었으면 느리다. 그때는 dtsi에 `assigned-clocks`로 벤더의 낮은 부모(mainpll_d4_d2, univpll_d6)를 준다. UFS 3.x 장치면 벤더도 낮은 쪽으로 고정한다(`ufs_mtk_fix_clock_scaling`).
+5. [ ] 기어와 전력 모드를 본다: HS 기어·rate, PMC via FASTAUTO 길, 장치 판(`wspecversion`).
+6. [ ] 클럭 게이팅과 런타임 PM을 본다. idle 뒤 hibern8과 ref 클럭 SiP 핸드셰이크("missing ack of refclk req"가 없어야 한다), 런타임 suspend의 MTCMOS 끄기·켜기 뒤 I/O를 본다.
+7. [ ] UFS가 뜬 뒤 VEMC가 그대로 켜져 있고 런타임 PM에서 문제없는지 본다.
+8. [ ] M-PHY를 본다. 커널은 M-PHY 레지스터를 건드리지 않는다. 높은 기어에서 링크가 흔들리면 벤더(ATF·UniPro 속성)와 견준다.
+
+### 6.7 USB 가젯
+
+mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스트 쪽은 같은 커널의 `cdc_acm`·`cdc_ncm`으로만 시험했고 가짜 UDC(`dummy_hcd`) 위였다. macOS·Windows의 NCM은 보지 못했다.
+
+> **위험: USB 끊김.** ssusb를 켤 때 SPMI M 버스와 MT6368(MFD·regulator)이 켜져 있지 않으면 mtu3가 공급을 기다리며 뜨지 않는다. 포트가 하나이고 호스트 모드가 없어 이 길이 화면 말고는 유일하다.
+>
+> **먼저 둘 것.** 6.3~6.5절의 노드, 화면 콘솔과 pstore.
+
+1. [ ] mtu3가 `vusb33`을 받아 뜨는지 본다. 더미 공급 경고 "supply vusb33 not found"가 없어야 한다.
+2. [ ] `dr_mode`와 UDC 이름, 실제 열거를 본다. `dummy_udc`와 달리 초기화 순서가 다를 수 있어 서비스가 `buntos.wait`초 기다린다.
+3. [ ] 호스트에서 직렬 포트에 들어간다. 호스트의 장치 이름은 macOS `/dev/cu.usbmodem*`, Linux `/dev/ttyACM0`이다. USB 제품 문자열로 어느 쪽 가젯인지 안다(`TB375FC initramfs`, `TB375FC`).
+
+    ```bash
+    screen /dev/ttyACM0 115200
+    ```
+
+4. [ ] 네트워크를 본다. 기기는 172.16.42.1/24, 호스트는 DHCP로 172.16.42.2를 받는다. initramfs에서는 `buntos.telnet=1`이면 telnetd가 뜬다. 옵션은 [init](../../bsp/lenovo-tb375fc/initramfs/init) 머리말에 있다.
+5. [ ] 속도를 본다. USB3는 PS5170 리드라이버가 있어야 해 그 드라이버 전에는 HS로만 붙는다(설계안 4절). SS가 흔들리면 벤더가 MT6897에만 넣는 U3 RX CDR 값부터 본다(U3 포트 `+0x408`의 [23:16] `RG_XTP_LN0_RX_CDR_RESERVE` = 0x8).
+6. [ ] U2 INTR_CAL을 본다. `0x11e40330`의 [29:24]를 읽어 LK가 둔 값을 적고, 4절 9번의 efuse 값과 견준다. 다르면 xsphy MT6897 꼴(칸과 nvmem)을 만든다.
+7. [ ] eye 값을 본다. `0x11e40304`의 [14:12] = 7, [10:8] = 3인지 본다.
+
+### 6.8 루트 파티션
+
+자리는 userdata를 줄여 만든 새 GPT 파티션이다. 형식 GUID는 root-arm64(`b921b045-1df0-41c3-af44-4c6f280d3fae`)이고 명령줄은 `root=PARTLABEL=<이름>`이다. USB-C 저장장치 길은 쓰지 않는다. 전체 이미지(`tools/image/build.sh lenovo-tb375fc`)를 만든 기록은 아직 없고, 작은 시험 이미지로만 봤다.
+
+이미지의 systemd가 UFS의 GPT를 고치지 못하게 `systemd-repart`와 `systemd-gpt-auto-generator`를 보드 프로필과 initramfs에서 가렸다. 이 가림을 풀지 않는다. QEMU에서 GPT와 다른 파티션의 해시로 확인했다.
+
+1. [ ] 가젯 셸에서 UFS를 읽기 전용으로 확인하고 파티션 표를 읽는다. 커널이 MediaTek GPT를 읽어 `PARTNAME`이 나오는지 본다. LU 여럿에서 같은 이름이 없는지 본다. 지금은 먼저 찾은 것을 쓰고 겹침을 따로 알리지 않는다.
+2. [ ] 크기와 이름을 정한다(4절 7번).
+3. [ ] 고치기 전의 GPT(앞·뒤 표)를 떠서 기기 밖에 둔다.
+4. [ ] GPT를 고친다.
+
+    > **위험: 부팅 불가·데이터 손실.** preloader·LK가 고친 GPT를 읽지 못하면 부팅이 막힌다. userdata를 한 번 지운다(공장 초기화). 안드로이드 슬롯은 남는다.
+    >
+    > **먼저 둘 것.** 3번의 GPT, 2.3절 백업. 언락 직후라 잃을 데이터가 적을 때 한다.
+    >
+    > **되돌리기.** 언락 전에 뜬 SP Flash 백업이다. 고친 GPT는 SP Flash Tool scatter와 달라지므로 고친 GPT도 떠 둔다.
+
+5. [ ] preloader·LK가 고친 GPT를 어떻게 읽는지, LK의 fastboot가 새 항목을 아는지 본다.
+6. [ ] 루트 파티션 파일(`buntos.root-arm64.raw`)을 굽는다. fastboot로 굽고(sparse), 안 되면 가젯으로 `dd`한다. 이미지의 ESP와 UKI는 LK가 쓰지 않으므로, 이미지에서는 이 파일만 굽는다.
+
+    > **위험: 데이터 손실.** `dd`의 대상은 새 파티션뿐이다. userdata 전체, super, 루프 파일은 쓰지 않는다. 안드로이드 슬롯을 지키지 못하거나 metadata 암호화로 열 수 없다.
+
+7. [ ] 명령줄을 넣어 부트 이미지를 다시 만든다. `<이름>`은 2번에서 정한 값이다(`PARTUUID=`, `UUID=`, `/dev/…`도 받는다). 공개 키는 ed25519를 쓴다. RSA 4096은 명령줄 한도에 빠듯하다. 값의 뜻은 [BSP README](../../bsp/lenovo-tb375fc/README.md)의 "루트로 넘기기"에 있다.
+
+    ```bash
+    limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'x=$(mktemp -d) && dpkg-deb -x ~/buntos-build/tb375fc/deb/linux-image-7.2.12-tb375fc_*_arm64.deb $x && bsp/lenovo-tb375fc/initramfs/mkinitramfs.sh --modules $x && bsp/lenovo-tb375fc/boot/mkimages.sh --kernel $x/boot/vmlinuz-7.2.12-tb375fc --dtb $x/usr/lib/linux-image-7.2.12-tb375fc/mediatek/mt6897-lenovo-tb375fc.dtb --initramfs ~/buntos-build/tb375fc/images/initramfs.cpio.lz4 --cmdline "console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused regulator_ignore_unused root=PARTLABEL=<이름> rootfstype=btrfs rw systemd.firstboot=no buntos.usbdebug=1 systemd.set_credential_binary=ssh.authorized_keys.root:$(base64 -w0 <공개 키 파일>)"'
+    ```
+
+8. [ ] LK가 `root=`와 `buntos.usbdebug=1`을 커널에 넘기는지 본다. `/proc/cmdline`이 `/run/buntos/boot.log`에 남는다. LK가 자기 `root=`나 `ro`를 덧붙여도 우리 값이 이긴다.
+
+    > **위험: USB 끊김.** 진짜 루트의 USB 길은 명령줄에 `buntos.usbdebug=1`이 있을 때만 돈다. 없으면 넘어간 뒤 가젯이 없다.
+    >
+    > **먼저 둘 것.** LK가 이 값을 넘기는지 `/proc/cmdline`으로 본다. 안 넘어오면 커널 `CMDLINE`(+`CMDLINE_EXTEND`)로 주고 `buntos.usbdebug=1`을 함께 넣는다. 그때 공개 키는 커널 설정에 넣지 말고 ttyACM 셸에서 넣는다.
+
+9. [ ] 못 넘어갔으면 까닭을 본다. 패닉 없이 셸이 뜨고, 까닭은 화면, dmesg, pstore, `/run/buntos/boot.log`에 남는다. 찾지 못했으면 `/run/buntos/block.txt`에 장치와 GPT 이름 목록이 있다. UFS가 뜨는 시간도 본다(`buntos.wait` 기본 30초면 되는가).
+10. [ ] 들어간다. 넘어가는 동안 USB가 잠깐 없다. 가젯은 진짜 루트에서 새로 띄운다.
+
+    ```bash
+    ssh root@172.16.42.1
+    ```
+
+    공개 키가 아직 없거나 네트워크가 안 되면 ttyACM의 암호 없는 root 셸을 쓴다. 셋 다 다른 서비스를 기다리지 않아, sysinit이 멈추거나 emergency.target으로 넘어가도 들어갈 수 있다.
+11. [ ] 실제 UFS의 btrfs를 본다. `discard=async`가 저절로 켜진다(QEMU의 마운트 옵션에서 봤다). UFS의 UNMAP과 안드로이드 쪽 영향은 파티션 안이라 없을 것으로 보지만 기기에서 본다.
+12. [ ] 넘어간 뒤의 화면을 본다. simpledrm의 fbcon이 systemd, greetd를 지나도 사는지 본다.
+13. [ ] 워치독을 본다. `mtk_wdt`는 내장이고 넘어가도 커널이 먹인다(`WATCHDOG_HANDLE_BOOT_ENABLED=y`). systemd의 `RuntimeWatchdogSec`을 켜지 않아도 오래 사는지 본다.
+14. [ ] 안드로이드 파티션이 70개쯤일 때 `systemd-udevd`와 `blkid`가 걸리는 시간을 본다.
+15. [ ] 실제 크기의 btrfs 늘리기와 첫 부팅 시간, `systemd-firstboot`(`systemd.firstboot=no`)를 본다. 늘리기는 `systemd-growfs-root.service`이고 파일 시스템만 늘린다.
+16. [ ] pstore를 본다. ramoops 자리를 정한 뒤 `/run/buntos/pstore`와 `systemd-pstore`(`/var/lib/systemd/pstore`)에 남는지 본다.
+17. [ ] 가상화 판별이 `none`인지 본다. `buntos-vm-sleep.service`가 `ConditionVirtualization=vm`이라 기기에서는 돌지 않아야 한다.
+
+    ```bash
+    systemd-detect-virt
+    ```
+
+### 6.9 2b 뒤에 남는 일
+
+기기에서 UFS·USB가 뜬 뒤에 한다.
+
+- UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`).
+- MCQ. 공통 바인딩의 인터럽트 수를 고치고, 큐 인터럽트 SPI 177~184를 넣고, `mediatek,ufs-disable-mcq`를 뺀다. 이 속성을 뺀 시험은 그 뒤에 한다.
+- xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103).
+- U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다(설계안 D3).
+- EFI 길이 열리거나 LK의 벤더 램디스크 한도를 기기에서 재면 mkosi initrd를 vendor_boot에 넣는 길을 다시 볼 수 있다. 지금은 우리 initramfs다.
+- 기기에서 커널을 바꾸는 길은 남은 결정이다(LK 부트 이미지를 다시 만들어 쓴다).
+
+## 7. 2c 입력
+
+**목표.** simple-framebuffer로 buntOS 데스크톱을 띄우고, NT36532 SPI 터치, 펜, 홀 센서, 포고 키보드를 쓴다.
+
+**종료 조건.** 2944×1840으로 buntOS 로그인 화면, 터치·펜 조작, 키보드 커버를 붙이면 포인터 모드.
+
+### 7.1 준비
+
+1. [ ] 데스크톱 전에 안드로이드 파티션을 가린다. 전체 이미지에는 `udisks2`가 들어온다(`nautilus` → `gvfs`).
+
+    > **위험: 데이터 손실.** 내부 디스크는 자동으로 붙지 않지만 파일 관리자에 보이고, 관리자 인증 뒤 쓰기 가능으로 붙을 수 있다. `nvdata`, `persist`는 ext4라 저널을 되살리며 바뀐다.
+    >
+    > **먼저 둘 것.** 보드의 udev 규칙으로 UFS의 다른 파티션에 `ENV{UDISKS_IGNORE}="1"`을 준다. UFS 장치 경로의 짝(`DRIVERS`, `KERNELS`)을 기기에서 본 뒤 만든다. UFS LU가 이동식으로 보이지 않는지도 기기에서 본다.
+
+2. [ ] 터치 펌웨어를 넣는다. 드라이버는 터치를 열 때 루트에서 읽는다(`TOUCHSCREEN_NOVATEK_NVT_SPI=m`).
+    - `vendor/firmware/novatek_ts_fw_boe.bin` → `/lib/firmware/lenovo/tb375fc/novatek_ts_fw_boe.bin`
+    - `vendor/firmware/novatek_ts_fw_tm.bin` → `/lib/firmware/lenovo/tb375fc/novatek_ts_fw_tm.bin`
+3. [ ] 노드를 켠다. pio·클럭 컨트롤러에 더해 `spi2`, `gpio-keys`, `vddio_1v8`, `uart3`이다. `vddio_1v8`(GPIO63)은 패널과 터치가 같이 쓰는 I/O 전원이라 simple-framebuffer 동안 꺼지면 안 된다. 그래서 `regulator-always-on`이다.
+4. [ ] 패널 노드(부트로더가 찾는 `/soc/dsi@1400d000/panel1@0`~`panel3@2`)와 `framebuffer0`의 `panel`(273×171mm)을 더한다.
+5. [ ] 전체 이미지에서 `greetd`·`bunt-comp`와의 관계, 공통 설치 뒤 스크립트와의 순서(보드 것이 먼저 돈다)를 본다. 작은 시험 이미지에는 데스크톱 꾸러미가 없어 보지 못했다.
+
+### 7.2 터치
+
+패치 0027~0031이다. 프로토콜은 OEM 코드, 패널 판별과 펌웨어 이름은 제3자 미러, 좌표 범위는 실측에서 왔다. 기기 시험은 없다.
+
+1. [ ] spi2 probe를 본다. `/sys/kernel/debug/clk`에서 spi2 먹스의 부모와 값을 읽는다.
+    - SCLK는 9.6 MHz 아래여야 한다. 부모 182 MHz면 9.1 MHz, 208 MHz면 9.45 MHz다(코드로 본 것).
+    - 전송이 깨지면 `cs-gpios = <&pio 12 GPIO_ACTIVE_LOW>`(GPIO12를 GPIO로)를 쓴다. OEM의 소프트웨어 CS를 업스트림이 쓰지 않는다. 이 드라이버는 전송 하나짜리 메시지만 써서 차이가 작을 것으로 보지만 기기에서 본다.
+2. [ ] 터치 probe를 본다. `dyndbg`로 `novatek_nvt_spi`를 켠다.
+    - trim ID: `xx xx xx 32 65 03`.
+    - 패널 ID(GPIO184): 0이면 BOE(`novatek_ts_fw_boe.bin`), 1이면 Tianma와 Tianma 무광(`novatek_ts_fw_tm.bin`).
+3. [ ] 열 때를 본다(`evtest`). 펌웨어는 터치를 열 때 내려받는다. 리셋 상태 0xA0·0xA1, 펌웨어 판, 손가락 좌표를 본다. 컨트롤러 좌표는 X 0~18400, Y 0~29440이고 픽셀의 10배다(실측).
+4. [ ] 화면 네 모서리를 눌러 축을 정한다. `touchscreen-inverted-x/y`를 여기서 정한다. `touchscreen-swapped-x-y`는 보드에 있다.
+5. [ ] 서스펜드·복귀 뒤 터치와 시간을 본다. 복귀 때 펌웨어를 다시 올린다.
+6. [ ] 펌웨어 워치독 복구를 본다. 드물다. 일어나면 기록에 "controller was reset"이 남는다.
+
+### 7.3 펜
+
+1. [ ] 압력, 기울기, 거리(호버), 단추 둘을 본다. 범위는 압력 0~4095, 기울기 ±60°, 거리 0~1이다(실측).
+2. [ ] 나오지 않으면 펜 켜기 인자(`0x7B 0x01`)부터 본다. 이 기기 드라이버(제3자 미러)는 `7B 01`이 켜기이고, TB371FC 커뮤니티 포트의 펌웨어에서는 `7B 01`이 끄기다. 명령이 실패해도 드라이버는 경고만 한다.
+
+### 7.4 홀 센서
+
+1. [ ] 덮개를 닫고 열 때 `SW_LID`를 본다(`evtest`). GPIO1이 0이면 덮개 닫힘이다. 보드 노드는 `gpio-keys`의 `switch-lid`다(active low, 100 ms, `wakeup-source`).
+2. [ ] 펌웨어의 `hall_2`(GPIO26)는 키보드의 붙음·뗌 줄이다. `gpio-keys`에 없고 키보드 드라이버가 가진다. 7.5절 2번에서 본다.
+
+### 7.5 포고 키보드
+
+패치 0032~0036이다. 프로토콜은 글로벌판(TB373FU) 스톡 모듈을 읽은 것이고, 사용자 기기는 중국판 ZUXOS다. 키보드 MCU는 액세서리 쪽이라 프로토콜이 같을 것으로 본다(판단). 실물 확인은 이 절이다. 드라이버는 사용자 공간 시뮬레이터로 돌렸고 기기 시험은 없다. 3번이 프로토콜 판단을 가르는 첫 확인이다.
+
+1. [ ] UART3 패드 모드(`mediatek,syscon-pad-mode`, pericfg_ao `0x50`)를 본다. 켠 뒤 `0x11036050`의 값은 bit 4 = 1, bit 0 = 0이어야 한다. 스톡 로그의 "first get uart3_def_value"처럼 바뀌기 전 값(리셋 값)도 본다. 이 비트 없이는 UART3이 패드로 나가지 않을 수 있어 필요하다고 판단했다.
+2. [ ] GPIO26이 키보드를 붙이면 0, 떼면 1인지 본다. GPIO61(전원)이 따라가는지 본다.
+3. [ ] 처음 프레임을 본다. `dyndbg`로 `oneplus_pogo_kbd`를 켠다.
+    - 기대: 전원 뒤 첫 프레임이 0x7B로 풀리고 "bad sum"이 없다. 그러면 프로토콜 판단이 맞다.
+    - 다르면: "bad sum"·"unknown symbol"과 원시 바이트(`pogo rx:`)로 본다. 전 판과 다르면 여기서 보인다.
+4. [ ] `evtest`로 키, 미디어 키, 터치패드(손가락 넷, 2944×1840), Caps Lock LED(0x6A/0x27)를 본다. 터치패드 해상도는 실측으로 정한다. 실제 크기(mm)를 모른다. libinput은 해상도 없이도 돌지만 가속이 어긋날 수 있다.
+5. [ ] 키보드를 뒤로 접을 때 0x93/0x03 프레임과 `SW_TABLET_MODE`를 본다.
+    - 이 프레임을 뒤로 접음으로 본 것은 판단이다. 자료로는 "키보드가 스스로 꺼짐"까지만 확인된다.
+    - 드라이버는 값 0이면 1, 값 1이면 0을 보낸다. 키보드가 없을 때도 1이다.
+    - libinput이 이 스위치로 키보드·터치패드를 멈추려면 BUS_HOST 키보드가 내장으로 잡혀야 한다. 기기에서 본다.
+6. [ ] 921600에서 PIO로 넘침이 있는지 본다. 스톡은 APDMA를 쓴다. 넘치면 APDMA 노드(`mediatek,mt6985-uart-dma`, 펌웨어 `0x11300b80`)를 더한다.
+
+    ```bash
+    cat /proc/tty/driver/serial
+    ```
+
+    `oe` 칸을 본다.
+7. [ ] 서스펜드를 본다: 0x92/0x02 응답, 키로 깨우기(GPIO40), 붙이고 떼어 깨우기(GPIO26). 응답의 상태 바이트가 1이 아니면 드라이버는 실패로 본다. MT6897에서는 꺼 둔 동안의 에지가 있어도 키로 깨울 수 있다고 읽었다(코드로 본 것). 이 확인으로 본다.
+8. [ ] TX 게이트와 응답 지연을 잰다. `dyndbg`로 `oneplus_pogo_kbd`를 켜면 `pogo_xfer`가 `gate shut after N us, reply after M us`를 찍는다. 로직 분석기가 있으면 GPIO71과 선을 함께 본다.
+    - 닫힘 지연: N에서 프레임 시간(25바이트면 271 µs)을 뺀다. 부하를 걸고도 본다.
+    - MCU 응답 지연: M에서 응답 프레임 시간(31바이트면 340 µs, 0x92 응답)을 뺀다.
+    - 모델 값: 닫힘은 프레임 끝부터 52~158 µs다. RX 문턱이 16이면(ST16650V2로 잡힐 때. 부트 로그의 `is a …`로 본다) 104~217 µs다. 실측이 아니다.
+    - "no reply"나 "bad sum"이 응답에서 나면: 응답이 약 100~150 µs(모델 값)보다 빠른 키보드다. RX 콜백에서 게이트를 바로 닫는다. 그래도 모자라면 8250 쪽 콜백이 필요하고, 이것은 업스트림 꼴을 다시 정해야 한다.
+9. [ ] 잠든 사이 펼치기와 접기를 본다. 깬 뒤 SLEEP 0 다음에 MCU가 0x93/0x03을 다시 보내는지 본다. 보내지 않으면 접은 것을 깬 뒤 알 수 없다. 잠든 사이 펼친 것은 키나 손가락이 눌리면 `SW_TABLET_MODE`를 0으로 되돌린다.
+
+## 8. USB 호스트
+
+**목표.** 태블릿이 USB 메모리에 5V를 주고 xHCI로 붙인다. VBUS는 MT6375 OTG 부스트 → 차지 펌프 입력 FET → 커넥터로 나간다. TCPC 전까지 사용자 공간이 `regulator-output`의 `state`로 켠다. 드라이버는 패치 0042~0049이고 노드는 모두 꺼져 있다.
+
+**종료 조건.** 소스에 따로 적힌 것이 없어 6·7단계의 기대를 옮긴다. USB 메모리가 HS로 붙고, 끈 뒤 VBUS가 0V로 내려가고, 충전과 가젯이 전처럼 된다.
+
+**때.** UFS 루트와 USB 가젯이 기기에서 된 뒤에만 한다. 2d의 USB 동글 우회도 이것을 기다린다.
+
+> **위험: USB 끊김.** 포트가 하나라서 VBUS를 켜 있는 동안 가젯 셸은 없다. 그동안 디버그는 화면과 pstore에 기댄다. 단계마다 되돌릴 길을 먼저 둔다.
+
+근거의 한계는 다음과 같다.
+
+- 회로도는 없다. 순정 `extcon-mtk-usb`가 부스트 앞에서 차지 펌프에게 입력 FET를 닫게 한다는 것은 스톡 모듈과 제3자 미러로 확인했다. 이것 없이 5V가 나가는지는 기기에서만 안다(나가지 않을 가능성이 크다고 본다).
+- 드라이버는 실제 커널의 i2c·regmap·regulator 코어 위에서 레지스터 모델로 돌렸다. 프로브·등록·늦은 정리·읽기에서 쓰기가 0번인 것은 이 범위에서 증거가 된다. 칩이 PWR_RDY·VAC1을 언제 올리는지, 비밀 코드와 숨은 레지스터가 어떻게 도는지는 모델이 해석을 품으므로 증거가 되지 않는다. 실제 `i2c-mt65xx`와 클럭은 돌리지 않았다.
+- 이 절의 `0x1xx` 주소는 은행을 윗바이트에 넣은 regmap 주소다(패치 0046). I2C `0x34`에서는 아래 바이트로 읽는다(`0x1E0` → `0xE0`).
+
+### 0단계. 준비
+
+1. [ ] 배터리 50% 이상(LBP는 2.8V이지만 부하에 처지지 않게).
+2. [ ] USB-C 브레이크아웃과 멀티미터.
+3. [ ] 전력이 작은 USB 메모리. 첫 시험에 허브·SSD는 금지다. TCPC 드라이버가 없어 CC는 LK 상태 그대로이고 Rp·VCONN을 내지 않는다. USB-A 변환 젠더와 단순한 USB-C 메모리는 CC를 보지 않지만, 허브·독은 Rp를 기다리다 붙지 않을 수 있다.
+4. [ ] 충전기와 PC를 꽂은 채 켜지 않는다.
+
+### 1단계. 읽기만 (모듈 없이)
+
+1. [ ] 2b의 `&pio`·클럭 컨트롤러에 `&imp_iic_wrap_n`, `&imp_iic_wrap_en`, `&i2c5`, `&i2c10`만 더 켠 dtb로 부팅하고 가젯이 그대로인지 본다. 두 버스는 400 kHz로 시작한다(펌웨어 1 MHz). `i2cdetect`와 `i2cget`은 진짜 루트의 `i2c-tools`나 initramfs의 busybox에 있다. 이미지용 커널에서는 `/dev/i2c-*`가 모듈이라 먼저 `modprobe i2c-dev`를 한다.
+2. [ ] 칩을 읽는다. `i2cdetect`는 범위를 꼭 준다. `-r`은 읽기 탐지다.
+
+    ```bash
+    i2cdetect -y -r 5 0x34 0x34
+    i2cdetect -y -r 10 0x65 0x6e
+    i2cget -f -y 5 0x34 0x00    # 0x7X
+    ```
+
+3. [ ] 차지 펌프가 어느 칩인지, 스트랩(NU2115 `0x2E` bit 4:3, UPM6720 `0x12` bit 1:0, 값 1이 slave)이 slave가 아닌지 본다. 순정 트리에는 넷이 있다: NU2115 @0x6d·@0x6e, UPM6720 @0x65·@0x66. 순정이 `primary_dvchg`로 부르는 칩이 FET를 닫는다. @0x6d·@0x65는 스트랩이 master나 standalone일 때, @0x6e·@0x66은 standalone일 때 그 이름을 쓴다. 그 노드만 켠다. 보드 dts의 `vbus-switch-supply`는 `charge_pump_65_switch`다(사용자 기기 UPM6720 @0x65). 다른 칩이면 그 레귤레이터로 고친다.
+4. [ ] 차지 펌프의 ID를 읽어 맞춘다: NU2115 `0x31`, UPM6720 `0x22`. 실제 칩의 값이 다르면 드라이버 프로브가 실패하고 값을 찍는다(쓰기 없음). 벤더는 ID가 달라도 넘어가고, 이 드라이버는 안전한 쪽으로 거절한다.
+5. [ ] 아래를 기록해 둔다. 끈 뒤와 견줄 값이다.
+    - `i2cget -f -y 5 0x34`: `0x20`, `0x21`, `0x29`, `0x2A`, `0x30`, `0x31`, `0x32`, `0x34`, `0x35`, `0x40`, `0x50`, `0xE0`, `0xE1`, `0xE4`
+    - `0x4E`: `0x1A`, `0x1C`
+    - 차지 펌프: `0x2F`, `0x30`, `0x31`, `0x0D`(UPM6720은 `0x06`, `0x0E`, `0x0F`, `0x15`, `0x22`)
+    - `/sys/kernel/debug/pinctrl`에서 GPIO147·148·179
+    - `clk_summary`에서 `i2c`, `impn_i2c5`
+6. [ ] LK가 남긴 상태를 이 값으로 본다: HZ·BUCK_EN(`0x120`), 네 boost 값의 평소 값(순정의 buck 값과 같은지, 패치 0047의 표), BC1.2(`0x150` bit 7), 충전 워치독(`0x12A` bit 3), CC 저항(TCPC `0x4E`의 `0x1A`). I2C 소스 클럭(`i2c` 먹스), HW voter 시간, AP-DMA가 이 버스들에서 도는지도 본다(벤더는 짧은 전송에 FIFO를 쓴다).
+
+### 2단계. 가드 비트 확인
+
+1. [ ] 1단계의 읽기를 스크립트로 UFS에 남겨 케이블이 있을 때와 없을 때를 견준다. 있으면 PWR_RDY(`0x1E0` bit 0)와 VAC1(`0x2F` bit 7, UPM6720 `0x15` bit 4)이 1, 없으면 0이어야 한다. **아니면 멈추고 가드를 고친다.** NU2115의 비트는 인터럽트 표의 `stat` 칸에서 읽었다. 틀리면 외부 VBUS가 있어도 켜진다.
+
+### 3단계. 드라이버 (켜지 않고)
+
+1. [ ] `&mt6375`, 고른 차지 펌프, `&usb_vbus_output`을 켠 dtb로 부팅하고 모듈(`mt6375`, `mt6375-charger`, `nu2115_charger`, `userspace-consumer`)을 `modprobe`한다. `&pio`가 꺼져 있으면 충전기 쪽이 GPIO179 상태를 기다리며 뜨지 않는다. 안전하게 멈춘다.
+2. [ ] 프로브에서 칩 쓰기는 0번이다. GPIO179는 이때 low로 간다. GPIO179는 VBUS를 막는 스위치가 아니라 충전 중 커넥터 과열 보호다. 1단계 값과 전부 같아야 한다.
+3. [ ] `/sys/class/regulator`의 `usb-otg-vbus`는 `off`, `state`는 `disabled`여야 한다.
+4. [ ] 가드를 본다. PC를 꽂은 채 쓴다. 이것이 PC를 꽂고 켜는 유일한 항목이다.
+
+    > **위험: USB 끊김.** 가드 비트의 뜻이 틀리면 외부 VBUS가 있어도 켜지고, 두 전원이 VBUS에서 맞선다.
+    >
+    > **먼저 둘 것.** 2단계를 통과했어야 한다.
+
+    ```bash
+    echo enabled > /sys/devices/platform/usb-vbus-output/state
+    ```
+
+    기대: 거절되고(`VAC1 is present`), PC 쪽 USB가 끊기지 않고, 레지스터 변화가 0이다.
+
+### 4단계. 처음 켜기 (부하 없이)
+
+> **위험: USB 끊김.** 케이블을 뽑고 VBUS를 켠다. 가드는 켜는 순간만 본다.
+>
+> **먼저 둘 것.** 0단계, 2·3단계 통과. 저절로 끄는 배경 스크립트.
+>
+> **되돌리기.** 스크립트가 끈다. 멈추면 전원+볼륨 올림을 길게 누른다(MT6363 리셋, 6.4절 5번). 그 뒤 VBUS가 살아 있으면 LK가 끄지 않는다는 뜻이니 기록한다.
+
+1. [ ] 케이블을 뽑기 전에 배경에서 시작해 저절로 끄게 한다. `dump`는 1단계 읽기다.
+
+    ```bash
+    OUT=/sys/devices/platform/usb-vbus-output/state
+    ( sleep 30; echo enabled > $OUT; sleep 70; cat $OUT; dump > /var/log/vbus-on.txt; echo disabled > $OUT; dump > /var/log/vbus-off.txt ) &
+    ```
+
+2. [ ] 케이블을 뽑고 브레이크아웃을 꽂아 VBUS를 잰다. 기대: 약 5.0V, 끈 뒤 0V로 내려감.
+3. [ ] 0V이면 `status`와 FET 레지스터(NU2115 `0x2F`·`0x30`, UPM6720 `0x0F`)를 본다. `on`인데 0V면 FET나 칩 고름이 틀렸다. `error`면 부스트가 멈췄다(`0x34`, `0x1E3`의 OTG 깃발).
+4. [ ] 70초를 켜 두는 까닭은 MT6375 충전 워치독이다. 1단계에서 `0x2A` bit 3이 1이었으면 만료(순정 주기 40초)에 VBUS가 떨어지는지 본다. 순정은 프로브에서 이것을 끄지만 이 드라이버는 건드리지 않는다. 만료가 부스트에 영향을 주는지 코드로는 모른다.
+5. [ ] `state` 쓰기는 실패해도 성공을 돌려준다. 꼭 다시 읽어 확인한다.
+6. [ ] VBUS를 켠 채 `userspace-consumer` 모듈을 빼지 않는다. 끄지 않고 빠지고, 다시 올리면 supply가 한 번 더 켜져 FET가 닫힌 채 남는다.
+
+### 5단계. FET가 필요한지
+
+1. [ ] 전제를 닫으려면 `vbus-switch-supply`를 뺀 dtb로 4단계를 한 번 더 한다. 0V면 전제가 맞다.
+
+### 6단계. 호스트
+
+> **위험: USB 끊김.** otg 모드도 프로브에서 잠깐 호스트로 시작해 기본 역할로 간다. 그래서 2b 끝까지 `peripheral`로 두었다.
+>
+> **먼저 둘 것.** 앞 단계의 dtb. `role`과 `state`를 배경 스크립트로 되돌리는 차례.
+
+1. [ ] `dr_mode = "otg"`, `usb-role-switch`, `role-switch-default-mode = "peripheral"`, `&xhci0`을 켠 dtb로 부팅하고 가젯이 그대로인지 먼저 본다. `enable-manual-drd`는 쓰지 않는다(호스트로 시작해 가젯이 뜨지 않는다). `&ssusb`와 xhci의 `vbus-supply`도 쓰지 않는다(otg 모드에서는 프로브마다 켠다).
+2. [ ] 4단계의 배경 스크립트에 역할 전환을 더한다. 켜는 차례는 `role`에 `host` → `state`에 `enabled`, 끄는 차례는 `state`에 `disabled` → `role`에 `device`다.
+
+    ```bash
+    echo host > /sys/class/usb_role/11201000.usb-role-switch/role    # VBUS 앞
+    echo device > /sys/class/usb_role/11201000.usb-role-switch/role  # VBUS 뒤
+    ```
+
+3. [ ] USB 메모리를 꽂고 기록을 파일로 남긴다.
+
+    ```bash
+    dmesg
+    lsusb -t
+    ```
+
+    기대: HS로 붙는다. SS는 PS5170 전까지 안 된다. USB3 장치도 HS로 내려 붙어야 한다(스펙 동작, 기기에서 본다). 안 되면 `mediatek,u3p-dis-msk = <1>`이 후보다.
+4. [ ] 시험 시간은 수십 초로 하고 커넥터 온도를 손으로 본다. 과열 보호가 없다(순정의 `usb_board_ntc` 드라이버가 이 커널에 없다). 게이지(MM8013)를 켰으면 배터리 전류도 본다.
+
+### 7단계. 끈 뒤
+
+1. [ ] `vbus-off.txt`와 1단계 값을 견준다. 달라도 되는 것은 `0x30`~`0x32`와, 1단계 값이 순정 buck 값과 달랐다면 네 값이다.
+2. [ ] 충전기를 꽂아 충전이 전처럼 되는지, PC를 꽂아 가젯이 다시 붙는지 본다.
+3. [ ] `0x29` bit 7이 1로 남았을 때 입력 전류가 늘었는지 본다. 순정은 충전기가 붙으면 `CHG_VSYS` bit 7을 0으로 고치는데, 충전 드라이버가 없는 이 커널에서는 그대로다. 블리드 전류만큼 충전 입력에서 샐 수 있다.
+4. [ ] UPM6720이면 풀다운을 본다. 끌 때 `BUS_PD_EN`·`VAC1_PD_EN`을 켜고 그대로 둔다. 순정은 shutdown과 프로브의 칩 리셋으로 지우지만, 이 커널에는 그 리셋이 없어 재부팅을 넘어 남을 수 있다. 충전 입력에서 조금 샐 수 있고, 영향은 작을 것으로 본다.
+
+### 8단계. 내려가는 길
+
+1. [ ] VBUS를 켠 채 끄면 VBUS도 꺼져야 한다(`.shutdown`).
+
+    ```bash
+    poweroff
+    ```
+
+2. [ ] 패닉·길게 누름 리셋 때 VBUS가 남는지 본다. 남으면 그 기록을 남긴다. 드라이버는 다음 부팅에서 켜진 것으로 받는다(쓰기 없이). 사용자 공간에서 끌 수 있는지 함께 본다.
+
+### 되돌아 흐름
+
+켠 채 충전기나 PC를 꽂으면 두 전원이 VBUS에서 맞선다. 가드는 켜는 순간만 본다. 칩이 어떻게 버티는지는 코드로 모르고, 시험할 일도 아니다. TCPC 전까지 손으로만 켜고, 꽂기 전에 끈다.
+
+## 9. 나머지 단계
+
+2d 무선, 2e GPU·전원, 2c 화면(2차), 3 최적화의 목록은 나중에 더한다. 그 일이 아직 진행 중이다(전원 도메인 0050~0054, Wi-Fi 0055~0069, GPU 전원과 열·게이지 0070~0079, 그다음 패널 0080~0084, Bluetooth 0085~0089).
+
+이미 적힌 확인만 잃지 않게 옮겨 둔다.
+
+- 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다. 진짜 루트에서 nvdata를 붙일 때는 initramfs처럼 `blockdev --setro`와 `ro,noload`로 붙인다.
+- 2e: 전원 키로 s2idle에서 깨는지, mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`, mtu3 깨우기 접점, 커넥터 과열 보호(`usb_board_ntc`, GPIO179).
+- 2c 2차: 패널 드라이버가 생기면 터치를 패널 팔로워로 잇고, 끌 때 GPIO184를 0으로 둘지 본다.
+- 3: 볼륨 내림(SoC 키패드)이 업스트림 `mt6779-keypad`로 되는지 본다.
+
+## 10. 아직 비어 있는 것
+
+자료가 없어 비워 둔 것이다. 정해지면 이 문서에 넣는다.
+
+1. **백업에 쓸 펌웨어 묶음.** "그 기기 판의 묶음"을 쓰라는 보고뿐이다. 우리가 본 묶음은 중국판 16.0.20.091과 글로벌판 17.0.04.266이고, ZUXOS 1.5.10.044의 묶음을 구한 기록은 없다.
+2. **판을 내린 뒤의 OTA와 언락의 데이터.** 판을 내리면 OTA를 다시 꺼야 하는지, 언락이 userdata를 지우는지 자료가 없다.
+3. **명령 꼴.** vbmeta 셋의 파티션 이름과 명령, 비운 슬롯에 넷을 굽는 명령, GPT를 뜨고 고치는 도구를 정하지 않았다. 그래서 글로만 적었다. 파티션 이름은 3절 3번에서 본다.
+4. **멈췄을 때.** MT6363 드라이버가 뜨기 전(2a, 2b 초반)에 기기를 강제로 끄는 법과, 우리 슬롯에서 LK fastboot로 들어가는 키를 모른다. [커뮤니티 포트 분석](community-port.md)에는 그 포트의 주석 "멈추면 키를 눌러 fastboot로 되살린다"만 있고 어느 키인지는 없다. 굽기 전에 안드로이드 상태에서 찾아 적는다.
+5. **입력 통로.** UART를 찾지 못하면 2a와 2b 초반에 셸에 입력할 길이 없다. 5절과 6절 머리의 차례(화면 출력으로 보고, 가젯 뒤에 읽는다)는 이 문서의 해석이다. `/sys/firmware/fdt`를 기기 밖으로 옮기는 일도 그래서 가젯 뒤가 된다.
