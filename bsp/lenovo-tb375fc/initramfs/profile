@@ -6,3 +6,5 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
 PS1='tb375fc:\w\$ '
 alias ll='ls -la'
 echo "buntOS initramfs: log /run/buntos/boot.log, pstore /run/buntos/pstore, live fdt /run/buntos/fdt.dtb"
+# root=로 넘어가지 못하고 여기 남았으면 까닭을 바로 보인다
+grep '^root: ' /run/buntos/boot.log 2>/dev/null

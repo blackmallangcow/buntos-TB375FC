@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 개발용 USB 가젯(ACM + NCM). initramfs가 넘어간 뒤의 디버그 길이다. 명령줄에 buntos.usbdebug=1이 있을 때만 돌고, 출시
+# 부트 이미지의 명령줄에는 그 값을 넣지 않는다. 가젯 드라이버는 initramfs가 올려 둔 그대로 쓴다.
+# 다른 서비스를 기다리지 않아(DefaultDependencies=no) sysinit이 멈춰도, emergency.target으로 넘어가도 USB로 들어갈 수 있다.
+# 끌 때 일부러 멈추지 않는다. 끄는 도중에도 볼 수 있다
+
+[Unit]
+Description=USB gadget for development (ACM + NCM)
+ConditionKernelCommandLine=buntos.usbdebug=1
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+Wants=sys-kernel-config.mount
+After=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/buntos/usb-gadget TB375FC
+
+[Install]
+WantedBy=sysinit.target emergency.target

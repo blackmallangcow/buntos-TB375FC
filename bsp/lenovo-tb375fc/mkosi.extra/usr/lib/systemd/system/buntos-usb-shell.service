@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# USB 가젯의 직렬 포트(호스트의 ttyACM)에 암호 없는 root 셸을 둔다. 개발 때만 쓰는 구조 길이고 명령줄에 buntos.usbdebug=1이
+# 있어야 돈다. 케이블을 꽂은 사람만 닿는다. getty·login·PAM·logind를 거치지 않아 부팅이 중간에 멈춰도 뜬다.
+# systemd의 debug-shell.service와 같은 꼴이다. 다만 터미널을 초기화하지 않고(TTYReset) 크기를 정해 둔다. 호스트가 아직 없을 때
+# 보낸 제어 문자와 크기 질의(DSR)가 나중에 터미널을 연 사람의 입력에 섞이기 때문이다
+
+[Unit]
+Description=Root shell on the USB gadget serial port (development)
+ConditionKernelCommandLine=buntos.usbdebug=1
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+Requires=buntos-usb-gadget.service
+After=buntos-usb-gadget.service
+StartLimitIntervalSec=0
+
+[Service]
+Environment=TERM=vt220 HOME=/root
+WorkingDirectory=-/root
+ExecStart=/bin/bash -l
+Restart=always
+RestartSec=1
+StandardInput=tty
+TTYPath=/dev/ttyGS0
+TTYRows=24
+TTYColumns=80
+TTYVHangup=yes
+KillMode=process
+IgnoreSIGPIPE=no
+# bash는 SIGTERM을 무시한다
+KillSignal=SIGHUP
+
+[Install]
+WantedBy=sysinit.target emergency.target

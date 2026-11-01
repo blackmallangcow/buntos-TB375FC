@@ -4,19 +4,28 @@
 #
 # TB375FC 첫 부팅(2a·2b)용 initramfs의 /init. busybox sh로 돈다. LK가 init_boot의 램디스크를 initrd로 넘기면
 # 커널이 이것을 PID 1로 띄운다.
-# - proc·sys·devtmpfs·devpts·configfs·pstore·debugfs를 붙이고 initramfs의 모듈을 올린다
+# - proc·sys·devtmpfs·devpts·tmpfs(/run)·configfs·pstore·debugfs를 붙이고 initramfs의 모듈을 올린다
 # - 직전 부팅의 pstore 기록을 /run/buntos/pstore에 떠 두고(지우지 않는다) 콘솔 기록의 끝을 보인다
 # - 커널, 명령줄, 장치 트리, CPU의 EL(설계안 12.1절), 화면을 알리고 LK가 넘긴 트리를 /run/buntos/fdt.dtb에 뜬다
+# - 명령줄에 root=가 있으면 그 파티션을 /sysroot에 붙여 switch_root로 넘어간다(try_root). /proc·/sys·/dev·/run을 함께
+#   옮기므로 /run/buntos의 기록이 진짜 루트에 남는다. 안드로이드 파티션은 건드리지 않는다
+# - 못 넘어가면(장치 없음, 붙지 않음, init이 돌지 못함) 까닭을 남기고 root=가 없을 때와 똑같이 이어 간다.
+#   기기에서는 이 길이 유일한 구조 수단이라, 되돌릴 수 없는 switch_root 앞에서 모든 실패를 먼저 걸러 낸다
 # - /etc/inittab을 만들어 busybox init에 넘긴다. busybox init이 console=의 화면(tty0)과 UART(ttyS0)에 셸을 띄우고
 #   "/init --late"를 한 번 돌린다
-# - --late: UDC를 기다려 USB 가젯(ACM + NCM, 기기 172.16.42.1/24)을 띄우고 ttyGS0에 셸을 더한다.
+# - --late: USB 가젯(usb-gadget: ACM + NCM, 기기 172.16.42.1/24)을 띄우고 ttyGS0에 셸을 더한다.
 #   nvdata·nvcfg·persist를 GPT 파티션 이름으로 찾아 /mnt/vendor/<이름>에 읽기 전용으로 붙인다(Wi-Fi 보정값이 nvdata에 있다)
 # 진행은 /dev/kmsg로 알린다. 커널이 모든 콘솔(simpledrm 화면, UART)과 dmesg, pstore에 함께 남기고, 같은 글을
 # /run/buntos/boot.log에도 적는다. 화면 콘솔(fbcon)에 한글 글꼴이 없어 기기에 찍는 글은 영어로 쓴다.
 # PID 1이 끝나면 커널이 panic하므로 set -e를 쓰지 않는다. 한 단계가 실패해도 다음으로 넘어간다.
 #
 # 커널 명령줄 옵션:
-#   buntos.wait=<초>       --late가 UDC와 nvdata를 기다리는 시간 (기본 30)
+#   root=PARTLABEL=<이름>|PARTUUID=<값>|UUID=<값>|/dev/<장치>  넘어갈 루트. 없으면 넘어가지 않는다
+#   rootfstype=<형식>      없으면 mount가 찾는다
+#   rootflags=<옵션>       mount -o에 더한다
+#   rw, ro                 rw가 하나라도 있으면 rw, 없으면 ro (커널 기본값과 같다)
+#   init=<경로>            새 루트의 init (기본 /sbin/init)
+#   buntos.wait=<초>       루트 장치와, --late가 UDC와 nvdata를 기다리는 시간 (기본 30)
 #   buntos.usbnet=ncm|ecm  가젯의 네트워크 함수 (기본 ncm)
 #   buntos.telnet=1        가젯 네트워크(172.16.42.1:23)에 암호 없는 telnetd를 띄운다
 #   buntos.debug=1         set -x
@@ -29,17 +38,33 @@ say() {
 	echo "<5>bunt-init: $*" >/dev/kmsg 2>/dev/null || echo "bunt-init: $*"
 }
 
+# 넘어가지 못한 까닭. quiet여도 화면에 보이도록 커널 기록의 수준을 높인다
+fail() {
+	echo "$*" >>"$log"
+	echo "<3>bunt-init: $*" >/dev/kmsg 2>/dev/null || echo "bunt-init: $*"
+}
+
+# 커널 명령줄을 낱말 하나씩 낸다. 순정 트리의 /chosen bootargs처럼 탭이 섞여 있어도 나눈다
+words() {
+	tr -s ' \t' '\n' </proc/cmdline
+}
+
+# 커널 명령줄의 값을 나온 차례대로 모두 낸다
+args() {
+	words | sed -n "s/^$1=//p"
+}
+
 # 커널 명령줄의 값. 여러 번 나오면 마지막 것, 없으면 $2
 arg() {
 	local v
-	v=$(tr ' ' '\n' </proc/cmdline | sed -n "s/^$1=//p" | tail -n 1)
+	v=$(args "$1" | tail -n 1)
 	echo "${v:-$2}"
 }
 
 # 셸을 띄울 콘솔: console=의 장치 가운데 열리는 것 (UART 포트가 없으면 ttyS0 노드는 있어도 열리지 않는다)
 consoles() {
 	local list t seen=
-	list=$(tr ' ' '\n' </proc/cmdline | sed -n 's/^console=\([^,]*\).*/\1/p')
+	list=$(args console | sed 's/,.*//')
 	for t in ${list:-tty0 ttyS0}; do
 		case " $seen " in *" $t "*) continue ;; esac
 		[ -c "/dev/$t" ] && stty -F "/dev/$t" >/dev/null 2>&1 && seen="$seen $t"
@@ -68,15 +93,20 @@ keep_pstore() {
 	done
 }
 
-# GPT 파티션 이름으로 블록 장치를 찾는다. udev가 없어 /dev/disk/by-partlabel이 없으므로 uevent의 PARTNAME을 본다
-part() {
+# uevent의 값으로 블록 장치를 찾는다. udev가 없어 /dev/disk/by-*가 없다
+part_by() {
 	local u
 	for u in /sys/class/block/*/uevent; do
-		grep -qx "PARTNAME=$1" "$u" 2>/dev/null || continue
+		grep -qxF "$1=$2" "$u" 2>/dev/null || continue
 		echo "/dev/$(sed -n 's/^DEVNAME=//p' "$u")"
 		return 0
 	done
 	return 1
+}
+
+# GPT 파티션 이름으로 블록 장치를 찾는다
+part() {
+	part_by PARTNAME "$1"
 }
 
 # 보정값이 든 파티션을 읽기 전용으로 붙인다. 블록 장치부터 읽기 전용으로 두고(쓰기가 커널에서 막힌다),
@@ -100,79 +130,15 @@ mount_ro() {
 	fi
 }
 
-gadget() {
-	local udc=$1 g=/sys/kernel/config/usb_gadget/buntos net ifname
-	net=$(arg buntos.usbnet ncm)
-	if [ ! -d /sys/kernel/config/usb_gadget ]; then
-		say "usb gadget: no usb_gadget in configfs (CONFIG_USB_CONFIGFS, libcomposite)"
-		return 1
-	fi
-	mkdir "$g" || return 1
-	echo 0x1d6b >"$g/idVendor"  # Linux Foundation
-	echo 0x0104 >"$g/idProduct" # Multifunction Composite Gadget
-	echo 0x0100 >"$g/bcdDevice"
-	echo 0x0200 >"$g/bcdUSB"
-	# 여러 함수를 묶은 장치(IAD). Windows가 ACM을 알아보게 한다
-	echo 0xef >"$g/bDeviceClass"
-	echo 0x02 >"$g/bDeviceSubClass"
-	echo 0x01 >"$g/bDeviceProtocol"
-	mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409"
-	echo buntOS >"$g/strings/0x409/manufacturer"
-	echo "TB375FC initramfs" >"$g/strings/0x409/product"
-	arg androidboot.serialno buntos >"$g/strings/0x409/serialnumber"
-	echo "ACM + $net" >"$g/configs/c.1/strings/0x409/configuration"
-	echo 500 >"$g/configs/c.1/MaxPower"
-	if ! mkdir "$g/functions/acm.0" "$g/functions/$net.0"; then
-		say "usb gadget: no acm or $net function (usb_f_acm, usb_f_$net)"
-		return 1
-	fi
-	# 고정 MAC(로컬 관리 주소, 02 + "bunt")
-	echo 02:62:75:6e:74:01 >"$g/functions/$net.0/dev_addr"
-	echo 02:62:75:6e:74:02 >"$g/functions/$net.0/host_addr"
-	ln -s "$g/functions/acm.0" "$g/configs/c.1/"
-	ln -s "$g/functions/$net.0" "$g/configs/c.1/"
-	if ! echo "$udc" >"$g/UDC"; then
-		say "usb gadget: could not bind to $udc"
-		return 1
-	fi
-	ifname=$(cat "$g/functions/$net.0/ifname")
-	ip link set lo up
-	ip addr add 172.16.42.1/24 dev "$ifname"
-	ip link set "$ifname" up
-	# 호스트가 172.16.42.2를 저절로 받게 한다. 경로·DNS는 주지 않는다
-	cat >/run/buntos/udhcpd.conf <<-EOF
-		interface $ifname
-		start 172.16.42.2
-		end 172.16.42.2
-		max_leases 1
-		option subnet 255.255.255.0
-		lease_file /run/buntos/udhcpd.leases
-	EOF
-	touch /run/buntos/udhcpd.leases
-	udhcpd /run/buntos/udhcpd.conf
-	echo "ttyGS0::respawn:/bin/sh" >>/etc/inittab && kill -HUP 1
-	say "usb gadget: $udc, acm (shell on ttyGS0) + $net ($ifname 172.16.42.1/24, host 172.16.42.2)"
-	if [ "$(arg buntos.telnet)" = 1 ] && telnetd -b 172.16.42.1 -l /bin/sh; then
-		say "telnetd: 172.16.42.1:23, no password"
-	fi
-}
-
 late() {
 	local wait_s
 	wait_s=$(arg buntos.wait 30)
 	(
-		i=0
-		udc=
-		while [ "$i" -lt "$wait_s" ]; do
-			udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
-			[ -n "$udc" ] && break
-			sleep 1
-			i=$((i + 1))
-		done
-		if [ -n "$udc" ]; then
-			gadget "$udc"
-		else
-			say "usb gadget: no UDC within ${wait_s}s (mtu3 in device or dual-role mode)"
+		if /usr/libexec/buntos/usb-gadget "TB375FC initramfs"; then
+			echo "ttyGS0::respawn:/bin/sh" >>/etc/inittab && kill -HUP 1
+			if [ "$(arg buntos.telnet)" = 1 ] && telnetd -b 172.16.42.1 -l /bin/sh; then
+				say "telnetd: 172.16.42.1:23, no password"
+			fi
 		fi
 	) &
 	(
@@ -191,13 +157,202 @@ late() {
 	wait
 }
 
+# 명령줄에서 넘어갈 루트를 고른다(root_spec). LK가 자기 root=를 덧붙일 수 있으므로(순정 트리의 /chosen은 root=/dev/ram이다)
+# 마지막 값을 그대로 믿지 않는다. 우리만 쓰는 꼴(PARTLABEL=, PARTUUID=, UUID=)의 마지막 값을 먼저 고르고, 없으면 /dev/
+# 경로의 마지막 값을 고른다. 램디스크, 안드로이드의 dm, 커널의 별칭은 버린다
+pick_root() {
+	local v tagged='' path=''
+	for v in $(args root); do
+		case $v in
+		PARTLABEL=?* | PARTUUID=?* | UUID=?*) tagged=$v ;;
+		/dev/ram* | /dev/dm-* | /dev/root | /dev/nfs) say "root: ignoring root=$v" ;;
+		/dev/?*) path=$v ;;
+		*) say "root: ignoring root=$v (unknown form)" ;;
+		esac
+	done
+	root_spec=${tagged:-$path}
+}
+
+# root= 값의 블록 장치를 낸다. 아직 없으면 실패한다. sysfs 항목이 devtmpfs 노드보다 먼저 보일 수 있어 노드까지 본다
+root_device() {
+	local dev
+	case $1 in
+	PARTLABEL=*) dev=$(part "${1#*=}") ;;
+	PARTUUID=*) dev=$(part_by PARTUUID "$(echo "${1#*=}" | tr 'A-F' 'a-f')") ;;
+	UUID=*) dev=$(findfs "$1" 2>/dev/null) ;;
+	*) dev=$1 ;;
+	esac
+	[ -b "$dev" ] && echo "$dev"
+}
+
+# 찾지 못했을 때 볼 목록: 장치 이름, GPT 이름, GPT UUID
+block_list() {
+	local u
+	for u in /sys/class/block/*/uevent; do
+		[ -f "$u" ] || continue
+		sed -n 's/^DEVNAME=//p; s/^PARTNAME=/name=/p; s/^PARTUUID=/uuid=/p' "$u" | tr '\n' ' '
+		echo
+	done >/run/buntos/block.txt
+}
+
+# 새 루트에서 init이 돌 수 있는지 미리 본다. switch_root는 initramfs를 지운 뒤에 exec하므로 그 뒤의 실패는 PID 1의 죽음(패닉)이고
+# 되돌릴 수 없다. 경로를 /sysroot 앞에 붙여 보면 절대 경로 심볼릭 링크를 여기 루트에서 풀게 되므로 새 루트 안에서 본다.
+# - run-init -n: switch_root와 같은 코드의 시험 운전. 새 루트가 다른 파일 시스템인지, rootfs가 ramfs·tmpfs인지, init에 실행
+#   권한이 있는지 본다
+# - 머리 20바이트: arm64 ELF나 #!여야 한다. 그 밖에는 exec가 ENOEXEC로 실패한다. 다음 단계의 chroot(execvp)는 ENOEXEC이면 새 루트의
+#   /bin/sh로 다시 돌려 통과하므로 따로 본다. 새 루트 안에서 경로를 풀려고 initramfs의 busybox를 /proc/1/root로 부른다
+# - LD_TRACE_LOADED_OBJECTS: 실제로 exec하되 ELF 로더가 라이브러리만 찾고 init을 돌리지 않고 끝난다(ldd와 같다). 스크립트면
+#   인터프리터가 이렇게 끝난다. 로더·인터프리터·라이브러리가 없으면 여기서 걸린다. 정적 링크한 init은 실제로 돌므로(busybox init은
+#   PID 1이 아니면 곧 끝난다) 시간을 제한한다
+check_init() {
+	local out rc head
+	if ! command -v switch_root >/dev/null; then
+		fail "root: no switch_root in this initramfs"
+		return 1
+	fi
+	if ! out=$(run-init -n /sysroot "$1" 2>&1); then
+		fail "root: init $1: $(echo "$out" | tail -n 1)"
+		return 1
+	fi
+	mkdir -p /sysroot/proc 2>/dev/null
+	if ! out=$(mount -t proc proc /sysroot/proc 2>&1); then
+		fail "root: no /proc in the new root: $out"
+		return 1
+	fi
+	head=$(chroot /sysroot /proc/1/root/bin/busybox od -An -tx1 -N 20 "$1" 2>/dev/null | tr -d ' \n')
+	umount /sysroot/proc
+	case $head in
+	7f454c460201????????????????????????b700 | 2321*) ;;
+	*)
+		fail "root: init $1 is not an arm64 program or a script (starts with '${head:-nothing}')"
+		return 1
+		;;
+	esac
+	out=$(LD_TRACE_LOADED_OBJECTS=1 timeout -s KILL 10 chroot /sysroot "$1" 2>&1 </dev/null)
+	rc=$?
+	case $rc in
+	126 | 127)
+		fail "root: init $1 cannot run: $(echo "$out" | tail -n 1)"
+		return 1
+		;;
+	137) say "root: init $1: the check timed out, going on" ;;
+	1[3-9][0-9] | 2[0-9][0-9])
+		fail "root: init $1 died in the check (status $rc): $(echo "$out" | tail -n 1)"
+		return 1
+		;;
+	esac
+	case $out in
+	*"not found"*)
+		fail "root: init $1 cannot run: $(echo "$out" | grep -m 1 'not found')"
+		return 1
+		;;
+	esac
+}
+
+# UFS에는 안드로이드 파티션이 함께 있다. 어떤 루트로 넘어가든 systemd가 파티션 표를 고치거나 GPT 형식으로 파티션을 붙이지
+# 못하게 막는다. 보드 프로필(mkosi.postinst.chroot)도 같은 것을 막지만, 이 줄은 다른 보드의 이미지를 잘못 구웠을 때도 듣는다.
+# 유닛은 /run/systemd/system의 /dev/null 링크로(systemctl mask --runtime과 같다), 생성기는 systemd.generator(7)의 방법으로 가린다
+guard_disks() {
+	local u
+	mkdir -p /run/systemd/system /run/systemd/system-generators /run/repart.d
+	for u in systemd-repart.service systemd-repart.socket systemd-repart@.service; do
+		ln -sf /dev/null "/run/systemd/system/$u"
+	done
+	ln -sf /dev/null /run/systemd/system-generators/systemd-gpt-auto-generator
+	ln -sf /dev/null /run/repart.d/10-root.conf
+}
+
+# /proc·/sys·/dev·/run을 새 루트로 옮긴다. 그 아래 마운트(/dev/pts, /sys/kernel/config·debug, /sys/fs/pstore)도 따라간다.
+# systemd는 이미 붙어 있는 것을 그대로 쓴다(mount_setup). 그래서 main이 systemd와 같은 옵션으로 붙인다.
+# 하나라도 실패하면 모두 되돌린다. /dev와 /run이 돌아온 뒤에야 say를 쓸 수 있다
+move_mounts() {
+	local m u moved='' err
+	for m in /sys /dev /run /proc; do
+		mkdir -p "/sysroot$m" 2>/dev/null
+		if ! err=$(mount --move "$m" "/sysroot$m" 2>&1); then
+			for u in $moved; do
+				mount --move "/sysroot$u" "$u"
+			done
+			fail "root: could not move $m to the new root: $err"
+			return 1
+		fi
+		moved="$m $moved"
+	done
+}
+
+# 넘어가지 못하고 돌아올 때 붙인 루트를 뗀다
+leave_root() {
+	umount /sysroot || say "root: could not unmount /sysroot"
+}
+
+# root=의 파티션으로 넘어간다. 넘어가면 돌아오지 않는다. 돌아오면 까닭을 남긴 뒤이고, 아무것도 고치지 않았다.
+# 이때 도는 프로세스는 이 셸뿐이다(가젯, udhcpd, nvdata는 --late의 일이라 실패 길에서만 돈다)
+try_root() {
+	local dev='' fstype flags mode=ro init v i=0 wait_s err
+	pick_root
+	if [ -z "$root_spec" ]; then
+		fail "root: no usable root= on the command line"
+		return 1
+	fi
+	wait_s=$(arg buntos.wait 30)
+	say "root: looking for $root_spec (up to ${wait_s}s)"
+	until dev=$(root_device "$root_spec"); do
+		if [ "$i" -ge "$wait_s" ]; then
+			block_list
+			fail "root: $root_spec not found within ${wait_s}s;" \
+				"$(wc -l </run/buntos/block.txt) block devices in /run/buntos/block.txt"
+			return 1
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	fstype=$(arg rootfstype)
+	flags=$(arg rootflags)
+	# LK가 ro를 덧붙여도 우리가 준 rw를 따른다
+	if words | grep -qx rw; then mode=rw; fi
+	mkdir -p /sysroot
+	say "root: found $dev after ${i}s; mounting (${fstype:-auto}, $mode${flags:+,$flags})"
+	# shellcheck disable=SC2086 # -t와 형식은 낱말 둘이다
+	if ! err=$(mount ${fstype:+-t $fstype} -o "$mode${flags:+,$flags}" "$dev" /sysroot 2>&1); then
+		fail "root: could not mount $dev: $err (kernel log: dmesg)"
+		return 1
+	fi
+	# 안드로이드식 init=/init는 이 루트에 없다
+	init=/sbin/init
+	for v in $(args init); do
+		case $v in
+		/init) say "root: ignoring init=/init" ;;
+		*) init=$v ;;
+		esac
+	done
+	if ! check_init "$init"; then
+		leave_root
+		return 1
+	fi
+	[ -d "/sysroot/usr/lib/modules/$ver" ] || [ -d "/sysroot/lib/modules/$ver" ] ||
+		fail "root: warning: the new root has no modules for $ver"
+	guard_disks
+	say "root: switching to $dev, init $init"
+	if ! move_mounts; then
+		leave_root
+		return 1
+	fi
+	unset ENV
+	export HOME=/
+	exec switch_root /sysroot "$init"
+}
+
 main() {
 	mkdir -p /proc /sys /dev /run /tmp /root
-	mount -t proc proc /proc
-	mount -t sysfs sysfs /sys
-	mount -t devtmpfs devtmpfs /dev
-	mkdir -p /dev/pts /run/buntos
-	mount -t devpts devpts /dev/pts
+	# 옵션은 systemd의 mount_setup과 같다. 넘어간 뒤에 systemd가 이 마운트를 그대로 쓴다
+	mount -t proc -o nosuid,noexec,nodev proc /proc
+	mount -t sysfs -o nosuid,noexec,nodev sysfs /sys
+	mount -t devtmpfs -o nosuid,mode=0755 devtmpfs /dev
+	mkdir -p /dev/pts
+	mount -t devpts -o nosuid,noexec,mode=620,gid=5 devpts /dev/pts
+	# 기록을 진짜 루트에 남기려고 /run을 rootfs가 아닌 tmpfs에 둔다. switch_root는 rootfs의 내용을 지운다
+	mount -t tmpfs -o nosuid,nodev,mode=0755,size=20%,nr_inodes=800k tmpfs /run
+	mkdir -p /run/buntos
 	[ "$(arg buntos.debug)" = 1 ] && set -x
 
 	say "buntOS TB375FC initramfs ($(cat /etc/buntos/initramfs 2>/dev/null))"
@@ -229,9 +384,9 @@ main() {
 		say "modules: built for $(ls /lib/modules | tr '\n' ' ')but the kernel is $ver"
 	fi
 
-	mount -t configfs configfs /sys/kernel/config 2>/dev/null
-	mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
-	if mount -t pstore pstore /sys/fs/pstore 2>/dev/null; then
+	mount -t configfs -o nosuid,noexec,nodev configfs /sys/kernel/config 2>/dev/null
+	mount -t debugfs -o nosuid,noexec,nodev debugfs /sys/kernel/debug 2>/dev/null
+	if mount -t pstore -o nosuid,noexec,nodev pstore /sys/fs/pstore 2>/dev/null; then
 		keep_pstore
 	else
 		say "pstore: could not mount (CONFIG_PSTORE)"
@@ -240,6 +395,11 @@ main() {
 		say "display: $(cat /sys/class/graphics/fb0/name) $(cat /sys/class/graphics/fb0/virtual_size)"
 	else
 		say "display: no framebuffer (simple-framebuffer node, simpledrm)"
+	fi
+
+	# root=가 없으면 아무 말 없이 지금처럼 이어 간다
+	if [ -n "$(args root)" ]; then
+		try_root || fail "root: staying in the initramfs (shells on the consoles and USB)"
 	fi
 
 	cons=$(consoles)

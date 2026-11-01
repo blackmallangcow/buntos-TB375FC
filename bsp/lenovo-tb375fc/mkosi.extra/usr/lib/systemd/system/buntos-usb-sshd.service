@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# USB 가젯 네트워크에서만 듣는 SSH 서버. 명령줄에 buntos.usbdebug=1이 있어야 돈다. 꾸러미의 ssh.service는 프리셋으로 꺼 둔다
+# (모든 주소에서 듣는다). 호스트 키는 기기마다 처음 켤 때 만든다.
+# root의 공개 키는 명령줄의 systemd.set_credential_binary=ssh.authorized_keys.root:<base64>로 넣는다
+# (systemd의 tmpfiles.d/provision.conf). 없으면 ttyACM의 셸에서 넣는다.
+# 가젯처럼 다른 서비스를 기다리지 않아, sysinit이 멈추거나 emergency.target으로 넘어가도 들어갈 수 있다
+
+[Unit]
+Description=SSH on the USB gadget network (development)
+ConditionKernelCommandLine=buntos.usbdebug=1
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+Requires=buntos-usb-gadget.service
+After=buntos-usb-gadget.service
+
+[Service]
+Type=notify
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+ExecStartPre=/usr/bin/ssh-keygen -A
+ExecStart=/usr/sbin/sshd -D -e -o ListenAddress=172.16.42.1
+KillMode=process
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=sysinit.target emergency.target

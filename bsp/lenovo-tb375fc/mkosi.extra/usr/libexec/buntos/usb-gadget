@@ -1,0 +1,107 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 개발용 USB 가젯을 configfs로 띄운다: ACM(기기 쪽 ttyGS0) + NCM(기기 172.16.42.1/24, 호스트는 DHCP로 172.16.42.2).
+# USB 호스트가 없는 2b에서 화면 말고는 하나뿐인 디버그 길이다(설계안 2.4절).
+# initramfs의 실패 길(init --late)과 진짜 루트(buntos-usb-gadget.service)가 이 파일 하나를 쓴다. mkinitramfs.sh가 initramfs에
+# 같은 경로로 복사한다. 그래서 POSIX 셸과 흔한 명령만 쓰고, ip와 udhcpd는 양쪽에 다 있는 busybox로 부른다.
+# UDC를 buntos.wait초까지 기다린다. 이미 만든 가젯이 있으면(서비스를 다시 시작했을 때) 그것을 다시 쓴다.
+# 진행은 /dev/kmsg와 /run/buntos/boot.log에 남긴다. 화면 콘솔에 한글 글꼴이 없어 기기에 찍는 글은 영어로 쓴다.
+#
+# 사용법: usb-gadget <제품 문자열>
+# 커널 명령줄 옵션:
+#   buntos.wait=<초>       UDC를 기다리는 시간 (기본 30)
+#   buntos.usbnet=ncm|ecm  네트워크 함수 (기본 ncm)
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+product=${1:-TB375FC}
+g=/sys/kernel/config/usb_gadget/buntos
+log=/run/buntos/boot.log
+mkdir -p /run/buntos
+
+say() {
+	echo "$*" >>"$log"
+	echo "<5>usb-gadget: $*" >/dev/kmsg 2>/dev/null || echo "usb-gadget: $*"
+}
+
+# 커널 명령줄의 값. 여러 번 나오면 마지막 것, 없으면 $2
+arg() {
+	v=$(tr -s ' \t' '\n' </proc/cmdline | sed -n "s/^$1=//p" | tail -n 1)
+	echo "${v:-$2}"
+}
+
+# UDC 하나의 이름. sysfs의 이름이라 ls로 읽어도 된다
+first_udc() {
+	# shellcheck disable=SC2012
+	ls /sys/class/udc 2>/dev/null | head -n 1
+}
+
+# configfs에 가젯을 만든다
+make_gadget() {
+	if [ ! -d /sys/kernel/config/usb_gadget ]; then
+		say "usb gadget: no usb_gadget in configfs (CONFIG_USB_CONFIGFS, libcomposite)"
+		return 1
+	fi
+	mkdir "$g" || return 1
+	echo 0x1d6b >"$g/idVendor"  # Linux Foundation
+	echo 0x0104 >"$g/idProduct" # Multifunction Composite Gadget
+	echo 0x0100 >"$g/bcdDevice"
+	echo 0x0200 >"$g/bcdUSB"
+	# 여러 함수를 묶은 장치(IAD). Windows가 ACM을 알아보게 한다
+	echo 0xef >"$g/bDeviceClass"
+	echo 0x02 >"$g/bDeviceSubClass"
+	echo 0x01 >"$g/bDeviceProtocol"
+	mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409"
+	echo buntOS >"$g/strings/0x409/manufacturer"
+	echo "$product" >"$g/strings/0x409/product"
+	arg androidboot.serialno buntos >"$g/strings/0x409/serialnumber"
+	echo "ACM + $net" >"$g/configs/c.1/strings/0x409/configuration"
+	echo 500 >"$g/configs/c.1/MaxPower"
+	if ! mkdir "$g/functions/acm.0" "$g/functions/$net.0"; then
+		say "usb gadget: no acm or $net function (usb_f_acm, usb_f_$net)"
+		return 1
+	fi
+	# 고정 MAC(로컬 관리 주소, 02 + "bunt")
+	echo 02:62:75:6e:74:01 >"$g/functions/$net.0/dev_addr"
+	echo 02:62:75:6e:74:02 >"$g/functions/$net.0/host_addr"
+	ln -s "$g/functions/acm.0" "$g/configs/c.1/"
+	ln -s "$g/functions/$net.0" "$g/configs/c.1/"
+}
+
+net=$(arg buntos.usbnet ncm)
+wait_s=$(arg buntos.wait 30)
+i=0
+udc=$(first_udc)
+while [ -z "$udc" ] && [ "$i" -lt "$wait_s" ]; do
+	sleep 1
+	i=$((i + 1))
+	udc=$(first_udc)
+done
+if [ -z "$udc" ]; then
+	say "usb gadget: no UDC within ${wait_s}s (mtu3 in device or dual-role mode)"
+	exit 1
+fi
+
+[ -d "$g" ] || make_gadget || exit 1
+if [ -z "$(cat "$g/UDC")" ] && ! echo "$udc" >"$g/UDC"; then
+	say "usb gadget: could not bind to $udc"
+	exit 1
+fi
+ifname=$(cat "$g/functions/$net.0/ifname")
+busybox ip link set lo up
+busybox ip addr replace 172.16.42.1/24 dev "$ifname"
+busybox ip link set "$ifname" up
+# 호스트가 172.16.42.2를 저절로 받게 한다. 경로·DNS는 주지 않는다
+cat >/run/buntos/udhcpd.conf <<-CONF
+	interface $ifname
+	start 172.16.42.2
+	end 172.16.42.2
+	max_leases 1
+	option subnet 255.255.255.0
+	lease_file /run/buntos/udhcpd.leases
+	pidfile /run/buntos/udhcpd.pid
+CONF
+touch /run/buntos/udhcpd.leases
+busybox udhcpd /run/buntos/udhcpd.conf
+say "usb gadget: $udc, acm (shell on ttyGS0) + $net ($ifname 172.16.42.1/24, host 172.16.42.2)"

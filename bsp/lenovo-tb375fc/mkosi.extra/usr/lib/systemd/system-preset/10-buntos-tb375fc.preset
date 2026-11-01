@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# mkosi가 이미지를 마무리할 때 도는 systemctl preset-all의 값 (mkosi 27.1의 run_preset). 이 줄이 없으면 꾸러미의 SSH 서버가
+# 켜져 모든 주소에서 듣는다. 개발용 USB 길은 유닛마다 명령줄의 buntos.usbdebug=1을 조건으로 두어, 켜져 있어도 그 값이 없으면 돌지 않는다
+disable ssh.service
+disable ssh.socket
+enable buntos-usb-gadget.service
+enable buntos-usb-shell.service
+enable buntos-usb-sshd.service

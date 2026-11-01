@@ -1,0 +1,25 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 보드 프로필의 설치 뒤 스크립트. mkosi가 이미지 안(chroot)에서 돌린다.
+set -euo pipefail
+
+# UFS에는 안드로이드 파티션(슬롯, nvdata, 펌웨어)이 함께 있다. 공통 레시피는 처음 켤 때 루트 디스크의 GPT를 고쳐 루트를 늘리지만
+# (image/mkosi.extra/usr/lib/repart.d/10-root.conf), 이 기기에서는 어떤 경우에도 GPT를 고치면 안 된다.
+# - systemd-repart: 루트가 든 디스크(LU) 전체를 열어 GPT를 다시 쓴다. 서비스와 varlink 소켓을 가리고, 손으로 돌려도 할 일이
+#   없게 정의 파일도 가린다(repart는 /etc의 같은 이름이 가리키는 /dev/null을 빈 정의로 친다)
+# - systemd-gpt-auto-generator: EFI가 아니어도(LK) 루트가 든 디스크의 GPT를 읽어 형식 GUID가 맞는 파티션을 스왑, /home, /srv,
+#   /var, /var/tmp로 붙이고 속성 59·60을 따른다. 기기의 GPT는 우리가 정하지 않았다
+systemctl mask systemd-repart.service systemd-repart.socket systemd-repart@.service
+mkdir -p /etc/repart.d /etc/systemd/system-generators
+ln -sf /dev/null /etc/repart.d/10-root.conf
+ln -sf /dev/null /etc/systemd/system-generators/systemd-gpt-auto-generator
+
+# 작게 구운 btrfs는 파일 시스템만 파티션 끝까지 늘린다 (systemd-growfs-root.service.d/10-buntos.conf)
+systemctl add-wants local-fs.target systemd-growfs-root.service
+
+# 켜고 끄는 것은 프리셋이 정한다(/usr/lib/systemd/system-preset/10-buntos-tb375fc.preset). mkosi는 이 스크립트 뒤에 preset-all을
+# 돌리므로 여기서 systemctl disable을 해도 되살아난다.
+# 설치 때 만든 호스트 키는 지운다. 이미지마다 같은 키를 쓰지 않도록 기기에서 처음 켤 때 만든다 (buntos-usb-sshd.service)
+rm -f /etc/ssh/ssh_host_*
