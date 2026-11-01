@@ -6,6 +6,7 @@
  */
 
 /dts-v1/;
+#include <dt-bindings/spmi/spmi.h>
 #include "mt6897.dtsi"
 
 / {
@@ -14,6 +15,7 @@
 
 	aliases {
 		serial0 = &uart0;
+		spmi0 = &spmi_m;
 	};
 
 	chosen {
@@ -63,6 +65,87 @@
 		console-size = <0x40000>;
 		pmsg-size = <0x80000>;
 		status = "disabled";
+	};
+};
+
+/*
+ * MT6319 buck PMICs, as in the stock tree. Their users there: 6/vbuck1
+ * the ISP and camera power domains, 6/vbuck3 (proc1 and proc4),
+ * 7/vbuck1 (proc2) and 6/vbuck4 (proc3) the CPU DVFS that the MCUPM
+ * drives, 8/vbuck3 UFS VCCQ; 7/vbuck3 has none. Buck 2 is paired with
+ * buck 1 on all three. Nothing claims these rails yet, so all of them
+ * stay on through the unused regulator cleanup. The driver picks the
+ * paired bucks by SID as on MT8195 boards, which does not match this
+ * board, so no operating modes are allowed.
+ */
+&spmi_m {
+	mt6319_6: pmic@6 {
+		compatible = "mediatek,mt6319-regulator", "mediatek,mt6315-regulator";
+		reg = <0x6 SPMI_USID>;
+
+		regulators {
+			mt6319_6_vbuck1: vbuck1 {
+				regulator-name = "vmm";
+				regulator-min-microvolt = <300000>;
+				regulator-max-microvolt = <1193750>;
+				regulator-enable-ramp-delay = <256>;
+				regulator-always-on;
+			};
+
+			mt6319_6_vbuck3: vbuck3 {
+				regulator-name = "vproc1";
+				regulator-min-microvolt = <300000>;
+				regulator-max-microvolt = <1193750>;
+				regulator-enable-ramp-delay = <256>;
+				regulator-always-on;
+			};
+
+			mt6319_6_vbuck4: vbuck4 {
+				regulator-name = "vproc3";
+				regulator-min-microvolt = <300000>;
+				regulator-max-microvolt = <1193750>;
+				regulator-enable-ramp-delay = <256>;
+				regulator-always-on;
+			};
+		};
+	};
+
+	mt6319_7: pmic@7 {
+		compatible = "mediatek,mt6319-regulator", "mediatek,mt6315-regulator";
+		reg = <0x7 SPMI_USID>;
+
+		regulators {
+			mt6319_7_vbuck1: vbuck1 {
+				regulator-name = "vproc2";
+				regulator-min-microvolt = <300000>;
+				regulator-max-microvolt = <1193750>;
+				regulator-enable-ramp-delay = <256>;
+				regulator-always-on;
+			};
+
+			mt6319_7_vbuck3: vbuck3 {
+				regulator-name = "mt6319_7_vbuck3";
+				regulator-min-microvolt = <300000>;
+				regulator-max-microvolt = <1193750>;
+				regulator-enable-ramp-delay = <256>;
+				regulator-always-on;
+			};
+		};
+	};
+
+	mt6319_8: pmic@8 {
+		compatible = "mediatek,mt6319-regulator", "mediatek,mt6315-regulator";
+		reg = <0x8 SPMI_USID>;
+
+		regulators {
+			mt6319_8_vbuck3: vbuck3 {
+				regulator-name = "vufs_vccq";
+				regulator-min-microvolt = <300000>;
+				regulator-max-microvolt = <1193750>;
+				regulator-enable-ramp-delay = <256>;
+				regulator-always-on;
+			};
+		};
 	};
 };
 

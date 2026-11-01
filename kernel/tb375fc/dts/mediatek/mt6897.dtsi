@@ -450,12 +450,15 @@
 
 		/*
 		 * SPMI 2.0 arbiter with two buses, laid out like MT8196. The
-		 * vendor register tables match the upstream MT8195 data.
-		 * TODO(2b): all six PMICs sit on the M bus (the firmware sets
-		 * no spmi-dev-mask), so put the PMIC children under spmi_m
-		 * (MT6363 @4, MT6368 @5, MT6319 @6-8, MT6685 @9), disable
-		 * spmi_p, and add the rcs interrupt (pio EINT 248), which
-		 * needs pinctrl-mt6897.
+		 * vendor register tables match the upstream MT8195 data. All
+		 * six PMICs sit on the M bus (the firmware sets no
+		 * spmi-dev-mask): MT6363 @4, MT6368 @5, MT6319 @6-8 and
+		 * MT6685 @9. The P bus has nothing on it and stays off.
+		 * The driver needs an spmiN alias for each bus.
+		 * TODO(2b): enable with pio. The PMIF and SPMI master clocks
+		 * are the bootloader's until clk-mt6897 exists; clk26m only
+		 * stands in for them, and with no clock driver nothing can
+		 * gate the real ones.
 		 */
 		spmi: spmi-arbiter@1cc00000 {
 			compatible = "mediatek,mt6897-spmi", "mediatek,mt8196-spmi";
@@ -467,11 +470,20 @@
 			spmi_m: spmi@4000 {
 				reg = <0x4000 0x900>, <0x1000 0x100>;
 				reg-names = "pmif", "spmimst";
+				interrupts-extended = <&pio 248 IRQ_TYPE_LEVEL_HIGH>;
+				interrupt-names = "rcs";
+				interrupt-controller;
+				#interrupt-cells = <3>;
+				clocks = <&clk26m>, <&clk26m>, <&clk26m>;
+				clock-names = "pmif_sys_ck", "pmif_tmr_ck", "spmimst_clk_mux";
+				#address-cells = <2>;
+				#size-cells = <0>;
 			};
 
 			spmi_p: spmi@6000 {
 				reg = <0x6000 0x900>, <0x0 0x100>;
 				reg-names = "pmif", "spmimst";
+				status = "disabled";
 			};
 		};
 

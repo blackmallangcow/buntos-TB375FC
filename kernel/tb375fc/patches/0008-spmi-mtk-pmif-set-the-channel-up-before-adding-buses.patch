@@ -1,0 +1,55 @@
+From: buntOS contributors
+Subject: [PATCH] spmi: mtk-pmif: set the channel up before adding buses
+
+Since the multi-bus support, mtk_spmi_probe() fills in arb->chan only
+after mtk_spmi_bus_probe() has called spmi_controller_add() for every bus.
+spmi_controller_add() registers the slave devices, and a slave driver that
+is already registered probes them right away, or asynchronously while
+mtk_spmi_probe() goes on. Until arb->chan is set, all its register indices
+are zero, so a read or write in that window polls PMIF_INIT_DONE instead
+of the SWINF status register and writes the command into PMIF_INIT_DONE.
+
+This window is open when the PMIC drivers are built in: drivers/regulator
+links before drivers/spmi, so the MT6315 and MT6363 regulator drivers are
+already registered when the arbiter probes.
+
+Set the channel up before probing the buses.
+
+Fixes: 078117963b2c ("spmi: mtk-pmif: Add multi-bus support for SPMI 2.0")
+---
+diff --git a/drivers/spmi/spmi-mtk-pmif.c b/drivers/spmi/spmi-mtk-pmif.c
+index ef3cf4e..c605643 100644
+--- a/drivers/spmi/spmi-mtk-pmif.c
++++ b/drivers/spmi/spmi-mtk-pmif.c
+@@ -811,6 +811,17 @@ static int mtk_spmi_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, arb);
+ 
++	/*
++	 * Set the channel up before the buses: adding a bus registers its
++	 * slaves, and their drivers may probe and use the bus right away.
++	 */
++	chan_offset = PMIF_CHAN_OFFSET * arb->data->soc_chan;
++	arb->chan.ch_sta = PMIF_SWINF_0_STA + chan_offset;
++	arb->chan.wdata = PMIF_SWINF_0_WDATA_31_0 + chan_offset;
++	arb->chan.rdata = PMIF_SWINF_0_RDATA_31_0 + chan_offset;
++	arb->chan.ch_send = PMIF_SWINF_0_ACC + chan_offset;
++	arb->chan.ch_rdy = PMIF_SWINF_0_VLD_CLR + chan_offset;
++
+ 	if (!arb->data->num_spmi_buses) {
+ 		ret = mtk_spmi_bus_probe(pdev, node, arb->data, &arb->bus[cur_bus]);
+ 		if (ret)
+@@ -828,13 +839,6 @@ static int mtk_spmi_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
+-	chan_offset = PMIF_CHAN_OFFSET * arb->data->soc_chan;
+-	arb->chan.ch_sta = PMIF_SWINF_0_STA + chan_offset;
+-	arb->chan.wdata = PMIF_SWINF_0_WDATA_31_0 + chan_offset;
+-	arb->chan.rdata = PMIF_SWINF_0_RDATA_31_0 + chan_offset;
+-	arb->chan.ch_send = PMIF_SWINF_0_ACC + chan_offset;
+-	arb->chan.ch_rdy = PMIF_SWINF_0_VLD_CLR + chan_offset;
+-
+ 	return 0;
+ }
+ 

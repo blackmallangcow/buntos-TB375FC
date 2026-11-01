@@ -1,0 +1,27 @@
+From: buntOS contributors
+Subject: [PATCH] spmi: mtk-pmif: fix the RCS interrupt bank calculation
+
+Each SPMI_SLV_x_y_EINT register holds the RCS interrupt status of four
+slaves, eight bits each, as mtk_spmi_rcs_irq_eoi() already assumes. The
+chained handler divides the bit number by 7 instead of 8 to find the
+slave, so a status bit at position 7, 14-15, 21-23 or 28-31 is taken for
+the next slave. The handler then clears the wrong byte, the bit stays set,
+and the loop never ends.
+
+Divide by 8.
+
+Fixes: ab1b3469fc28 ("spmi: mtk-pmif: Implement Request Capable Slave (RCS) interrupt")
+---
+diff --git a/drivers/spmi/spmi-mtk-pmif.c b/drivers/spmi/spmi-mtk-pmif.c
+index 833c2b3..ef3cf4e 100644
+--- a/drivers/spmi/spmi-mtk-pmif.c
++++ b/drivers/spmi/spmi-mtk-pmif.c
+@@ -513,7 +513,7 @@ static void mtk_spmi_handle_chained_irq(struct irq_desc *desc)
+ 
+ 		while (val) {
+ 			u8 bit = __ffs(val);
+-			u8 bank = bit / 7;
++			u8 bank = bit / 8;
+ 			u8 sid = ((i - SPMI_SLV_3_0_EINT) * 4) + bank;
+ 
+ 			val &= ~(PMIF_RCS_IRQ_MASK << (8 * bank));
