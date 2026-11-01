@@ -70,6 +70,8 @@ prepare() {
 	# 더한 빌드 목록 줄을 되돌린다. 그대로 두면 dtbs가 없는 소스를 찾다 실패한다
 	if compgen -G "$here/dts/mediatek/mt6897-lenovo-*.dts" >/dev/null; then
 		cp -p "$here"/dts/mediatek/*.dts* "$tree/arch/arm64/boot/dts/mediatek/"
+		# 다른 사본으로 만든 dtb가 out/에 남으면 시각 때문에 다시 빌드되지 않는다. 보드 dtb는 늘 새로 만든다(몇 초)
+		rm -f "$out"/arch/arm64/boot/dts/mediatek/mt6897-lenovo-*.dtb
 	else
 		echo "알림: dts/mediatek에 TB375FC 장치 트리가 아직 없어 빌드 목록에서 뺀다" >&2
 		git -C "$tree" checkout -q base -- arch/arm64/boot/dts/mediatek/Makefile

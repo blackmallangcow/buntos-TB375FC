@@ -27,8 +27,9 @@ umask 022
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cpio_tool="$here/../initramfs/mkcpio.py"
 out="$HOME/buntos-build/tb375fc/images"
-kernel= dtb= initramfs= boot_ramdisk=
-cmdline="console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused"
+kernel='' dtb='' initramfs='' boot_ramdisk=''
+# *_ignore_unused: 소비자가 아직 없는 클럭·전원 도메인·레귤레이터를 늦은 정리에서 끄지 않는다(LK가 켜 둔 화면 등)
+cmdline="console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused regulator_ignore_unused"
 vendor_cmdline="bootopt=64S3,32N2,64N2"
 
 # 원래 vendor_boot의 머리 값 (unpack_bootimg로 읽었다)

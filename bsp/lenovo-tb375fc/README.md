@@ -52,4 +52,4 @@ LK처럼 vendor_boot의 램디스크 조각을 initramfs 앞에 이어 붙여 `-
   - init은 vendor_boot 표지(`/etc/buntos/vendor_boot`)로 LK가 우리 vendor_boot를 읽었는지 알린다.
   - 우리 장치 트리로 띄우는 확실한 길은 비운 슬롯에 넷을 굽는 것이다(설계안 2.4절).
 - 원래 이미지와 달리 AVB 꼬리, 파티션 크기 채움, dtbo 뒤의 MediaTek 서명 블록(cert1·cert2)이 없다. LK가 언락 상태에서 이것을 요구하는지는 기기에서 본다.
-- 기본 커널 명령줄은 `console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused`다. MT6895 xaga 커뮤니티 포트는 LK가 boot·vendor_boot 이미지의 명령줄을 버린다고 적었다. 처음 띄우면 `/proc/cmdline`으로 들어왔는지 보고, 안 들어오면 커널 `CMDLINE`(+`CMDLINE_EXTEND`)로 준다. initramfs 옵션(`buntos.wait`, `buntos.usbnet`, `buntos.telnet`, `buntos.debug`)은 `initramfs/init` 머리말에 있다.
+- 기본 커널 명령줄은 `console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused regulator_ignore_unused`다. 뒤의 셋은 소비자가 아직 없는 클럭·전원 도메인·레귤레이터를 늦은 정리에서 끄지 않게 한다(2b에서 PMIC 레일이 등록되면 소비자 없는 레일이 꺼질 수 있다). MT6895 xaga 커뮤니티 포트는 LK가 boot·vendor_boot 이미지의 명령줄을 버린다고 적었다. 처음 띄우면 `/proc/cmdline`으로 들어왔는지 보고, 안 들어오면 커널 `CMDLINE`(+`CMDLINE_EXTEND`)로 준다. initramfs 옵션(`buntos.wait`, `buntos.usbnet`, `buntos.telnet`, `buntos.debug`)은 `initramfs/init` 머리말에 있다.
