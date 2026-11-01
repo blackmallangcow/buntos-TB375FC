@@ -1,0 +1,37 @@
+From: buntOS contributors
+Subject: [PATCH] regulator: mt6363: Cancel the overcurrent work on removal
+
+The overcurrent interrupt handler disables the interrupt and schedules a
+delayed work to enable it again, but nothing stops that work when the
+driver goes away, so it can run after the module is unloaded. Mark Brown
+asked about this on the MT6373 driver, which has the same code.
+
+Set the work up with devm_delayed_work_autocancel() before registering the
+regulator. Managed resources go in the reverse order, so the regulator goes
+first and frees the interrupt, which then cannot schedule the work again
+after it was cancelled. The mapping of the interrupt goes last, as before.
+
+Link: https://lore.kernel.org/r/agKKuH0fP3lBMuFd@sirena.co.uk
+Fixes: 3c36965df808 ("regulator: Add support for MediaTek MT6363 SPMI PMIC Regulators")
+---
+ drivers/regulator/mt6363-regulator.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/regulator/mt6363-regulator.c b/drivers/regulator/mt6363-regulator.c
+index 03a9169..a2747d9 100644
+--- a/drivers/regulator/mt6363-regulator.c
++++ b/drivers/regulator/mt6363-regulator.c
+@@ -909,7 +909,12 @@ static int mt6363_regulator_probe(struct platform_device *pdev)
+ 			return ret;
+ 
+ 		config.driver_data = info;
+-		INIT_DELAYED_WORK(&info->oc_work, mt6363_oc_irq_enable_work);
++
++		/* Must outlive the regulator, which owns the IRQ that schedules it */
++		ret = devm_delayed_work_autocancel(dev, &info->oc_work,
++						   mt6363_oc_irq_enable_work);
++		if (ret)
++			return ret;
+ 
+ 		rdev = devm_regulator_register(dev, &info->desc, &config);
+ 		if (IS_ERR(rdev))

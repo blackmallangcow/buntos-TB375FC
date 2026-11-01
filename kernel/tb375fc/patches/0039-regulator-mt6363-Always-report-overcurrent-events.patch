@@ -1,0 +1,28 @@
+From: buntOS contributors
+Subject: [PATCH] regulator: mt6363: Always report overcurrent events
+
+The overcurrent interrupt handler only calls the notifier if the enable bit
+of the regulator is set. If the hardware reports an error, the error should
+be reported, as Mark Brown pointed out on the MT6373 driver, which has the
+same code. MediaTek's driver has this check too, and does not say why.
+
+Link: https://lore.kernel.org/r/agKKuH0fP3lBMuFd@sirena.co.uk
+Fixes: 3c36965df808 ("regulator: Add support for MediaTek MT6363 SPMI PMIC Regulators")
+---
+ drivers/regulator/mt6363-regulator.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/drivers/regulator/mt6363-regulator.c b/drivers/regulator/mt6363-regulator.c
+index 76dbead..03a9169 100644
+--- a/drivers/regulator/mt6363-regulator.c
++++ b/drivers/regulator/mt6363-regulator.c
+@@ -630,8 +630,7 @@ static irqreturn_t mt6363_oc_isr(int irq, void *data)
+ 
+ 	disable_irq_nosync(info->virq);
+ 
+-	if (regulator_is_enabled_regmap(rdev))
+-		regulator_notifier_call_chain(rdev, REGULATOR_EVENT_OVER_CURRENT, NULL);
++	regulator_notifier_call_chain(rdev, REGULATOR_EVENT_OVER_CURRENT, NULL);
+ 
+ 	schedule_delayed_work(&info->oc_work, msecs_to_jiffies(OC_IRQ_ENABLE_DELAY_MS));
+ 
