@@ -1,0 +1,163 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: add the MT6897 I2C clock gates
+
+Add the five imp_iic_wrap blocks of MT6897, with the registers and bits
+of the MediaTek driver in the OnePlus MT6897 kernel (clk-mt6897-peri.c).
+All gates hang off the i2c mux of topckgen, which goes through the
+hardware voter. As on MT8196, the gates keep their parent enabled while
+they are switched.
+
+---
+ drivers/clk/mediatek/Kconfig                  |  10 ++
+ drivers/clk/mediatek/Makefile                 |   1 +
+ .../clk/mediatek/clk-mt6897-imp_iic_wrap.c    | 109 ++++++++++++++++++
+ 3 files changed, 120 insertions(+)
+
+diff --git a/drivers/clk/mediatek/Kconfig b/drivers/clk/mediatek/Kconfig
+index 7931e7b..82fb638 100644
+--- a/drivers/clk/mediatek/Kconfig
++++ b/drivers/clk/mediatek/Kconfig
+@@ -385,6 +385,16 @@ config COMMON_CLK_MT6897
+ 	  generators and the pericfg_ao clock gates. Some PLLs, muxes and
+ 	  gates are switched through the hardware voter.
+ 
++config COMMON_CLK_MT6897_IMP_IIC_WRAP
++	tristate "Clock driver for MediaTek MT6897 imp_iic_wrap"
++	depends on COMMON_CLK_MT6897
++	default COMMON_CLK_MT6897
++	help
++	  This driver supports the MediaTek MT6897 I2C clock gates in the five
++	  imp_iic_wrap blocks. All I2C controllers of the SoC take their main
++	  clock from one of these gates. Say Y or M here when a device on the
++	  I2C buses is used.
++
+ config COMMON_CLK_MT6897_UFSSYS
+ 	tristate "Clock driver for MediaTek MT6897 ufssys"
+ 	depends on COMMON_CLK_MT6897
+diff --git a/drivers/clk/mediatek/Makefile b/drivers/clk/mediatek/Makefile
+index 620a4e4..a978375 100644
+--- a/drivers/clk/mediatek/Makefile
++++ b/drivers/clk/mediatek/Makefile
+@@ -36,6 +36,7 @@ obj-$(CONFIG_COMMON_CLK_MT6797_VDECSYS) += clk-mt6797-vdec.o
+ obj-$(CONFIG_COMMON_CLK_MT6797_VENCSYS) += clk-mt6797-venc.o
+ obj-$(CONFIG_COMMON_CLK_MT6897) += clk-mt6897-apmixedsys.o clk-mt6897-topckgen.o \
+ 				   clk-mt6897-vlpckgen.o clk-mt6897-peri_ao.o
++obj-$(CONFIG_COMMON_CLK_MT6897_IMP_IIC_WRAP) += clk-mt6897-imp_iic_wrap.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_UFSSYS) += clk-mt6897-ufs.o
+ obj-$(CONFIG_COMMON_CLK_MT2701) += clk-mt2701.o
+ obj-$(CONFIG_COMMON_CLK_MT2701_AUDSYS) += clk-mt2701-aud.o
+diff --git a/drivers/clk/mediatek/clk-mt6897-imp_iic_wrap.c b/drivers/clk/mediatek/clk-mt6897-imp_iic_wrap.c
+new file mode 100644
+index 0000000..f7e38c4
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6897-imp_iic_wrap.c
+@@ -0,0 +1,109 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ * Author: Benjamin Chao <benjamin.chao@mediatek.com>
++ *
++ * Copyright (c) 2026 buntOS contributors
++ */
++#include <dt-bindings/clock/mediatek,mt6897-clock.h>
++
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++static const struct mtk_gate_regs imp_cg_regs = {
++	.set_ofs = 0xe08,
++	.clr_ofs = 0xe04,
++	.sta_ofs = 0xe00,
++};
++
++#define GATE_IMP(_id, _name, _shift) {			\
++		.id = _id,				\
++		.name = _name,				\
++		.parent_name = "i2c",			\
++		.regs = &imp_cg_regs,			\
++		.shift = _shift,			\
++		.flags = CLK_OPS_PARENT_ENABLE,		\
++		.ops = &mtk_clk_gate_ops_setclr,	\
++	}
++
++static const struct mtk_gate impc_clks[] = {
++	GATE_IMP(CLK_IMPC_I2C6, "impc_i2c6", 0),
++};
++
++static const struct mtk_clk_desc impc_mcd = {
++	.clks = impc_clks,
++	.num_clks = ARRAY_SIZE(impc_clks),
++};
++
++static const struct mtk_gate impen_clks[] = {
++	GATE_IMP(CLK_IMPEN_I2C2, "impen_i2c2", 0),
++	GATE_IMP(CLK_IMPEN_I2C4, "impen_i2c4", 1),
++	GATE_IMP(CLK_IMPEN_I2C10, "impen_i2c10", 2),
++	GATE_IMP(CLK_IMPEN_I2C11, "impen_i2c11", 3),
++};
++
++static const struct mtk_clk_desc impen_mcd = {
++	.clks = impen_clks,
++	.num_clks = ARRAY_SIZE(impen_clks),
++};
++
++static const struct mtk_gate impes_clks[] = {
++	GATE_IMP(CLK_IMPES_I2C8, "impes_i2c8", 0),
++	GATE_IMP(CLK_IMPES_I2C9, "impes_i2c9", 1),
++	GATE_IMP(CLK_IMPES_I2C12, "impes_i2c12", 2),
++	GATE_IMP(CLK_IMPES_I2C13, "impes_i2c13", 3),
++};
++
++static const struct mtk_clk_desc impes_mcd = {
++	.clks = impes_clks,
++	.num_clks = ARRAY_SIZE(impes_clks),
++};
++
++static const struct mtk_gate impn_clks[] = {
++	GATE_IMP(CLK_IMPN_I2C3, "impn_i2c3", 0),
++	GATE_IMP(CLK_IMPN_I2C5, "impn_i2c5", 1),
++};
++
++static const struct mtk_clk_desc impn_mcd = {
++	.clks = impn_clks,
++	.num_clks = ARRAY_SIZE(impn_clks),
++};
++
++static const struct mtk_gate imps_clks[] = {
++	GATE_IMP(CLK_IMPS_I2C0, "imps_i2c0", 0),
++	GATE_IMP(CLK_IMPS_I2C1, "imps_i2c1", 1),
++	GATE_IMP(CLK_IMPS_I2C7, "imps_i2c7", 2),
++};
++
++static const struct mtk_clk_desc imps_mcd = {
++	.clks = imps_clks,
++	.num_clks = ARRAY_SIZE(imps_clks),
++};
++
++static const struct of_device_id of_match_clk_mt6897_imp_iic_wrap[] = {
++	{ .compatible = "mediatek,mt6897-imp-iic-wrap-c", .data = &impc_mcd },
++	{ .compatible = "mediatek,mt6897-imp-iic-wrap-en", .data = &impen_mcd },
++	{ .compatible = "mediatek,mt6897-imp-iic-wrap-es", .data = &impes_mcd },
++	{ .compatible = "mediatek,mt6897-imp-iic-wrap-n", .data = &impn_mcd },
++	{ .compatible = "mediatek,mt6897-imp-iic-wrap-s", .data = &imps_mcd },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, of_match_clk_mt6897_imp_iic_wrap);
++
++static struct platform_driver clk_mt6897_imp_iic_wrap_drv = {
++	.probe = mtk_clk_simple_probe,
++	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "clk-mt6897-imp_iic_wrap",
++		.of_match_table = of_match_clk_mt6897_imp_iic_wrap,
++	},
++};
++module_platform_driver(clk_mt6897_imp_iic_wrap_drv);
++
++MODULE_DESCRIPTION("MediaTek MT6897 I2C clock gates driver");
++MODULE_LICENSE("GPL");

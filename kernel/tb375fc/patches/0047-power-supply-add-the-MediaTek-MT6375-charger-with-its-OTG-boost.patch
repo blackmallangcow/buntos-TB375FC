@@ -1,0 +1,369 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: add the MediaTek MT6375 charger with its OTG boost
+
+Add the charger part of MT6375 with only its boost for USB VBUS, as a
+regulator. The registers, the parameters that differ between boost and
+buck and their order come from the MediaTek driver in the OnePlus MT6897
+kernel: the current limit and voltage, then the parameters behind the
+pass code, then OTG_EN, and the reverse on the way down.
+
+That driver sets the low battery threshold at probe from the device tree
+and gets the voltage and current from its consumer. Here nothing is
+written until the regulator is enabled, so enable writes all of them,
+with stock's 2800 mV, 5 V and 1.8 A. This also leaves out the set
+operations: with a current limit in the constraints, the regulator core
+would write at registration.
+
+Two more things differ from stock on purpose. With no TCPC driver
+nothing else knows what is on the port, so enable refuses when PWR_RDY
+shows VBUS is already driven. And the stock USB-killer check, off on
+this board, needs the ADC and is left out.
+
+The error paths go further than stock, because an I2C error does not say
+the chip missed the write: the pass code is always closed, with one
+retry, and a failed enable clears OTG_EN too.
+
+Shutdown turns the boost off, which the stock kernel does in its extcon
+driver.
+
+---
+ drivers/power/supply/Kconfig          |  12 ++
+ drivers/power/supply/Makefile         |   1 +
+ drivers/power/supply/mt6375-charger.c | 294 ++++++++++++++++++++++++++
+ 3 files changed, 307 insertions(+)
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index f0ede1c..923298b 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -731,6 +731,18 @@ config CHARGER_MT6370
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called "mt6370-charger".
+ 
++config CHARGER_MT6375
++	tristate "MediaTek MT6375 Charger Driver"
++	depends on MFD_MT6375
++	depends on REGULATOR
++	help
++	  Say Y here to enable the MT6375 charger part. So far that is the
++	  boost that sources USB VBUS, as a regulator. Battery charging stays
++	  as the bootloader set it.
++
++	  This driver can also be built as a module. If so, the module
++	  will be called "mt6375-charger".
++
+ config CHARGER_QCOM_SMBB
+ 	tristate "Qualcomm Switch-Mode Battery Charger and Boost"
+ 	depends on MFD_SPMI_PMIC || COMPILE_TEST
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 31fe4a1..8ed8042 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -94,6 +94,7 @@ obj-$(CONFIG_CHARGER_MAX8998)	+= max8998_charger.o
+ obj-$(CONFIG_CHARGER_MP2629)	+= mp2629_charger.o
+ obj-$(CONFIG_CHARGER_MT6360)	+= mt6360_charger.o
+ obj-$(CONFIG_CHARGER_MT6370)	+= mt6370-charger.o
++obj-$(CONFIG_CHARGER_MT6375)	+= mt6375-charger.o
+ obj-$(CONFIG_CHARGER_QCOM_SMBB)	+= qcom_smbb.o
+ obj-$(CONFIG_BATTERY_PM8916_BMS_VM)	+= pm8916_bms_vm.o
+ obj-$(CONFIG_CHARGER_PM8916_LBC)	+= pm8916_lbc.o
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+new file mode 100644
+index 0000000..8791906
+--- /dev/null
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -0,0 +1,294 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek MT6375 charger: the boost that sources USB VBUS
++ *
++ * Only the OTG boost is here so far. Battery charging, the USB switch, BC1.2,
++ * the watchdog and the interrupts stay as the bootloader left them, and neither
++ * probing nor reading the state writes to the chip. The first write comes when
++ * the regulator is enabled.
++ *
++ * The registers, the parameters and their order come from the MediaTek driver
++ * in the OnePlus MT6897 kernel.
++ *
++ * Copyright (c) 2026 buntOS contributors
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/kernel.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++
++#define MT6375_REG_TM_PAS_CODE1		0x107
++#define MT6375_REG_CHG_TOP1		0x120
++#define MT6375_REG_CHG_TOP2		0x121
++#define MT6375_REG_CHG_VSYS		0x129
++#define MT6375_REG_OTG_LBP		0x130
++#define MT6375_REG_OTG_V		0x131
++#define MT6375_REG_OTG_C		0x132
++#define MT6375_REG_CHG_STAT		0x134
++#define MT6375_REG_CHG_DUMY0		0x135
++#define MT6375_REG_CHG_HD_BUCK5		0x140
++#define MT6375_REG_CHG_STAT0		0x1e0
++
++#define MT6375_TM_PAS_CODE		0x69
++
++#define MT6375_OTG_EN			BIT(2)
++#define MT6375_CLK_FREQ_MASK		GENMASK(7, 6)
++#define MT6375_BLEED_DIS_EN		BIT(7)
++#define MT6375_OTG_LBP_MASK		GENMASK(3, 0)
++#define MT6375_OTG_CV_MASK		GENMASK(5, 0)
++#define MT6375_OTG_CC_MASK		GENMASK(2, 0)
++#define MT6375_IC_STAT_MASK		GENMASK(3, 0)
++#define MT6375_IC_STAT_OTG		15
++#define MT6375_COMP_CLAMP_MASK		GENMASK(1, 0)
++#define MT6375_BUCK_RAMPOFT_MASK	GENMASK(7, 6)
++#define MT6375_ST_PWR_RDY		BIT(0)
++
++/*
++ * OTG_LBP holds 2700 mV from 4 up in steps of 100 mV, OTG_V holds 4850 mV from
++ * 20 up in steps of 25 mV, and OTG_C is an index into mt6375_otg_cc_ua. Stock
++ * runs the boost at 5 V with a limit of 1.8 A, and stops it below a battery
++ * voltage of 2800 mV. Consumers cannot change these: the regulator core would
++ * write a limit out of the constraints when it registers the regulator, and
++ * nothing may write before the first enable.
++ */
++#define MT6375_OTG_LBP_2800MV		5
++#define MT6375_OTG_CV_5000MV		26
++#define MT6375_OTG_UV			5000000
++#define MT6375_OTG_CC_1800MA		4
++
++struct mt6375_chg {
++	struct device *dev;
++	struct regmap *regmap;
++	struct regulator_dev *rdev;
++};
++
++/* The chip wants these set differently for the boost than for charging */
++static const struct mt6375_boost_param {
++	u16 reg;
++	u8 mask;
++	u8 buck;
++	u8 boost;
++} mt6375_boost_params[] = {
++	{ MT6375_REG_CHG_TOP2, MT6375_CLK_FREQ_MASK, 1, 0 },
++	{ MT6375_REG_CHG_DUMY0, MT6375_COMP_CLAMP_MASK, 0, 3 },
++	{ MT6375_REG_CHG_HD_BUCK5, MT6375_BUCK_RAMPOFT_MASK, 1, 3 },
++	{ MT6375_REG_CHG_VSYS, MT6375_BLEED_DIS_EN, 1, 0 },
++};
++
++static int mt6375_chg_write_boost_param(struct mt6375_chg *chg,
++					const struct mt6375_boost_param *param,
++					bool boost)
++{
++	unsigned int val = boost ? param->boost : param->buck;
++
++	return regmap_update_bits(chg->regmap, param->reg, param->mask,
++				  val << __ffs(param->mask));
++}
++
++/* CHG_HD_BUCK5 sits behind a pass code, which stays open only for this */
++static int mt6375_chg_set_boost_params(struct mt6375_chg *chg, bool boost)
++{
++	int i, ret;
++
++	ret = regmap_write(chg->regmap, MT6375_REG_TM_PAS_CODE1,
++			   MT6375_TM_PAS_CODE);
++	if (ret)
++		goto close;
++
++	for (i = 0; i < ARRAY_SIZE(mt6375_boost_params); i++) {
++		ret = mt6375_chg_write_boost_param(chg, &mt6375_boost_params[i],
++						   boost);
++		if (ret) {
++			dev_err(chg->dev, "Failed to write register 0x%03x\n",
++				mt6375_boost_params[i].reg);
++			break;
++		}
++	}
++
++	if (ret) {
++		for (; i >= 0; i--)
++			mt6375_chg_write_boost_param(chg, &mt6375_boost_params[i],
++						     !boost);
++	}
++
++close:
++	/* An I2C error does not say the chip missed the write, so always close */
++	if (regmap_write(chg->regmap, MT6375_REG_TM_PAS_CODE1, 0) &&
++	    regmap_write(chg->regmap, MT6375_REG_TM_PAS_CODE1, 0))
++		dev_err(chg->dev, "Failed to close the pass code\n");
++
++	return ret;
++}
++
++static int mt6375_otg_enable(struct regulator_dev *rdev)
++{
++	struct mt6375_chg *chg = rdev_get_drvdata(rdev);
++	unsigned int stat;
++	int ret;
++
++	/*
++	 * Without the TCPC nothing else knows what is on the port. Do not start
++	 * the boost against a charger or a USB host that already drives VBUS.
++	 */
++	ret = regmap_read(chg->regmap, MT6375_REG_CHG_STAT0, &stat);
++	if (ret)
++		return ret;
++	if (stat & MT6375_ST_PWR_RDY) {
++		dev_err(chg->dev, "VBUS is present, not starting the boost\n");
++		return -EBUSY;
++	}
++
++	ret = regmap_update_bits(chg->regmap, MT6375_REG_OTG_LBP,
++				 MT6375_OTG_LBP_MASK, MT6375_OTG_LBP_2800MV);
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(chg->regmap, MT6375_REG_OTG_V,
++				 MT6375_OTG_CV_MASK, MT6375_OTG_CV_5000MV);
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(chg->regmap, MT6375_REG_OTG_C,
++				 MT6375_OTG_CC_MASK, MT6375_OTG_CC_1800MA);
++	if (ret)
++		return ret;
++
++	ret = mt6375_chg_set_boost_params(chg, true);
++	if (ret)
++		return ret;
++
++	ret = regulator_enable_regmap(rdev);
++	if (ret) {
++		mt6375_chg_set_boost_params(chg, false);
++		regulator_disable_regmap(rdev);
++	}
++
++	return ret;
++}
++
++static int mt6375_otg_disable(struct regulator_dev *rdev)
++{
++	struct mt6375_chg *chg = rdev_get_drvdata(rdev);
++	int ret;
++
++	ret = mt6375_chg_set_boost_params(chg, false);
++	if (ret)
++		return ret;
++
++	ret = regulator_disable_regmap(rdev);
++	if (ret)
++		mt6375_chg_set_boost_params(chg, true);
++
++	return ret;
++}
++
++static int mt6375_otg_get_status(struct regulator_dev *rdev)
++{
++	struct mt6375_chg *chg = rdev_get_drvdata(rdev);
++	unsigned int stat;
++	int ret;
++
++	ret = regmap_read(chg->regmap, MT6375_REG_CHG_STAT, &stat);
++	if (ret)
++		return ret;
++	if (FIELD_GET(MT6375_IC_STAT_MASK, stat) == MT6375_IC_STAT_OTG)
++		return REGULATOR_STATUS_ON;
++
++	ret = regulator_is_enabled_regmap(rdev);
++	if (ret < 0)
++		return ret;
++
++	return ret ? REGULATOR_STATUS_ERROR : REGULATOR_STATUS_OFF;
++}
++
++static const struct regulator_ops mt6375_otg_ops = {
++	.enable = mt6375_otg_enable,
++	.disable = mt6375_otg_disable,
++	.is_enabled = regulator_is_enabled_regmap,
++	.get_status = mt6375_otg_get_status,
++	.list_voltage = regulator_list_voltage_linear,
++	.get_current_limit = regulator_get_current_limit_regmap,
++};
++
++static const unsigned int mt6375_otg_cc_ua[] = {
++	500000, 700000, 1100000, 1300000, 1800000, 2100000, 2400000,
++};
++
++static const struct regulator_desc mt6375_otg_desc = {
++	.name = "mt6375-usb-otg-vbus",
++	.supply_name = "vbus-switch",
++	.of_match = "usb-otg-vbus-regulator",
++	.ops = &mt6375_otg_ops,
++	.owner = THIS_MODULE,
++	.type = REGULATOR_VOLTAGE,
++	.min_uV = MT6375_OTG_UV,
++	.fixed_uV = MT6375_OTG_UV,
++	.n_voltages = 1,
++	.curr_table = mt6375_otg_cc_ua,
++	.n_current_limits = ARRAY_SIZE(mt6375_otg_cc_ua),
++	.csel_reg = MT6375_REG_OTG_C,
++	.csel_mask = MT6375_OTG_CC_MASK,
++	.enable_reg = MT6375_REG_CHG_TOP1,
++	.enable_mask = MT6375_OTG_EN,
++};
++
++static int mt6375_chg_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct regulator_config cfg = { };
++	struct mt6375_chg *chg;
++
++	chg = devm_kzalloc(dev, sizeof(*chg), GFP_KERNEL);
++	if (!chg)
++		return -ENOMEM;
++
++	chg->dev = dev;
++	chg->regmap = dev_get_regmap(dev->parent, NULL);
++	if (!chg->regmap)
++		return dev_err_probe(dev, -ENODEV, "Failed to get regmap\n");
++
++	cfg.dev = dev;
++	cfg.driver_data = chg;
++	cfg.regmap = chg->regmap;
++	chg->rdev = devm_regulator_register(dev, &mt6375_otg_desc, &cfg);
++	if (IS_ERR(chg->rdev))
++		return dev_err_probe(dev, PTR_ERR(chg->rdev),
++				     "Failed to register the OTG regulator\n");
++
++	platform_set_drvdata(pdev, chg);
++
++	return 0;
++}
++
++/* The stock kernel too turns VBUS off on its way down */
++static void mt6375_chg_shutdown(struct platform_device *pdev)
++{
++	struct mt6375_chg *chg = platform_get_drvdata(pdev);
++
++	if (regulator_is_enabled_regmap(chg->rdev) > 0)
++		mt6375_otg_disable(chg->rdev);
++}
++
++static const struct of_device_id mt6375_chg_of_match[] = {
++	{ .compatible = "mediatek,mt6375-charger" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, mt6375_chg_of_match);
++
++static struct platform_driver mt6375_chg_driver = {
++	.probe = mt6375_chg_probe,
++	.shutdown = mt6375_chg_shutdown,
++	.driver = {
++		.name = "mt6375-charger",
++		.of_match_table = mt6375_chg_of_match,
++	},
++};
++module_platform_driver(mt6375_chg_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6375 charger driver");
++MODULE_LICENSE("GPL");

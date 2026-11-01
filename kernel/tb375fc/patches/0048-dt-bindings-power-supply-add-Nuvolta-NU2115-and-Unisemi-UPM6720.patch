@@ -1,0 +1,96 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: power: supply: add Nuvolta NU2115 and Unisemi UPM6720
+
+These charge pumps drive the input FETs between the USB connector and
+the rest of the VBUS rail. Add a binding with that switch as a
+regulator, and the two vendor prefixes.
+
+---
+ .../bindings/power/supply/nuvolta,nu2115.yaml | 56 +++++++++++++++++++
+ .../devicetree/bindings/vendor-prefixes.yaml  |  4 ++
+ 2 files changed, 60 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/power/supply/nuvolta,nu2115.yaml b/Documentation/devicetree/bindings/power/supply/nuvolta,nu2115.yaml
+new file mode 100644
+index 0000000..8537e7c
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/supply/nuvolta,nu2115.yaml
+@@ -0,0 +1,56 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/supply/nuvolta,nu2115.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Nuvolta NU2115 and Unisemi UPM6720 Charge Pumps
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++description:
++  Switched-capacitor chargers that also drive the back-to-back FETs at their
++  VAC1 input. The FETs close by themselves when a source on VAC1 is present.
++  With no source they can be closed by hand, which lets a boost elsewhere on
++  the board source the USB connector through them.
++
++properties:
++  compatible:
++    enum:
++      - nuvolta,nu2115
++      - unisemi,upm6720
++
++  reg:
++    maxItems: 1
++
++  interrupts:
++    maxItems: 1
++
++  usb-otg-switch-regulator:
++    type: object
++    $ref: /schemas/regulator/regulator.yaml#
++    description: The FETs at the VAC1 input, closed by hand.
++    unevaluatedProperties: false
++
++required:
++  - compatible
++  - reg
++
++additionalProperties: false
++
++examples:
++  - |
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        charger@6d {
++            compatible = "nuvolta,nu2115";
++            reg = <0x6d>;
++
++            usb-otg-switch-regulator {
++                regulator-name = "usb-otg-switch";
++            };
++        };
++    };
+diff --git a/Documentation/devicetree/bindings/vendor-prefixes.yaml b/Documentation/devicetree/bindings/vendor-prefixes.yaml
+index 396044f..d5df856 100644
+--- a/Documentation/devicetree/bindings/vendor-prefixes.yaml
++++ b/Documentation/devicetree/bindings/vendor-prefixes.yaml
+@@ -1199,6 +1199,8 @@ patternProperties:
+     deprecated: true
+   "^nutsboard,.*":
+     description: NutsBoard
++  "^nuvolta,.*":
++    description: Nuvolta Technologies
+   "^nuvoton,.*":
+     description: Nuvoton Technology Corporation
+   "^nvd,.*":
+@@ -1763,6 +1765,8 @@ patternProperties:
+     description: Beijing Ultrapower Software Co., Ltd.
+   "^uni-t,.*":
+     description: Uni-Trend Technology (China) Co., Ltd.
++  "^unisemi,.*":
++    description: Unisemi
+   "^uniwest,.*":
+     description: United Western Technologies Corp (UniWest)
+   "^upisemi,.*":

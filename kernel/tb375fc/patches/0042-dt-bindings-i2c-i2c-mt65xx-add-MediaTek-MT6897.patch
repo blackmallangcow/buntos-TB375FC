@@ -1,0 +1,34 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: i2c: i2c-mt65xx: add MediaTek MT6897
+
+The I2C controllers of the MediaTek MT6897 (Dimensity 8300) SoC work
+like the MT8188 ones. In the MediaTek driver in the OnePlus MT6897
+kernel, the mt6897 data has the same register offsets as the mainline
+mt_i2c_regs_v3 (the slave address at 0x94, selected there by
+slave_addr_ver), the same timing, auto restart and auxiliary length
+handling, no dma_sync, apdma_sync and 36-bit DMA addresses. Its dma_ver
+1 writes the same skip-config, async and direction-change bits to the
+DMA controller as the mainline apdma_sync path does.
+
+The MediaTek driver also has a FIFO path for short transfers, which the
+mainline driver does not use for any SoC.
+
+Add MT6897 with mediatek,mt8188-i2c as the fallback, as MT6878 and
+MT6991 have.
+
+---
+ Documentation/devicetree/bindings/i2c/i2c-mt65xx.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/i2c/i2c-mt65xx.yaml b/Documentation/devicetree/bindings/i2c/i2c-mt65xx.yaml
+index ecd5783..47de29e 100644
+--- a/Documentation/devicetree/bindings/i2c/i2c-mt65xx.yaml
++++ b/Documentation/devicetree/bindings/i2c/i2c-mt65xx.yaml
+@@ -53,6 +53,7 @@ properties:
+       - items:
+           - enum:
+               - mediatek,mt6878-i2c
++              - mediatek,mt6897-i2c
+               - mediatek,mt6991-i2c
+               - mediatek,mt8189-i2c
+               - mediatek,mt8196-i2c

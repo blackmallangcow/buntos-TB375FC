@@ -66,8 +66,18 @@
 0039-regulator-mt6363-Always-report-overcurrent-events.patch
 0040-regulator-mt6363-Cancel-the-overcurrent-work-on-removal.patch
 0041-regulator-mt6363-Fix-the-registers-of-the-VSRAM-CPU-and-APU-LDOs.patch
+# 0042~0049: USB 호스트의 VBUS. 0042 I2C 바인딩의 MT6897(mt8188 대체), 0043·0044 I2C 클럭 게이트(imp_iic_wrap 블록 다섯), 0045·0046 MT6375 MFD
+# (칩 확인과 regmap만, 쓰기 허용 목록), 0047 MT6375 OTG 부스트(레귤레이터, 처음 켤 때까지 쓰기 0번), 0048·0049 차지 펌프의 입력 FET
+# 스위치(NU2115·UPM6720, 부스트의 supply). 순정은 부스트 앞에서 이 FET를 닫는다. 모두 꺼 둔 노드이고, 기기에서 확인한 뒤 낸다
+0042-dt-bindings-i2c-i2c-mt65xx-add-MediaTek-MT6897.patch
+0043-dt-bindings-clock-mediatek-add-the-MT6897-I2C-clock-gates.patch
+0044-clk-mediatek-add-the-MT6897-I2C-clock-gates.patch
+0045-dt-bindings-mfd-add-MediaTek-MT6375.patch
+0046-mfd-add-MediaTek-MT6375-core-driver.patch
+0047-power-supply-add-the-MediaTek-MT6375-charger-with-its-OTG-boost.patch
+0048-dt-bindings-power-supply-add-Nuvolta-NU2115-and-Unisemi-UPM6720.patch
+0049-power-supply-add-the-NU2115-and-UPM6720-VBUS-input-switch.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 드라이버가 없다):
-#  - mfd·regulator: MT6375(I2C5, OTG 레귤레이터). USB 호스트의 VBUS다
 #  - pmdomain: mediatek: add MT6897 power domains (MT8196 틀. UFS·USB에는 없어 2d 뒤)
 #  - pmdomain: mediatek: mtk-mfg MT6897 GPUEB 변형
 #  - soc: mediatek: conninfra(TF-A SIP 호출), wifi: mt76: mt7921 SoC(soc7_0) 버스, bluetooth: BEIF 전송

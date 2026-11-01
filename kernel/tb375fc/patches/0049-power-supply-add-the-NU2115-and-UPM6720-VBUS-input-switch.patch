@@ -1,0 +1,397 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: add the NU2115 and UPM6720 VBUS input switch
+
+The stock kernel of the Lenovo TB375FC closes the input FETs of a charge
+pump before it enables the OTG boost of the MT6375, and opens them after
+it stops the boost ("enable ovp mos by dvchg" in its extcon driver). The
+FETs sit between the USB connector and the rest of the VBUS rail. They
+close by themselves when a source on the connector brings up VAC1, but
+with the tablet as the source they stay open until the charge pump is
+put in OTG mode and told to close them. The stock device tree lists both
+chips.
+
+Add that switch as a regulator, which the boost takes as its supply so
+that the regulator core gets the order right. The charge pump itself
+stays unused, probing only reads the device ID, and the regmap only lets
+the registers of the switch be written. As on the boost, enabling is
+refused when VAC1 shows a source on the connector: switching to OTG mode
+then could open FETs that are carrying its current.
+
+The registers and the order come from the stock modules. Stock keeps the
+watchdog of these chips off unless it is charging through them, so
+closing the switch turns it off first, and leaves it off. The UPM6720
+sequence also turns the bus and VAC1 pull-downs on when opening and
+leaves them on. Stock does the same until it resets the chip at
+shutdown; here nothing resets it. Unlike stock, probing rejects a device
+ID that does not match: a failed probe leaves the chip alone.
+
+---
+ drivers/power/supply/Kconfig          |  13 ++
+ drivers/power/supply/Makefile         |   1 +
+ drivers/power/supply/nu2115_charger.c | 322 ++++++++++++++++++++++++++
+ 3 files changed, 336 insertions(+)
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index 923298b..c310511 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -743,6 +743,19 @@ config CHARGER_MT6375
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called "mt6375-charger".
+ 
++config CHARGER_NU2115
++	tristate "Nuvolta NU2115 and Unisemi UPM6720 VBUS input switch"
++	depends on I2C
++	depends on REGULATOR
++	select REGMAP_I2C
++	help
++	  Say Y here to enable the VBUS input FET switch of these charge pumps,
++	  as a regulator. A board's boost needs it closed to reach the USB
++	  connector. The charge pump itself is not used.
++
++	  This driver can also be built as a module. If so, the module
++	  will be called "nu2115_charger".
++
+ config CHARGER_QCOM_SMBB
+ 	tristate "Qualcomm Switch-Mode Battery Charger and Boost"
+ 	depends on MFD_SPMI_PMIC || COMPILE_TEST
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 8ed8042..f84d897 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -95,6 +95,7 @@ obj-$(CONFIG_CHARGER_MP2629)	+= mp2629_charger.o
+ obj-$(CONFIG_CHARGER_MT6360)	+= mt6360_charger.o
+ obj-$(CONFIG_CHARGER_MT6370)	+= mt6370-charger.o
+ obj-$(CONFIG_CHARGER_MT6375)	+= mt6375-charger.o
++obj-$(CONFIG_CHARGER_NU2115)	+= nu2115_charger.o
+ obj-$(CONFIG_CHARGER_QCOM_SMBB)	+= qcom_smbb.o
+ obj-$(CONFIG_BATTERY_PM8916_BMS_VM)	+= pm8916_bms_vm.o
+ obj-$(CONFIG_CHARGER_PM8916_LBC)	+= pm8916_lbc.o
+diff --git a/drivers/power/supply/nu2115_charger.c b/drivers/power/supply/nu2115_charger.c
+new file mode 100644
+index 0000000..a3ff033
+--- /dev/null
++++ b/drivers/power/supply/nu2115_charger.c
+@@ -0,0 +1,322 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Nuvolta NU2115 and Unisemi UPM6720 charge pumps: the VBUS input switch
++ *
++ * These chips drive the back-to-back FETs between the USB connector and the rest
++ * of the VBUS rail. The FETs close by themselves when a source on the connector
++ * brings up VAC1. To source VBUS from the charger's boost they have to be closed
++ * by hand first, and this driver only does that: the charge pump itself stays
++ * unused, and probing only reads. The two chips do the same job with different
++ * registers. The MediaTek stock kernel of the Lenovo TB375FC does these writes in
++ * the same order around its VBUS regulator, with the watchdog of the chip off,
++ * which it turns on only while charging through the chip.
++ *
++ * Copyright (c) 2026 buntOS contributors
++ */
++
++#include <linux/bits.h>
++#include <linux/i2c.h>
++#include <linux/kernel.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++
++#define NU2115_REG_CONTROL		0x0d
++#define NU2115_WDT_DIS			BIT(2)
++#define NU2115_REG_VAC_PRESENT		0x2f
++#define NU2115_VAC1_PRESENT		BIT(7)
++#define NU2115_OTG_EN			BIT(1)
++#define NU2115_REG_ACDRV_CTRL		0x30
++#define NU2115_ACDRV1_STAT		BIT(7)
++#define NU2115_REG_DEV_INFO		0x31
++#define NU2115_DEV_ID_MASK		GENMASK(7, 4)
++#define NU2115_DEV_ID			0x90
++
++#define UPM6720_REG_VBUSOVP		0x06
++#define UPM6720_BUS_PD_EN		BIT(7)
++#define UPM6720_REG_VAC_CTRL		0x0e
++#define UPM6720_VAC1_PD_EN		BIT(1)
++#define UPM6720_REG_CTRL2		0x0f
++#define UPM6720_OTG_EN			BIT(5)
++#define UPM6720_DIS_ACDRV_BOTH		BIT(2)
++#define UPM6720_ACDRV1_STAT		BIT(1)
++#define UPM6720_REG_CTRL3		0x10
++#define UPM6720_WDT_DIS			BIT(2)
++#define UPM6720_REG_STAT3		0x15
++#define UPM6720_VAC1_PRESENT		BIT(4)
++#define UPM6720_REG_PART_INFO		0x22
++#define UPM6720_DEV_ID_MASK		GENMASK(3, 0)
++#define UPM6720_DEV_ID			0x00
++
++struct nu2115_reg_op {
++	u8 reg;
++	u8 mask;
++	u8 val;
++};
++
++struct nu2115_info {
++	u8 id_reg;
++	u8 id_mask;
++	u8 id;
++	u8 vac1_reg;
++	u8 vac1_present;
++	const struct nu2115_reg_op *on;
++	unsigned int n_on;
++	const struct nu2115_reg_op *off;
++	unsigned int n_off;
++	const struct regmap_config *regmap_config;
++	const struct regulator_desc *rdesc;
++};
++
++struct nu2115 {
++	struct device *dev;
++	struct regmap *regmap;
++	struct regulator_dev *rdev;
++	const struct nu2115_info *info;
++};
++
++/* Goes through all of them whatever fails, to leave the FETs open if it can */
++static int nu2115_switch_open(struct nu2115 *chip)
++{
++	const struct nu2115_info *info = chip->info;
++	unsigned int i;
++	int ret, err = 0;
++
++	for (i = 0; i < info->n_off; i++) {
++		ret = regmap_update_bits(chip->regmap, info->off[i].reg,
++					 info->off[i].mask, info->off[i].val);
++		if (ret && !err)
++			err = ret;
++	}
++
++	return err;
++}
++
++static int nu2115_switch_enable(struct regulator_dev *rdev)
++{
++	struct nu2115 *chip = rdev_get_drvdata(rdev);
++	const struct nu2115_info *info = chip->info;
++	unsigned int stat, i;
++	int ret;
++
++	/*
++	 * With a source on the connector these FETs are already closed and
++	 * carrying its current. Switching the chip to OTG mode now could open
++	 * them and drop the USB session.
++	 */
++	ret = regmap_read(chip->regmap, info->vac1_reg, &stat);
++	if (ret)
++		return ret;
++	if (stat & info->vac1_present) {
++		dev_err(chip->dev, "VAC1 is present, not closing the switch\n");
++		return -EBUSY;
++	}
++
++	for (i = 0; i < info->n_on; i++) {
++		ret = regmap_update_bits(chip->regmap, info->on[i].reg,
++					 info->on[i].mask, info->on[i].val);
++		if (ret) {
++			nu2115_switch_open(chip);
++			return ret;
++		}
++	}
++
++	return 0;
++}
++
++static int nu2115_switch_disable(struct regulator_dev *rdev)
++{
++	return nu2115_switch_open(rdev_get_drvdata(rdev));
++}
++
++static const struct regulator_ops nu2115_switch_ops = {
++	.enable = nu2115_switch_enable,
++	.disable = nu2115_switch_disable,
++	.is_enabled = regulator_is_enabled_regmap,
++};
++
++static const struct regulator_desc nu2115_switch_desc = {
++	.name = "nu2115-usb-otg-switch",
++	.of_match = "usb-otg-switch-regulator",
++	.ops = &nu2115_switch_ops,
++	.owner = THIS_MODULE,
++	.type = REGULATOR_VOLTAGE,
++	.enable_reg = NU2115_REG_ACDRV_CTRL,
++	.enable_mask = NU2115_ACDRV1_STAT,
++};
++
++static const struct regulator_desc upm6720_switch_desc = {
++	.name = "upm6720-usb-otg-switch",
++	.of_match = "usb-otg-switch-regulator",
++	.ops = &nu2115_switch_ops,
++	.owner = THIS_MODULE,
++	.type = REGULATOR_VOLTAGE,
++	.enable_reg = UPM6720_REG_CTRL2,
++	.enable_mask = UPM6720_ACDRV1_STAT,
++};
++
++/* ACDRV1_STAT is set last and cleared first, so it tells whether all this is done */
++static const struct nu2115_reg_op nu2115_on[] = {
++	{ NU2115_REG_CONTROL, NU2115_WDT_DIS, NU2115_WDT_DIS },
++	{ NU2115_REG_VAC_PRESENT, NU2115_OTG_EN, NU2115_OTG_EN },
++	{ NU2115_REG_ACDRV_CTRL, NU2115_ACDRV1_STAT, NU2115_ACDRV1_STAT },
++};
++
++static const struct nu2115_reg_op nu2115_off[] = {
++	{ NU2115_REG_ACDRV_CTRL, NU2115_ACDRV1_STAT, 0 },
++	{ NU2115_REG_VAC_PRESENT, NU2115_OTG_EN, 0 },
++};
++
++static const struct nu2115_reg_op upm6720_on[] = {
++	{ UPM6720_REG_CTRL3, UPM6720_WDT_DIS, UPM6720_WDT_DIS },
++	{ UPM6720_REG_CTRL2, UPM6720_OTG_EN, UPM6720_OTG_EN },
++	{ UPM6720_REG_CTRL2, UPM6720_DIS_ACDRV_BOTH, 0 },
++	{ UPM6720_REG_CTRL2, UPM6720_ACDRV1_STAT, UPM6720_ACDRV1_STAT },
++};
++
++/*
++ * Also pulls the rail down and leaves the pull-downs on, as stock does until it
++ * resets the chip at its next shutdown. Nothing resets it here.
++ */
++static const struct nu2115_reg_op upm6720_off[] = {
++	{ UPM6720_REG_VBUSOVP, UPM6720_BUS_PD_EN, UPM6720_BUS_PD_EN },
++	{ UPM6720_REG_VAC_CTRL, UPM6720_VAC1_PD_EN, UPM6720_VAC1_PD_EN },
++	{ UPM6720_REG_CTRL2, UPM6720_ACDRV1_STAT, 0 },
++	{ UPM6720_REG_CTRL2, UPM6720_OTG_EN, 0 },
++};
++
++/* Everything else on these chips stays out of reach */
++static const struct regmap_range nu2115_wr_ranges[] = {
++	regmap_reg_range(NU2115_REG_CONTROL, NU2115_REG_CONTROL),
++	regmap_reg_range(NU2115_REG_VAC_PRESENT, NU2115_REG_ACDRV_CTRL),
++};
++
++static const struct regmap_access_table nu2115_wr_table = {
++	.yes_ranges = nu2115_wr_ranges,
++	.n_yes_ranges = ARRAY_SIZE(nu2115_wr_ranges),
++};
++
++static const struct regmap_config nu2115_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = NU2115_REG_DEV_INFO,
++	.wr_table = &nu2115_wr_table,
++};
++
++static const struct regmap_range upm6720_wr_ranges[] = {
++	regmap_reg_range(UPM6720_REG_VBUSOVP, UPM6720_REG_VBUSOVP),
++	regmap_reg_range(UPM6720_REG_VAC_CTRL, UPM6720_REG_CTRL3),
++};
++
++static const struct regmap_access_table upm6720_wr_table = {
++	.yes_ranges = upm6720_wr_ranges,
++	.n_yes_ranges = ARRAY_SIZE(upm6720_wr_ranges),
++};
++
++static const struct regmap_config upm6720_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = UPM6720_REG_PART_INFO,
++	.wr_table = &upm6720_wr_table,
++};
++
++static const struct nu2115_info nu2115_info = {
++	.id_reg = NU2115_REG_DEV_INFO,
++	.id_mask = NU2115_DEV_ID_MASK,
++	.id = NU2115_DEV_ID,
++	.vac1_reg = NU2115_REG_VAC_PRESENT,
++	.vac1_present = NU2115_VAC1_PRESENT,
++	.on = nu2115_on,
++	.n_on = ARRAY_SIZE(nu2115_on),
++	.off = nu2115_off,
++	.n_off = ARRAY_SIZE(nu2115_off),
++	.regmap_config = &nu2115_regmap_config,
++	.rdesc = &nu2115_switch_desc,
++};
++
++static const struct nu2115_info upm6720_info = {
++	.id_reg = UPM6720_REG_PART_INFO,
++	.id_mask = UPM6720_DEV_ID_MASK,
++	.id = UPM6720_DEV_ID,
++	.vac1_reg = UPM6720_REG_STAT3,
++	.vac1_present = UPM6720_VAC1_PRESENT,
++	.on = upm6720_on,
++	.n_on = ARRAY_SIZE(upm6720_on),
++	.off = upm6720_off,
++	.n_off = ARRAY_SIZE(upm6720_off),
++	.regmap_config = &upm6720_regmap_config,
++	.rdesc = &upm6720_switch_desc,
++};
++
++static int nu2115_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct regulator_config cfg = { };
++	struct nu2115 *chip;
++	unsigned int id;
++	int ret;
++
++	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
++	if (!chip)
++		return -ENOMEM;
++
++	chip->dev = dev;
++	chip->info = i2c_get_match_data(client);
++	if (!chip->info)
++		return -ENODEV;
++
++	chip->regmap = devm_regmap_init_i2c(client, chip->info->regmap_config);
++	if (IS_ERR(chip->regmap))
++		return dev_err_probe(dev, PTR_ERR(chip->regmap),
++				     "Failed to init regmap\n");
++
++	ret = regmap_read(chip->regmap, chip->info->id_reg, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "No chip here\n");
++	if ((id & chip->info->id_mask) != chip->info->id)
++		return dev_err_probe(dev, -ENODEV, "Unknown device ID 0x%02x\n",
++				     id);
++
++	i2c_set_clientdata(client, chip);
++
++	cfg.dev = dev;
++	cfg.driver_data = chip;
++	cfg.regmap = chip->regmap;
++	chip->rdev = devm_regulator_register(dev, chip->info->rdesc, &cfg);
++	if (IS_ERR(chip->rdev))
++		return dev_err_probe(dev, PTR_ERR(chip->rdev),
++				     "Failed to register the switch\n");
++
++	return 0;
++}
++
++static void nu2115_shutdown(struct i2c_client *client)
++{
++	struct nu2115 *chip = i2c_get_clientdata(client);
++
++	if (regulator_is_enabled_regmap(chip->rdev) > 0)
++		nu2115_switch_open(chip);
++}
++
++static const struct of_device_id nu2115_of_match[] = {
++	{ .compatible = "nuvolta,nu2115", .data = &nu2115_info },
++	{ .compatible = "unisemi,upm6720", .data = &upm6720_info },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, nu2115_of_match);
++
++static struct i2c_driver nu2115_driver = {
++	.driver = {
++		.name = "nu2115",
++		.of_match_table = nu2115_of_match,
++	},
++	.probe = nu2115_probe,
++	.shutdown = nu2115_shutdown,
++};
++module_i2c_driver(nu2115_driver);
++
++MODULE_DESCRIPTION("Nuvolta NU2115 and Unisemi UPM6720 VBUS input switch driver");
++MODULE_LICENSE("GPL");

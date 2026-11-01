@@ -18,6 +18,8 @@
 	compatible = "lenovo,tb375fc", "mediatek,mt6897";
 
 	aliases {
+		i2c5 = &i2c5;
+		i2c10 = &i2c10;
 		serial0 = &uart0;
 		spmi0 = &spmi_m;
 	};
@@ -95,6 +97,105 @@
 		regulator-always-on;
 		status = "disabled";
 	};
+
+	/*
+	 * Turns the USB VBUS boost on and off from user space, through the state
+	 * attribute of this device, until the TCPC driver takes that over. Stays
+	 * off with the MT6375 (see &i2c5).
+	 */
+	usb_vbus_output: usb-vbus-output {
+		compatible = "regulator-output";
+		vout-supply = <&mt6375_otg_vbus>;
+		status = "disabled";
+	};
+};
+
+/*
+ * The MT6375 sources VBUS for USB host mode. Its boost feeds the connector
+ * through the input FETs of the charge pump below, which stock closes first.
+ *
+ * TODO(USB host): stays off with &usb_vbus_output, &i2c5, &i2c10 and
+ * &imp_iic_wrap_n/en until UFS root and the USB gadget work on the device. It
+ * also needs &pio for its GPIO179 state. The stock tree has no pins and no pull
+ * setting for these buses, and runs them at 1 MHz. Check with i2cdetect first,
+ * reading only. There is no driver for the interrupt (GPIO7), the TCPC, the
+ * charger, the fuel gauge or the ADCs yet.
+ */
+&i2c5 {
+	clock-frequency = <400000>;
+
+	mt6375: pmic@34 {
+		compatible = "mediatek,mt6375";
+		reg = <0x34>;
+		status = "disabled";
+
+		charger {
+			compatible = "mediatek,mt6375-charger";
+			pinctrl-names = "default";
+			pinctrl-0 = <&usb_vbus_mos_pins>;
+
+			mt6375_otg_vbus: usb-otg-vbus-regulator {
+				regulator-name = "usb-otg-vbus";
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5000000>;
+				vbus-switch-supply = <&charge_pump_65_switch>;
+			};
+		};
+	};
+};
+
+/*
+ * The stock tree lists all of these and its drivers bind what answers: NU2115 at
+ * 0x6d and 0x6e, or UPM6720 at 0x65 and 0x66. The one that stock names
+ * primary_dvchg closes the FETs: the master at 0x6d or 0x65, or a chip strapped
+ * as standalone. On the one tablet read so far, stock binds only the UPM6720 at
+ * 0x65, so vbus-switch-supply above points at it. Other units may differ.
+ *
+ * TODO(USB host): on the device, see with i2cdetect which ones answer and which
+ * is not strapped as a slave, and enable that one only.
+ */
+&i2c10 {
+	clock-frequency = <400000>;
+
+	charge_pump_65: charger@65 {
+		compatible = "unisemi,upm6720";
+		reg = <0x65>;
+		status = "disabled";
+
+		charge_pump_65_switch: usb-otg-switch-regulator {
+			regulator-name = "usb-otg-switch";
+		};
+	};
+
+	charge_pump_66: charger@66 {
+		compatible = "unisemi,upm6720";
+		reg = <0x66>;
+		status = "disabled";
+
+		charge_pump_66_switch: usb-otg-switch-regulator {
+			regulator-name = "usb-otg-switch";
+		};
+	};
+
+	charge_pump_6d: charger@6d {
+		compatible = "nuvolta,nu2115";
+		reg = <0x6d>;
+		status = "disabled";
+
+		charge_pump_6d_switch: usb-otg-switch-regulator {
+			regulator-name = "usb-otg-switch";
+		};
+	};
+
+	charge_pump_6e: charger@6e {
+		compatible = "nuvolta,nu2115";
+		reg = <0x6e>;
+		status = "disabled";
+
+		charge_pump_6e_switch: usb-otg-switch-regulator {
+			regulator-name = "usb-otg-switch";
+		};
+	};
 };
 
 &pio {
@@ -168,6 +269,19 @@
 
 		pins-reset {
 			pinmux = <PINMUX_GPIO60__FUNC_GPIO60>;
+		};
+	};
+
+	/*
+	 * GPIO179 (stock vbus_mos_gpio) is the over-temperature protection of USB
+	 * VBUS. Stock drives it low from its charger probe on and, with a charger
+	 * attached, raises it above 75 degrees on the usb_board_ntc sensor, which
+	 * has no driver here yet.
+	 */
+	usb_vbus_mos_pins: usb-vbus-mos-pins {
+		pins-mos {
+			pinmux = <PINMUX_GPIO179__FUNC_GPIO179>;
+			output-low;
 		};
 	};
 };
@@ -561,8 +675,20 @@
 
 /*
  * USB's analog supply, as in the stock tree. The stock controller is dual role,
- * but host mode needs VBUS from the MT6375 and the role switch from its TCPC,
- * so this starts as a USB device only.
+ * but this starts as a USB device only, because the USB gadget is the way into
+ * the tablet while it is being brought up.
+ *
+ * TODO(USB host): once UFS root and the gadget work on the device, and the
+ * nodes under &i2c5 and &i2c10 are on, enable &xhci0 and add
+ *
+ *	dr_mode = "otg";
+ *	usb-role-switch;
+ *	role-switch-default-mode = "peripheral";
+ *
+ * The role is then in /sys/class/usb_role/11201000.usb-role-switch/role and VBUS
+ * in the state attribute of &usb_vbus_output. Without the TCPC nothing does this
+ * by itself. Never add vbus-supply here: in otg mode ssusb_host_setup() enables
+ * it at every probe, whatever is on the port.
  */
 &ssusb {
 	dr_mode = "peripheral";

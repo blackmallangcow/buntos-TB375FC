@@ -1,0 +1,99 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: clock: mediatek: add the MT6897 I2C clock gates
+
+The I2C controllers of MT6897 take their main clock from a gate in one
+of five imp_iic_wrap blocks: c (I2C6), en (I2C2, 4, 10, 11), es (I2C8,
+9, 12, 13), n (I2C3, 5) and s (I2C0, 1, 7). Add their compatibles and
+the clock identifiers. Unlike the UFS blocks they have no resets, so the
+property for the reset cells gets a condition of its own.
+
+---
+ .../bindings/clock/mediatek,mt6897-clock.yaml | 26 ++++++++++++++++---
+ .../dt-bindings/clock/mediatek,mt6897-clock.h | 24 +++++++++++++++++
+ 2 files changed, 47 insertions(+), 3 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+index 60db799..fd3ad4e 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+@@ -29,6 +29,11 @@ properties:
+   compatible:
+     items:
+       - enum:
++          - mediatek,mt6897-imp-iic-wrap-c
++          - mediatek,mt6897-imp-iic-wrap-en
++          - mediatek,mt6897-imp-iic-wrap-es
++          - mediatek,mt6897-imp-iic-wrap-n
++          - mediatek,mt6897-imp-iic-wrap-s
+           - mediatek,mt6897-pericfg-ao
+           - mediatek,mt6897-ufscfg-ao
+           - mediatek,mt6897-ufscfg-pdn
+@@ -65,13 +70,22 @@ allOf:
+     then:
+       required:
+         - mediatek,hardware-voter
+-      properties:
+-        '#reset-cells': false
+     else:
++      properties:
++        mediatek,hardware-voter: false
++  - if:
++      properties:
++        compatible:
++          contains:
++            enum:
++              - mediatek,mt6897-ufscfg-ao
++              - mediatek,mt6897-ufscfg-pdn
++    then:
+       required:
+         - '#reset-cells'
++    else:
+       properties:
+-        mediatek,hardware-voter: false
++        '#reset-cells': false
+ 
+ additionalProperties: false
+ 
+@@ -90,3 +104,9 @@ examples:
+         #clock-cells = <1>;
+         #reset-cells = <1>;
+     };
++  - |
++    clock-controller@11f02000 {
++        compatible = "mediatek,mt6897-imp-iic-wrap-n", "syscon";
++        reg = <0x11f02000 0x1000>;
++        #clock-cells = <1>;
++    };
+diff --git a/include/dt-bindings/clock/mediatek,mt6897-clock.h b/include/dt-bindings/clock/mediatek,mt6897-clock.h
+index 7f52c80..e7daf90 100644
+--- a/include/dt-bindings/clock/mediatek,mt6897-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6897-clock.h
+@@ -271,4 +271,28 @@
+ #define CLK_UFSPDN_UFSHCI_UFS		0
+ #define CLK_UFSPDN_UFSHCI_AES		1
+ 
++/* IMP_IIC_WRAP_C */
++#define CLK_IMPC_I2C6			0
++
++/* IMP_IIC_WRAP_EN */
++#define CLK_IMPEN_I2C2			0
++#define CLK_IMPEN_I2C4			1
++#define CLK_IMPEN_I2C10			2
++#define CLK_IMPEN_I2C11			3
++
++/* IMP_IIC_WRAP_ES */
++#define CLK_IMPES_I2C8			0
++#define CLK_IMPES_I2C9			1
++#define CLK_IMPES_I2C12			2
++#define CLK_IMPES_I2C13			3
++
++/* IMP_IIC_WRAP_N */
++#define CLK_IMPN_I2C3			0
++#define CLK_IMPN_I2C5			1
++
++/* IMP_IIC_WRAP_S */
++#define CLK_IMPS_I2C0			0
++#define CLK_IMPS_I2C1			1
++#define CLK_IMPS_I2C7			2
++
+ #endif /* _DT_BINDINGS_CLK_MEDIATEK_MT6897_H */

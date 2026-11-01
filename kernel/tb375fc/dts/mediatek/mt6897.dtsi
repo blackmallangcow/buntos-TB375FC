@@ -595,6 +595,33 @@
 		};
 
 		/*
+		 * The I2C controllers and their clock gates from here on, in address
+		 * order with the other blocks. Like the other clock controllers, the
+		 * gates stay off until something uses them. As in the stock tree,
+		 * only i2c6 has its pins set by the kernel; the bootloader muxes the
+		 * rest, so nothing here changes them.
+		 */
+		i2c6: i2c@11280000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11280000 0 0x1000>, <0 0x11300600 0 0x80>;
+			interrupts = <GIC_SPI 192 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_c CLK_IMPC_I2C6>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		imp_iic_wrap_c: clock-controller@11281000 {
+			compatible = "mediatek,mt6897-imp-iic-wrap-c", "syscon";
+			reg = <0 0x11281000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		/*
 		 * A newer M-PHY revision ("mphy-ver = <1>" in the stock tree)
 		 * that takes no clocks and no power sequence from the kernel.
 		 * Its reset (ufscfg_ao, MT6897_UFSAO_RST_UFS_MPHY) is left out:
@@ -677,6 +704,170 @@
 			status = "disabled";
 		};
 
+		i2c2: i2c@11b70000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11b70000 0 0x1000>, <0 0x11300300 0 0x100>;
+			interrupts = <GIC_SPI 188 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_en CLK_IMPEN_I2C2>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c4: i2c@11b71000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11b71000 0 0x1000>, <0 0x11300480 0 0x100>;
+			interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_en CLK_IMPEN_I2C4>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c10: i2c@11b72000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11b72000 0 0x1000>, <0 0x11300980 0 0x80>;
+			interrupts = <GIC_SPI 196 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_en CLK_IMPEN_I2C10>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c11: i2c@11b73000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11b73000 0 0x1000>, <0 0x11300a00 0 0x80>;
+			interrupts = <GIC_SPI 197 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_en CLK_IMPEN_I2C11>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		imp_iic_wrap_en: clock-controller@11b74000 {
+			compatible = "mediatek,mt6897-imp-iic-wrap-en", "syscon";
+			reg = <0 0x11b74000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		i2c8: i2c@11cc0000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11cc0000 0 0x1000>, <0 0x11300780 0 0x100>;
+			interrupts = <GIC_SPI 194 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_es CLK_IMPES_I2C8>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c9: i2c@11cc1000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11cc1000 0 0x1000>, <0 0x11300880 0 0x100>;
+			interrupts = <GIC_SPI 195 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_es CLK_IMPES_I2C9>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c12: i2c@11cc2000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11cc2000 0 0x1000>, <0 0x11300a80 0 0x80>;
+			interrupts = <GIC_SPI 198 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_es CLK_IMPES_I2C12>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c13: i2c@11cc3000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11cc3000 0 0x1000>, <0 0x11300b00 0 0x80>;
+			interrupts = <GIC_SPI 199 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_es CLK_IMPES_I2C13>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		imp_iic_wrap_es: clock-controller@11cc4000 {
+			compatible = "mediatek,mt6897-imp-iic-wrap-es", "syscon";
+			reg = <0 0x11cc4000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		i2c0: i2c@11d00000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11d00000 0 0x1000>, <0 0x11300200 0 0x80>;
+			interrupts = <GIC_SPI 186 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_s CLK_IMPS_I2C0>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c1: i2c@11d01000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11d01000 0 0x1000>, <0 0x11300280 0 0x80>;
+			interrupts = <GIC_SPI 187 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_s CLK_IMPS_I2C1>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c7: i2c@11d02000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11d02000 0 0x1000>, <0 0x11300680 0 0x100>;
+			interrupts = <GIC_SPI 193 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_s CLK_IMPS_I2C7>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		imp_iic_wrap_s: clock-controller@11d03000 {
+			compatible = "mediatek,mt6897-imp-iic-wrap-s", "syscon";
+			reg = <0 0x11d03000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
 		xsphy: xs-phy@11e43000 {
 			compatible = "mediatek,mt6897-xsphy", "mediatek,xsphy";
 			reg = <0 0x11e43000 0 0x200>;
@@ -709,6 +900,39 @@
 		};
 
 		/* TOPRGU, already running when the bootloader hands over */
+		i2c3: i2c@11f00000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11f00000 0 0x1000>, <0 0x11300400 0 0x80>;
+			interrupts = <GIC_SPI 189 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_n CLK_IMPN_I2C3>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c5: i2c@11f01000 {
+			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
+			reg = <0 0x11f01000 0 0x1000>, <0 0x11300580 0 0x80>;
+			interrupts = <GIC_SPI 191 IRQ_TYPE_LEVEL_HIGH 0>;
+			clock-div = <1>;
+			clocks = <&imp_iic_wrap_n CLK_IMPN_I2C5>,
+				 <&pericfg_ao CLK_PERI_AO_DMA_BCLK>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		imp_iic_wrap_n: clock-controller@11f02000 {
+			compatible = "mediatek,mt6897-imp-iic-wrap-n", "syscon";
+			reg = <0 0x11f02000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
 		watchdog: watchdog@1c00a000 {
 			compatible = "mediatek,mt6897-wdt", "mediatek,mt6589-wdt";
 			reg = <0 0x1c00a000 0 0x100>;
