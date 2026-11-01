@@ -730,7 +730,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 
 ## 9. 나머지 단계
 
-2d 무선, 2e GPU·전원, 2c 화면(2차), 3 최적화의 목록은 나중에 더한다. 그 일이 아직 진행 중이다(전원 도메인 0050~0054, Wi-Fi 0055~0069, GPU 전원과 열·게이지 0070~0079, 그다음 패널 0080~0084, Bluetooth 0085~0089).
+2d 무선의 차례는 9.1절과 9.2절에 있다. 2e GPU·전원, 2c 화면(2차), 3 최적화의 목록은 나중에 더한다. 그 일이 아직 진행 중이다(GPU 전원과 열·게이지 0070~0079, 충전·TCPC 0090~0099).
 
 이미 적힌 확인만 잃지 않게 옮겨 둔다.
 
@@ -740,7 +740,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
     3. conn을 켤 때 ACK가 오지 않으면 소비자의 전원 도메인 붙이기가 `-ETIMEDOUT`으로 실패한다. `0x1c001e04`의 bit 30·31을 본다.
     4. conn을 끌 때 버스 보호 SET이 시간 초과면 벤더의 EN 재시도와 되돌리기가 필요한지 본다(메인라인에 없다). 켜고 끄기를 몇 번 돌린다.
 - 2c 2차와 코덱·카메라 앞: MM_INFRA 아래 첫 소비자 전에 `simple-framebuffer`에 `power-domains`(DIS0, DIS1, OVL0, OVL1)를 건다.
-- 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다. 진짜 루트에서 nvdata를 붙일 때는 initramfs처럼 `blockdev --setro`와 `ro,noload`로 붙인다.
+- 2d: `consys@18001000`(`mediatek,mt6897-consys`), `wifi@18000000`(`mediatek,mt6897-wifi`), `bluetooth@18800000`. 전원 도메인(위)이 먼저이고 차례는 9.1절과 9.2절이다. 진짜 루트에서 nvdata를 붙일 때는 initramfs처럼 `blockdev --setro`와 `ro,noload`로 붙인다.
 - 2e: 전원 키로 s2idle에서 깨는지, mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`, mtu3 깨우기 접점, 커넥터 과열 보호(`usb_board_ntc`, GPIO179).
 - 2c 2차(화면 파이프라인이 온 뒤):
     1. 패널이 뜨는지(첫 prepare 깜빡임 포함), 144·120·60·30Hz 전환과 실제 주사율을 본다. 벤더 PHY 기준으로 계산한 값은 143.97, 119.57Hz다.
@@ -750,6 +750,245 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
     5. 패널 노드를 켜면 GPIO184가 터치와 공유되어 `gpio-shared-proxy` 모듈이 있어야 한다. 없으면 터치와 패널이 둘 다 미뤄진다. udev가 올리고, 터치나 패널을 initramfs에 넣으면 `modules.list`에 함께 넣는다.
     6. 중국판 펌웨어의 패널 모듈이 같은지 본다. 사용자 기기에서 vendor_boot를 뜨면 글로벌판 모듈과 표를 맞댄다.
 - 3: 볼륨 내림(SoC 키패드)이 업스트림 `mt6779-keypad`로 되는지 본다.
+
+### 9.1 2d Wi-Fi
+
+아래는 코드와 자료로 짠 차례다. 기기에서 돌린 적이 없다. 2a(부팅, 콘솔), 2b(SPMI·PMIC·핀·USB 가젯)가 된 뒤에 한다.
+위에서 아래로 하고, 앞 단계를 채운 뒤 다음으로 간다. 장치 트리는 단계마다 적은 노드를 켠다.
+
+1·2단계 다음에는 9.2절의 Bluetooth를 먼저 한다. nvdata도 DMA 칸도 필요 없어 connsys 전원의 첫 시험으로 가볍다. 다만 Wi-Fi 없이 켜면 보정이 나쁠 수 있으므로, 전원 길의 시험과 RF 품질은 나눠 본다.
+
+#### 공통 준비
+
+- USB 가젯 셸(`buntos.usbdebug=1`)로 들어가 `dmesg -w`를 PC에 받아 둔다. 드라이버는 단계마다 한 줄씩 남기므로, 멈추면 **마지막 줄이 멈춘 곳**이다.
+  화면 콘솔(`console=tty0`)도 켠다. 멈추면 USB도 함께 끊길 수 있다.
+- 켜 보는 동안 자동 적재를 막는다: 명령줄에 `modprobe.blacklist=mt7921soc,mtk_connsys`. 모듈은 셸에서 손으로 올린다.
+- **멈췄을 때 되돌리기:** 전원 키와 볼륨(홈) 키를 길게 눌러 PMIC 초기화(순정 트리 설정)로 다시 켠다. 그래도 안 되면 배터리가 빠질 때까지 둔다.
+  명령줄에 블랙리스트가 있으므로 다시 켜면 셸까지 온다. 그 전 단계 dtb로 돌아가려면 앞 부트 이미지를 다시 굽거나 `fastboot boot`를 쓴다. nvdata는 어느 단계에서도 쓰지 않는다.
+- 모든 쓰기는 PMIC 레일, 패드, connsys 레지스터뿐이다. 파티션은 읽기만 한다.
+
+#### 1. LK가 메모리를 나누는지 (드라이버 없음, 레일 없음)
+
+`mt6897.dtsi`의 루트에 **`gps`·`connscp` 노드만** 넣는다(아래). consys·wifi는 disabled로 둔다. 드라이버가 돌지 않으므로 커널 쪽 위험은 없다.
+LK는 status를 보지 않으므로 이 순간부터 펌웨어를 싣는다. 이것이 기기에서 처음 지나는 길이다.
+
+```dts
+connscp {
+	scp-shm-size = <0x20000>;
+	scp-remap-offset = <0x2100000>;
+	scp-remap-size = <0x20000>;
+};
+
+gps {
+	emi-size = <0x100000>;
+	emi-alignment = <0x100000>;
+	emi-max-addr = <0xc0000000>;
+};
+```
+
+위험: 부팅 불가. LK가 mainline 트리에서 이 길을 지난 적이 없다. 되돌리는 길은 노드 없는 dtb다.
+
+볼 것 (`/run/buntos/fdt.dtb` 또는 `/sys/firmware/fdt`를 `dtc -I dtb`로 푼다):
+- `/soc/consys@18001000`의 `emi-addr`가 0이 아닌 8바이트인가
+- `/soc/wifi@18000000`에 `memory-region`이 있고, 그 phandle의 `/reserved-memory/mblock-*`에 `shared-dma-pool`, `no-map`, 크기 0x1400000이 있는가. 주소가 4 GiB 아래인가(0x2_5000_0000 위면 드라이버가 멈춘다)
+- `dmesg`의 reserved-memory 줄, `/proc/iomem`
+- 복구나 충전 모드가 아닌지(LK는 그때 싣지 않는다). `fastboot boot`일 때도 싣는지 여기서 안다
+
+안 되면(`emi-addr`가 0): LK 기록(uart)의 `platform_load_connsys` 줄을 본다. 값이 빠지면 -2나 -1을 남기고 돌아온다.
+
+#### 2. consys 드라이버 (레일만 잡고 아직 켜지 않음)
+
+`status = "okay"`: consys, `pmic@9`, 레일 다섯(`vcn13`, `vrf-io18`, `vant18`, `vcn33-1`, `vcn33-2`), `&spm`. wifi는 아직 disabled. 전원 도메인의 확인이 먼저다(`pm_genpd_summary`에 conn이 `off-0`). IFR·VLP syscon은 켜지 않는다.
+
+`modprobe mtk-connsys` 뒤에 볼 것:
+- `firmware region at …, 0xc00000 bytes` 한 줄과 바인드(`/sys/bus/platform/drivers/mtk-connsys`). `emi-addr`가 0이면 `the bootloader has not loaded the firmware`로 멈춘다
+- `no DCXO device`가 나오면 `pmic@9`가 안 잡힌 것이다. 레일을 기다리면 PMIC 드라이버 순서를 본다
+- `/sys/kernel/debug/regulator/regulator_summary`에 다섯 레일이 꺼진 채 있는가. 2.5 V 같은 낯선 전압이 없는가
+
+이 단계에서 SIP 호출과 레일 켜기는 일어나지 않는다.
+
+#### 3. connsys 전원 켜기 (첫 SIP 호출)
+
+`wifi`를 `status = "okay"`로 하고, 먼저 보정값을 둔다.
+
+```
+blockdev --setro /dev/disk/by-partlabel/nvdata
+mount -t ext4 -o ro,noload /dev/disk/by-partlabel/nvdata /mnt/vendor/nvdata
+install -D -m 0600 /mnt/vendor/nvdata/APCFG/APRDEB/WIFI /usr/lib/firmware/lenovo/tb375fc/wifi-nvram.bin
+```
+
+위험: 부팅 불가가 아니라 그 자리 멈춤이다. `modprobe mt7921soc`을 치면 아래 줄이 차례로 나와야 한다. 마지막 줄이 멈춘 곳이다.
+
+| 줄 | 뜻 | 여기서 멈추면 |
+|---|---|---|
+| `DMA window at …, 20 MiB` | LK의 칸 | 1단계의 값과 같은가. `the bootloader gave no DMA region`이면 1단계로 돌아간다 |
+| `calibration data: …, N of M bytes in the list` | 파일 | `no calibration data`면 probe가 **아무것도 켜지 않고** 멈춘다. 파일을 두고 다시 올린다 |
+| `A-die clock: 26 MHz co-clock` | DCXO 읽기 | SPMI, MT6685 |
+| `SIP init_atf_data(0, 0)` | TF-A에 값을 넘김 | TF-A가 이 호출을 받지 않는다. SMC는 돌아와야 한다 |
+| `rail VRFIO18`, `rail VCN13` | MT6363 레일 | SW_OP_EN 쓰기, 레귤레이터 오류 메시지 |
+| `CONN power domain` | MTCMOS, 버스 보호 | 전원 도메인 표 |
+| `SIP polling_chipid(0, 0)` | D-die 응답 | 0이 아니면 `the D-die does not answer`로 돌아온다 |
+| `SIP a_die_cfg(0, 8)` | A-die SPI | `A-die version`이 0x6637 쪽 값인가 |
+| `SIP afe_wbg_cal`, `subsys_pll_initial` | 클럭·PLL | 레일 전압, 클럭 값 |
+| `rail VCN33_1`, `VCN33_2`, `VANT18` | RF 레일 | 레귤레이터 오류 |
+| `radio 3 power on: 0, radios 0x8` | 공통부 완료 | |
+
+SIP 줄에 `returned N`이 붙으면 그 값을 적는다. 0이 아니어도 벤더처럼 계속 가는 호출이 있다.
+
+#### 4. WF MCU와 ROM
+
+| 줄 | 여기서 멈추거나 실패하면 |
+|---|---|
+| `WF: wake conninfra` | `conninfra version: … = …`이면 값을 벤더의 0x02050400과 맞댄다 |
+| `WF: top on` 뒤 `wfsys reset` | 실패 메시지와 값 |
+| `WF: first read of the WF side` | 버스 보호가 안 풀린 채 읽어 멈춘 경우다. 그 전 폴링이 통과했어야 한다 |
+| `WF: CPU out of reset` | |
+| `no firmware own after the ROM` | 경고일 뿐이다(벤더는 기다리지 않는다). 다음 줄을 본다 |
+| `WF: ROM idle` | `WF ROM: 18060b10 = …`이면 `ROM code index`와 함께 적는다. 0x1D1E가 안 오면 WF가 ROM에서 멈춘 것이다(커뮤니티 포트가 멈춘 자리, 그쪽은 벤더 gen4m을 옮긴 것이고 포럼이 아닌 그 저장소의 기록이다) |
+| `ASIC revision: 79610000, driver own` | `driver own failed` |
+| `DMA rings` | 링을 만들고 WFDMA를 켠다. 여기서 멈추면 WFDMA 레지스터나 칸 접근이다 |
+
+#### 5. 펌웨어 기동
+
+| 줄 | 볼 것 |
+|---|---|
+| `firmware in memory: …` | `t-neptune-main-soc7_0-…`이어야 한다. `(unknown)`이면 LK가 싣지 않았거나 읽는 칸이 틀렸다 |
+| `PHY action: calibrate, N bytes of data, FEM 0x0` | 보정은 수 초 걸린다 |
+| `PHY action: event 0x81, status 0, temperature T` | event가 0x81(`FORCE_CAL_RSP`)이고 T가 그럴듯한가 |
+| `starting the firmware the bootloader loaded` → `firmware running` | `Message … timeout`이면 INIT 명령의 링이나 이벤트 링이 틀렸다. `/sys/kernel/debug/ieee80211/phy*/mt76/`의 queues, `MT_WFDMA0_HOST_INT_STA` |
+| `unified command probe: N` | **가장 중요한 답이다.** 0이나 다른 값이면 uni cmd를 받는다. `does not answer`면 레거시 길이 필요하다(아래 7) |
+
+#### 6. FEM 맞대기
+
+안드로이드 슬롯에서 connfem 기록을 받는다: `FemInfo, id:`. 순정 트리에는 `hwid`가 없어 0번(nofem/nofem)이 뽑히지만 `/vendor/firmware/connfem.cfg`가 바꿀 수 있다(adb로 못 읽었다).
+값이 0이 아니면 `mediatek,fem-parts`, `mediatek,fem-pins`, `pinctrl-0`을 순정 트리의 그 조합(`qm42195-qm45197` 등)에서 옮긴다. 순정 트리의 표는 아래와 같다(가장 새 값).
+
+| i | 2.4 GHz | 5 GHz |
+|---|---|---|
+| 0 | nofem | nofem |
+| 1, 2 | wlan7207h | wlan7207c |
+| 3, 4 | qm42195 | qm45197 |
+| 5, 6 | nofem | sky85732 |
+| 7 | qm42195 | nofem |
+| 8 | vc536411 | nofem |
+| 9 | nofem | qm45197 |
+
+vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky85732 1/3, vc536411 5/1. 핀은 순정 트리의 같은 이름 pinctrl 노드에 있다.
+
+#### 7. 인터페이스
+
+`ip link set wlan0 up` → `iw dev wlan0 scan` → 연결. 여기서 처음 쓰는 명령 가운데 벤더 표에 없는 것이 있다.
+
+| 단계 | 명령 | 벤더 표 |
+|---|---|---|
+| up | EXT `MAC_INIT_CTRL` 0x46 | 없음. timeout이면 mt7921의 `__mt7921_start`가 실패하고 리셋이 돈다 |
+| up | EXT `SET_RX_PATH` 0x4e | 벤더 헤더에서 같은 번호가 `EFUSE_BUFFER_RD`다 |
+| up | CE `SET_CHAN_DOMAIN` 0x0f, `SET_RATE_TX_POWER` 0x5d | 있음 |
+| scan | CE `START_HW_SCAN` 0x03 | 있음(`SCAN_REQ_V2`) |
+| 연결 | uni `DEV_INFO`, `BSS_INFO`, `STA_REC` | 벤더는 쓰지 않는다. 5의 시험이 이 길을 가른다 |
+
+- `Message … timeout`이 나면 cmd와 함께 적는다. 그 뒤 `mt792x_reset`이 WF 전원을 다시 돌린다(10번까지). 멈추려면 `rmmod mt7921soc`.
+- 다시 켜기가 실패하면 `WF restart failed`가 나오고, 그 뒤로 드라이버는 WF 쪽과 WFDMA를 건드리지 않는다(`… while the WF part is off`가 찍힌다). `rmmod`로 내려도 된다(링 레지스터는 그동안 메모리를 가리킨다). 다시 올려도 안 되면 재부팅으로 되돌린다.
+- CNM: 기본은 꺼 둔 길이다. 스캔과 연결이 안 되면 `modprobe mt7921soc cnm=1`로 ROC 길을 본다. 펌웨어 파일이 없어 미리 읽을 수 없다.
+
+#### 끝날 때
+
+- 끄기: `rmmod mt7921soc mtk_connsys`. `WF:` 끄기 폴링 실패 줄이 없는가, 레일이 꺼졌는가(`regulator_summary`), 다시 올렸을 때 같은 줄이 나오는가.
+- 2b의 USB 가젯 길: 이 드라이버는 USB를 건드리지 않는다. 레일과 전원 도메인은 connsys 것만 쓴다. 끊기면 보고한다.
+- 소비 전력: 레일을 켠 채 두므로 대기 전력이 순정보다 크다. 2e에서 잰다.
+
+### 9.2 2d Bluetooth
+
+아래는 코드와 자료로 짠 차례다. 기기에서 돌린 적이 없다. 2a(부팅, 콘솔), 2b(SPMI·PMIC·핀·USB 가젯)가 된 뒤에 한다.
+9.1절의 1·2단계가 먼저다. 그 뒤로 Bluetooth와 Wi-Fi는 어느 쪽을 먼저 해도 된다.
+
+#### 공통 준비
+
+- USB 가젯 셸(`buntos.usbdebug=1`)로 들어가 `dmesg -w`를 PC에 받아 둔다. 드라이버는 단계마다 한 줄씩 남기므로, 멈추면 **마지막 줄이 멈춘 곳**이다. 화면 콘솔(`console=tty0`)도 켠다.
+- 명령줄에 `modprobe.blacklist=btmtkbeif`를 넣어 자동 적재를 막고 손으로 올린다. `hci_register_dev`가 곧바로 전원을 켜므로 **`modprobe`가 곧 첫 켜기**다.
+- 멈췄을 때 되돌리는 길은 9.1절과 같다(전원 키 길게, 블랙리스트 덕에 다시 켜면 셸까지 온다). 파티션은 읽지도 쓰지도 않는다.
+- 만지는 것: `0x18000000~0x18080000`, `0x18800000~0x18821000`의 레지스터, EMI의 위 1 MiB(링 32 KiB에 쓰고 로그 머리를 읽는다). 펌웨어 RO 칸은 읽지 않는다.
+
+#### 1. 먼저 할 일 (9.1절 1·2단계)
+
+- `gps`·`connscp`를 넣어 LK가 `emi-addr`를 쓰는지 본다. `consys` 드라이버가 `firmware region at …`을 남기는지 본다.
+- 여기까지 Bluetooth 코드는 돌지 않는다. `bluetooth@18800000`은 `disabled`다.
+
+#### 2. 첫 켜기
+
+`bluetooth@18800000`을 `status = "okay"`로 켜고 `modprobe btmtkbeif`를 친다. 프로브 자체는 하드웨어를 건드리지 않지만, 프로브 끝의 `hci_register_dev`가 곧바로 전원을 켠다. `rfkill`로는 막지 못한다(HCI 설정 단계는 rfkill을 보지 않는다, `hci_dev_open_sync`). 위험: 부팅 불가가 아니라 그 자리 멈춤이다.
+
+프로브에서 끝나는 경우:
+
+| 줄 | 여기서 멈추면 |
+|---|---|
+| 아무 줄 없이 묶이지 않음 | consys 드라이버가 안 묶였다(`EPROBE_DEFER`로 조용히 기다린다). `/sys/bus/platform/drivers/mtk-connsys`, `/sys/kernel/debug/devices_deferred` |
+| `can't map the rings` | LK가 연 connsys 칸이 `no-map`이 아니다. `/proc/iomem`, `/reserved-memory`를 본다. 드라이버 고칠 곳이다 |
+
+켜기:
+
+| 줄 | 뜻 | 여기서 멈추거나 실패하면 |
+|---|---|---|
+| `radio 0 power on: 0, radios 0x1` | connsys 공통부(또는 `radios 0x9`면 Wi-Fi가 켠 위에) | 9.1절 3단계의 표 |
+| `BGF: wake conninfra` | `0x180601A8`로 깨움 | `conninfra version: …`이면 값을 `0x02050400`과 맞댄다 |
+| `BGF: top on, CPU in reset` | BGF 전원 | `top isolation`: `0x18060A10` |
+| `BGF: function on` | `0x18001208` | `power ack`, `second power ack`: `0x18000424` |
+| `BGF: conn2bt sleep protection off`, `bt2conn` | GALS 보호 | `receive/transmit sleep protection` |
+| `BGF: first read of the BGF side` | **여기서 조용히 멈추면** 버스다. 그 앞 폴링이 지났는데 읽기가 안 돌아오는 경우다 | 첫 의심은 CONN 전원 도메인과 레일 |
+| `BGF: version 02080000` | IP 판 | 다른 값이면 SoC 판이 다르다 |
+| `BGF: CPU out of reset` | MCU를 놓음 | |
+| `BGF: MCU ROM done after N polls` | ROM 끝 `0x1D1E` | `BGF: MCU ROM: …, pc …`: **LK가 `connsys_bt`를 싣지 않았거나 EMI 재매핑이 틀렸다.** LK 기록의 `CONN_RO BT load`를 본다 |
+| `firmware: t-neptune-main-soc7_0-…` | 판 문자열. 실기기 속성 `vendor.connsys.bt_fw_ver`와 같은 꼴이어야 한다 | `release string at 0x…, not read`는 실패가 아니다. 벤더도 0을 넘어간다 |
+| `BGF: driver own` | `0x18060030` | `no driver own: …, MCU pc …`: MCU가 안 돈다 |
+| `BGF: up, ring of 16304 bytes each way` | 링 준비 | |
+| `can't set the antennas: …` | 경고일 뿐 간다. 첫 WMT 명령이라 **`WMT command 0x55 timed out`이면 링이나 초인종부터 본다** | 아래 줄과 같은 표 |
+| `WMT function on: status 0` | **가장 중요한 답이다.** 링과 초인종과 인터럽트가 모두 맞고 펌웨어가 켜졌다는 뜻이다 | `WMT command 0x6 timed out`과 그 뒤 `BEIF: key … guards … to chip N/M, from chip …`: N과 M이 같으면 펌웨어가 읽었고 답이 안 온 것, 다르면 초인종이나 펌웨어 쪽이다. status가 0이 아니면 보정 실패일 수 있다(아래 3) |
+| `WMT calibration: status S, sub 3, N bytes` | 보정 결과. 켜지기는 켜졌어도 S가 0이 아니면 RF가 나쁠 수 있다 | `no word on the calibration: …`: 펌웨어가 답하지 않는다. 벤더도 무시한다 |
+
+#### 3. 보정
+
+벤더는 부팅 때 Wi-Fi를 함께 켜고 BT를 켜 보정하고, 그 값을 SYSRAM에 되돌린다. 주석은 "Wi-Fi가 꺼진 채 첫 켜기는 보정에 실패하기 쉽다"고 적는다. 이 드라이버는 켤 때마다 펌웨어가 보정한다.
+
+- Wi-Fi를 올리지 않고 켠 경우와 `modprobe mt7921soc` 뒤에 켠 경우를 나눠 본다: `WMT function on`과 `WMT calibration`의 status와 걸린 시간, RSSI(`hcitool`, `btmgmt`), 연결의 안정성.
+- 차이가 크면 Wi-Fi가 켜진 뒤에만 Bluetooth를 켜게 하거나 벤더의 보정값 복원 길을 옮긴다(`WMT_OPCODE_RF_CAL` 0x14, sub 3, `0x5AD02EA5`).
+
+#### 4. HCI
+
+- **주소가 먼저다.** MCU가 켤 때마다 ROM부터 시작하고 저장소가 없으므로, 드라이버는 주소를 시스템에서 받는 꼴이다(`HCI_QUIRK_USE_BDADDR_PROPERTY`, `btqcomsmd`와 같다). 주소가 없으면 `WMT function on` 뒤에 어댑터가 **설정 전(unconfigured) 상태**로 멈춘다(`btmgmt info`의 `unconfigured`). 정상이다.
+  - 처음 볼 때는 시험용 값을 넣는다: `btmgmt --index 0 public-addr <값>`. 값은 저장소에 적지 않는다.
+  - 스택이 값을 기억해 켤 때마다 다시 넣는다. 재부팅하면 사라지므로 나중에 BSP가 부팅 때 넣는다. `local-bd-address`를 트리에 적어도 되지만 기기마다 달라 이미지에 넣지 않는다.
+  - 안드로이드에는 `persist.odm.bt.address` 속성이 있다(값은 적지 않는다). 뽑는 길은 6단계의 표다.
+- 넣은 값이 그대로 보이는지 본다(`btmgmt info`). 바이트 순서가 뒤집히면 업스트림 `btmtk_set_bdaddr`와 펌웨어가 다른 것이다.
+- `btmgmt info`, `hciconfig -a`: 제조사 70, 판 번호. 스택의 HCI Reset과 초기화 명령이 처음 지나는 곳이다.
+- 명령이 시간을 넘기면 `BGF: a command timed out`과 링 상태를 남기고 스택이 닫고 다시 연다.
+- `bluetoothctl power on`, `scan on`: 근처 기기가 보이는가. `pair`, A2DP 싱크나 HID로 큰 흐름을 본다(C2H 칸을 넘기는 데이터). `hcidump`나 `btmon`으로 본다.
+
+#### 5. 함께 쓰기와 끄기
+
+| 시험 | 기대 |
+|---|---|
+| BT 켠 뒤 `modprobe mt7921soc` | `radio 3 power on: 0, radios 0x9`. BT 흐름이 끊기지 않는다 |
+| Wi-Fi 켠 뒤 BT 켜기 | `radio 0 power on: 0, radios 0x9` |
+| `bluetoothctl power off`(Wi-Fi 켠 채) | `WMT function off`, `BGF: power off`, `radio 0 power off, radios 0x8`. Wi-Fi가 끊기지 않는다. 레일이 켜져 있다 |
+| `rmmod btmtkbeif`, 다시 `modprobe` | 같은 줄이 다시 나온다 |
+| 둘 다 끄기 | `regulator_summary`에서 레일이 꺼진다 |
+| `power off` 때 `the bus to it is not quiet` | 벤더는 여기서 connsys 전체를 리셋한다. 이 드라이버는 하지 않는다. 보고한다 |
+
+#### 6. 벤더와 맞대 볼 것 (안드로이드 슬롯, 기기 값은 저장소에 적지 않는다)
+
+| 무엇 | 명령 | 까닭 |
+|---|---|---|
+| `BT_FW.cfg` | `adb shell cat /vendor/firmware/BT_FW.cfg`(권한으로 막히면 그 판의 vendor 이미지에서) | 안테나 태그(`bt_antswap[…]`, `wifi_antswap`)가 있으면 그 명령을 드라이버에 더해야 한다. 지금 드라이버는 파일이 없을 때의 벤더 길이다. 기기 값이 아니라 판별 값이라 저장소에 적어도 된다 |
+| 켠 뒤의 HCI 차례 | 개발자 옵션의 HCI 스누프를 켜고 BT를 껐다 켠 뒤 `adb pull /data/misc/bluetooth/logs/btsnoop_hci.log` | HAL이 보내는 벤더 명령을 안다. 주소가 들어 있어 저장소에 넣지 않는다. 명령 번호만 옮겨 적는다 |
+| 펌웨어 판 | `adb shell getprop vendor.connsys.bt_fw_ver` | 이미 읽었다: 빌드 `t-neptune-main-soc7_0-2104-LEPIN_SOC7_0_E1_ASIC-20211206113401`. 2단계의 `firmware:` 줄과 맞댄다 |
+| 주소의 자리 | `adb shell getprop persist.odm.bt.address`로 있음만 보고, nvdata의 `APCFG/APRDEB/BT_Addr`와 같은 값인지 PC에서 비교 | BSP에서 어디서 뽑을지 정한다 |
+| 모뎀 | `ls /sys/class/ccci_node` | 모뎀 알림을 뺀 근거. 순정 `modules.txt`에는 ccci가 없다 |
+
+#### 끝날 때
+
+- 대기 전력: 열려 있는 동안 MCU가 깨어 있다(driver own). 2e에서 수면 길을 넣기 전까지 큰 값이 나온다.
+- 서스펜드: 들어갈 때 링이 비어 있으면 MCU를 펌웨어에 돌려준다(`BGF: firmware own`), 보낼 것이 생기면 찾아온다(`BGF: driver own`). 깨우기 원천이 아니라 잠든 동안 온 데이터는 깨어나서 받는다. 2e에서 본다.
+- 되풀이 실패: 켜자마자 죽으면 스택이 닫고 여는 것을 세 번 하고 `it keeps failing, not starting it again`을 남긴다. 60초 넘게 살아 있었으면 다시 센다.
 
 ## 10. 아직 비어 있는 것
 

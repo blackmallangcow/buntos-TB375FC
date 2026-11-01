@@ -81,6 +81,8 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `scpsys` | `mediatek,mt6897-power-controller`, `access-controllers` = IFR·VLP, `mediatek,hardware-voter` = `hwv` | 펌웨어, 패치 0050 | 도메인은 첫 소비자가 생길 때 적는다(지금 conn). 벤더 번호 그대로라 부모가 자식보다 작다. 자식 노드의 `status`는 드라이버가 보지 않으니(`scpsys_add_subdomain`) 켜지 않으려면 노드를 적지 않는다 |
 | `ifr_bus`, `vlpcfg_bus` | `0x1002c000`, `0x1c00c000`(0x1000) | 펌웨어 | 버스 보호. 늘 꺼 둔다: 드라이버가 regmap으로 쓸 때는 `status`를 보지 않고(`device_node_to_regmap`), 켜면 드라이버 없는 장치가 생겨 fw_devlink가 `access-controllers`를 보고 `scpsys`를 deferred probe 시간 한도(10초)까지 붙든다 |
 | `dsi0`, `dsi1` | `0x1400d000` SPI 368, `0x1420d000` SPI 412 | 펌웨어 | `disabled`. compatible·클럭·PHY는 화면 파이프라인과 함께 더한다 |
+| `wifi`, `consys` | `wifi@18000000`(SPI 889, 둘째 `reg`는 PCCIF가 있는 `0x10001000`), `consys@18001000`(`cfg-on`, `iocfg-rt`, conn 도메인), LK가 읽는 크기 | 펌웨어, 벤더 | `disabled`(2d). LK는 경로 `/soc/consys`, `/soc/wifi`로 찾고 유닛 주소와 status를 보지 않는다. 유닛 주소가 겹치지 않게 consys를 `18001000`으로 뒀다 |
+| `bluetooth` | `bluetooth@18800000`(`bgf`, `conn`, SPI 614·891) | 펌웨어, 벤더 | `disabled`(2d). LK는 이 노드를 찾지 않는다. 트리의 892는 BEIF 빌드에서 쓰지 않는다 |
 | `spi0`~`spi7` | `0x11010000`~`0x11017000`(0x100), SPI 242~249, `mediatek,pad-select` 0(spi0~5)·1(spi6·7) | 펌웨어, OEM 드라이버 | `disabled`. compatible은 `mediatek,mt6897-spi` + 업스트림 `mediatek,mt6991-spi`(패치 0029). OEM `spi-mt65xx`의 `mt6985` 데이터와 업스트림 `mt6991` 데이터가 같은 기능이다. 클럭은 펌웨어처럼 `parent-clk` = topckgen `mainpll_d6_d2`(spi0~2)·`univpll_d6_d2`(spi3~7), `sel-clk` = spi 먹스, `spi-clk` = pericfg_ao 게이트다. 드라이버가 실제 클럭 값으로 분주를 계산한다(커뮤니티 포트는 26 MHz 자리값 때문에 SCLK가 약 52 MHz였다). OEM의 소프트웨어 CS는 업스트림이 쓰지 않는다 |
 | `watchdog` | `0x1c00a000`(0x100) | 펌웨어 | 7.2.12 `mtk_wdt`는 대체 compatible `mediatek,mt6589-wdt`로 붙고, 켜져 있으면 `WDOG_HW_RUNNING`으로 받아 커널이 쓰다듬는다. 펌웨어의 `syscon`·`simple-mfd`·reboot-mode는 뺐다 |
 | `performance` | `0x11bc10`·`0x11bd30`·`0x11be50`(각 0x120) | 펌웨어 | 노드 이름을 첫 `reg`에 맞췄다(펌웨어 `@11bc00`). mt8195와 같은 CSRAM 배치에 도메인이 하나 더 있다 |
@@ -123,6 +125,9 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `&dsi0`·`&dsi1` `ports/port@1` | 패널의 `port@0`·`port@1`로 | 업스트림 `mediatek,dsi.yaml`(번호) | `disabled`. 입력 포트는 파이프라인과 함께 더한다 |
 | `lcd_avdd`, `lcd_avee` | regulator-fixed, GPIO187·186, `regulator-boot-on`, `off-on-delay-us = <80000>` | 펌웨어(`bias_p`·`bias_n`), 미러 | `disabled`. SM5109의 켜기 핀이다. 전압 5.8V는 TPS65132 식으로 읽은 값이고 소프트웨어는 쓰지 않는다. 80ms는 벤더가 끈 뒤 기다리는 시간이다 |
 | `framebuffer0`의 `panel` | `&panel0` | 미러(셋 다 273615×171009µm) | simpledrm이 `width-mm`·`height-mm`를 읽는다. 파이프라인을 켤 때 뺀다 |
+| `conn_pins_off`, `conn_pins_on` | GPIO192~202 | 펌웨어, 벤더 | consys가 쓴다(2d) |
+| 레일 `mt6363_vcn13`, `mt6363_vrfio18`, `mt6368_vant18`, `mt6368_vcn33_1`, `mt6368_vcn33_2` | 1.35 V, 1.7 V(벤더가 쓰는 값), 나머지는 범위 없음 | 펌웨어, 벤더 | `disabled`(2d). of_regulator가 사용 가능한 자식만 보므로 리눅스가 건드리지 않는다 |
+| `pmic@9` MT6685 | `reg = <0x9 SPMI_USID>` | 펌웨어 | `disabled`(2d). 드라이버가 없고 connsys가 DCXO 레지스터 하나를 읽는다 |
 | `spi2` 터치 `touchscreen@0` | `novatek,nt36532-ts`, 9.6 MHz, IRQ = pio EINT9, 리셋 GPIO60, `iovcc-supply = <&vddio_1v8>`, `firmware-name` 둘(BOE, Tianma), `novatek,panel-id-gpios` = GPIO184, 크기 18401×29441, 171×273 mm, `touchscreen-swapped-x-y` | 펌웨어, OEM(프로토콜), 제3자 미러(패널 판별, 펌웨어 이름), 기기 실측(좌표 범위) | spi2와 함께 꺼져 있다. GPIO184가 0이면 BOE, 1이면 Tianma다. 컨트롤러 좌표는 픽셀의 10배이고 X가 짧은 쪽이다. 축 뒤집기는 기기에서 정한다 |
 | `pio` 핀 상태 | `spi2-pins`(GPIO11~14, 6 mA), `touch-pins`(GPIO9 IRQ, GPIO184 패널 ID, GPIO60 리셋), `hall-pins`(GPIO1), `pogo-keyboard-pins`(GPIO181 UTXD3, GPIO26·40 입력, GPIO61·71), `pogo-keyboard-rx-pins`(GPIO180 URXD3), `pogo-keyboard-rx-detached-pins`(GPIO180 입력) | 펌웨어 | drive-strength는 0027이 핀 드라이버에 더한 연산으로 적용된다 |
 | `aliases` | `spmi0 = &spmi_m` | 7.2.12 드라이버 | 버스가 둘인 MT8196 꼴은 버스마다 `spmiN` 별칭이 있어야 probe한다 |
@@ -201,6 +206,6 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
   - 터치·펜·홀 센서: 패치 0027~0031과 노드가 있다(꺼 둠). 2c에서 pio·클럭 컨트롤러와 함께 spi2·gpio-keys·`vddio_1v8`을 켜고, spi2의 SCLK(9.6 MHz 아래, 깨지면 `cs-gpios`), 터치의 trim ID·패널 ID·펌웨어 내려받기, `evtest`의 좌표와 축 방향, 펜(압력·기울기·단추·호버, 펜 켜기 명령 `0x7B 0x01`), 서스펜드 뒤 터치, 덮개와 키보드에 따른 GPIO1·26 값을 본다([체크리스트](../../../docs/tb375fc/bringup-checklist.md) 7절)
 - 2c 2차:
   - 패널: `dsi0`·`dsi1`에 compatible과 파이프라인을 붙이고 `panel0`·`lcd_avdd`·`lcd_avee`를 켜고 `framebuffer0`의 `panel`을 뺀다(패치 0083·0084)
-- 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다
+- 2d: `consys@18001000`(`mediatek,mt6897-consys`), `wifi@18000000`(`mediatek,mt6897-wifi`), `bluetooth@18800000`, `pmic@9`, 레일 다섯을 켠다. 루트의 `gps`·`connscp`는 그때까지 트리에 없다. LK는 status를 보지 않아, 넷이 다 있으면 메모리를 나누고 펌웨어를 싣기 때문이다. LK가 `emi-addr`와 `memory-region`을 채우는지 본다
   - `&spm`을 켠다(`status = "okay"`). `ifr_bus`·`vlpcfg_bus`는 켜지 않는다. 소비자는 `power-domains = <&scpsys MT6897_POWER_DOMAIN_CONN>`
 - 2e: mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`

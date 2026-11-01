@@ -90,24 +90,26 @@ Dimensity 8300 기기의 속성으로 적힌 값이다. 2.1의 기기 펌웨어�
 - **LK가 싣는다.** MT6897의 gen4m 빌드는 `CFG_WLAN_LK_FWDL_SUPPORT=1`이다. 코드 주석에도 드라이버가 펌웨어를 내려받지 않는다고 적혀 있다.
   - 커널 드라이버는 EMI의 manifest(+0xB00024)만 읽고 시작 명령(INIT 0x42)을 보낸다.
   - 커널에는 파티션을 읽는 코드가 없다.
-  - Bluetooth도 같다(`SUPPORT_BIN2IMG=1`). EMI에서 버전만 읽는다.
+  - Bluetooth도 같다(`SUPPORT_BIN2IMG=1`). EMI에서 버전만 읽는다. `0xB48024`의 오프셋은 펌웨어가 돌기 전에는 0일 수 있다. LK는 `connsys_bt`를 EMI+0에 싣는다(`0x3c4dc`, 역어셈블).
 - **무엇이 실리나:** `connsys_wifi`·`connsys_bt` 파티션의 서명된 이미지일 것이다. LK 소스가 없어 추정이지만 근거는 강하다. 기기에서 EMI의 manifest로 확인한다.
 - **예약 메모리**(펌웨어 트리):
-  - `consys@18000000`: 12 MiB. RO 6.5 MiB(Wi-Fi 3 MiB, BT 2.875 MiB, GNSS 640 KiB)와 RW 4.5 MiB다. `emi-addr`는 LK가 채운다.
-  - `wifi@18000000`: 20 MiB. 호스트 DMA 링과 버퍼를 두는 칸이고, MPU는 LK가 연다. gen4m은 `memory-region`이 없으면 probe에 실패하므로 LK가 이 속성을 붙여 준다고 본다.
+  - `consys@18000000`: 12 MiB. RO 6.5 MiB(Wi-Fi 3 MiB, BT 2.875 MiB, GNSS 640 KiB)와 RW 4.5 MiB다. `emi-addr`는 LK가 채운다. LK는 유닛 주소를 보지 않는다. wifi와 겹치지 않게 mainline 트리에서는 `consys@18001000`으로 둔다. `gps`(1 MiB)와 `connscp`(128 KiB)도 LK가 요구한다.
+  - `wifi@18000000`: 20 MiB. 호스트 DMA 링과 버퍼를 두는 칸이고, MPU는 LK가 연다. LK의 `mblock_fdt_reserved_append`가 `/reserved-memory/mblock-<n>-<name>`을 `shared-dma-pool`, `no-map`으로 만들고 wifi 경로에 `memory-region`을 쓴다(LK 역어셈블, 기기 확인 전).
 - **linux-firmware에는 soc7_0 파일이 없다.** 실기기(ZUXOS 1.5.10.044)의 `/vendor/firmware`에는 BT·MCU RAM 코드(`soc7_0_ram_bt_1_1_hdr.bin`, `soc7_0_ram_mcu_1_1_hdr.bin`과 각 1a·1b판)가 있고, Wi-Fi RAM 코드는 없다(2026-11-01). BT 쪽 이름은 LK를 쓰지 않는 빌드가 찾는 대체 이름과 같다.
 - **방침:** Wi-Fi·BT 펌웨어는 뽑아 둘 파일이 아니라 지켜 둘 파티션이다. `connsys_wifi`·`connsys_bt`를 건드리지 않고 LK 적재본을 쓴다. 재배포 문제도 피한다(buntOS ADR-012).
 
 ## 4. 포팅 설계
 
+코드는 패치 0055~0060(Wi-Fi)과 0085·0086(Bluetooth)이다. 기기 시험은 없다.
+
 | 단계 | 할 일 | 참고 |
 |---|---|---|
-| W1 conninfra 최소 | connsys 전원 켜기. 기기 트리가 `mediatek,mt6897-consys-atf`라 init, A-die, AFE, PLL, 저전력 단계를 TF-A SIP 호출(`0xC2000534`)로 한다. 커널 몫은 넷이다: PMIC 전원(MT6363 VCN13·VRFIO18, MT6368 VCN33_1·VCN33_2·VANT18), 클럭 방식(MT6685 DCXO), CONN 전원 도메인, AP2CONN·CONN2AP sleep protect 해제. A-die MT6637은 conn_infra RF SPI 마스터와 하드웨어 세마포어로 닿는다 | 벤더 `conninfra/conn_drv/connv2/platform/mt6897`(OnePlus 공식), 업스트림 `mt7915/soc.c`(같은 RF SPI·세마포어 절차) |
+| W1 conninfra 최소 | connsys 전원 켜기. 기기 트리가 `mediatek,mt6897-consys-atf`라 init, A-die, AFE, PLL, 저전력 단계를 TF-A SIP 호출(`0xC2000534`)로 한다. 커널 몫은 셋이다: PMIC 전원(MT6363 VCN13·VRFIO18, MT6368 VCN33_1·VCN33_2·VANT18), 클럭 방식(MT6685 DCXO), CONN 전원 도메인. AP2CONN·CONN2AP sleep protect는 전원 도메인의 버스 보호가 맡는다(패치 0054). A-die MT6637은 conn_infra RF SPI 마스터와 하드웨어 세마포어로 닿는다 | 벤더 `conninfra/conn_drv/connv2/platform/mt6897`(OnePlus 공식), 업스트림 `mt7915/soc.c`(같은 RF SPI·세마포어 절차) |
 | W2 mt76 SoC 버스 | `wifi@18000000` 영역의 MMIO 매핑. AXI 표는 0x7c000000→+0, 0x830c0000→+0x400000이고 창은 7 MiB다. 인터럽트는 889(WFDMA)다. 링 배치는 명령 TX 15, RX 이벤트 2 | 업스트림 `mt7921`/`mt792x` 공통 코드, MT7902의 TXQ 15 분기(DMA 배치 선례), 벤더 `soc7_0.c`의 `_HIF_AXI` 표 |
 | W3 펌웨어 기동 | LK가 실은 것을 쓴다. EMI 주소(DT `emi-addr`)를 받아 remap하고, MCU를 기동한 뒤 시작 명령 INIT 0x42를 보낸다. 그 앞에 시간 동기(INIT 0x09)와 PHY action(INIT 0x08: FEM, NVRAM, 보정)이 있다. DMA는 LK가 연 20 MiB 칸 안에서만 한다 | 벤더 `chips/common/fw_dl.c`, `pre_cal.c` |
-| W4 MCU 명령 | 머리 꼴과 레거시 명령 번호는 mt7921과 같다(6절). 펌웨어가 uni cmd(DEV_INFO, BSS_INFO, STA_REC, ROC)를 받는지 2d에서 시험한다. 안 받으면 레거시 경로(CMD 0x11~0x14 등)를 둔다. 보정값은 NVRAM 2,048바이트를 CMD 0x48 조각으로 보낸다 | 6절 표, 벤더 `nic_cmd_event.h` |
+| W4 MCU 명령 | 머리 꼴과 레거시 명령 번호는 mt7921과 같다(6절). 펌웨어가 uni cmd(DEV_INFO, BSS_INFO, STA_REC, ROC)를 받는지 2d에서 시험한다. 안 받으면 레거시 경로(CMD 0x11~0x14 등)를 둔다. 보정값은 NVRAM 태그를 CMD 0x48 조각으로 보낸다 | 6절 표, 벤더 `nic_cmd_event.h` |
 | W5 FEM | `connfem` 표에서 이 기기의 조합을 골라 RF 앞단 설정 | 벤더 `connectivity/connfem` |
-| B1 Bluetooth | 전송은 공유 메모리 링 BEIF(EMI+0xBA0000, 32 KiB)와 IRQ 셋이다. 펌웨어는 LK가 싣는다. hci_dev와 WMT-over-HCI(0xFC6F) 머리는 업스트림 btmtk와 같으므로 다시 쓴다. 전송 드라이버는 새로 쓴다. 업스트림의 SoC 내장 BT 선례는 btmtkuart의 MT7622(BTIF 위 serdev)뿐이다 | 벤더 `bt/mt66xx/btif`(`SUPPORT_BEIF=1`), 업스트림 `drivers/bluetooth/btmtk.h` |
+| B1 Bluetooth | 전송은 공유 메모리 링 BEIF(EMI+0xBA0000, 32 KiB)와 IRQ 둘(SW 614, 버스 멈춤 891)이다. 펌웨어는 LK가 싣는다. hci_dev와 WMT-over-HCI(0xFC6F) 머리는 업스트림 btmtk와 같으므로 다시 쓴다. 전송 드라이버는 새로 쓴다. 업스트림의 SoC 내장 BT 선례는 btmtkuart의 MT7622(BTIF 위 serdev)뿐이다 | 벤더 `bt/mt66xx/btif`(`SUPPORT_BEIF=1`), 업스트림 `drivers/bluetooth/btmtk.h` |
 
 - **순서:** W1은 2b의 플랫폼 기반(클럭, 핀, PMIC)이 먼저 있어야 한다. 그래서 Wi-Fi는 설계안의 2d 단계 그대로 둔다.
 - **우회:** 그 전에는 USB-C 쪽 업스트림 장치(USB Wi-Fi 동글 mt7921u, 유선 이더넷)로 네트워크를 쓴다. 2b에서 USB 호스트(mtu3·xHCI)가 되면 가능하다.
@@ -132,11 +134,12 @@ OnePlus 공식 gen4m(MT6897 빌드)과 업스트림 mt76(7.3)을 대조했다(�
 | 그 앞 단계 | FWDL 모드, 시간 동기(INIT 0x09), PHY action(INIT 0x08) | 없다 | 새로 쓴다 |
 | 명령 머리 | `struct WIFI_CMD`(HW TXD 32바이트와 머리, 합계 64바이트) | `mt76_connac2_mcu_txd` | 같다(CONNAC2 레거시) |
 | uni cmd | soc7_0 빌드에 uni 지원 설정이 없다. BSS·STA·키·ROC·suspend를 레거시 명령으로 보낸다 | 여러 명령을 uni로 보낸다 | 모른다. gen4m은 MT7961도 레거시로 보내므로, 펌웨어가 uni를 못 받는다는 뜻은 아니다 |
-| 레거시 명령 번호 | CE 0x01·03·05·0a·0f·16·17·1b·1c·1d·33·5d·61·62·8a·a1·b0·c0·c5·ca·cd·d0과 EXT 0x05·08·21·2c가 같은 뜻이다 | 같다 | 같다. CE 0x5c(CLC)와 EXT 0xbd(RF pin)는 없다 |
+| 레거시 명령 번호 | CE 0x01·03·05·0a·0f·16·17·1b·1c·1d·33·5d·61·62·8a·a1·b0·c0·c5·ca·cd·d0과 EXT 0x05·08·21이 같은 뜻이다 | 같다 | 같다. CE 0x5c(CLC)와 EXT 0xbd(RF pin)는 없다. EXT 0x46(`MAC_INIT_CTRL`), 0x3e(`PROTECT_CTRL`)도 벤더 표에 없고, 0x4e(`SET_RX_PATH`)와 0x2c는 벤더 헤더에 다른 이름으로 있다(`EFUSE_BUFFER_RD`, `GET_SENSOR_RESULT`). 기기에서 본다 |
 | 이벤트 | `WIFI_EVENT`(RXD 24바이트와 머리). 주요 EID가 같다 | `mt76_connac2_mcu_rxd` | 같다. RSSI 알림 번호만 다르다(0xa1, 업스트림 0x96) |
 | NIC 능력(0x8a) | 0x17은 P2P, 0x20은 MLR 능력 | 0x17은 WFDMA 재할당, 0x20은 칩 능력 | 뜻이 달라 따로 읽는다 |
 | 기능 플래그 | 펌웨어 파일이 없어 trailer의 feature_set을 읽을 수 없다 | `mt792x_get_offload_capability()`가 파일에서 읽는다 | CNM 여부를 다른 길로 정한다 |
-| 보정값 | NVRAM 2,048바이트를 CMD 0x48 조각으로 보낸다 | efuse 모드(EXT 0x21)뿐 | 새로 쓴다 |
+| 보정값 | NVRAM 태그 목록을 CMD 0x48로 보낸다. 목록의 끝은 첫 태그(CTRL)의 길이로 정한다(+256). 조각은 태그마다 1,500바이트 하나다(`wlanLoadManufactureData`). PHY action에는 태그 7·8·21·9와 비트 7이 선 태그만 넣는다(`wlanGetEpaElnaFromNvram`, 최대 1 KiB) | efuse 모드(EXT 0x21)뿐 | 새로 썼다 |
+| INIT 이벤트 | 페이로드는 RXD 24바이트 + 8바이트 뒤다. 일반 이벤트는 + 12바이트 뒤다(`struct mt76_connac2_mcu_rxd`) | `mt7921_mcu_parse_response`는 PATCH_SEM_CONTROL에서만 이 차이를 다룬다 | 자기 함수를 얹었다 |
 | DMA | 명령 TX 링 15. RX는 0·1 데이터, 2 이벤트, 3 tx-free | 명령 링 17, 이벤트 RX 0 | 다르다. MT7902의 TXQ 15 분기가 선례다 |
 | 레지스터 | MT7921과 같은 칩 주소 공간이다 | `fixed_map` | AXI 표만 새로 쓴다 |
 
@@ -147,11 +150,11 @@ OnePlus 공식 gen4m(MT6897 빌드)과 업스트림 mt76(7.3)을 대조했다(�
 
 ## 7. 남은 확인
 
-- **uni cmd:** soc7_0 펌웨어가 uni cmd를 받는지. 2d에서 INIT 0x42 뒤에 uni DEV_INFO 하나를 보내 본다.
-- **LK가 트리에 쓰는 값:** LK가 mainline 트리의 `consys@18000000`·`wifi@18000000`에 `emi-addr`·`memory-region`을 써 주는지, 노드를 이름으로 찾는지 compatible로 찾는지.
+- **uni cmd:** soc7_0 펌웨어가 uni cmd를 받는지. 드라이버가 INIT 0x42 뒤에 uni DEV_INFO 하나를 보내고, 답이 없으면 멈추고 그렇다고 남긴다.
+- **LK가 트리에 쓰는 값:** LK는 노드를 경로로 찾고 status를 보지 않는다(역어셈블). mainline 트리에 실제로 값을 쓰는지는 기기에서 본다. 차례는 [체크리스트](bringup-checklist.md) 9.1절이다.
 - **LK의 펌웨어 적재:** 기기에서 EMI+0xB00024의 manifest로 확인한다.
 - **직접 레지스터 길:** `-atf` 대신 일반 세계에서 레지스터를 직접 쓸 수 있는지(DAPC). 모르면 SIP를 쓴다.
-- **NVRAM과 BT 주소:** gen4m 코드는 `/data/nvram/APCFG/APRDEB/WIFI`를 읽는다. 파티션은 nvdata다. BT 주소의 출처도 기기에서 확인한다.
+- **NVRAM과 BT 주소:** gen4m 코드는 `/data/nvram/APCFG/APRDEB/WIFI`를 읽는다. 파티션은 nvdata다. BT 주소의 출처도 기기에서 확인한다(안드로이드 속성 `persist.odm.bt.address`가 있다).
 
 ## 출처
 
