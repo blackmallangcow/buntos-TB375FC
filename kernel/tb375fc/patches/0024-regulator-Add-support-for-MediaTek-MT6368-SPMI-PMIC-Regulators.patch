@@ -18,8 +18,7 @@ off sequence of the PMIC.
 
 Also address the review of the MT6373 driver: regmap_bulk_write() takes
 a number of registers, an overcurrent interrupt is always reported, and
-the work that enables the interrupt again is cancelled with the
-regulator.
+the work that enables the interrupt again is cancelled on removal.
 
 The registers, less the 0x30 base of the regulators node, the voltage
 tables and the interrupt numbers are those of the MediaTek MT6368 driver
@@ -33,9 +32,9 @@ Link: https://lore.kernel.org/r/agKKuH0fP3lBMuFd@sirena.co.uk
 ---
  drivers/regulator/Kconfig                  |  11 +
  drivers/regulator/Makefile                 |   1 +
- drivers/regulator/mt6368-regulator.c       | 683 +++++++++++++++++++++
+ drivers/regulator/mt6368-regulator.c       | 682 +++++++++++++++++++++
  include/linux/regulator/mt6368-regulator.h | 113 ++++
- 4 files changed, 808 insertions(+)
+ 4 files changed, 807 insertions(+)
 
 diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
 index a54a549..b48f954 100644
@@ -73,10 +72,10 @@ index 134eee2..7f5a2c0 100644
  obj-$(CONFIG_REGULATOR_MT6397)	+= mt6397-regulator.o
 diff --git a/drivers/regulator/mt6368-regulator.c b/drivers/regulator/mt6368-regulator.c
 new file mode 100644
-index 0000000..5b0693b
+index 0000000..1224227
 --- /dev/null
 +++ b/drivers/regulator/mt6368-regulator.c
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,682 @@
 +// SPDX-License-Identifier: GPL-2.0
 +//
 +// Copyright (c) 2021 MediaTek Inc.
@@ -508,7 +507,6 @@ index 0000000..5b0693b
 +static int mt6368_set_ocp(struct regulator_dev *rdev, int lim, int severity, bool enable)
 +{
 +	struct mt6368_regulator_info *info = rdev_get_drvdata(rdev);
-+	int ret;
 +
 +	/* MT6368 supports only enabling protection and does not support limits */
 +	if (lim || severity != REGULATOR_SEVERITY_PROT || !enable)
@@ -517,12 +515,6 @@ index 0000000..5b0693b
 +	/* If there is no OCP interrupt, there's nothing to set */
 +	if (info->virq <= 0)
 +		return -EOPNOTSUPP;
-+
-+	/* Both go with the regulator: the interrupt first, then the work */
-+	ret = devm_delayed_work_autocancel(&rdev->dev, &info->oc_work,
-+					   mt6368_oc_irq_enable_work);
-+	if (ret)
-+		return ret;
 +
 +	return devm_request_threaded_irq(&rdev->dev, info->virq, NULL,
 +					 mt6368_oc_isr, IRQF_ONESHOT,
@@ -723,6 +715,12 @@ index 0000000..5b0693b
 +		}
 +
 +		config.driver_data = info;
++
++		/* Must outlive the regulator, which owns the IRQ that schedules it */
++		ret = devm_delayed_work_autocancel(dev, &info->oc_work,
++						   mt6368_oc_irq_enable_work);
++		if (ret)
++			return ret;
 +
 +		rdev = devm_regulator_register(dev, &info->desc, &config);
 +		if (IS_ERR(rdev))
