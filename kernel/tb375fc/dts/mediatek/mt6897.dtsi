@@ -415,10 +415,13 @@
 		};
 
 		/*
-		 * SPMI 2.0 arbiter with two buses, laid out like MT8196.
-		 * TODO(2b): PMIC children (MT6363 @4, MT6368 @5, MT6319 @6-8,
-		 * MT6685 @9) and the rcs interrupt (pio EINT 248), which needs
-		 * pinctrl-mt6897.
+		 * SPMI 2.0 arbiter with two buses, laid out like MT8196. The
+		 * vendor register tables match the upstream MT8195 data.
+		 * TODO(2b): all six PMICs sit on the M bus (the firmware sets
+		 * no spmi-dev-mask), so put the PMIC children under spmi_m
+		 * (MT6363 @4, MT6368 @5, MT6319 @6-8, MT6685 @9), disable
+		 * spmi_p, and add the rcs interrupt (pio EINT 248), which
+		 * needs pinctrl-mt6897.
 		 */
 		spmi: spmi-arbiter@1cc00000 {
 			compatible = "mediatek,mt6897-spmi", "mediatek,mt8196-spmi";

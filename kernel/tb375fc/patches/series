@@ -1,13 +1,14 @@
 # TB375FC 커널 패치 대기열. 위에서부터 차례로 Linux 7.2.x에 얹는다(build.sh prepare).
 # 업스트림에 들어가면 빼고, 업스트림 판으로 바꾼다. 들어갈 차례는 docs/tb375fc/DESIGN.md 4절과 같다.
 0001-arm64-dts-mediatek-build-Lenovo-TB375FC-and-TB373FU.patch
-# 다음 차례(아직 없음):
-#  - pinctrl: mediatek: add MT6897 (pinctrl-mt6878 틀)
-#  - pmdomain: mediatek: add MT6897 power domains (mtk-pm-domains의 MT8196 데이터 틀)
-#  - clk: mediatek: add MT6897 clocks
-#  - mfd: mtk-spmi-pmic (업스트림 v12, MT6363 regulator·키와 MT6685가 의존)
+# 다음 차례(아직 없음). 2b의 PMIC 쪽은 핀(EINT) → SPMI → MT6319(DT만) → MFD·MT6363 순서다:
+#  - pinctrl: mediatek: add MT6897 (pinctrl-mt6878 틀, EINT 포함)
+#  - spmi: mtk-pmif: FSM 멈춤 우회(84c72fc05f73, 7.4 병합 창)와 클럭 참조 누수(636c4c026f47) 백포트
+#  - clk: mediatek: add MT6897 clocks (FENC 없는 HW voter 먹스, PLL HW voter)
+#  - mfd: mtk-spmi-pmic (업스트림 v12와 리뷰 고침. MT6363 regulator와 MT6685가 의존한다), MT6363 키
+#  - pmdomain: mediatek: add MT6897 power domains (MT8196 틀. UFS·USB에는 없어 2d 뒤)
 #  - input: touchscreen: Novatek NT36532 SPI TDDI와 펜
-#  - input: OnePlus/OPPO Pad pogo-pin 키보드 v6 + TB375FC 프레이밍
+#  - input: OnePlus/OPPO Pad pogo-pin 키보드 v6 + compatible별 CRC 초기값
 #  - pmdomain: mediatek: mtk-mfg MT6897 GPUEB 변형
-#  - wifi: mt76: mt7921 SoC(soc7_0) 버스 + conninfra
-#  - drm/panel: novatek-nt36532 백포트(7.4)와 BOE·Tianma·Tianma 무광 패널
+#  - soc: mediatek: conninfra(TF-A SIP 호출), wifi: mt76: mt7921 SoC(soc7_0) 버스, bluetooth: BEIF 전송
+#  - drm/panel: novatek-nt36532 백포트(47b823940e38)와 BOE·Tianma·Tianma 무광 패널(DSC 1.1)

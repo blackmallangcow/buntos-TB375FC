@@ -48,7 +48,7 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'kernel/tb375fc/build.sh a
 | 단계 | 커널 쪽 | 상태 |
 |---|---|---|
 | 2a 첫 부팅 | UART(8250_mtk), simpledrm 화면 콘솔, pstore, 워치독, LZ4 initramfs | 설정 조각과 장치 트리에 있음. framebuffer·ramoops 노드는 기기에서 주소를 확인한 뒤 켠다 |
-| 2b 저장장치·USB | UFS(ufs-mediatek), mtu3·xHCI·xsphy, USB 가젯, SPMI, MT6363·MT6319, cpufreq-hw | 드라이버는 업스트림에 있음. 클럭·핀·전원 도메인 데이터가 패치 대기열에서 필요 |
+| 2b 저장장치·USB | UFS(ufs-mediatek), mtu3·xHCI·xsphy, USB 가젯, SPMI, MT6363·MT6319, cpufreq-hw | 드라이버는 업스트림에 있음. 핀·클럭 데이터, MFD, SPMI 고침이 패치 대기열에서 필요. UFS·USB에는 전원 도메인이 없다 |
 | 2c 입력 | gpio-keys(홀), SPI, I2C, serdev | NT36532 SPI 터치와 포고 키보드는 패치 대기열 |
-| 2d 무선 | 그 전에는 USB 동글(mt7921u)·USB 이더넷 | soc7_0은 패치 대기열([Wi-Fi 설계](../../docs/tb375fc/wifi-soc7_0.md)) |
+| 2d 무선 | 그 전에는 USB 동글(mt7921u)·USB 이더넷 | soc7_0(LK가 실은 펌웨어를 쓴다), conninfra, BT BEIF 전송은 패치 대기열([Wi-Fi 설계](../../docs/tb375fc/wifi-soc7_0.md)) |
 | 2e GPU·전원 | panthor, GPUEB 메일박스·MFG 전원 도메인, LVTS, MM8013 | MT6897 GPUEB 변형은 패치 대기열 |
