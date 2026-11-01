@@ -2,7 +2,7 @@
 
 TB375FC(Lenovo Xiaoxin Pad Pro 12.7 2025, MediaTek MT6897)용 mainline 커널 커스텀이다. 설계는 [docs/tb375fc/DESIGN.md](../../docs/tb375fc/DESIGN.md)의 1절(D1, D2), 3절, 4절, 5절을 따른다.
 
-- **기반:** Linux **7.2.12** 원본(kernel.org)이다. buntOS 이미지의 Debian forky 커널과 같은 판이다. 벤더 GKI 커널은 쓰지 않는다.
+- **기반:** Linux **7.2.12** 원본(kernel.org)이다. buntOS 이미지의 Debian forky 커널과 같은 판이다. 벤더 GKI 커널은 쓰지 않는다. 이미지용 커널도 이 원본 소스로 빌드하고, 설정만 Debian forky 설정에 조각을 얹은 것을 쓴다. Debian 소스 패키지의 패치는 쓰지 않는다(설계안 D1).
 - **커스텀:** 원본 위에 세 가지를 얹는다. 모두 업스트림에 낼 수 있는 꼴로 짠다.
   - 장치 트리(`dts/`)
   - 패치 대기열(`patches/`)
@@ -36,7 +36,7 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'kernel/tb375fc/build.sh a
 | `kernel` | Image, 장치 트리, 모듈을 빌드하고 모듈을 `~/buntos-build/tb375fc/modules`에 설치한다 |
 
 - 개발 빌드는 arm64 defconfig에 조각을 얹는다. 빠르고 플랫폼 드라이버가 넉넉하다.
-- 이미지에 넣을 때는 Debian forky 커널 설정에 같은 조각을 얹는다. `debian-config.sh`가 그 설정을 만들어 본다(`~/buntos-build/tb375fc/out-debian/.config`). 기본은 패치 없는 원본 트리라 패치 대기열의 기호(`PINCTRL_MT6897`)는 따로 알린다. 그것까지 보려면 빌드가 돌지 않을 때 `KERNEL_TREE=~/buntos-build/tb375fc/linux-7.2.12-tb375fc`를 준다.
+- 이미지에 넣을 때는 Debian forky 커널 설정에 같은 조각을 얹는다. `debian-config.sh`가 그 설정을 만들어 본다(`~/buntos-build/tb375fc/out-debian/.config`). 기본은 패치 없는 원본 트리라 패치 대기열의 기호(`PINCTRL_MT6897`)는 따로 알린다. 그것까지 보려면 빌드가 돌지 않을 때 `KERNEL_TREE=~/buntos-build/tb375fc/linux-7.2.12-tb375fc`를 준다. 이 설정으로 커널 .deb를 만드는 이미지 단계는 아직 없다(설계안 4절, 11절).
 
 ```bash
 limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'kernel/tb375fc/debian-config.sh'
