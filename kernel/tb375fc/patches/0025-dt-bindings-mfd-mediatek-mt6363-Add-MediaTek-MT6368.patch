@@ -1,0 +1,91 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: mfd: mediatek,mt6363: Add MediaTek MT6368
+
+The MT6368 is an SPMI PMIC of the same series as the MT6363, which it
+accompanies on boards with the MT6897 (Dimensity 8300) SoC. Add its
+compatible, and let the regulators node be an MT6363 or an MT6368 one.
+
+Only the MT6363 has the power and home keys: the MediaTek driver adds no
+keys for the MT6368 and the MT6373, so do not allow a keys node for them.
+
+---
+ .../bindings/mfd/mediatek,mt6363.yaml         | 48 ++++++++++++++++++-
+ 1 file changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml
+index 7bdb129..015e313 100644
+--- a/Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml
+@@ -30,6 +30,7 @@ properties:
+   compatible:
+     enum:
+       - mediatek,mt6363
++      - mediatek,mt6368
+       - mediatek,mt6373
+ 
+   reg:
+@@ -63,7 +64,9 @@ patternProperties:
+ 
+   "^regulators@[0-9a-f]+$":
+     type: object
+-    $ref: /schemas/regulator/mediatek,mt6363-regulator.yaml#
++    oneOf:
++      - $ref: /schemas/regulator/mediatek,mt6363-regulator.yaml#
++      - $ref: /schemas/regulator/mediatek,mt6368-regulator.yaml#
+ 
+ required:
+   - compatible
+@@ -71,6 +74,17 @@ required:
+   - '#address-cells'
+   - '#size-cells'
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          not:
++            contains:
++              const: mediatek,mt6363
++    then:
++      properties:
++        keys: false
++
+ additionalProperties: false
+ 
+ examples:
+@@ -125,3 +139,35 @@ examples:
+         };
+       };
+     };
++
++  - |
++    #include <dt-bindings/interrupt-controller/irq.h>
++    #include <dt-bindings/spmi/spmi.h>
++
++    spmi {
++      #address-cells = <2>;
++      #size-cells = <0>;
++
++      pmic@5 {
++        compatible = "mediatek,mt6368";
++        reg = <0x5 SPMI_USID>;
++        interrupts = <5 48 IRQ_TYPE_LEVEL_HIGH>;
++        interrupt-controller;
++        #address-cells = <1>;
++        #interrupt-cells = <3>;
++        #size-cells = <0>;
++
++        regulators@30 {
++          compatible = "mediatek,mt6368-regulator";
++          reg = <0x30>;
++
++          vusb {
++            regulator-name = "vusb33";
++            regulator-min-microvolt = <3300000>;
++            regulator-max-microvolt = <3300000>;
++            regulator-allowed-modes = <0 2>;
++            regulator-over-current-protection;
++          };
++        };
++      };
++    };

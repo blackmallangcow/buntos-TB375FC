@@ -1,0 +1,80 @@
+From: buntOS contributors
+Subject: [PATCH] mfd: mtk-spmi-pmic: Add support for MediaTek MT6368
+
+Add the MediaTek MT6368 SPMI PMIC, with its BUCK, LDO, MISC and AUD
+interrupt groups. Like the MT6363, it has its chip ID in the same
+register and three Control registers (CON, SET and CLR) for each eight
+interrupts.
+
+The group status bits, the registers and the interrupt numbers are those
+of the MediaTek driver in the OnePlus MT6897 kernel (OnePlusOSS
+android_kernel_modules_and_devicetree_oneplus_mt6897, branch
+oneplus/mt6897_b_16.0.0_oneplus_pad).
+
+---
+ drivers/mfd/mtk-spmi-pmic.c               | 15 +++++++++++++++
+ include/linux/mfd/mt63x3_spmi/registers.h | 11 +++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/drivers/mfd/mtk-spmi-pmic.c b/drivers/mfd/mtk-spmi-pmic.c
+index 719c3d1..33b469b 100644
+--- a/drivers/mfd/mtk-spmi-pmic.c
++++ b/drivers/mfd/mtk-spmi-pmic.c
+@@ -405,6 +405,13 @@ static const struct mtk_spmi_pmic_irq_grp mt6363_irq_groups[] = {
+ 	MTK_SPMI_PMIC_IRQ_GROUP(MT6363, BM,	6, 88, 107)
+ };
+ 
++static const struct mtk_spmi_pmic_irq_grp mt6368_irq_groups[] = {
++	MTK_SPMI_PMIC_IRQ_GROUP(MT6368, BUCK,	0,  0,  6),
++	MTK_SPMI_PMIC_IRQ_GROUP(MT6368, LDO,	1,  8, 26),
++	MTK_SPMI_PMIC_IRQ_GROUP(MT6368, MISC,	3, 48, 63),
++	MTK_SPMI_PMIC_IRQ_GROUP(MT6368, AUD,	7, 96, 99),
++};
++
+ static const struct mtk_spmi_pmic_irq_grp mt6373_irq_groups[] = {
+ 	MTK_SPMI_PMIC_IRQ_GROUP(MT6373, BUCK,	0,  0,  9),
+ 	MTK_SPMI_PMIC_IRQ_GROUP(MT6373, LDO,	1, 16, 39),
+@@ -418,6 +425,13 @@ static const struct mtk_spmi_pmic_variant mt6363_variant = {
+ 	.irq_grp_reg = MT6363_REG_TOP_INT_STATUS1,
+ };
+ 
++static const struct mtk_spmi_pmic_variant mt6368_variant = {
++	.pmic_irq = mt6368_irq_groups,
++	.num_groups = ARRAY_SIZE(mt6368_irq_groups),
++	.con_reg_len = 3,
++	.irq_grp_reg = MT6368_REG_TOP_INT_STATUS1,
++};
++
+ static const struct mtk_spmi_pmic_variant mt6373_variant = {
+ 	.pmic_irq = mt6373_irq_groups,
+ 	.num_groups = ARRAY_SIZE(mt6373_irq_groups),
+@@ -463,6 +477,7 @@ static int mtk_spmi_pmic_probe(struct spmi_device *sdev)
+ 
+ static const struct of_device_id mtk_pmic_spmi_id_table[] = {
+ 	{ .compatible = "mediatek,mt6363", .data = &mt6363_variant },
++	{ .compatible = "mediatek,mt6368", .data = &mt6368_variant },
+ 	{ .compatible = "mediatek,mt6373", .data = &mt6373_variant },
+ 	{ /* sentinel */ }
+ };
+diff --git a/include/linux/mfd/mt63x3_spmi/registers.h b/include/linux/mfd/mt63x3_spmi/registers.h
+index a1a088d..333b815 100644
+--- a/include/linux/mfd/mt63x3_spmi/registers.h
++++ b/include/linux/mfd/mt63x3_spmi/registers.h
+@@ -24,6 +24,17 @@
+ #define MT6363_REG_LDO_TOP_INT_CON0		0x1b11
+ #define MT6363_REG_LDO_TOP_INT_STATUS0		0x1b29
+ 
++/* MT6368 PMIC Registers */
++#define MT6368_REG_MISC_TOP_INT_CON0		0x3b
++#define MT6368_REG_MISC_TOP_INT_STATUS0		0x47
++#define MT6368_REG_TOP_INT_STATUS1		0x52
++#define MT6368_REG_BUCK_TOP_INT_CON0		0x1411
++#define MT6368_REG_BUCK_TOP_INT_STATUS0		0x1417
++#define MT6368_REG_LDO_TOP_INT_CON0		0x1b12
++#define MT6368_REG_LDO_TOP_INT_STATUS0		0x1b24
++#define MT6368_REG_AUD_TOP_INT_CON0		0x231d
++#define MT6368_REG_AUD_TOP_INT_STATUS0		0x2323
++
+ /* MT6373 PMIC Registers */
+ #define MT6373_REG_MISC_TOP_INT_CON0		0x3c
+ #define MT6373_REG_MISC_TOP_INT_STATUS0		0x48

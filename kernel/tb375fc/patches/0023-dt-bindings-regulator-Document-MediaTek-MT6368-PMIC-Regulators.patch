@@ -1,0 +1,114 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: regulator: Document MediaTek MT6368 PMIC Regulators
+
+Add a binding for the regulators of the MediaTek MT6368 SPMI PMIC, which
+board designs with the MT6897 (Dimensity 8300) SoC pair with the MT6363.
+As with the MT6363 and MT6373 regulators, they are a child node of the
+PMIC whose reg is the base of their registers.
+
+The MT6368 has six bucks, a buck for an RF power amplifier (vpa) and
+fifteen LDOs. VMCH can also be switched on and off by an external
+interrupt, such as the card detect line of an SD card slot, through
+vmch-eint-high or vmch-eint-low. As in the MediaTek driver, the SIM card
+and DRAM LDOs are left out. Unlike the MT6363 binding, the bucks do not
+list the ultra low power mode, which neither the MediaTek driver nor this
+one can set.
+
+---
+ .../regulator/mediatek,mt6368-regulator.yaml  | 88 +++++++++++++++++++
+ 1 file changed, 88 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/regulator/mediatek,mt6368-regulator.yaml b/Documentation/devicetree/bindings/regulator/mediatek,mt6368-regulator.yaml
+new file mode 100644
+index 0000000..ffacaaf
+--- /dev/null
++++ b/Documentation/devicetree/bindings/regulator/mediatek,mt6368-regulator.yaml
+@@ -0,0 +1,88 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/regulator/mediatek,mt6368-regulator.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6368 PMIC Regulators
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++description:
++  The MT6368 SPMI PMIC provides six BUCK regulators, a BUCK for an RF power
++  amplifier (vpa) and LDO (Low DropOut) regulators, and can optionally
++  provide overcurrent warnings with one ocp interrupt for each of them.
++  VMCH can also be switched on and off by an external interrupt, such as
++  the card detect line of an SD card slot, through vmch-eint-high or
++  vmch-eint-low, named after the active level of that interrupt.
++
++properties:
++  compatible:
++    const: mediatek,mt6368-regulator
++
++  reg:
++    maxItems: 1
++
++patternProperties:
++  "^v(buck[1-6]|pa)$":
++    description: Buck regulators
++    type: object
++    $ref: regulator.yaml#
++    unevaluatedProperties: false
++    properties:
++      regulator-allowed-modes:
++        description: |
++          Allowed Buck regulator operating modes allowed. Valid values below.
++            0 - Normal mode with automatic power saving, reducing the switching
++                frequency when light load conditions are detected
++            1 - Forced Continuous Conduction mode (FCCM) for improved voltage
++                regulation accuracy with constant switching frequency but lower
++                regulator efficiency
++            2 - Forced Low Power mode for improved regulator efficiency, used
++                when no heavy load is expected, does not limit the maximum out
++                current but unless only a light load is applied, there will be
++                regulation accuracy and efficiency losses.
++        maxItems: 3
++        items:
++          enum: [ 0, 1, 2 ]
++
++  "^v(ant|aud|aux)18$":
++    $ref: "#/$defs/ldo-common"
++
++  "^v(cn33-[12]|efuse|fp|ibr|io28|tp|usb)$":
++    $ref: "#/$defs/ldo-common"
++
++  "^vmc(h)?$":
++    $ref: "#/$defs/ldo-common"
++
++  "^vmch-eint-(high|low)$":
++    $ref: "#/$defs/ldo-common"
++
++  "^vrf1[38]-aif$":
++    $ref: "#/$defs/ldo-common"
++
++$defs:
++  ldo-common:
++    type: object
++    $ref: regulator.yaml#
++    unevaluatedProperties: false
++    properties:
++      regulator-allowed-modes:
++        description: |
++          Allowed LDO regulator operating modes allowed. Valid values below.
++            0 - Normal mode with automatic power saving, reducing the switching
++                frequency when light load conditions are detected
++            2 - Forced Low Power mode for improved regulator efficiency, used
++                when no heavy load is expected, does not limit the maximum out
++                current but unless only a light load is applied, there will be
++                regulation accuracy and efficiency losses.
++        maxItems: 2
++        items:
++          enum: [ 0, 2 ]
++
++required:
++  - compatible
++  - reg
++
++additionalProperties: false

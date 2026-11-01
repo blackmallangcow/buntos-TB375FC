@@ -261,6 +261,68 @@
 	};
 
 	/*
+	 * MT6368 second PMIC, with the rails the stock tree keeps on: among
+	 * them USB's analog supply and the GPU core, which stays on until a
+	 * GPU driver takes it. The stock tree leaves the others to their
+	 * users, such as vibr (the vibrator and the camera autofocus), vfp
+	 * (the fingerprint sensor), vaud18 (the audio codec), vmc and
+	 * vmch-eint-* (the SD card) and vsim2 (the cameras); leaving them
+	 * out of this node keeps Linux from touching them. As on the MT6363,
+	 * no voltage limits are given and the names come from the stock
+	 * consumers where there is one.
+	 */
+	mt6368: pmic@5 {
+		compatible = "mediatek,mt6368";
+		reg = <0x5 SPMI_USID>;
+		interrupts = <0x5 48 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-controller;
+		#interrupt-cells = <3>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		regulators@30 {
+			compatible = "mediatek,mt6368-regulator";
+			reg = <0x30>;
+
+			mt6368_vbuck2: vbuck2 {
+				regulator-name = "vgpu";
+				regulator-enable-ramp-delay = <200>;
+				regulator-always-on;
+			};
+
+			mt6368_vbuck5: vbuck5 {
+				regulator-name = "mt6368_vbuck5";
+				regulator-enable-ramp-delay = <180>;
+				regulator-always-on;
+			};
+
+			mt6368_vbuck6: vbuck6 {
+				regulator-name = "mt6368_vbuck6";
+				regulator-enable-ramp-delay = <180>;
+				regulator-always-on;
+			};
+
+			mt6368_vio28: vio28 {
+				regulator-name = "mt6368_vio28";
+				regulator-enable-ramp-delay = <680>;
+				regulator-always-on;
+			};
+
+			mt6368_vtp: vtp {
+				regulator-name = "mt6368_vtp";
+				regulator-enable-ramp-delay = <680>;
+				regulator-always-on;
+			};
+
+			mt6368_vusb: vusb {
+				regulator-name = "vusb33";
+				regulator-enable-ramp-delay = <680>;
+				regulator-always-on;
+			};
+		};
+	};
+
+	/*
 	 * MT6319 buck PMICs, as in the stock tree. Their users there:
 	 * 6/vbuck1 the ISP and camera power domains, 6/vbuck3 (proc1 and
 	 * proc4), 7/vbuck1 (proc2) and 6/vbuck4 (proc3) the CPU DVFS that
@@ -341,16 +403,17 @@
 	};
 };
 
+/* USB's analog supply, as in the stock tree */
+&ssusb {
+	vusb33-supply = <&mt6368_vusb>;
+};
+
 /* Debug UART, GPIO207 (TX) and GPIO208 (RX) */
 &uart0 {
 	status = "okay";
 };
 
-/*
- * UFS supplies, as in the stock tree. USB's vusb33 there is MT6368 VUSB
- * (SID 5), which has no upstream driver: the stock tree keeps it always
- * on, nothing here touches the MT6368, and ssusb runs on a dummy supply.
- */
+/* UFS supplies, as in the stock tree */
 &ufshci {
 	vcc-supply = <&mt6363_vemc>;
 	vccq-supply = <&mt6319_8_vbuck3>;

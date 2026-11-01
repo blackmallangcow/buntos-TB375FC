@@ -1,0 +1,881 @@
+From: buntOS contributors
+Subject: [PATCH] regulator: Add support for MediaTek MT6368 SPMI PMIC Regulators
+
+Add a driver for the regulators of the MediaTek MT6368 SPMI PMIC, based
+on the MT6363 one: the regulators are a child of the PMIC, with their own
+regmap at the base the device tree gives, and their overcurrent
+interrupts come from the PMIC interrupt controller of the mtk-spmi-pmic
+MFD driver.
+
+Unlike the MT6363 driver, the regmap has 8-bit values, as the registers
+have: with 16-bit values every write would also write the next register,
+which here is a CLR register after a SET register, or the next enable
+register after a CLR register. The MT6368 has no hardware voted low power
+mode and no operating mode registers, so the mode comes from the low
+power bit and there is no set_load. As on the MT6373, VMCH can be
+switched by an external interrupt, and the shutdown enables the power
+off sequence of the PMIC.
+
+Also address the review of the MT6373 driver: regmap_bulk_write() takes
+a number of registers, an overcurrent interrupt is always reported, and
+the work that enables the interrupt again is cancelled with the
+regulator.
+
+The registers, less the 0x30 base of the regulators node, the voltage
+tables and the interrupt numbers are those of the MediaTek MT6368 driver
+in the OnePlus MT6897 kernel (OnePlusOSS
+android_kernel_modules_and_devicetree_oneplus_mt6897, branch
+oneplus/mt6897_b_16.0.0_oneplus_pad). As in the MT6363 driver, VOCAL adds
+up to ten 10mV steps to the voltage that VOSEL picks.
+
+Link: https://lore.kernel.org/r/agKKuH0fP3lBMuFd@sirena.co.uk
+
+---
+ drivers/regulator/Kconfig                  |  11 +
+ drivers/regulator/Makefile                 |   1 +
+ drivers/regulator/mt6368-regulator.c       | 683 +++++++++++++++++++++
+ include/linux/regulator/mt6368-regulator.h | 113 ++++
+ 4 files changed, 808 insertions(+)
+
+diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
+index a54a549..b48f954 100644
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -984,6 +984,17 @@ config REGULATOR_MT6363
+ 	  This driver supports the control of different power rails of device
+ 	  through regulator interface.
+ 
++config REGULATOR_MT6368
++	tristate "MT6368 SPMI PMIC regulator driver"
++	depends on SPMI
++	select REGMAP_SPMI
++	select IRQ_DOMAIN
++	help
++	  Say Y here to enable support for regulators found in the MediaTek
++	  MT6368 SPMI PMIC.
++	  This driver supports the control of different power rails of device
++	  through regulator interface.
++
+ config REGULATOR_MT6370
+ 	tristate "MT6370 SubPMIC Regulator"
+ 	depends on MFD_MT6370
+diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
+index 134eee2..7f5a2c0 100644
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -116,6 +116,7 @@ obj-$(CONFIG_REGULATOR_MT6358)	+= mt6358-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6359)	+= mt6359-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6360) += mt6360-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6363) += mt6363-regulator.o
++obj-$(CONFIG_REGULATOR_MT6368) += mt6368-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6370) += mt6370-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6380)	+= mt6380-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6397)	+= mt6397-regulator.o
+diff --git a/drivers/regulator/mt6368-regulator.c b/drivers/regulator/mt6368-regulator.c
+new file mode 100644
+index 0000000..5b0693b
+--- /dev/null
++++ b/drivers/regulator/mt6368-regulator.c
+@@ -0,0 +1,683 @@
++// SPDX-License-Identifier: GPL-2.0
++//
++// Copyright (c) 2021 MediaTek Inc.
++// Copyright (c) 2026 buntOS contributors
++//
++// Based on the MT6363 regulator driver,
++// Copyright (c) 2025 Collabora Ltd
++
++#include <linux/delay.h>
++#include <linux/devm-helpers.h>
++#include <linux/err.h>
++#include <linux/interrupt.h>
++#include <linux/irq.h>
++#include <linux/irqdomain.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_irq.h>
++#include <linux/platform_device.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/spmi.h>
++#include <linux/unaligned.h>
++
++#include <linux/regulator/driver.h>
++#include <linux/regulator/mt6368-regulator.h>
++
++#define MT6368_REGULATOR_MODE_NORMAL	0
++#define MT6368_REGULATOR_MODE_FCCM	1
++#define MT6368_REGULATOR_MODE_LP	2
++
++#define EN_SET_OFFSET			0x1
++#define EN_CLR_OFFSET			0x2
++
++#define OC_IRQ_ENABLE_DELAY_MS		10
++
++/* Unlock key for BUCK_TOP */
++#define MT6368_BUCK_TOP_UNLOCK_VALUE	0x5543
++
++enum {
++	MT6368_ID_VBUCK1,
++	MT6368_ID_VBUCK2,
++	MT6368_ID_VBUCK3,
++	MT6368_ID_VBUCK4,
++	MT6368_ID_VBUCK5,
++	MT6368_ID_VBUCK6,
++	MT6368_ID_VPA,
++	MT6368_ID_VANT18,
++	MT6368_ID_VAUD18,
++	MT6368_ID_VAUX18,
++	MT6368_ID_VCN33_1,
++	MT6368_ID_VCN33_2,
++	MT6368_ID_VEFUSE,
++	MT6368_ID_VFP,
++	MT6368_ID_VIBR,
++	MT6368_ID_VIO28,
++	MT6368_ID_VMC,
++	MT6368_ID_VMCH,
++	MT6368_ID_VMCH_EINT_HIGH,
++	MT6368_ID_VMCH_EINT_LOW,
++	MT6368_ID_VRF13_AIF,
++	MT6368_ID_VRF18_AIF,
++	MT6368_ID_VTP,
++	MT6368_ID_VUSB,
++};
++
++/**
++ * struct mt6368_regulator_info - MT6368 regulators information
++ * @desc: Regulator description structure
++ * @lp_mode_reg: Low Power mode register (normal/idle)
++ * @lp_mode_mask: Low Power mode regulator mask
++ * @modeset_reg: AUTO/PWM mode register, zero if there is none
++ * @modeset_mask: AUTO/PWM regulator mask
++ * @oc_work: Delayed work for enabling overcurrent IRQ
++ * @hwirq: PMIC-Internal HW Interrupt for overcurrent event, negative if none
++ * @virq: Mapped Interrupt for overcurrent event
++ */
++struct mt6368_regulator_info {
++	struct regulator_desc desc;
++	u16 lp_mode_reg;
++	u16 lp_mode_mask;
++	u16 modeset_reg;
++	u16 modeset_mask;
++	struct delayed_work oc_work;
++	int hwirq;
++	int virq;
++};
++
++#define MT6368_BUCK(match, vreg, min, max, step, en_reg, lp_reg,	\
++		    mset_reg, ocp_intn)					\
++[MT6368_ID_##vreg] = {							\
++	.desc = {							\
++		.name = match,						\
++		.of_match = of_match_ptr(match),			\
++		.ops = &mt6368_vreg_setclr_ops,				\
++		.type = REGULATOR_VOLTAGE,				\
++		.id = MT6368_ID_##vreg,					\
++		.owner = THIS_MODULE,					\
++		.n_voltages = ((max) - (min)) / (step) + 1,		\
++		.min_uV = (min),					\
++		.uV_step = (step),					\
++		.enable_reg = (en_reg),					\
++		.enable_mask = BIT(MT6368_RG_BUCK_##vreg##_EN_BIT),	\
++		.vsel_reg = MT6368_RG_BUCK_##vreg##_VOSEL_ADDR,		\
++		.vsel_mask = MT6368_RG_BUCK_##vreg##_VOSEL_MASK,	\
++		.of_map_mode = mt6368_map_mode,				\
++	},								\
++	.lp_mode_reg = (lp_reg),					\
++	.lp_mode_mask = BIT(MT6368_RG_BUCK_##vreg##_LP_BIT),		\
++	.modeset_reg = (mset_reg),					\
++	.modeset_mask = BIT(MT6368_RG_##vreg##_FCCM_BIT),		\
++	.hwirq = (ocp_intn),						\
++}
++
++/*
++ * VOSEL picks one of sixteen voltages, used as the ranges here, and VOCAL
++ * adds up to ten 10mV steps to it.
++ */
++#define MT6368_LDO_CAL_OPS(match, vreg, vops, vrnum, en_reg, en_mask,	\
++			   ldo, ocp_intn)				\
++[MT6368_ID_##vreg] = {							\
++	.desc = {							\
++		.name = match,						\
++		.of_match = of_match_ptr(match),			\
++		.ops = &(vops),						\
++		.type = REGULATOR_VOLTAGE,				\
++		.id = MT6368_ID_##vreg,					\
++		.owner = THIS_MODULE,					\
++		.n_voltages = ARRAY_SIZE(ldo_volt_ranges##vrnum) * 11,	\
++		.linear_ranges = ldo_volt_ranges##vrnum,		\
++		.n_linear_ranges = ARRAY_SIZE(ldo_volt_ranges##vrnum),	\
++		.linear_range_selectors_bitfield = ldos_cal_selectors,	\
++		.enable_reg = (en_reg),					\
++		.enable_mask = (en_mask),				\
++		.vsel_reg = MT6368_RG_##ldo##_VOCAL_ADDR,		\
++		.vsel_mask = MT6368_RG_LDO_VOCAL_MASK,			\
++		.vsel_range_reg = MT6368_RG_##ldo##_VOSEL_ADDR,		\
++		.vsel_range_mask = MT6368_RG_LDO_VOSEL_MASK,		\
++		.of_map_mode = mt6368_map_mode,				\
++	},								\
++	.lp_mode_reg = MT6368_RG_LDO_##ldo##_ADDR,			\
++	.lp_mode_mask = BIT(MT6368_RG_LDO_LP_BIT),			\
++	.hwirq = (ocp_intn),						\
++}
++
++#define MT6368_LDO_VT(match, vreg, vrnum, ocp_intn)			\
++	MT6368_LDO_CAL_OPS(match, vreg, mt6368_ldo_vtable_ops, vrnum,	\
++			   MT6368_RG_LDO_##vreg##_ADDR,			\
++			   BIT(MT6368_RG_LDO_EN_BIT), vreg, ocp_intn)
++
++/*
++ * VMCH switched on and off by an external interrupt, such as the card
++ * detect line of an SD card slot, with VMCH's voltage and modes. It has
++ * no overcurrent interrupt of its own: VMCH's belongs to vmch.
++ */
++#define MT6368_LDO_EI(match, vreg)					\
++	MT6368_LDO_CAL_OPS(match, vreg, mt6368_vmch_eint_ops, 4,	\
++			   MT6368_RG_LDO_VMCH_EINT_ADDR,		\
++			   MT6368_RG_LDO_VMCH_EINT_EN, VMCH, -1)
++
++static const unsigned int ldos_cal_selectors[] = {
++	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
++};
++
++static const struct linear_range ldo_volt_ranges1[] = {
++	REGULATOR_LINEAR_RANGE(1200000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1300000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1500000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1700000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1800000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2000000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2100000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2200000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2700000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2800000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2900000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3000000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3100000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3300000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3400000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3500000, 0, 10, 10000)
++};
++
++static const struct linear_range ldo_volt_ranges2[] = {
++	REGULATOR_LINEAR_RANGE(1800000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1900000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2000000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2100000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2200000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2300000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2400000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2500000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2600000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2700000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2800000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2900000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3000000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3100000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3200000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3300000, 0, 10, 10000)
++};
++
++static const struct linear_range ldo_volt_ranges3[] = {
++	REGULATOR_LINEAR_RANGE(600000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(700000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(800000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(900000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1000000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1100000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1200000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1300000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1400000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1500000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1600000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1700000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1800000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1900000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2000000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2100000, 0, 10, 10000)
++};
++
++static const struct linear_range ldo_volt_ranges4[] = {
++	REGULATOR_LINEAR_RANGE(1200000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1300000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1500000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1700000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(1800000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2000000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2500000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2600000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2700000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2800000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(2900000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3000000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3100000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3300000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3400000, 0, 10, 10000),
++	REGULATOR_LINEAR_RANGE(3500000, 0, 10, 10000)
++};
++
++static int mt6368_vreg_enable_setclr(struct regulator_dev *rdev)
++{
++	return regmap_write(rdev->regmap, rdev->desc->enable_reg + EN_SET_OFFSET,
++			    rdev->desc->enable_mask);
++}
++
++static int mt6368_vreg_disable_setclr(struct regulator_dev *rdev)
++{
++	return regmap_write(rdev->regmap, rdev->desc->enable_reg + EN_CLR_OFFSET,
++			    rdev->desc->enable_mask);
++}
++
++static inline unsigned int mt6368_map_mode(unsigned int mode)
++{
++	switch (mode) {
++	case MT6368_REGULATOR_MODE_NORMAL:
++		return REGULATOR_MODE_NORMAL;
++	case MT6368_REGULATOR_MODE_FCCM:
++		return REGULATOR_MODE_FAST;
++	case MT6368_REGULATOR_MODE_LP:
++		return REGULATOR_MODE_IDLE;
++	default:
++		return REGULATOR_MODE_INVALID;
++	}
++}
++
++static int mt6368_vmch_eint_enable(struct regulator_dev *rdev)
++{
++	const struct regulator_desc *rdesc = rdev->desc;
++	unsigned int val;
++	int ret;
++
++	if (rdesc->id == MT6368_ID_VMCH_EINT_HIGH)
++		val = MT6368_RG_LDO_VMCH_EINT_POL;
++	else
++		val = 0;
++
++	ret = regmap_update_bits(rdev->regmap, MT6368_RG_LDO_VMCH_EINT_ADDR,
++				 MT6368_RG_LDO_VMCH_EINT_POL, val);
++	if (ret)
++		return ret;
++
++	ret = regmap_set_bits(rdev->regmap, MT6368_RG_LDO_VMCH_ADDR,
++			      BIT(MT6368_RG_LDO_EN_BIT));
++	if (ret)
++		return ret;
++
++	return regmap_set_bits(rdev->regmap, rdesc->enable_reg, rdesc->enable_mask);
++}
++
++static int mt6368_vmch_eint_disable(struct regulator_dev *rdev)
++{
++	const struct regulator_desc *rdesc = rdev->desc;
++	int ret;
++
++	ret = regmap_clear_bits(rdev->regmap, MT6368_RG_LDO_VMCH_ADDR,
++				BIT(MT6368_RG_LDO_EN_BIT));
++	if (ret)
++		return ret;
++
++	/* Wait for VMCH discharging */
++	usleep_range(1500, 1600);
++
++	return regmap_clear_bits(rdev->regmap, rdesc->enable_reg, rdesc->enable_mask);
++}
++
++static unsigned int mt6368_regulator_get_mode(struct regulator_dev *rdev)
++{
++	struct mt6368_regulator_info *info = rdev_get_drvdata(rdev);
++	unsigned int val;
++	int ret;
++
++	if (info->modeset_reg) {
++		ret = regmap_read(rdev->regmap, info->modeset_reg, &val);
++		if (ret) {
++			dev_err(&rdev->dev, "Failed to get mt6368 mode: %d\n", ret);
++			return ret;
++		}
++
++		if (val & info->modeset_mask)
++			return REGULATOR_MODE_FAST;
++	}
++
++	ret = regmap_read(rdev->regmap, info->lp_mode_reg, &val);
++	if (ret) {
++		dev_err(&rdev->dev, "Failed to get lp mode: %d\n", ret);
++		return ret;
++	}
++
++	if (val & info->lp_mode_mask)
++		return REGULATOR_MODE_IDLE;
++
++	return REGULATOR_MODE_NORMAL;
++}
++
++/* The key is written to KEY_PROT_LO and KEY_PROT_HI, low byte first */
++static int mt6368_buck_unlock(struct regmap *map, bool unlock)
++{
++	u8 key[2] = { };
++
++	if (unlock)
++		put_unaligned_le16(MT6368_BUCK_TOP_UNLOCK_VALUE, key);
++
++	return regmap_bulk_write(map, MT6368_BUCK_TOP_KEY_PROT_LO, key, ARRAY_SIZE(key));
++}
++
++static int mt6368_regulator_set_mode(struct regulator_dev *rdev,
++				     unsigned int mode)
++{
++	struct mt6368_regulator_info *info = rdev_get_drvdata(rdev);
++	struct regmap *regmap = rdev->regmap;
++	int cur_mode, ret;
++
++	if (!info->modeset_reg && mode == REGULATOR_MODE_FAST)
++		return -EOPNOTSUPP;
++
++	switch (mode) {
++	case REGULATOR_MODE_FAST:
++		ret = mt6368_buck_unlock(regmap, true);
++		if (ret)
++			break;
++
++		ret = regmap_set_bits(regmap, info->modeset_reg, info->modeset_mask);
++
++		mt6368_buck_unlock(regmap, false);
++		break;
++	case REGULATOR_MODE_NORMAL:
++		cur_mode = mt6368_regulator_get_mode(rdev);
++		if (cur_mode < 0) {
++			ret = cur_mode;
++			break;
++		}
++
++		if (cur_mode == REGULATOR_MODE_FAST) {
++			ret = mt6368_buck_unlock(regmap, true);
++			if (ret)
++				break;
++
++			ret = regmap_clear_bits(regmap, info->modeset_reg, info->modeset_mask);
++
++			mt6368_buck_unlock(regmap, false);
++			break;
++		} else if (cur_mode == REGULATOR_MODE_IDLE) {
++			ret = regmap_clear_bits(regmap, info->lp_mode_reg, info->lp_mode_mask);
++			if (ret == 0)
++				usleep_range(100, 200);
++		} else {
++			ret = 0;
++		}
++		break;
++	case REGULATOR_MODE_IDLE:
++		ret = regmap_set_bits(regmap, info->lp_mode_reg, info->lp_mode_mask);
++		break;
++	default:
++		ret = -EINVAL;
++	}
++
++	if (ret) {
++		dev_err(&rdev->dev, "Failed to set mode %u: %d\n", mode, ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++static void mt6368_oc_irq_enable_work(struct work_struct *work)
++{
++	struct delayed_work *dwork = to_delayed_work(work);
++	struct mt6368_regulator_info *info =
++		container_of(dwork, struct mt6368_regulator_info, oc_work);
++
++	enable_irq(info->virq);
++}
++
++static irqreturn_t mt6368_oc_isr(int irq, void *data)
++{
++	struct regulator_dev *rdev = data;
++	struct mt6368_regulator_info *info = rdev_get_drvdata(rdev);
++
++	disable_irq_nosync(info->virq);
++
++	regulator_notifier_call_chain(rdev, REGULATOR_EVENT_OVER_CURRENT, NULL);
++
++	schedule_delayed_work(&info->oc_work, msecs_to_jiffies(OC_IRQ_ENABLE_DELAY_MS));
++
++	return IRQ_HANDLED;
++}
++
++static int mt6368_set_ocp(struct regulator_dev *rdev, int lim, int severity, bool enable)
++{
++	struct mt6368_regulator_info *info = rdev_get_drvdata(rdev);
++	int ret;
++
++	/* MT6368 supports only enabling protection and does not support limits */
++	if (lim || severity != REGULATOR_SEVERITY_PROT || !enable)
++		return -EOPNOTSUPP;
++
++	/* If there is no OCP interrupt, there's nothing to set */
++	if (info->virq <= 0)
++		return -EOPNOTSUPP;
++
++	/* Both go with the regulator: the interrupt first, then the work */
++	ret = devm_delayed_work_autocancel(&rdev->dev, &info->oc_work,
++					   mt6368_oc_irq_enable_work);
++	if (ret)
++		return ret;
++
++	return devm_request_threaded_irq(&rdev->dev, info->virq, NULL,
++					 mt6368_oc_isr, IRQF_ONESHOT,
++					 info->desc.name, rdev);
++}
++
++static const struct regulator_ops mt6368_vreg_setclr_ops = {
++	.list_voltage = regulator_list_voltage_linear,
++	.map_voltage = regulator_map_voltage_linear,
++	.set_voltage_sel = regulator_set_voltage_sel_regmap,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.set_voltage_time_sel = regulator_set_voltage_time_sel,
++	.enable = mt6368_vreg_enable_setclr,
++	.disable = mt6368_vreg_disable_setclr,
++	.is_enabled = regulator_is_enabled_regmap,
++	.set_mode = mt6368_regulator_set_mode,
++	.get_mode = mt6368_regulator_get_mode,
++	.set_over_current_protection = mt6368_set_ocp,
++};
++
++static const struct regulator_ops mt6368_ldo_vtable_ops = {
++	.list_voltage = regulator_list_voltage_pickable_linear_range,
++	.map_voltage = regulator_map_voltage_pickable_linear_range,
++	.set_voltage_sel = regulator_set_voltage_sel_pickable_regmap,
++	.get_voltage_sel = regulator_get_voltage_sel_pickable_regmap,
++	.set_voltage_time_sel = regulator_set_voltage_time_sel,
++	.enable = regulator_enable_regmap,
++	.disable = regulator_disable_regmap,
++	.is_enabled = regulator_is_enabled_regmap,
++	.set_mode = mt6368_regulator_set_mode,
++	.get_mode = mt6368_regulator_get_mode,
++	.set_over_current_protection = mt6368_set_ocp,
++};
++
++static const struct regulator_ops mt6368_vmch_eint_ops = {
++	.list_voltage = regulator_list_voltage_pickable_linear_range,
++	.map_voltage = regulator_map_voltage_pickable_linear_range,
++	.set_voltage_sel = regulator_set_voltage_sel_pickable_regmap,
++	.get_voltage_sel = regulator_get_voltage_sel_pickable_regmap,
++	.set_voltage_time_sel = regulator_set_voltage_time_sel,
++	.enable = mt6368_vmch_eint_enable,
++	.disable = mt6368_vmch_eint_disable,
++	.is_enabled = regulator_is_enabled_regmap,
++	.set_mode = mt6368_regulator_set_mode,
++	.get_mode = mt6368_regulator_get_mode,
++};
++
++/* The array is indexed by id(MT6368_ID_XXX) */
++static struct mt6368_regulator_info mt6368_regulators[] = {
++	MT6368_BUCK("vbuck1", VBUCK1, 0, 1193750, 6250, MT6368_RG_BUCK0_EN_ADDR,
++		    MT6368_RG_BUCK0_LP_ADDR, MT6368_RG_BUCK0_FCCM_ADDR, 0),
++	MT6368_BUCK("vbuck2", VBUCK2, 0, 1193750, 6250, MT6368_RG_BUCK0_EN_ADDR,
++		    MT6368_RG_BUCK0_LP_ADDR, MT6368_RG_BUCK0_FCCM_ADDR, 1),
++	MT6368_BUCK("vbuck3", VBUCK3, 0, 1193750, 6250, MT6368_RG_BUCK0_EN_ADDR,
++		    MT6368_RG_BUCK0_LP_ADDR, MT6368_RG_BUCK0_FCCM_ADDR, 2),
++	MT6368_BUCK("vbuck4", VBUCK4, 0, 1193750, 6250, MT6368_RG_BUCK0_EN_ADDR,
++		    MT6368_RG_BUCK0_LP_ADDR, MT6368_RG_BUCK0_FCCM_ADDR, 3),
++	MT6368_BUCK("vbuck5", VBUCK5, 0, 1193750, 6250, MT6368_RG_BUCK0_EN_ADDR,
++		    MT6368_RG_BUCK0_LP_ADDR, MT6368_RG_VBUCK5_FCCM_ADDR, 4),
++	MT6368_BUCK("vbuck6", VBUCK6, 0, 1193750, 6250, MT6368_RG_BUCK0_EN_ADDR,
++		    MT6368_RG_BUCK0_LP_ADDR, MT6368_RG_VBUCK6_FCCM_ADDR, 5),
++	MT6368_BUCK("vpa", VPA, 500000, 3600000, 50000, MT6368_RG_BUCK1_EN_ADDR,
++		    MT6368_RG_BUCK1_LP_ADDR, MT6368_RG_VPA_FCCM_ADDR, 6),
++	MT6368_LDO_VT("vant18", VANT18, 3, 16),
++	MT6368_LDO_VT("vaud18", VAUD18, 3, 23),
++	MT6368_LDO_VT("vaux18", VAUX18, 2, 13),
++	MT6368_LDO_VT("vcn33-1", VCN33_1, 4, 24),
++	MT6368_LDO_VT("vcn33-2", VCN33_2, 4, 25),
++	MT6368_LDO_VT("vefuse", VEFUSE, 1, 26),
++	MT6368_LDO_VT("vfp", VFP, 1, 19),
++	MT6368_LDO_VT("vibr", VIBR, 1, 17),
++	MT6368_LDO_VT("vio28", VIO28, 1, 18),
++	MT6368_LDO_VT("vmc", VMC, 1, 22),
++	MT6368_LDO_VT("vmch", VMCH, 4, 21),
++	MT6368_LDO_EI("vmch-eint-high", VMCH_EINT_HIGH),
++	MT6368_LDO_EI("vmch-eint-low", VMCH_EINT_LOW),
++	MT6368_LDO_VT("vrf13-aif", VRF13_AIF, 3, 14),
++	MT6368_LDO_VT("vrf18-aif", VRF18_AIF, 3, 15),
++	MT6368_LDO_VT("vtp", VTP, 1, 20),
++	MT6368_LDO_VT("vusb", VUSB, 1, 12),
++};
++
++static void mt6368_irq_remove(void *data)
++{
++	int *virq = data;
++
++	irq_dispose_mapping(*virq);
++}
++
++static void mt6368_spmi_remove(void *data)
++{
++	struct spmi_device *sdev = data;
++
++	spmi_device_remove(sdev);
++}
++
++static struct regmap *mt6368_spmi_init_regmap(struct spmi_device *sdev, u32 base)
++{
++	/*
++	 * The registers are eight bits wide. Wider values would also write
++	 * the next register, such as the CLR register after a SET register
++	 * or the enable register after a CLR register.
++	 */
++	const struct regmap_config mt6368_regmap_config = {
++		.reg_bits = 16,
++		.val_bits = 8,
++		.reg_base = base,
++		.max_register = MT6368_RG_VRF13_AIF_VOSEL_ADDR,
++		.fast_io = true,
++	};
++
++	return devm_regmap_init_spmi_ext(sdev, &mt6368_regmap_config);
++}
++
++static struct regmap *mt6368_spmi_register_regmap(struct device *dev)
++{
++	struct spmi_device *sdev, *sparent;
++	u32 base;
++	int ret;
++
++	if (!dev->parent)
++		return ERR_PTR(-ENODEV);
++
++	ret = device_property_read_u32(dev, "reg", &base);
++	if (ret)
++		return ERR_PTR(ret);
++
++	sparent = to_spmi_device(dev->parent);
++	if (!sparent)
++		return ERR_PTR(-ENODEV);
++
++	sdev = spmi_device_alloc(sparent->ctrl);
++	if (!sdev)
++		return ERR_PTR(-ENODEV);
++
++	sdev->usid = sparent->usid;
++	dev_set_name(&sdev->dev, "%d-%02x-regulator", sdev->ctrl->nr, sdev->usid);
++	ret = device_add(&sdev->dev);
++	if (ret) {
++		put_device(&sdev->dev);
++		return ERR_PTR(ret);
++	}
++
++	ret = devm_add_action_or_reset(dev, mt6368_spmi_remove, sdev);
++	if (ret)
++		return ERR_PTR(ret);
++
++	return mt6368_spmi_init_regmap(sdev, base);
++}
++
++static int mt6368_regulator_probe(struct platform_device *pdev)
++{
++	struct device_node *interrupt_parent;
++	struct regulator_config config = {};
++	struct mt6368_regulator_info *info;
++	struct device *dev = &pdev->dev;
++	struct regulator_dev *rdev;
++	struct irq_fwspec fwspec = {};
++	struct irq_domain *domain;
++	struct spmi_device *sdev;
++	int i, ret;
++
++	config.regmap = mt6368_spmi_register_regmap(dev);
++	if (IS_ERR(config.regmap))
++		return dev_err_probe(dev, PTR_ERR(config.regmap),
++				     "Cannot get regmap\n");
++	config.dev = dev;
++	sdev = to_spmi_device(dev->parent);
++	platform_set_drvdata(pdev, config.regmap);
++
++	interrupt_parent = of_irq_find_parent(dev->of_node);
++	if (!interrupt_parent)
++		return dev_err_probe(dev, -EINVAL, "Cannot find IRQ parent\n");
++
++	domain = irq_find_host(interrupt_parent);
++	of_node_put(interrupt_parent);
++	if (!domain)
++		return dev_err_probe(dev, -ENODEV, "Cannot find IRQ domain\n");
++
++	fwspec.fwnode = domain->fwnode;
++	fwspec.param_count = 3;
++	fwspec.param[0] = sdev->usid;
++	fwspec.param[2] = IRQ_TYPE_LEVEL_HIGH;
++
++	for (i = 0; i < ARRAY_SIZE(mt6368_regulators); i++) {
++		info = &mt6368_regulators[i];
++
++		if (info->hwirq >= 0) {
++			fwspec.param[1] = info->hwirq;
++			info->virq = irq_create_fwspec_mapping(&fwspec);
++			if (!info->virq)
++				return dev_err_probe(dev, -EINVAL,
++						     "Failed to map IRQ%d\n", info->hwirq);
++
++			ret = devm_add_action_or_reset(dev, mt6368_irq_remove, &info->virq);
++			if (ret)
++				return ret;
++		}
++
++		config.driver_data = info;
++
++		rdev = devm_regulator_register(dev, &info->desc, &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(dev, PTR_ERR(rdev),
++					     "failed to register %s\n", info->desc.name);
++	}
++
++	return 0;
++}
++
++/* Let the power off sequence turn this PMIC off, as the MediaTek driver does */
++static void mt6368_regulator_shutdown(struct platform_device *pdev)
++{
++	struct regmap *regmap = platform_get_drvdata(pdev);
++
++	regmap_write(regmap, MT6368_TOP_CFG_ELR5, MT6368_TOP_CFG_ELR5_SHUTDOWN);
++}
++
++static const struct of_device_id mt6368_regulator_match[] = {
++	{ .compatible = "mediatek,mt6368-regulator" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, mt6368_regulator_match);
++
++static struct platform_driver mt6368_regulator_driver = {
++	.driver = {
++		.name = "mt6368-regulator",
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
++		.of_match_table = mt6368_regulator_match,
++	},
++	.probe = mt6368_regulator_probe,
++	.shutdown = mt6368_regulator_shutdown,
++};
++module_platform_driver(mt6368_regulator_driver);
++
++MODULE_DESCRIPTION("Regulator Driver for MediaTek MT6368 PMIC");
++MODULE_LICENSE("GPL");
+diff --git a/include/linux/regulator/mt6368-regulator.h b/include/linux/regulator/mt6368-regulator.h
+new file mode 100644
+index 0000000..46305f2
+--- /dev/null
++++ b/include/linux/regulator/mt6368-regulator.h
+@@ -0,0 +1,113 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (c) 2021 MediaTek Inc.
++ * Copyright (c) 2026 buntOS contributors
++ */
++
++#include <linux/bits.h>
++
++#ifndef __LINUX_REGULATOR_MT6368_H
++#define __LINUX_REGULATOR_MT6368_H
++
++/* Register, relative to the regulators node */
++#define MT6368_TOP_CFG_ELR5			0x11b
++#define MT6368_TOP_CFG_ELR5_SHUTDOWN		BIT(0)
++#define MT6368_RG_BUCK0_EN_ADDR			0x210
++#define MT6368_RG_BUCK_VBUCK1_EN_BIT		1
++#define MT6368_RG_BUCK_VBUCK2_EN_BIT		2
++#define MT6368_RG_BUCK_VBUCK3_EN_BIT		3
++#define MT6368_RG_BUCK_VBUCK4_EN_BIT		4
++#define MT6368_RG_BUCK_VBUCK5_EN_BIT		5
++#define MT6368_RG_BUCK_VBUCK6_EN_BIT		6
++#define MT6368_RG_BUCK1_EN_ADDR			0x213
++#define MT6368_RG_BUCK_VPA_EN_BIT		3
++#define MT6368_RG_BUCK0_LP_ADDR			0x216
++#define MT6368_RG_BUCK_VBUCK1_LP_BIT		1
++#define MT6368_RG_BUCK_VBUCK2_LP_BIT		2
++#define MT6368_RG_BUCK_VBUCK3_LP_BIT		3
++#define MT6368_RG_BUCK_VBUCK4_LP_BIT		4
++#define MT6368_RG_BUCK_VBUCK5_LP_BIT		5
++#define MT6368_RG_BUCK_VBUCK6_LP_BIT		6
++#define MT6368_RG_BUCK1_LP_ADDR			0x219
++#define MT6368_RG_BUCK_VPA_LP_BIT		3
++#define MT6368_RG_BUCK_VBUCK1_VOSEL_ADDR	0x21d
++#define MT6368_RG_BUCK_VBUCK1_VOSEL_MASK	GENMASK(7, 0)
++#define MT6368_RG_BUCK_VBUCK2_VOSEL_ADDR	0x21e
++#define MT6368_RG_BUCK_VBUCK2_VOSEL_MASK	GENMASK(7, 0)
++#define MT6368_RG_BUCK_VBUCK3_VOSEL_ADDR	0x21f
++#define MT6368_RG_BUCK_VBUCK3_VOSEL_MASK	GENMASK(7, 0)
++#define MT6368_RG_BUCK_VBUCK4_VOSEL_ADDR	0x220
++#define MT6368_RG_BUCK_VBUCK4_VOSEL_MASK	GENMASK(7, 0)
++#define MT6368_RG_BUCK_VBUCK5_VOSEL_ADDR	0x221
++#define MT6368_RG_BUCK_VBUCK5_VOSEL_MASK	GENMASK(7, 0)
++#define MT6368_RG_BUCK_VBUCK6_VOSEL_ADDR	0x222
++#define MT6368_RG_BUCK_VBUCK6_VOSEL_MASK	GENMASK(7, 0)
++#define MT6368_RG_BUCK_VPA_VOSEL_ADDR		0x227
++#define MT6368_RG_BUCK_VPA_VOSEL_MASK		GENMASK(6, 0)
++#define MT6368_BUCK_TOP_KEY_PROT_LO		0x13f1
++#define MT6368_RG_BUCK0_FCCM_ADDR		0x1803
++#define MT6368_RG_VBUCK1_FCCM_BIT		0
++#define MT6368_RG_VBUCK2_FCCM_BIT		1
++#define MT6368_RG_VBUCK3_FCCM_BIT		2
++#define MT6368_RG_VBUCK4_FCCM_BIT		3
++#define MT6368_RG_VBUCK5_FCCM_ADDR		0x1863
++#define MT6368_RG_VBUCK5_FCCM_BIT		0
++#define MT6368_RG_VBUCK6_FCCM_ADDR		0x1872
++#define MT6368_RG_VBUCK6_FCCM_BIT		0
++/* The VPA mode set bit forces continuous conduction as FCCM does */
++#define MT6368_RG_VPA_FCCM_ADDR			0x1876
++#define MT6368_RG_VPA_FCCM_BIT			1
++#define MT6368_RG_LDO_VUSB_ADDR			0x1b91
++#define MT6368_RG_LDO_VAUX18_ADDR		0x1b9f
++#define MT6368_RG_LDO_VRF13_AIF_ADDR		0x1bd7
++#define MT6368_RG_LDO_VRF18_AIF_ADDR		0x1be5
++#define MT6368_RG_LDO_VANT18_ADDR		0x1bf3
++#define MT6368_RG_LDO_VIBR_ADDR			0x1c01
++#define MT6368_RG_LDO_VIO28_ADDR		0x1c0f
++#define MT6368_RG_LDO_VFP_ADDR			0x1c1d
++#define MT6368_RG_LDO_VTP_ADDR			0x1c57
++#define MT6368_RG_LDO_VMCH_ADDR			0x1c65
++#define MT6368_RG_LDO_VMCH_EINT_ADDR		0x1c73
++#define MT6368_RG_LDO_VMCH_EINT_EN		BIT(0)
++#define MT6368_RG_LDO_VMCH_EINT_POL		BIT(2)
++#define MT6368_RG_LDO_VMC_ADDR			0x1c74
++#define MT6368_RG_LDO_VAUD18_ADDR		0x1c82
++#define MT6368_RG_LDO_VCN33_1_ADDR		0x1c90
++#define MT6368_RG_LDO_VCN33_2_ADDR		0x1c9e
++#define MT6368_RG_LDO_VEFUSE_ADDR		0x1cd7
++#define MT6368_RG_LDO_EN_BIT			0
++#define MT6368_RG_LDO_LP_BIT			1
++#define MT6368_RG_VAUX18_VOCAL_ADDR		0x1d58
++#define MT6368_RG_VAUX18_VOSEL_ADDR		0x1d59
++#define MT6368_RG_VUSB_VOCAL_ADDR		0x1d64
++#define MT6368_RG_VUSB_VOSEL_ADDR		0x1d65
++#define MT6368_RG_VIBR_VOCAL_ADDR		0x1d68
++#define MT6368_RG_VIBR_VOSEL_ADDR		0x1d69
++#define MT6368_RG_VIO28_VOCAL_ADDR		0x1d6c
++#define MT6368_RG_VIO28_VOSEL_ADDR		0x1d6d
++#define MT6368_RG_VFP_VOCAL_ADDR		0x1d70
++#define MT6368_RG_VFP_VOSEL_ADDR		0x1d71
++#define MT6368_RG_VTP_VOCAL_ADDR		0x1d74
++#define MT6368_RG_VTP_VOSEL_ADDR		0x1d75
++#define MT6368_RG_VMCH_VOCAL_ADDR		0x1d78
++#define MT6368_RG_VMCH_VOSEL_ADDR		0x1d79
++#define MT6368_RG_VMC_VOCAL_ADDR		0x1d7c
++#define MT6368_RG_VMC_VOSEL_ADDR		0x1d7d
++#define MT6368_RG_VCN33_1_VOCAL_ADDR		0x1d80
++#define MT6368_RG_VCN33_1_VOSEL_ADDR		0x1d81
++#define MT6368_RG_VCN33_2_VOCAL_ADDR		0x1d84
++#define MT6368_RG_VCN33_2_VOSEL_ADDR		0x1d85
++#define MT6368_RG_VAUD18_VOCAL_ADDR		0x1d88
++#define MT6368_RG_VAUD18_VOSEL_ADDR		0x1d89
++#define MT6368_RG_VANT18_VOCAL_ADDR		0x1dd8
++#define MT6368_RG_VANT18_VOSEL_ADDR		0x1dd9
++#define MT6368_RG_VEFUSE_VOCAL_ADDR		0x1ddc
++#define MT6368_RG_VEFUSE_VOSEL_ADDR		0x1ddd
++#define MT6368_RG_VRF18_AIF_VOCAL_ADDR		0x1de0
++#define MT6368_RG_VRF18_AIF_VOSEL_ADDR		0x1de1
++#define MT6368_RG_VRF13_AIF_VOCAL_ADDR		0x1de9
++#define MT6368_RG_VRF13_AIF_VOSEL_ADDR		0x1dea
++#define MT6368_RG_LDO_VOCAL_MASK		GENMASK(3, 0)
++#define MT6368_RG_LDO_VOSEL_MASK		GENMASK(3, 0)
++
++#endif /* __LINUX_REGULATOR_MT6368_H */

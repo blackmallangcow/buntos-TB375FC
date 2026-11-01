@@ -33,9 +33,16 @@
 0020-dt-bindings-ufs-mediatek-ufs-add-MT6897.patch
 0021-phy-mediatek-ufs-add-MT6897-support.patch
 0022-scsi-ufs-mediatek-add-MT6897-support.patch
-# 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363까지 장치 트리에 있다(MT6368·MT6685는 드라이버가 없다):
-#  - regulator: MT6368(VUSB는 USB vusb33, VBUCK2는 GPU 코어. MT6895 포크 견본으로 새로)
+# 0023~0026: MT6368 PMIC(regulator 바인딩·드라이버, MFD 바인딩·드라이버. 업스트림에 없다). regulator는 7.2.12의
+# mt6363-regulator를 틀로 새로 썼다(업스트림 MT6373 v12와는 레지스터와 레일이 달라 백포트하지 않았다). 표는 OnePlus 공식
+# MT6897 커널에서 옮겼다. 기기에서 확인한 뒤 낸다
+0023-dt-bindings-regulator-Document-MediaTek-MT6368-PMIC-Regulators.patch
+0024-regulator-Add-support-for-MediaTek-MT6368-SPMI-PMIC-Regulators.patch
+0025-dt-bindings-mfd-mediatek-mt6363-Add-MediaTek-MT6368.patch
+0026-mfd-mtk-spmi-pmic-Add-support-for-MediaTek-MT6368.patch
+# 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 드라이버가 없다):
 #  - regulator: mt6363: VEMC 전압 읽기 고침(범위를 고르는 조건이 반대다)
+#  - regulator: mt6363: 8비트 값의 regmap(16비트 값은 쓸 때 다음 레지스터도 쓴다. 벅을 끄면 VS1·VS3·VSRAM이 꺼진다)
 #  - pmdomain: mediatek: add MT6897 power domains (MT8196 틀. UFS·USB에는 없어 2d 뒤)
 #  - input: touchscreen: Novatek NT36532 SPI TDDI와 펜
 #  - input: OnePlus/OPPO Pad pogo-pin 키보드 v6 + compatible별 CRC 초기값
