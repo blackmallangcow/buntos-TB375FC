@@ -1,0 +1,1289 @@
+From: buntOS contributors
+Subject: [PATCH] Input: add Novatek NT36532 SPI touchscreen driver
+
+Add a driver for the touchscreen and stylus of the Novatek NT36532 touch
+and display driver IC, as found on the Lenovo Xiaoxin Pad Pro 12.7 (2025,
+TB375FC) and the Lenovo Idea Tab Pro (TB373FU).
+
+The controller has no flash. The host addresses its 24-bit memory over
+SPI in 128-byte pages and loads the firmware into SRAM after every reset:
+a bootloader reset, the ILM and DLM CRCs into the bootloader registers,
+every partition of the file, then the boot ready bit; the bootloader
+checks the CRCs and starts the firmware. The driver does this when the
+touchscreen or the stylus is opened and on resume. Probe only resets the
+controller and checks its trim ID. The firmware file comes from
+firmware-name, picked by the panel ID GPIOs where the board has them.
+
+Each report holds ten fingers with 16-bit coordinates (the firmware
+reports ten times the panel resolution), a checksum over the finger
+records and the stylus: position in the same coordinates, pressure up to
+4095, tilt of up to 60 degrees on each axis, hover and two buttons. The
+stylus is a second input device, which the firmware only reports after
+a host command enables it. Its resolution comes from touchscreen-x-mm
+and touchscreen-y-mm, as libinput ignores a tablet without one. When the
+controller's watchdog resets the firmware, the reports turn into a fill
+pattern and the driver loads the firmware again.
+
+This is a new driver rather than an extension of novatek-nvt-ts, which
+reads the touches of I2C controllers that run from their own flash. The
+two share the finger record layout at most: this controller needs the
+paged SPI access, the firmware loader and the stylus, which are the bulk
+of the driver. In the review of an earlier NT36xxx driver, extending
+novatek-nvt-ts was suggested instead, which was then done for the I2C
+NT36672A, and firmware loading, SPI and stylus support were named as what
+novatek-nvt-ts lacks. Like that earlier driver, this one does not use
+regmap paging: regmap reads the page selector before it writes it, which
+the controller's reset sequences do not allow.
+
+The protocol, the register addresses, the firmware layout and the report
+format follow the Lenovo NT36532 driver that the OnePlus MT6897 kernel
+carries (OnePlusOSS android_kernel_modules_and_devicetree_oneplus_mt6897,
+branch oneplus/mt6897_b_16.0.0_oneplus_pad,
+kernel/kernel_device_modules-6.1/drivers/input/touchscreen/NT36532).
+Wake gestures, the charger mode, edge rejection and the MP self test of
+that driver are left out.
+
+Link: https://lore.kernel.org/r/2980f5e6-40b0-4ab2-ae73-bceeb97b4de5@gmail.com
+Link: https://lore.kernel.org/r/17542518-42ff-46f6-8304-fb8a214bfa77@linaro.org
+Link: https://lore.kernel.org/r/CAK7fi1Y62YhoQvsU++_u=Z5Y3d6KC1_C4bWr6R8QZmDgyVV86g@mail.gmail.com
+
+---
+ drivers/input/touchscreen/Kconfig           |   15 +
+ drivers/input/touchscreen/Makefile          |    1 +
+ drivers/input/touchscreen/novatek-nvt-spi.c | 1190 +++++++++++++++++++
+ 3 files changed, 1206 insertions(+)
+
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index 9b9ae8a..aebf2b5 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -701,6 +701,21 @@ config TOUCHSCREEN_NOVATEK_NVT_TS
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called novatek-nvt-ts.
+ 
++config TOUCHSCREEN_NOVATEK_NVT_SPI
++	tristate "Novatek NT36532 SPI touchscreen support"
++	depends on SPI
++	help
++	  Say Y here if you have a touchscreen driven by a Novatek NT36532
++	  touch and display driver IC over SPI, as on the Lenovo Xiaoxin Pad
++	  Pro 12.7 (2025). The driver loads the controller's firmware when the
++	  touchscreen is opened and reports the active stylus as a second
++	  input device.
++
++	  If unsure, say N.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called novatek-nvt-spi.
++
+ config TOUCHSCREEN_IMAGIS
+ 	tristate "Imagis touchscreen support"
+ 	depends on I2C
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index bfd9de8..e571a2c 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -69,6 +69,7 @@ obj-$(CONFIG_TOUCHSCREEN_MMS114)	+= mms114.o
+ obj-$(CONFIG_TOUCHSCREEN_MSG2638)	+= msg2638.o
+ obj-$(CONFIG_TOUCHSCREEN_MTOUCH)	+= mtouch.o
+ obj-$(CONFIG_TOUCHSCREEN_NOVATEK_NVT_TS)	+= novatek-nvt-ts.o
++obj-$(CONFIG_TOUCHSCREEN_NOVATEK_NVT_SPI)	+= novatek-nvt-spi.o
+ obj-$(CONFIG_TOUCHSCREEN_HP600)		+= hp680_ts_input.o
+ obj-$(CONFIG_TOUCHSCREEN_HP7XX)		+= jornada720_ts.o
+ obj-$(CONFIG_TOUCHSCREEN_IPAQ_MICRO)	+= ipaq-micro-ts.o
+diff --git a/drivers/input/touchscreen/novatek-nvt-spi.c b/drivers/input/touchscreen/novatek-nvt-spi.c
+new file mode 100644
+index 0000000..d2d2ea7
+--- /dev/null
++++ b/drivers/input/touchscreen/novatek-nvt-spi.c
+@@ -0,0 +1,1190 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Driver for the touchscreen and stylus of the Novatek NT36532 TDDI
++ *
++ * The touch controller has no flash: the host loads its firmware into the
++ * controller's SRAM after every reset. The SPI protocol, the memory map, the
++ * firmware layout and the report format follow the Novatek driver in the
++ * OnePlus MT6897 kernel release (drivers/input/touchscreen/NT36532 in
++ * kernel_device_modules-6.1), Copyright (C) 2010 - 2022 Novatek, Inc.
++ *
++ * Copyright (c) 2026 buntOS contributors
++ */
++
++#include <linux/bitops.h>
++#include <linux/cleanup.h>
++#include <linux/delay.h>
++#include <linux/devm-helpers.h>
++#include <linux/firmware.h>
++#include <linux/gpio/consumer.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++#include <linux/interrupt.h>
++#include <linux/minmax.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/overflow.h>
++#include <linux/property.h>
++#include <linux/regulator/consumer.h>
++#include <linux/sizes.h>
++#include <linux/slab.h>
++#include <linux/spi/spi.h>
++#include <linux/unaligned.h>
++#include <linux/workqueue.h>
++
++/*
++ * The controller has a 24-bit address space, selected in pages of 128
++ * bytes. A transfer starts with the offset in the page, with bit 7 set for a
++ * write, and goes on through the following addresses. A read returns one
++ * turnaround byte before the data.
++ */
++#define NVT_SPI_PAGE_SHIFT	7
++#define NVT_SPI_OFFSET_MASK	GENMASK(6, 0)
++#define NVT_SPI_WRITE		BIT(7)
++#define NVT_SPI_SET_PAGE	0xff
++#define NVT_SPI_READ_HDR	2
++
++#define NVT_ENG_RST_ADDR	0x7fff80
++#define NVT_ENG_RST		0x5a
++#define NVT_SWRST_BOOTLOADER	0x69
++#define NVT_AUTO_COPY_EN	0x56
++
++/* Event buffer offsets */
++#define NVT_EVT_HOST_CMD	0x50
++#define NVT_EVT_RESET_STATE	0x60
++#define NVT_EVT_FW_INFO		0x78
++#define NVT_FW_INFO_LEN		38
++
++#define NVT_CMD_DEEP_SLEEP	0x11
++#define NVT_CMD_PEN		0x7b
++#define NVT_CMD_PEN_ON		0x01
++#define NVT_CMD_FW_CRC		0xae
++
++#define NVT_RESET_STATE_INIT	0xa0
++#define NVT_RESET_STATE_REK	0xa1
++#define NVT_RESET_STATE_MAX	0xaf
++
++/*
++ * The report: ten 6-byte finger records with 16-bit coordinates, a checksum
++ * of the finger records, then the stylus.
++ */
++#define NVT_REPORT_LEN		108
++#define NVT_MAX_TOUCHES		10
++#define NVT_TOUCH_SIZE		6
++#define NVT_TOUCH_ID_SHIFT	3
++#define NVT_TOUCH_STATE_MASK	GENMASK(2, 0)
++#define NVT_TOUCH_NEW		1
++#define NVT_TOUCH_UPDATE	2
++#define NVT_EVENT_ID		30
++#define NVT_CSUM_LEN		64
++#define NVT_PEN_OFFSET		65
++#define NVT_PEN_DATA		0x01
++#define NVT_PEN_NONE		0xff
++
++#define NVT_PEN_PRESSURE_MAX	4095
++#define NVT_PEN_DISTANCE_MAX	1
++#define NVT_PEN_TILT_MAX	60	/* degrees */
++#define NVT_PEN_TILT_RES	57	/* units per radian */
++
++/* A firmware that the controller's watchdog has reset reports 0xfd or 0xfe */
++#define NVT_WDT_REPORTS		10
++
++#define NVT_FW_SECTOR_SIZE	SZ_4K
++#define NVT_FW_HDR_INFO		0x30
++#define NVT_FW_HDR_ENTRY	0x10
++#define NVT_FW_MAX_PARTS	32
++#define NVT_FW_CHUNK		SZ_4K
++
++#define NVT_TX_LEN		(1 + NVT_FW_CHUNK)
++#define NVT_RX_LEN		(NVT_SPI_READ_HDR + NVT_REPORT_LEN)
++
++struct nvt_spi_chip {
++	u8 trim_id[3];		/* bytes 3 to 5 of the trim ID */
++	u32 trim_id_addr;
++	u32 swrst_addr;
++	u32 event_buf;
++	u32 boot_rdy;
++	u32 auto_copy;
++	u32 ilm_des;
++	u32 ilm_len;
++	u32 ilm_crc;
++	u32 dlm_des;
++	u32 dlm_len;
++	u32 dlm_crc;
++};
++
++/* A partition of the firmware file. The size is one less than the length. */
++struct nvt_fw_part {
++	u32 bin_addr;
++	u32 sram_addr;
++	u32 size;
++	u32 crc;
++};
++
++struct nvt_spi_ts {
++	struct spi_device *spi;
++	const struct nvt_spi_chip *chip;
++	struct input_dev *input;
++	struct input_dev *pen;
++	struct touchscreen_properties prop;
++	struct regulator_bulk_data supplies[2];
++	struct gpio_desc *reset_gpio;
++	const char *fw_name;
++	struct work_struct recover_work;
++	struct mutex lock;	/* users and running */
++	unsigned int users;
++	bool running;
++	unsigned int wdt_reports;
++	u8 report[NVT_REPORT_LEN];
++	u8 *tx;
++	u8 *rx;
++};
++
++static int nvt_spi_set_page(struct nvt_spi_ts *ts, u32 addr)
++{
++	u32 page = addr >> NVT_SPI_PAGE_SHIFT;
++
++	ts->tx[0] = NVT_SPI_SET_PAGE;
++	ts->tx[1] = page >> 8;
++	ts->tx[2] = page;
++
++	return spi_write(ts->spi, ts->tx, 3);
++}
++
++static int nvt_spi_write(struct nvt_spi_ts *ts, u32 addr, const void *data,
++			 size_t len)
++{
++	int error;
++
++	if (WARN_ON(len > NVT_FW_CHUNK))
++		return -EINVAL;
++
++	error = nvt_spi_set_page(ts, addr);
++	if (error)
++		return error;
++
++	ts->tx[0] = (addr & NVT_SPI_OFFSET_MASK) | NVT_SPI_WRITE;
++	memcpy(&ts->tx[1], data, len);
++
++	return spi_write(ts->spi, ts->tx, 1 + len);
++}
++
++static int nvt_spi_write_u8(struct nvt_spi_ts *ts, u32 addr, u8 val)
++{
++	return nvt_spi_write(ts, addr, &val, 1);
++}
++
++static int nvt_spi_read(struct nvt_spi_ts *ts, u32 addr, void *data, size_t len)
++{
++	struct spi_transfer xfer = {
++		.tx_buf = ts->tx,
++		.rx_buf = ts->rx,
++		.len = NVT_SPI_READ_HDR + len,
++	};
++	int error;
++
++	if (WARN_ON(len > NVT_REPORT_LEN))
++		return -EINVAL;
++
++	error = nvt_spi_set_page(ts, addr);
++	if (error)
++		return error;
++
++	memset(ts->tx, 0, xfer.len);
++	ts->tx[0] = addr & NVT_SPI_OFFSET_MASK;
++
++	error = spi_sync_transfer(ts->spi, &xfer, 1);
++	if (error)
++		return error;
++
++	memcpy(data, &ts->rx[NVT_SPI_READ_HDR], len);
++
++	return 0;
++}
++
++static int nvt_spi_bootloader_reset(struct nvt_spi_ts *ts)
++{
++	int error;
++
++	error = nvt_spi_write_u8(ts, ts->chip->swrst_addr, NVT_SWRST_BOOTLOADER);
++	if (error)
++		return error;
++
++	usleep_range(5000, 6000);
++
++	return 0;
++}
++
++static int nvt_spi_power_on(struct nvt_spi_ts *ts)
++{
++	int error;
++
++	error = regulator_bulk_enable(ARRAY_SIZE(ts->supplies), ts->supplies);
++	if (error)
++		return error;
++
++	/* The engineering reset goes out while TP_RESX is still low */
++	gpiod_set_value_cansleep(ts->reset_gpio, 1);
++	usleep_range(1000, 2000);
++	error = nvt_spi_write_u8(ts, NVT_ENG_RST_ADDR, NVT_ENG_RST);
++	if (error)
++		goto err_power_off;
++	usleep_range(1000, 2000);
++
++	gpiod_set_value_cansleep(ts->reset_gpio, 0);
++	usleep_range(10000, 11000);
++
++	return 0;
++
++err_power_off:
++	regulator_bulk_disable(ARRAY_SIZE(ts->supplies), ts->supplies);
++	return error;
++}
++
++static void nvt_spi_power_off(struct nvt_spi_ts *ts)
++{
++	gpiod_set_value_cansleep(ts->reset_gpio, 1);
++	regulator_bulk_disable(ARRAY_SIZE(ts->supplies), ts->supplies);
++}
++
++static int nvt_spi_check_chip(struct nvt_spi_ts *ts)
++{
++	static const u8 zero[6];
++	u8 id[6];
++	int retry, error;
++
++	for (retry = 0; retry < 5; retry++) {
++		error = nvt_spi_bootloader_reset(ts);
++		if (error)
++			return error;
++
++		/* Clear the ID registers before reading, as the vendor driver does */
++		error = nvt_spi_write(ts, ts->chip->trim_id_addr, zero, sizeof(zero));
++		if (error)
++			return error;
++
++		error = nvt_spi_read(ts, ts->chip->trim_id_addr, id, sizeof(id));
++		if (error)
++			return error;
++
++		if (!memcmp(&id[3], ts->chip->trim_id, sizeof(ts->chip->trim_id)))
++			return 0;
++
++		usleep_range(10000, 11000);
++	}
++
++	dev_err(&ts->spi->dev, "unknown trim ID %*ph\n", (int)sizeof(id), id);
++
++	return -ENODEV;
++}
++
++static int nvt_spi_read_part(const struct firmware *fw, u32 pos,
++			     struct nvt_fw_part *part)
++{
++	if (size_add(pos, NVT_FW_HDR_ENTRY) > fw->size)
++		return -EINVAL;
++
++	part->sram_addr = get_unaligned_le32(&fw->data[pos]);
++	part->size = get_unaligned_le32(&fw->data[pos + 4]);
++	part->bin_addr = get_unaligned_le32(&fw->data[pos + 8]);
++	part->crc = get_unaligned_le32(&fw->data[pos + 12]);
++
++	return 0;
++}
++
++/*
++ * The file starts with the ILM and DLM partitions (BIN address, SRAM address,
++ * size; their CRCs at 0x18), then from 0x30 the other partitions (SRAM
++ * address, size, BIN address, CRC). The overlay partitions are listed at the
++ * start of the DLM. Files for cascaded controllers add a second header.
++ */
++static int nvt_spi_read_parts(const struct firmware *fw, u32 hdr_end,
++			      bool auto_copy, unsigned int num_info,
++			      unsigned int num_ovly, struct nvt_fw_part *parts)
++{
++	const u8 *data = fw->data;
++	unsigned int num = 2 + num_info + num_ovly;
++	bool found_hdr = false;
++	unsigned int i;
++	u32 pos, last;
++
++	for (i = 0; i < 2; i++) {
++		parts[i].bin_addr = get_unaligned_le32(&data[i * 12]);
++		parts[i].sram_addr = get_unaligned_le32(&data[i * 12 + 4]);
++		parts[i].size = get_unaligned_le32(&data[i * 12 + 8]);
++		parts[i].crc = get_unaligned_le32(&data[0x18 + i * 4]);
++	}
++
++	/*
++	 * As in the vendor driver, the entry after the one that points into
++	 * the header is the second header of a cascade file, or else the same
++	 * entry again.
++	 */
++	pos = NVT_FW_HDR_INFO;
++	for (i = 0; i < num_info; i++) {
++		struct nvt_fw_part *part = &parts[2 + i];
++
++		if (!found_hdr)
++			pos = NVT_FW_HDR_INFO + i * NVT_FW_HDR_ENTRY;
++		else if (auto_copy)
++			pos = hdr_end - NVT_FW_HDR_ENTRY;
++
++		if (nvt_spi_read_part(fw, pos, part))
++			return -EINVAL;
++
++		if (part->bin_addr < hdr_end && part->size)
++			found_hdr = true;
++	}
++
++	for (i = 0; i < num_ovly; i++) {
++		pos = parts[1].bin_addr + i * NVT_FW_HDR_ENTRY;
++		if (pos < parts[1].bin_addr ||
++		    nvt_spi_read_part(fw, pos, &parts[2 + num_info + i]))
++			return -EINVAL;
++	}
++
++	/* A partition takes size + 1 bytes */
++	for (i = 0; i < num; i++) {
++		if (!parts[i].size)
++			continue;
++
++		if (check_add_overflow(parts[i].bin_addr, parts[i].size, &last) ||
++		    last >= fw->size)
++			return -EINVAL;
++	}
++
++	return 0;
++}
++
++static struct nvt_fw_part *nvt_spi_parse_fw(struct nvt_spi_ts *ts,
++					    const struct firmware *fw,
++					    unsigned int *num_parts,
++					    bool *auto_copy)
++{
++	struct device *dev = &ts->spi->dev;
++	const u8 *data = fw->data;
++	unsigned int num_info, num_ovly, num, i;
++	u32 hdr_end, limit;
++	size_t end = 0;
++	int error;
++	u8 ver;
++
++	/* The image ends at a 4 KiB sector that ends with "NVT" or "MOD" */
++	for (i = fw->size / NVT_FW_SECTOR_SIZE; i > 0; i--) {
++		const u8 *flag = &data[i * NVT_FW_SECTOR_SIZE - 3];
++
++		if (!memcmp(flag, "NVT", 3) || !memcmp(flag, "MOD", 3)) {
++			end = i * NVT_FW_SECTOR_SIZE;
++			break;
++		}
++	}
++	if (!end) {
++		dev_err(dev, "no end of image in %s\n", ts->fw_name);
++		return ERR_PTR(-EINVAL);
++	}
++
++	ver = data[end - NVT_FW_SECTOR_SIZE];
++	if (ver + data[end - NVT_FW_SECTOR_SIZE + 1] != 0xff) {
++		dev_err(dev, "bad version in %s\n", ts->fw_name);
++		return ERR_PTR(-EINVAL);
++	}
++
++	hdr_end = get_unaligned_le32(data);
++	if (hdr_end < NVT_FW_HDR_INFO || hdr_end > end) {
++		dev_err(dev, "bad header size %#x in %s\n", hdr_end, ts->fw_name);
++		return ERR_PTR(-EINVAL);
++	}
++
++	*auto_copy = data[0x20] & BIT(1);
++	limit = *auto_copy ? hdr_end / 2 : hdr_end;
++	num_info = limit > NVT_FW_HDR_INFO ?
++		   DIV_ROUND_UP(limit - NVT_FW_HDR_INFO, NVT_FW_HDR_ENTRY) : 0;
++	if (*auto_copy)
++		num_info++;
++	num_ovly = data[0x28] & BIT(4) ? data[0x28] & 0x0f : 0;
++
++	num = 2 + num_info + num_ovly;
++	if (num > NVT_FW_MAX_PARTS) {
++		dev_err(dev, "too many partitions in %s\n", ts->fw_name);
++		return ERR_PTR(-EINVAL);
++	}
++
++	struct nvt_fw_part *parts __free(kfree) =
++		kcalloc(num, sizeof(*parts), GFP_KERNEL);
++	if (!parts)
++		return ERR_PTR(-ENOMEM);
++
++	error = nvt_spi_read_parts(fw, hdr_end, *auto_copy, num_info, num_ovly,
++				   parts);
++	if (error) {
++		dev_err(dev, "bad partition table in %s\n", ts->fw_name);
++		return ERR_PTR(error);
++	}
++
++	dev_dbg(dev, "%s: version %#04x, %u partitions\n", ts->fw_name, ver, num);
++	*num_parts = num;
++
++	return_ptr(parts);
++}
++
++static int nvt_spi_set_crc_bank(struct nvt_spi_ts *ts, u32 des, u32 len,
++				u32 crc, const struct nvt_fw_part *part)
++{
++	u8 buf[4];
++	int error;
++
++	put_unaligned_le24(part->sram_addr, buf);
++	error = nvt_spi_write(ts, des, buf, 3);
++	if (error)
++		return error;
++
++	put_unaligned_le24(part->size, buf);
++	error = nvt_spi_write(ts, len, buf, 3);
++	if (error)
++		return error;
++
++	put_unaligned_le32(part->crc, buf);
++	return nvt_spi_write(ts, crc, buf, 4);
++}
++
++static int nvt_spi_write_part(struct nvt_spi_ts *ts, const struct firmware *fw,
++			      const struct nvt_fw_part *part)
++{
++	size_t len = (size_t)part->size + 1;
++	size_t off, n;
++	int error;
++
++	for (off = 0; off < len; off += n) {
++		n = min_t(size_t, len - off, NVT_FW_CHUNK);
++		error = nvt_spi_write(ts, part->sram_addr + off,
++				      &fw->data[part->bin_addr + off], n);
++		if (error)
++			return error;
++	}
++
++	return 0;
++}
++
++static int nvt_spi_wait_auto_copy(struct nvt_spi_ts *ts)
++{
++	int i, error;
++	u8 val;
++
++	for (i = 0; i < 200; i++) {
++		error = nvt_spi_read(ts, ts->chip->auto_copy, &val, 1);
++		if (error)
++			return error;
++
++		if (!val)
++			return 0;
++
++		usleep_range(1000, 2000);
++	}
++
++	return -ETIMEDOUT;
++}
++
++static int nvt_spi_wait_reset_state(struct nvt_spi_ts *ts, u8 state,
++				    unsigned int retries)
++{
++	unsigned int i;
++	int error;
++	u8 val;
++
++	for (i = 0; i <= retries; i++) {
++		error = nvt_spi_read(ts, ts->chip->event_buf + NVT_EVT_RESET_STATE,
++				     &val, 1);
++		if (error)
++			return error;
++
++		if (val >= state && val <= NVT_RESET_STATE_MAX)
++			return 0;
++
++		usleep_range(10000, 11000);
++	}
++
++	return -ETIMEDOUT;
++}
++
++static int nvt_spi_download(struct nvt_spi_ts *ts, const struct firmware *fw,
++			    const struct nvt_fw_part *parts,
++			    unsigned int num_parts, bool auto_copy)
++{
++	static const u8 clear_state[6];
++	static const u8 crc_cmd[] = { NVT_CMD_FW_CRC, 0x00 };
++	const struct nvt_spi_chip *chip = ts->chip;
++	unsigned int i;
++	int error;
++
++	error = nvt_spi_bootloader_reset(ts);
++	if (error)
++		return error;
++
++	/* The bootloader checks the ILM and DLM against these CRCs */
++	error = nvt_spi_set_crc_bank(ts, chip->ilm_des, chip->ilm_len,
++				     chip->ilm_crc, &parts[0]);
++	if (error)
++		return error;
++
++	error = nvt_spi_set_crc_bank(ts, chip->dlm_des, chip->dlm_len,
++				     chip->dlm_crc, &parts[1]);
++	if (error)
++		return error;
++
++	if (auto_copy) {
++		error = nvt_spi_write_u8(ts, chip->auto_copy, NVT_AUTO_COPY_EN);
++		if (error)
++			return error;
++	}
++
++	for (i = 0; i < num_parts; i++) {
++		if (!parts[i].size)
++			continue;
++
++		error = nvt_spi_write_part(ts, fw, &parts[i]);
++		if (error)
++			return error;
++	}
++
++	if (auto_copy) {
++		error = nvt_spi_wait_auto_copy(ts);
++		if (error)
++			return error;
++	}
++
++	error = nvt_spi_write(ts, chip->event_buf + NVT_EVT_RESET_STATE,
++			      clear_state, sizeof(clear_state));
++	if (error)
++		return error;
++
++	error = nvt_spi_write(ts, chip->event_buf + NVT_EVT_HOST_CMD,
++			      crc_cmd, sizeof(crc_cmd));
++	if (error)
++		return error;
++
++	error = nvt_spi_write_u8(ts, chip->boot_rdy, 1);
++	if (error)
++		return error;
++
++	usleep_range(5000, 6000);
++
++	return nvt_spi_wait_reset_state(ts, NVT_RESET_STATE_INIT, 10);
++}
++
++static int nvt_spi_send_cmd(struct nvt_spi_ts *ts, u8 cmd, u8 arg)
++{
++	const u8 buf[] = { cmd, arg };
++	int i, error;
++	u8 status;
++
++	for (i = 0; i < 5; i++) {
++		error = nvt_spi_write(ts, ts->chip->event_buf + NVT_EVT_HOST_CMD,
++				      buf, sizeof(buf));
++		if (error)
++			return error;
++
++		msleep(20);
++
++		/* The firmware clears the command byte when it is done */
++		error = nvt_spi_read(ts, ts->chip->event_buf + NVT_EVT_HOST_CMD,
++				     &status, 1);
++		if (error)
++			return error;
++
++		if (!status)
++			return 0;
++	}
++
++	return -ETIMEDOUT;
++}
++
++static int nvt_spi_boot(struct nvt_spi_ts *ts)
++{
++	struct device *dev = &ts->spi->dev;
++	unsigned int num_parts;
++	u8 info[NVT_FW_INFO_LEN];
++	bool auto_copy;
++	int retry, error;
++
++	const struct firmware *fw __free(firmware) = NULL;
++	error = request_firmware(&fw, ts->fw_name, dev);
++	if (error)
++		return error;
++
++	struct nvt_fw_part *parts __free(kfree) =
++		nvt_spi_parse_fw(ts, fw, &num_parts, &auto_copy);
++	if (IS_ERR(parts))
++		return PTR_ERR(parts);
++
++	for (retry = 0; retry < 3; retry++) {
++		error = nvt_spi_download(ts, fw, parts, num_parts, auto_copy);
++		if (!error)
++			break;
++	}
++	if (error) {
++		dev_err(dev, "failed to start the firmware: %d\n", error);
++		return error;
++	}
++
++	/* The firmware then calibrates its baseline */
++	if (nvt_spi_wait_reset_state(ts, NVT_RESET_STATE_REK, 50))
++		dev_dbg(dev, "no baseline yet\n");
++
++	error = nvt_spi_read(ts, ts->chip->event_buf + NVT_EVT_FW_INFO,
++			     info, sizeof(info));
++	if (!error && info[0] + info[1] == 0xff)
++		dev_dbg(dev, "firmware %#04x, PID %#06x\n",
++			info[0], get_unaligned_le16(&info[34]));
++
++	if (ts->pen) {
++		error = nvt_spi_send_cmd(ts, NVT_CMD_PEN, NVT_CMD_PEN_ON);
++		if (error)
++			dev_warn(dev, "failed to enable the stylus: %d\n", error);
++	}
++
++	return 0;
++}
++
++static void nvt_spi_report_touches(struct nvt_spi_ts *ts, const u8 *buf)
++{
++	unsigned int i, slot, x, y;
++	const u8 *touch;
++
++	for (i = 0; i < NVT_MAX_TOUCHES; i++) {
++		touch = &buf[i * NVT_TOUCH_SIZE];
++
++		slot = touch[0] >> NVT_TOUCH_ID_SHIFT;
++		if (slot < 1 || slot > NVT_MAX_TOUCHES)
++			continue;
++
++		switch (touch[0] & NVT_TOUCH_STATE_MASK) {
++		case NVT_TOUCH_NEW:
++		case NVT_TOUCH_UPDATE:
++			break;
++		default:
++			continue;
++		}
++
++		x = get_unaligned_be16(&touch[1]);
++		y = get_unaligned_be16(&touch[3]);
++		if (x > ts->prop.max_x || y > ts->prop.max_y)
++			continue;
++
++		input_mt_slot(ts->input, slot - 1);
++		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, true);
++		touchscreen_report_pos(ts->input, &ts->prop, x, y, true);
++		input_report_abs(ts->input, ABS_MT_TOUCH_MAJOR, touch[5]);
++	}
++
++	input_mt_sync_frame(ts->input);
++	input_sync(ts->input);
++}
++
++static void nvt_spi_report_pen(struct nvt_spi_ts *ts, const u8 *pen)
++{
++	struct input_dev *input = ts->pen;
++	unsigned int x, y, pressure, distance;
++	int tilt_x, tilt_y;
++
++	switch (pen[0]) {
++	case NVT_PEN_DATA:
++		x = get_unaligned_be16(&pen[1]);
++		y = get_unaligned_be16(&pen[3]);
++		if (x > ts->prop.max_x || y > ts->prop.max_y)
++			return;
++
++		pressure = get_unaligned_be16(&pen[5]);
++		tilt_x = (s8)pen[7];
++		tilt_y = (s8)pen[8];
++		distance = get_unaligned_be16(&pen[9]);
++
++		/* Turn the tilt as touchscreen_report_pos() turns the position */
++		if (ts->prop.invert_x)
++			tilt_x = -tilt_x;
++		if (ts->prop.invert_y)
++			tilt_y = -tilt_y;
++		if (ts->prop.swap_x_y)
++			swap(tilt_x, tilt_y);
++
++		touchscreen_report_pos(input, &ts->prop, x, y, false);
++		input_report_abs(input, ABS_PRESSURE, pressure);
++		input_report_abs(input, ABS_DISTANCE, distance);
++		input_report_abs(input, ABS_TILT_X, tilt_x);
++		input_report_abs(input, ABS_TILT_Y, tilt_y);
++		input_report_key(input, BTN_TOUCH, pressure);
++		input_report_key(input, BTN_TOOL_PEN, pressure || distance);
++		input_report_key(input, BTN_STYLUS, pen[11] & BIT(0));
++		input_report_key(input, BTN_STYLUS2, pen[11] & BIT(1));
++		break;
++
++	case NVT_PEN_NONE:
++		input_report_abs(input, ABS_PRESSURE, 0);
++		input_report_abs(input, ABS_DISTANCE, 0);
++		input_report_key(input, BTN_TOUCH, 0);
++		input_report_key(input, BTN_TOOL_PEN, 0);
++		input_report_key(input, BTN_STYLUS, 0);
++		input_report_key(input, BTN_STYLUS2, 0);
++		break;
++
++	default:
++		/* The stylus ID and other formats carry no position */
++		return;
++	}
++
++	input_sync(input);
++}
++
++static void nvt_spi_release_all(struct nvt_spi_ts *ts)
++{
++	static const u8 no_pen[] = { NVT_PEN_NONE };
++
++	input_mt_sync_frame(ts->input);
++	input_sync(ts->input);
++
++	if (ts->pen)
++		nvt_spi_report_pen(ts, no_pen);
++}
++
++static bool nvt_spi_is_wdt_report(const u8 *buf)
++{
++	unsigned int i;
++
++	for (i = 0; i < 6; i++)
++		if (buf[i] != 0xfd && buf[i] != 0xfe)
++			return false;
++
++	return true;
++}
++
++static bool nvt_spi_csum_ok(const u8 *buf)
++{
++	unsigned int i;
++	u8 sum = 0;
++
++	for (i = 0; i <= NVT_CSUM_LEN; i++)
++		sum += buf[i];
++
++	return !sum;
++}
++
++static irqreturn_t nvt_spi_irq(int irq, void *dev_id)
++{
++	struct nvt_spi_ts *ts = dev_id;
++	u8 *buf = ts->report;
++	int error;
++
++	error = nvt_spi_read(ts, ts->chip->event_buf, buf, NVT_REPORT_LEN);
++	if (error) {
++		dev_err_ratelimited(&ts->spi->dev, "failed to read report: %d\n",
++				    error);
++		return IRQ_HANDLED;
++	}
++
++	if (nvt_spi_is_wdt_report(buf)) {
++		if (++ts->wdt_reports > NVT_WDT_REPORTS) {
++			ts->wdt_reports = 0;
++			schedule_work(&ts->recover_work);
++		}
++		return IRQ_HANDLED;
++	}
++	ts->wdt_reports = 0;
++
++	/* The firmware's handshake pattern carries no touches */
++	if (!memchr_inv(buf, 0x77, 6))
++		return IRQ_HANDLED;
++
++	if (!nvt_spi_csum_ok(buf)) {
++		dev_dbg_ratelimited(&ts->spi->dev, "report checksum mismatch\n");
++		return IRQ_HANDLED;
++	}
++
++	/* Stylus mode and gesture events */
++	if ((buf[0] >> NVT_TOUCH_ID_SHIFT) == NVT_EVENT_ID)
++		return IRQ_HANDLED;
++
++	nvt_spi_report_touches(ts, buf);
++	if (ts->pen)
++		nvt_spi_report_pen(ts, &buf[NVT_PEN_OFFSET]);
++
++	return IRQ_HANDLED;
++}
++
++static int nvt_spi_start(struct nvt_spi_ts *ts)
++{
++	int error;
++
++	error = nvt_spi_power_on(ts);
++	if (error)
++		return error;
++
++	error = nvt_spi_boot(ts);
++	if (error) {
++		nvt_spi_power_off(ts);
++		return error;
++	}
++
++	ts->wdt_reports = 0;
++	ts->running = true;
++	enable_irq(ts->spi->irq);
++
++	return 0;
++}
++
++static void nvt_spi_stop(struct nvt_spi_ts *ts)
++{
++	disable_irq(ts->spi->irq);
++	ts->running = false;
++
++	nvt_spi_write_u8(ts, ts->chip->event_buf + NVT_EVT_HOST_CMD,
++			 NVT_CMD_DEEP_SLEEP);
++	nvt_spi_power_off(ts);
++	nvt_spi_release_all(ts);
++}
++
++static void nvt_spi_recover_work(struct work_struct *work)
++{
++	struct nvt_spi_ts *ts = container_of(work, struct nvt_spi_ts,
++					     recover_work);
++	int error;
++
++	guard(mutex)(&ts->lock);
++
++	if (!ts->running)
++		return;
++
++	dev_warn(&ts->spi->dev, "controller was reset, loading the firmware again\n");
++
++	disable_irq(ts->spi->irq);
++	nvt_spi_release_all(ts);
++
++	error = nvt_spi_boot(ts);
++	if (error) {
++		ts->running = false;
++		nvt_spi_power_off(ts);
++		return;
++	}
++
++	enable_irq(ts->spi->irq);
++}
++
++static int nvt_spi_open(struct input_dev *dev)
++{
++	struct nvt_spi_ts *ts = input_get_drvdata(dev);
++	int error;
++
++	guard(mutex)(&ts->lock);
++
++	if (!ts->users) {
++		error = nvt_spi_start(ts);
++		if (error)
++			return error;
++	}
++
++	ts->users++;
++
++	return 0;
++}
++
++static void nvt_spi_close(struct input_dev *dev)
++{
++	struct nvt_spi_ts *ts = input_get_drvdata(dev);
++
++	guard(mutex)(&ts->lock);
++
++	if (!--ts->users && ts->running)
++		nvt_spi_stop(ts);
++}
++
++static int nvt_spi_suspend(struct device *dev)
++{
++	struct nvt_spi_ts *ts = spi_get_drvdata(to_spi_device(dev));
++
++	cancel_work_sync(&ts->recover_work);
++
++	guard(mutex)(&ts->lock);
++
++	if (ts->running)
++		nvt_spi_stop(ts);
++
++	return 0;
++}
++
++static int nvt_spi_resume(struct device *dev)
++{
++	struct nvt_spi_ts *ts = spi_get_drvdata(to_spi_device(dev));
++
++	guard(mutex)(&ts->lock);
++
++	if (ts->users && !ts->running)
++		return nvt_spi_start(ts);
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(nvt_spi_pm_ops, nvt_spi_suspend, nvt_spi_resume);
++
++/* The panel ID straps pick the firmware for the panel */
++static int nvt_spi_get_fw_name(struct nvt_spi_ts *ts)
++{
++	struct device *dev = &ts->spi->dev;
++	DECLARE_BITMAP(id, 2) = { };
++	struct gpio_descs *id_gpios;
++	const char *names[4];
++	int count, error;
++
++	count = device_property_read_string_array(dev, "firmware-name",
++						  names, ARRAY_SIZE(names));
++	if (count < 1)
++		return dev_err_probe(dev, count ?: -EINVAL,
++				     "failed to read firmware-name\n");
++
++	id_gpios = gpiod_get_array_optional(dev, "novatek,panel-id", GPIOD_IN);
++	if (IS_ERR(id_gpios))
++		return dev_err_probe(dev, PTR_ERR(id_gpios),
++				     "failed to get the panel ID GPIOs\n");
++
++	if (id_gpios) {
++		if (id_gpios->ndescs > 2)
++			error = -EINVAL;
++		else
++			error = gpiod_get_array_value_cansleep(id_gpios->ndescs,
++							       id_gpios->desc,
++							       id_gpios->info, id);
++		gpiod_put_array(id_gpios);
++		if (error)
++			return dev_err_probe(dev, error,
++					     "failed to read the panel ID\n");
++	}
++
++	if (id[0] >= count)
++		return dev_err_probe(dev, -EINVAL,
++				     "no firmware for panel ID %lu\n", id[0]);
++
++	ts->fw_name = names[id[0]];
++	dev_dbg(dev, "panel ID %lu, firmware %s\n", id[0], ts->fw_name);
++
++	return 0;
++}
++
++/*
++ * touchscreen-x-mm and touchscreen-y-mm give the length of the controller's
++ * X and Y axes. Tablet clients such as libinput need the resolution.
++ */
++static void nvt_spi_set_res(struct nvt_spi_ts *ts, struct input_dev *input,
++			    unsigned int abs_x, unsigned int abs_y)
++{
++	struct device *dev = &ts->spi->dev;
++	u32 mm;
++
++	if (!device_property_read_u32(dev, "touchscreen-x-mm", &mm) && mm)
++		input_abs_set_res(input, ts->prop.swap_x_y ? abs_y : abs_x,
++				  (ts->prop.max_x + 1) / mm);
++
++	if (!device_property_read_u32(dev, "touchscreen-y-mm", &mm) && mm)
++		input_abs_set_res(input, ts->prop.swap_x_y ? abs_x : abs_y,
++				  (ts->prop.max_y + 1) / mm);
++}
++
++static int nvt_spi_init_input(struct nvt_spi_ts *ts)
++{
++	struct device *dev = &ts->spi->dev;
++	struct input_dev *input;
++	int error;
++
++	input = devm_input_allocate_device(dev);
++	if (!input)
++		return -ENOMEM;
++
++	input->name = "Novatek NT36532 Touchscreen";
++	input->phys = devm_kasprintf(dev, GFP_KERNEL, "%s/input0", dev_name(dev));
++	input->id.bustype = BUS_SPI;
++	input->open = nvt_spi_open;
++	input->close = nvt_spi_close;
++	input_set_drvdata(input, ts);
++
++	input_set_abs_params(input, ABS_MT_POSITION_X, 0, 0, 0, 0);
++	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, 0, 0, 0);
++	touchscreen_parse_properties(input, true, &ts->prop);
++	if (!ts->prop.max_x || !ts->prop.max_y)
++		return dev_err_probe(dev, -EINVAL, "touchscreen size missing\n");
++
++	nvt_spi_set_res(ts, input, ABS_MT_POSITION_X, ABS_MT_POSITION_Y);
++	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++
++	error = input_mt_init_slots(input, NVT_MAX_TOUCHES,
++				    INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	if (error)
++		return error;
++
++	ts->input = input;
++
++	return 0;
++}
++
++static int nvt_spi_init_pen(struct nvt_spi_ts *ts)
++{
++	struct device *dev = &ts->spi->dev;
++	struct input_dev *pen;
++
++	pen = devm_input_allocate_device(dev);
++	if (!pen)
++		return -ENOMEM;
++
++	pen->name = "Novatek NT36532 Stylus";
++	pen->phys = devm_kasprintf(dev, GFP_KERNEL, "%s/input1", dev_name(dev));
++	pen->id.bustype = BUS_SPI;
++	pen->open = nvt_spi_open;
++	pen->close = nvt_spi_close;
++	input_set_drvdata(pen, ts);
++
++	/* Same coordinates as the fingers */
++	input_set_abs_params(pen, ABS_X, 0, 0, 0, 0);
++	input_set_abs_params(pen, ABS_Y, 0, 0, 0, 0);
++	touchscreen_parse_properties(pen, false, &ts->prop);
++	nvt_spi_set_res(ts, pen, ABS_X, ABS_Y);
++
++	input_set_abs_params(pen, ABS_PRESSURE, 0, NVT_PEN_PRESSURE_MAX, 0, 0);
++	input_set_abs_params(pen, ABS_DISTANCE, 0, NVT_PEN_DISTANCE_MAX, 0, 0);
++	input_set_abs_params(pen, ABS_TILT_X, -NVT_PEN_TILT_MAX, NVT_PEN_TILT_MAX, 0, 0);
++	input_set_abs_params(pen, ABS_TILT_Y, -NVT_PEN_TILT_MAX, NVT_PEN_TILT_MAX, 0, 0);
++	input_abs_set_res(pen, ABS_TILT_X, NVT_PEN_TILT_RES);
++	input_abs_set_res(pen, ABS_TILT_Y, NVT_PEN_TILT_RES);
++
++	input_set_capability(pen, EV_KEY, BTN_TOUCH);
++	input_set_capability(pen, EV_KEY, BTN_TOOL_PEN);
++	input_set_capability(pen, EV_KEY, BTN_STYLUS);
++	input_set_capability(pen, EV_KEY, BTN_STYLUS2);
++	__set_bit(INPUT_PROP_DIRECT, pen->propbit);
++
++	ts->pen = pen;
++
++	return 0;
++}
++
++static int nvt_spi_probe(struct spi_device *spi)
++{
++	struct device *dev = &spi->dev;
++	struct nvt_spi_ts *ts;
++	int error;
++
++	if (!spi->irq)
++		return dev_err_probe(dev, -EINVAL, "no interrupt\n");
++
++	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
++	if (!ts)
++		return -ENOMEM;
++
++	ts->spi = spi;
++	ts->chip = spi_get_device_match_data(spi);
++	if (!ts->chip)
++		return -EINVAL;
++
++	spi_set_drvdata(spi, ts);
++
++	ts->tx = devm_kmalloc(dev, NVT_TX_LEN, GFP_KERNEL);
++	ts->rx = devm_kmalloc(dev, NVT_RX_LEN, GFP_KERNEL);
++	if (!ts->tx || !ts->rx)
++		return -ENOMEM;
++
++	error = devm_mutex_init(dev, &ts->lock);
++	if (error)
++		return error;
++
++	error = devm_work_autocancel(dev, &ts->recover_work, nvt_spi_recover_work);
++	if (error)
++		return error;
++
++	spi->mode = SPI_MODE_0;
++	spi->bits_per_word = 8;
++	error = spi_setup(spi);
++	if (error)
++		return error;
++
++	ts->supplies[0].supply = "vcc";
++	ts->supplies[1].supply = "iovcc";
++	error = devm_regulator_bulk_get(dev, ARRAY_SIZE(ts->supplies),
++					ts->supplies);
++	if (error)
++		return dev_err_probe(dev, error, "failed to get regulators\n");
++
++	ts->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ts->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ts->reset_gpio),
++				     "failed to get the reset GPIO\n");
++
++	error = nvt_spi_get_fw_name(ts);
++	if (error)
++		return error;
++
++	error = nvt_spi_power_on(ts);
++	if (error)
++		return dev_err_probe(dev, error, "failed to power on\n");
++
++	error = nvt_spi_check_chip(ts);
++	nvt_spi_power_off(ts);
++	if (error)
++		return error;
++
++	error = nvt_spi_init_input(ts);
++	if (error)
++		return error;
++
++	error = nvt_spi_init_pen(ts);
++	if (error)
++		return error;
++
++	error = devm_request_threaded_irq(dev, spi->irq, NULL, nvt_spi_irq,
++					  IRQF_ONESHOT | IRQF_NO_AUTOEN,
++					  dev_name(dev), ts);
++	if (error)
++		return dev_err_probe(dev, error, "failed to request the IRQ\n");
++
++	error = input_register_device(ts->input);
++	if (error)
++		return error;
++
++	return input_register_device(ts->pen);
++}
++
++static const struct nvt_spi_chip nt36532_chip = {
++	.trim_id = { 0x32, 0x65, 0x03 },
++	.trim_id_addr = 0x1fb104,
++	.swrst_addr = 0x1fb43e,
++	.event_buf = 0x125800,
++	.boot_rdy = 0x1fb50d,
++	.auto_copy = 0x1fc925,
++	.ilm_des = 0x1fb528,
++	.ilm_len = 0x1fb518,
++	.ilm_crc = 0x1fb500,
++	.dlm_des = 0x1fb52c,
++	.dlm_len = 0x1fb530,
++	.dlm_crc = 0x1fb504,
++};
++
++static const struct of_device_id nvt_spi_of_match[] = {
++	{ .compatible = "novatek,nt36532-ts", .data = &nt36532_chip },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, nvt_spi_of_match);
++
++static const struct spi_device_id nvt_spi_id[] = {
++	{ "nt36532-ts", (kernel_ulong_t)&nt36532_chip },
++	{ }
++};
++MODULE_DEVICE_TABLE(spi, nvt_spi_id);
++
++static struct spi_driver nvt_spi_driver = {
++	.driver = {
++		.name = "novatek-nvt-spi",
++		.of_match_table = nvt_spi_of_match,
++		.pm = pm_sleep_ptr(&nvt_spi_pm_ops),
++	},
++	.id_table = nvt_spi_id,
++	.probe = nvt_spi_probe,
++};
++module_spi_driver(nvt_spi_driver);
++
++MODULE_DESCRIPTION("Novatek NT36532 SPI touchscreen driver");
++MODULE_LICENSE("GPL");

@@ -1,0 +1,27 @@
+From: buntOS contributors
+Subject: [PATCH] arm64: dts: mediatek: mt6897-pinfunc: include mt65xx.h from dt-bindings
+
+The header includes "mt65xx.h", which is not in the device tree include
+path: the first board file that includes the header fails to build. Take
+MTK_PIN_NO from <dt-bindings/pinctrl/mt65xx.h>, as mt8196-pinfunc.h does.
+
+The header came from mt6878-pinfunc.h, which has the same include but no
+user yet.
+
+---
+ arch/arm64/boot/dts/mediatek/mt6897-pinfunc.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6897-pinfunc.h b/arch/arm64/boot/dts/mediatek/mt6897-pinfunc.h
+index 44234d6..ba5f50e 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6897-pinfunc.h
++++ b/arch/arm64/boot/dts/mediatek/mt6897-pinfunc.h
+@@ -9,7 +9,7 @@
+ #ifndef __MT6897_PINFUNC_H
+ #define __MT6897_PINFUNC_H
+ 
+-#include "mt65xx.h"
++#include <dt-bindings/pinctrl/mt65xx.h>
+ 
+ #define PINMUX_GPIO0__FUNC_GPIO0 (MTK_PIN_NO(0) | 0)
+ #define PINMUX_GPIO0__FUNC_FMI2S_LRCK (MTK_PIN_NO(0) | 3)

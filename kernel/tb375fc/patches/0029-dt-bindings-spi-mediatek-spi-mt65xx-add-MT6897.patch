@@ -1,0 +1,29 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: spi: mediatek,spi-mt65xx: add MT6897
+
+The SPI controllers of the MediaTek MT6897 (Dimensity 8300) SoC are of the
+IPM design that MT6991 has. The MediaTek driver in the OnePlus MT6897
+kernel matches them with its mt6985 data: pad selection, the enhanced
+timing registers, 36-bit DMA addresses and the IPM register layout, which
+are the features of the mainline mt6991 data. Add MT6897 with
+mediatek,mt6991-spi as the fallback.
+
+The MediaTek driver also has a quad mode and switches the chip select by
+software; the mainline driver uses neither, as on MT6991.
+
+---
+ Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml b/Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml
+index 3bf3eb1..2a746b4 100644
+--- a/Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml
++++ b/Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml
+@@ -41,6 +41,7 @@ properties:
+           - const: mediatek,spi-ipm
+       - items:
+           - enum:
++              - mediatek,mt6897-spi
+               - mediatek,mt8196-spi
+           - const: mediatek,mt6991-spi
+       - items:

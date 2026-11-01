@@ -425,6 +425,125 @@
 			status = "disabled";
 		};
 
+		/*
+		 * The SPI masters take their clock from a topckgen mux behind a
+		 * pericfg_ao gate. As in the stock tree, spi0-2 run from
+		 * mainpll_d6_d2 and spi3-7 from univpll_d6_d2. The stock
+		 * mediatek,tickdly sample delays have no mainline property.
+		 * TODO(2c): enable with pio and the clock controllers.
+		 */
+		spi0: spi@11010000 {
+			compatible = "mediatek,mt6897-spi", "mediatek,mt6991-spi";
+			reg = <0 0x11010000 0 0x100>;
+			interrupts = <GIC_SPI 242 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_MAINPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI0>,
+				 <&pericfg_ao CLK_PERI_AO_SPI0_BCLK>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			mediatek,pad-select = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi1: spi@11011000 {
+			compatible = "mediatek,mt6897-spi", "mediatek,mt6991-spi";
+			reg = <0 0x11011000 0 0x100>;
+			interrupts = <GIC_SPI 243 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_MAINPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI1>,
+				 <&pericfg_ao CLK_PERI_AO_SPI1_BCLK>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			mediatek,pad-select = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi2: spi@11012000 {
+			compatible = "mediatek,mt6897-spi", "mediatek,mt6991-spi";
+			reg = <0 0x11012000 0 0x100>;
+			interrupts = <GIC_SPI 244 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_MAINPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI2>,
+				 <&pericfg_ao CLK_PERI_AO_SPI2_BCLK>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			mediatek,pad-select = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi3: spi@11013000 {
+			compatible = "mediatek,mt6897-spi", "mediatek,mt6991-spi";
+			reg = <0 0x11013000 0 0x100>;
+			interrupts = <GIC_SPI 245 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_UNIVPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI3>,
+				 <&pericfg_ao CLK_PERI_AO_SPI3_BCLK>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			mediatek,pad-select = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi4: spi@11014000 {
+			compatible = "mediatek,mt6897-spi", "mediatek,mt6991-spi";
+			reg = <0 0x11014000 0 0x100>;
+			interrupts = <GIC_SPI 246 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_UNIVPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI4>,
+				 <&pericfg_ao CLK_PERI_AO_SPI4_BCLK>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			mediatek,pad-select = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi5: spi@11015000 {
+			compatible = "mediatek,mt6897-spi", "mediatek,mt6991-spi";
+			reg = <0 0x11015000 0 0x100>;
+			interrupts = <GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_UNIVPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI5>,
+				 <&pericfg_ao CLK_PERI_AO_SPI5_BCLK>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			mediatek,pad-select = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi6: spi@11016000 {
+			compatible = "mediatek,mt6897-spi", "mediatek,mt6991-spi";
+			reg = <0 0x11016000 0 0x100>;
+			interrupts = <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_UNIVPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI6>,
+				 <&pericfg_ao CLK_PERI_AO_SPI6_BCLK>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			mediatek,pad-select = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi7: spi@11017000 {
+			compatible = "mediatek,mt6897-spi", "mediatek,mt6991-spi";
+			reg = <0 0x11017000 0 0x100>;
+			interrupts = <GIC_SPI 249 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_UNIVPLL_D6_D2>,
+				 <&topckgen CLK_TOP_SPI7>,
+				 <&pericfg_ao CLK_PERI_AO_SPI7_BCLK>;
+			clock-names = "parent-clk", "sel-clk", "spi-clk";
+			mediatek,pad-select = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
 		pericfg_ao: clock-controller@11036000 {
 			compatible = "mediatek,mt6897-pericfg-ao", "syscon";
 			reg = <0 0x11036000 0 0x1000>;

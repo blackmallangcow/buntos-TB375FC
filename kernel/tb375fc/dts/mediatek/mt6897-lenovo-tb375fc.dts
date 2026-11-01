@@ -6,10 +6,12 @@
  */
 
 /dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/spmi/spmi.h>
 #include "mt6897.dtsi"
+#include "mt6897-pinfunc.h"
 
 / {
 	model = "Lenovo Xiaoxin Pad Pro 12.7 (TB375FC)";
@@ -44,10 +46,100 @@
 		};
 	};
 
+	/*
+	 * Hall sensors. GPIO1 (stock hall_1) goes low when the cover closes
+	 * over the screen. The stock tree's hall_2 is GPIO26, which is also
+	 * the plug-gpios of the stock pogo keyboard driver and has no driver
+	 * of its own there; whether low means the keyboard is attached or
+	 * folded back is not known yet.
+	 * TODO(2c): enable with pio, check both levels with evtest, and decide
+	 * whether GPIO26 belongs to the pogo keyboard driver instead.
+	 */
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&hall_pins>;
+		status = "disabled";
+
+		switch-lid {
+			label = "Lid";
+			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			debounce-interval = <100>;
+			wakeup-source;
+		};
+
+		switch-tablet-mode {
+			label = "Tablet mode";
+			gpios = <&pio 26 GPIO_ACTIVE_HIGH>;
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_TABLET_MODE>;
+			debounce-interval = <100>;
+		};
+	};
+
 	memory@40000000 {
 		device_type = "memory";
 		/* The bootloader fills in the real size (8 or 12 GiB) */
 		reg = <0 0x40000000 0 0x40000000>;
+	};
+
+	/*
+	 * The panel's 1.8 V I/O supply behind a switch on GPIO63 (stock
+	 * vddio_1v8-gpios), which the touch side of the NT36532 shares. The
+	 * bootloader turns it on with the panel, and nothing may turn it off
+	 * while the display runs on simple-framebuffer.
+	 * TODO(2c): enable with pio; drop regulator-always-on once a panel
+	 * driver uses it.
+	 */
+	vddio_1v8: regulator-vddio-1v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "vddio_1v8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&pio 63 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+		regulator-always-on;
+		status = "disabled";
+	};
+};
+
+&pio {
+	hall_pins: hall-pins {
+		pins-hall {
+			pinmux = <PINMUX_GPIO1__FUNC_GPIO1>,
+				 <PINMUX_GPIO26__FUNC_GPIO26>;
+			input-enable;
+		};
+	};
+
+	/* The stock tree sets drive strength 2, which is 6 mA */
+	spi2_pins: spi2-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO11__FUNC_SPI2_CLK>,
+				 <PINMUX_GPIO12__FUNC_SPI2_CSB>,
+				 <PINMUX_GPIO13__FUNC_SPI2_MI>,
+				 <PINMUX_GPIO14__FUNC_SPI2_MO>;
+			drive-strength = <6>;
+		};
+	};
+
+	touch_pins: touch-pins {
+		pins-irq {
+			pinmux = <PINMUX_GPIO9__FUNC_GPIO9>;
+			input-enable;
+		};
+
+		pins-panel-id {
+			pinmux = <PINMUX_GPIO184__FUNC_GPIO184>;
+			input-enable;
+		};
+
+		pins-reset {
+			pinmux = <PINMUX_GPIO60__FUNC_GPIO60>;
+		};
 	};
 };
 
@@ -67,6 +159,41 @@
 		console-size = <0x40000>;
 		pmsg-size = <0x80000>;
 		status = "disabled";
+	};
+};
+
+/* TODO(2c): spi2 stays disabled (mt6897.dtsi) until pio and the clocks are on */
+&spi2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi2_pins>;
+
+	/*
+	 * The touch and stylus side of the NT36532 TDDI. The firmware is tuned
+	 * per panel: the panel ID strap on GPIO184 reads 0 with the BOE panel
+	 * and 1 with the two Tianma panels. The controller's X runs along the
+	 * 1840-pixel side and Y along the 2944-pixel side, both in tenths of a
+	 * pixel and up to 18400 and 29440, while the panel scans out
+	 * 2944x1840. The active area is 273.6 x 171.0 mm (12.7", 16:10).
+	 * TODO(2c): check the direction of both axes with evtest and add
+	 * touchscreen-inverted-x/y where needed.
+	 */
+	touchscreen@0 {
+		compatible = "novatek,nt36532-ts";
+		reg = <0>;
+		spi-max-frequency = <9600000>;
+		interrupts-extended = <&pio 9 IRQ_TYPE_EDGE_RISING>;
+		reset-gpios = <&pio 60 GPIO_ACTIVE_LOW>;
+		iovcc-supply = <&vddio_1v8>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&touch_pins>;
+		firmware-name = "lenovo/tb375fc/novatek_ts_fw_boe.bin",
+				"lenovo/tb375fc/novatek_ts_fw_tm.bin";
+		novatek,panel-id-gpios = <&pio 184 GPIO_ACTIVE_HIGH>;
+		touchscreen-size-x = <18401>;
+		touchscreen-size-y = <29441>;
+		touchscreen-x-mm = <171>;
+		touchscreen-y-mm = <273>;
+		touchscreen-swapped-x-y;
 	};
 };
 
