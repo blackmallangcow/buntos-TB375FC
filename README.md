@@ -8,13 +8,13 @@
 >
 > 데스크톱(컴포지터, 셸, 시스템 설정, 에이전트)은 원본 buntOS(원격 `buntos`)에서 받아 합칩니다. 이 포크는 arm64만 빌드합니다.
 
-태블릿 폼팩터의 개발용 Unix 워크스테이션을 목표로 하는 오픈소스 OS입니다. 안드로이드 태블릿에서 막혀 있던 셸 제어, 개발환경 구성, 테스트 호스팅, 앱 간 제어를 완전히 열린 스택 위에서 제공하려고 합니다.
+개발용 Unix 워크스테이션을 목표로 하는 오픈소스 데스크톱 OS입니다. x86-64(Intel·AMD)와 arm64의 데스크톱·노트북을 GPU 가속으로 지원하고, 셸 제어, 개발환경 구성, 테스트 호스팅, 앱 간 제어를 완전히 열린 스택 위에서 제공하려고 합니다. 태블릿은 이 저장소를 arm64로 포크해 기기마다 최적화하는 별도 라인(태블릿 라인)에서 합니다.
 
-*English: buntOS is an open-source OS that aims to turn tablets into fully open Unix development workstations: Debian-based, mainline Linux, a Rust/Smithay Wayland compositor, and an AI-friendly control plane. The same image recipe builds and boots on x86-64 and arm64 QEMU with its own compositor, macOS-style shell, settings app and AI agent control plane (CLI, JavaScript REPL and MCP); the remaining foundation step is surveying the first target tablet. The design documents are written in Korean.*
+*English: buntOS is an open-source desktop OS for x86-64 and arm64 machines that aims to be a fully open Unix development workstation: Debian-based, mainline Linux, a GPU-accelerated Rust/Smithay Wayland compositor, and an AI-friendly control plane. The same image recipe builds and boots on x86-64 and arm64 QEMU with its own compositor, macOS-style shell, settings app and AI agent control plane (CLI, JavaScript REPL and MCP). Tablets are a separate line of device-specific arm64 forks, starting with the Lenovo Xiaoxin Pad Pro 12.7 (TB375FC). The design documents are written in Korean.*
 
 ## 현재 상태
 
-x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅하며, 이미지에는 Wi-Fi·Bluetooth·오디오·GPU 펌웨어 같은 필수 드라이버가 들어 있습니다. 두 아키텍처 모두에서 e2e 시험(부팅과 로그인, AI 에이전트의 앱 간 제어, 키보드 단축키, 한글 입력, 화면 잠금)을 통과합니다(x86-64는 CI의 호스티드 러너에서). 기반 단계(Phase 0)의 남은 일은 첫 대상 기기의 실측입니다.
+x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅하며, 이미지에는 Wi-Fi·Bluetooth·오디오·GPU 펌웨어 같은 필수 드라이버가 들어 있습니다. 두 아키텍처 모두에서 e2e 시험(부팅과 로그인, AI 에이전트의 앱 간 제어, 키보드 단축키, 한글 입력, 화면 잠금)을 통과합니다(x86-64는 CI의 호스티드 러너에서). 기반 단계(Phase 0)는 끝났고, 다음은 데스크톱 실기기와 GPU 가속입니다.
 
 자체 컴포지터(bunt-comp), 셸(bunt-shell), 시스템 설정(bunt-settings), 로그인 화면(bunt-greeter)이 뜹니다. UI는 macOS 26을 기준으로 삼습니다([디자인 스펙](docs/design/DESIGN-SPEC.md)).
 - **메뉴 막대:** 앞에 있는 앱의 메뉴, 입력 소스·사운드·배터리·Wi-Fi 같은 메뉴 막대 항목, 제어 센터, 알림 센터
@@ -42,10 +42,11 @@ x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅
 - **완전히 열린 스택**: 메인 CPU에서 도는 커널·드라이버·사용자 공간은 전부 오픈소스입니다. 벤더 커널과 폐쇄 드라이버는 쓰지 않으며, 펌웨어만 예외입니다
 - **개발환경 비차단**: root, 패키지 설치, 컨테이너, 가상화, 커널 업그레이드를 OS가 막지 않습니다
 - **두 아키텍처 동등 지원**: x86-64와 arm64를 같은 소스와 같은 패키지 목록으로 빌드합니다
-- **기반**: mainline Linux 커널, Debian(glibc, systemd), Rust + Smithay 기반 Wayland 컴포지터
+- **제품 라인**: 이 저장소는 x86-64·arm64 데스크톱 라인입니다. 태블릿은 기기마다 arm64 포크(태블릿 라인)에서 최적화하고, 데스크톱 컴포넌트는 이 저장소에서 받아 갑니다
+- **기반**: mainline Linux 커널, Debian(glibc, systemd), Rust + Smithay 기반 Wayland 컴포지터(Mesa GPU 가속)
 - **AI 친화 제어 계층**: 접근성 트리를 바탕으로 권한을 확인하며 앱 간 제어를 제공합니다
 
-첫 실기기 대상은 Lenovo Xiaoxin Pad Pro 12.7(TB375FC, MediaTek Dimensity 8300)이며, mainline 커널 포팅으로 진행합니다.
+태블릿 라인의 첫 기기는 Lenovo Xiaoxin Pad Pro 12.7(TB375FC, MediaTek Dimensity 8300)이고, 별도 포크 저장소에서 mainline 커널 포팅으로 진행합니다.
 
 ## 보안 지원
 
