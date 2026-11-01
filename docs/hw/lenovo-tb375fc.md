@@ -72,6 +72,7 @@ python3 -I tools/hw/dts_enabled.py out/merged.dts       # 켜진 노드의 compa
 | GPU | Arm Mali-Valhall(`mali@13000000`). 전원과 주파수는 GPU 내장 컨트롤러 gpueb(펌웨어 `gpueb.img`)와 gpufreq가 다룬다 | `mediatek,mali`, `arm,mali-valhall` | Panthor + Mesa가 GPU를 지원한다. MT6897 쪽 전원·주파수(gpueb) 통합이 포팅 범위다(4.2.1-3) |
 | 저장장치 | UFS(`ufshci@112b0000`), MediaTek UFS PHY | `mediatek,mt8183-ufshci`, 모듈 `ufs-mediatek-mod.ko`, `phy-mtk-ufs.ko` | 업스트림 `ufs-mediatek`이 받는 compatible이다 |
 | USB | mtu3 + xHCI(`usb0@11201000`). USB-C는 MT6375의 TCPC, Type-C 먹스, USB·DP 고르기 | `mediatek,mtu3`, `mediatek,mtk-xhci`, `mediatek,mt6375-tcpc` | mtu3·xhci-mtk는 업스트림에 있다. MT6375 TCPC는 확인 필요 |
+| USB VBUS 경로 | MT6375 부스트 → 차지 펌프 입력 FET(ACDRV1) → 커넥터. 순정은 부스트 앞에서 FET를 닫는다. 커넥터 과열 보호 GPIO179(`vbus_mos_gpio`, 평소 low, 충전 중 75도에서 high) | `mt6375,otg-vbus`, `nuvolta,nu2115`, `unisemi,upm6720` | 스톡 모듈과 제3자 미러로 확인. 회로도는 없다 |
 | PMIC | MT6363(주, SPMI), MT6368(보조: USB VUSB, GPU 코어 VBUCK2, 진동 VIBR, 지문 VFP, 오디오 코덱·이어폰 감지), MT6319 ×3(SPMI 벅), MT6685(RTC·클럭 버퍼), MT6375(충전기·TCPC·ADC, I2C 0x34) | `mediatek,mt6363` 등 | 확인 필요(2b) |
 | 충전 | MT6375 충전기, 차지 펌프 Nuvolta NU2115 ×2와 Southchip/Unisemi UPM6720 ×2(고속 충전, PD·PE) | `nuvolta,nu2115`, `southchip,upm6720` | |
 | 배터리 | 게이지 Mitsumi MM8013(I2C 0x55) | `mediatek,mm8013`, 모듈 `mm8013a_gauge.ko` | |
@@ -147,6 +148,7 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 - **자동 회전:** 센서는 있지만 SCP 뒤에 있다. buntOS에서 자동 회전을 하려면 SCP 길이 필요하다(포크 설계안 8절). 그 전에는 수동 회전이다.
 - **펌웨어:** 터치, 앰프, BT·MCU RAM 코드, Wi-Fi 설정, SCP 펌웨어가 `/vendor/firmware`에 있다. 다만 adb 셸로는 읽지 못하므로, root(언락 뒤)나 SP Flash Tool readback으로 뜬 super에서 vendor를 풀어 얻는다(ADR-012). Wi-Fi RAM 코드는 LK가 싣는다.
 - **지문 센서**가 있다. 포팅 블록 표(포크 설계안 5절)에 아직 없다.
+- 차지 펌프: `/sys/bus/i2c/drivers/upm6720`에 `10-0065`가 붙어 있고 `nu2115`에는 없다(2026-11-01). 이 기기의 VBUS 입력 FET는 I2C10의 UPM6720 @0x65가 다룬다. 순정 트리에는 후보 넷이 있어 다른 기기는 부품이 다를 수 있다
 
 ## 8. 남은 것
 
