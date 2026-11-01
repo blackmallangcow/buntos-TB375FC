@@ -126,7 +126,7 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 | 잠금 | `ro.boot.flash.locked=1`, `vbmeta.device_state=locked`, `verifiedbootstate=green`. `ro.oem_unlock_supported`와 `sys.oem_unlock_allowed` 속성은 없다 |
 | 슬롯 | A/B이고 지금 `_b`다. 동적 파티션 |
 | 메모리·저장장치 | RAM 8GB(`ro.boot.ddr_size`), 저장장치 128GB(`/data` 108G). 부팅 장치는 UFS `112b0000.ufshci` |
-| 화면 | 화면 버퍼는 2944×1840이고 회전이 없다(SurfaceFlinger의 `framebufferSpace`). Android는 `primary_display_orientation=270`으로 세로를 기본으로 보인다. 144Hz, 밀도 340 |
+| 화면 | 패널이 그리는 버퍼는 가로 2944×1840이다(SurfaceFlinger의 `framebufferSpace`, 터치 입력의 `physicalFrame`). 이 크기는 화면 회전 설정과 상관없다. Android는 세로(1840×2944)를 기본 방향으로 두고(`primary_display_orientation=270`) 가속도 센서로 자동 회전한다. 측정 때는 자동 회전이 꺼지고 가로(90°)로 고정되어 있었다. 144Hz, 밀도 340 |
 | 입력 장치(`dumpsys input`) | `NVTCapacitiveTouchScreen`(터치), `touch-pen`(펜), `hall`, `tn_wakeup`(포고 키보드 깨우기), `gf-keys`(지문), `mtk-pmic-keys`, `mtk-kpd`, `mt6897-mt6368 Headset Jack` |
 | `getevent -lp` | 입력 장치 7개가 `system` 소유라 셸이 열지 못한다. root가 필요하다 |
 | 살아 있는 트리 | `/proc/device-tree`의 노드와 속성 이름은 보이고 값은 막혀 있다(root 필요). 이름을 보면 LK가 `chosen`에 `atag,videolfb`(framebuffer 주소·크기)와 `bootargs`를 넣고, `reserved-memory`에 `mblock-*` 44개를 더한다. 그 가운데 `mblock-14-framebuffer`, `mblock-2-pstore`, `mblock-4-BL31-reserved`, `mblock-16-gz`, `mblock-38-consys_emi_reserved`, `mblock-42-me_GPUEB_SHARED`가 있다 |
@@ -135,13 +135,15 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 | vendor 펌웨어(`/vendor/firmware`, 40개) | 터치 `novatek_ts_fw_boe.bin`·`novatek_ts_fw_tm.bin`(과 MP 시험용), 앰프 보정 `aw883xx_acf_gyt.bin`·`aw883xx_acf_yc.bin`, `mali_csffw.bin`, `remoteproc_scp`, soc7_0의 BT·MCU RAM 코드(`soc7_0_ram_bt_1_1_hdr.bin`, `soc7_0_ram_mcu_1_1_hdr.bin`과 각 1a·1b판), `BT_FW.cfg`, `wifi.cfg`. Wi-Fi RAM 코드(`WIFI_RAM_CODE_soc7_0…`)는 없다 |
 | 커널 모듈 | 453개가 올라와 있다. `tn_keyboard`, `nt36532`, `hall`, `wlan_drv_gen4m_6897`, `bt_drv_6897`, `conninfra`, `gpueb`, `mali_kbase_mt6897_r44`, `snd_soc_aw883xx`, NT36532 패널 셋 |
 | 무선 | `persist.vendor.connsys.chipid=0x6897`, `fm_chipid=connac2x` |
+| 센서 | 가속도·자이로 LSM6DSO(ST), 조도 TCS37013(ams). 그 위에 MTK의 가상 센서(중력, 회전 벡터, 걸음 수 등)가 있다. 펌웨어의 AP 장치 트리에는 이 센서 노드가 없고 SCP(`scp@1c400000`)가 켜져 있어, SCP 펌웨어(센서 허브)가 다룬다 |
 | 지문·진동 | 지문 센서가 있다(`android.hardware.fingerprint`, 센서 하나). 진동은 컨트롤러가 등록되지 않았다. 진동 모터가 없거나 쓰지 않는다 |
 | 업데이트 | 시스템 업데이트 앱은 `com.lenovo.ota`이고 켜져 있다. AOSP의 자동 시스템 업데이트 설정(`ota_disable_automatic_update`)은 1(꺼짐)이다. 키보드 펌웨어 업데이트 앱(`com.zui.keyboardupdate`, `.olympia`)도 있다 |
 
 포팅에 닿는 것:
 - **언락:** Android 16 판이다. 포크 설계안 2.1절대로 중국판 16.0.20.091로 내린 뒤 언락하는 길을 쓴다. 128GB 기기라 SP Flash Tool의 scatter도 128GB에 맞춘다.
 - **2a 장치 트리:** framebuffer 꼴(2944×1840, stride 11776)이 맞다. framebuffer 주소와 pstore·BL31 자리는 값이 막혀 있어 언락하고 root를 얻은 뒤 읽는다. LK가 화면 영역을 `mblock-14-framebuffer`로 예약하므로, 우리 트리에도 같은 예약을 더하면 `framebuffer_mem` 노드는 필요 없다.
-- **터치 방향:** 패널의 자연 방향은 가로다. buntOS는 가로를 기본으로 쓰므로 회전 없이 맞는다.
+- **화면 방향:** 패널의 자연 방향은 가로다. buntOS가 가로를 기본으로 쓰면 화면과 터치를 돌리지 않아도 된다. 세로로 쓸 때는 컴포지터가 돌린다.
+- **자동 회전:** 센서는 있지만 SCP 뒤에 있다. buntOS에서 자동 회전을 하려면 SCP 길이 필요하다(포크 설계안 8절). 그 전에는 수동 회전이다.
 - **펌웨어:** 터치, 앰프, BT·MCU RAM 코드는 `/vendor/firmware`에서 뽑을 수 있다(ADR-012). Wi-Fi RAM 코드는 LK가 싣는다.
 - **지문 센서**가 있다. 포팅 블록 표(포크 설계안 5절)에 아직 없다.
 
