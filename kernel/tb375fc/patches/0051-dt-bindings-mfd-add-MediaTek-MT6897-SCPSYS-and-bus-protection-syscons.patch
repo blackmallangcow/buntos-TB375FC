@@ -1,0 +1,43 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: mfd: add MediaTek MT6897 SCPSYS and bus protection syscons
+
+Add the MT6897 SCPSYS, which holds the power controller, and the two
+register blocks that its bus protection uses, in the infrastructure bus
+(IFR) and the always-on VLP configuration block. These two are plain
+syscons.
+
+---
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
+index 4cafa3819..f9535c782 100644
+--- a/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
+@@ -21,6 +21,7 @@ properties:
+       - enum:
+           - mediatek,mt6795-scpsys
+           - mediatek,mt6893-scpsys
++          - mediatek,mt6897-scpsys
+           - mediatek,mt8167-scpsys
+           - mediatek,mt8173-scpsys
+           - mediatek,mt8183-scpsys
+diff --git a/Documentation/devicetree/bindings/mfd/syscon.yaml b/Documentation/devicetree/bindings/mfd/syscon.yaml
+index 169e8d100..108bf8add 100644
+--- a/Documentation/devicetree/bindings/mfd/syscon.yaml
++++ b/Documentation/devicetree/bindings/mfd/syscon.yaml
+@@ -87,6 +87,8 @@ select:
+           - mediatek,mt2712-pctl-a-syscfg
+           - mediatek,mt6397-pctl-pmic-syscfg
+           - mediatek,mt6897-hwv
++          - mediatek,mt6897-ifr-bus
++          - mediatek,mt6897-vlpcfg-bus
+           - mediatek,mt7981-topmisc
+           - mediatek,mt7988-topmisc
+           - mediatek,mt8135-pctl-a-syscfg
+@@ -201,6 +203,8 @@ properties:
+               - mediatek,mt2712-pctl-a-syscfg
+               - mediatek,mt6397-pctl-pmic-syscfg
+               - mediatek,mt6897-hwv
++              - mediatek,mt6897-ifr-bus
++              - mediatek,mt6897-vlpcfg-bus
+               - mediatek,mt7981-topmisc
+               - mediatek,mt7988-topmisc
+               - mediatek,mt8135-pctl-a-syscfg

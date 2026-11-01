@@ -1,0 +1,1007 @@
+From: buntOS contributors
+Subject: [PATCH] pmdomain: mediatek: add MT6897 power domains
+
+Add the System Power Manager domains of the MediaTek MT6897 (Dimensity
+8300) SoC. The tables come from the vendor driver (mtk-scpsys-mt6897.c in
+the OnePlus Pad GPL release): 25 directly controlled domains and 7 behind
+the hardware voter, with bus protection in the IFR and VLP blocks.
+
+Differences from the vendor tables:
+
+- All domains are default off, so that probe does not touch them. The
+  vendor powers on all but the modem and connectivity ones at probe, and
+  powers off the unused ones late in the boot, when its display driver
+  holds its domains. Here the bootloader leaves the display on for a
+  framebuffer with no consumer of the domains, and genpd powers off a
+  domain that it sees as on and unused at sync_state, even with
+  pd_ignore_unused.
+- The APU domain has no registers here, the vendor calls into its APU
+  driver. It was the last number, so the others keep theirs.
+- The GPU_EB_RPC domains are not in this controller: the vendor switches
+  them from the GPUEB firmware (gpueb-support, CMD_POWER_CONTROL) and
+  nothing in its device tree uses them. That is the mtk-mfg-pmdomain way.
+- The modem domain only looks at the first acknowledge bit. The vendor
+  does the same, and so does MT6858.
+- ISP_MAIN and CAM_MAIN take their supply as domain-supply. The vendor
+  finds isp-main-supply and cam-main-supply by the domain names.
+
+The vendor waits for the first power switch of a domain and 50 us more
+before it closes the second one, in the OnePlus sources and in the stock
+kernel of the Lenovo TB375FC. Mainline closes both at once on every SoC.
+That may well be fine here too, but it can only be tested on a device, and
+the wait costs next to nothing. Add staged_pwr_on to do as the vendor does.
+
+The OnePlus sources also wait 50 us before they clear the isolation of
+CAM_MAIN, which the older stock kernel does not. Add MTK_SCPD_ISO_DELAY for
+that.
+
+Add the VLP bus protection block, which mainline has as of the MT6858
+support.
+
+---
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index 4263a65ec..9fd09bd80 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -21,6 +21,7 @@
+ #include "mt6735-pm-domains.h"
+ #include "mt6795-pm-domains.h"
+ #include "mt6893-pm-domains.h"
++#include "mt6897-pm-domains.h"
+ #include "mt8167-pm-domains.h"
+ #include "mt8173-pm-domains.h"
+ #include "mt8183-pm-domains.h"
+@@ -479,6 +480,20 @@ static int scpsys_ctl_pwrseq_on(struct scpsys_domain *pd)
+ 
+ 	/* subsys power on */
+ 	regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_BIT);
++
++	if (scpsys->soc_data->staged_pwr_on) {
++		u32 sta;
++
++		/* Let the first power switch settle before closing the second one */
++		ret = regmap_read_poll_timeout(scpsys->base, pd->data->pwr_sta_offs, sta,
++					       sta & pd->data->sta_mask, MTK_POLL_DELAY_US,
++					       MTK_POLL_TIMEOUT);
++		if (ret < 0)
++			return ret;
++
++		fsleep(50);
++	}
++
+ 	regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_2ND_BIT);
+ 
+ 	/* wait until PWR_ACK = 1 */
+@@ -487,6 +502,9 @@ static int scpsys_ctl_pwrseq_on(struct scpsys_domain *pd)
+ 	if (ret < 0)
+ 		return ret;
+ 
++	if (MTK_SCPD_CAPS(pd, MTK_SCPD_ISO_DELAY))
++		fsleep(50);
++
+ 	regmap_clear_bits(scpsys->base, pd->data->ctl_offs, PWR_CLK_DIS_BIT);
+ 	regmap_clear_bits(scpsys->base, pd->data->ctl_offs, PWR_ISO_BIT);
+ 	regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_RST_B_BIT);
+@@ -1205,6 +1223,10 @@ static const struct of_device_id scpsys_of_match[] = {
+ 		.compatible = "mediatek,mt6893-power-controller",
+ 		.data = &mt6893_scpsys_data,
+ 	},
++	{
++		.compatible = "mediatek,mt6897-power-controller",
++		.data = &mt6897_scpsys_data,
++	},
+ 	{
+ 		.compatible = "mediatek,mt8167-power-controller",
+ 		.data = &mt8167_scpsys_data,
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.h b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+index 46ccd5cff..74ff045cd 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+@@ -17,6 +17,7 @@
+ #define MTK_SCPD_MODEM_PWRSEQ		BIT(10)
+ #define MTK_SCPD_SKIP_RESET_B		BIT(11)
+ #define MTK_SCPD_INFRA_PWR_CTL		BIT(12)
++#define MTK_SCPD_ISO_DELAY		BIT(13)
+ #define MTK_SCPD_CAPS(_scpd, _x)	((_scpd)->data ?		\
+ 					 (_scpd)->data->caps & (_x) :	\
+ 					 (_scpd)->hwv_data->caps & (_x))
+@@ -64,6 +65,7 @@ enum scpsys_bus_prot_block {
+ 	BUS_PROT_BLOCK_INFRA_NAO,
+ 	BUS_PROT_BLOCK_SMI,
+ 	BUS_PROT_BLOCK_SPM,
++	BUS_PROT_BLOCK_VLP,
+ 	BUS_PROT_BLOCK_COUNT,
+ };
+ 
+@@ -212,6 +214,7 @@ struct scpsys_soc_data {
+ 	enum scpsys_bus_prot_block *bus_prot_blocks;
+ 	int num_bus_prot_blocks;
+ 	enum scpsys_mtcmos_type type;
++	bool staged_pwr_on;
+ };
+ 
+ #endif /* __SOC_MEDIATEK_MTK_PM_DOMAINS_H */
+diff --git a/drivers/pmdomain/mediatek/mt6897-pm-domains.h b/drivers/pmdomain/mediatek/mt6897-pm-domains.h
+new file mode 100644
+index 000000000..ae81d7760
+--- /dev/null
++++ b/drivers/pmdomain/mediatek/mt6897-pm-domains.h
+@@ -0,0 +1,878 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ * Author: Benjamin Chao <benjamin.chao@mediatek.com>
++ */
++
++#ifndef __SOC_MEDIATEK_MT6897_PM_DOMAINS_H
++#define __SOC_MEDIATEK_MT6897_PM_DOMAINS_H
++
++#include "mtk-pm-domains.h"
++#include <dt-bindings/power/mediatek,mt6897-power.h>
++
++/*
++ * MT6897 power domain support
++ */
++
++/* IFR bus protection registers */
++#define MT6897_TOP_AXI_PROT_EN_INFRASYS0_SET		0x004
++#define MT6897_TOP_AXI_PROT_EN_INFRASYS0_CLR		0x008
++#define MT6897_TOP_AXI_PROT_EN_INFRASYS0_STA		0x00c
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS0_MD		BIT(11)
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS0_CONN		BIT(25)
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS0_CONN_2ND	BIT(26)
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS0_CAM_VCORE	BIT(27)
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS0_ADSP_AO	(BIT(29) | BIT(30))
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS0_ADSP_TOP	(BIT(29) | BIT(30))
++#define MT6897_TOP_AXI_PROT_EN_INFRASYS1_SET		0x024
++#define MT6897_TOP_AXI_PROT_EN_INFRASYS1_CLR		0x028
++#define MT6897_TOP_AXI_PROT_EN_INFRASYS1_STA		0x02c
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS1_MD		BIT(12)
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS1_ADSP_AO	BIT(14)
++#define  MT6897_TOP_AXI_PROT_EN_INFRASYS1_ADSP_TOP	BIT(14)
++#define MT6897_TOP_AXI_PROT_EN_PERISYS0_SET		0x0e4
++#define MT6897_TOP_AXI_PROT_EN_PERISYS0_CLR		0x0e8
++#define MT6897_TOP_AXI_PROT_EN_PERISYS0_STA		0x0ec
++#define  MT6897_TOP_AXI_PROT_EN_PERISYS0_AUDIO		BIT(6)
++#define MT6897_TOP_AXI_PROT_EN_EMISYS1_SET		0x104
++#define MT6897_TOP_AXI_PROT_EN_EMISYS1_CLR		0x108
++#define MT6897_TOP_AXI_PROT_EN_EMISYS1_STA		0x10c
++#define  MT6897_TOP_AXI_PROT_EN_EMISYS1_MD		(BIT(17) | BIT(18))
++#define MT6897_TOP_AXI_PROT_EN_EMISYS0_SET		0x124
++#define MT6897_TOP_AXI_PROT_EN_EMISYS0_CLR		0x128
++#define MT6897_TOP_AXI_PROT_EN_EMISYS0_STA		0x12c
++#define  MT6897_TOP_AXI_PROT_EN_EMISYS0_MD		(BIT(17) | BIT(18))
++#define MT6897_TOP_AXI_PROT_EN_CONNSYS0_SET		0x1c4
++#define MT6897_TOP_AXI_PROT_EN_CONNSYS0_CLR		0x1c8
++#define MT6897_TOP_AXI_PROT_EN_CONNSYS0_STA		0x1cc
++#define  MT6897_TOP_AXI_PROT_EN_CONNSYS0_CONN_2ND	BIT(0)
++#define  MT6897_TOP_AXI_PROT_EN_CONNSYS0_CONN		BIT(1)
++#define MT6897_TOP_AXI_PROT_EN_MMSYS0_SET		0x1e4
++#define MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR		0x1e8
++#define MT6897_TOP_AXI_PROT_EN_MMSYS0_STA		0x1ec
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBA		BIT(1)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBA_2ND	BIT(3)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBB		BIT(5)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBB_2ND	BIT(7)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBC		BIT(8)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBC_2ND	BIT(9)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_VEN0		BIT(12)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_VEN0_2ND		BIT(13)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_ISP_VCORE	BIT(14)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_ISP_VCORE_2ND	BIT(15)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_VCORE	(BIT(17) | BIT(27) | BIT(31))
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_MDP0		BIT(18)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_MDP0_2ND		BIT(19)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_VEN1		BIT(22)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_VEN1_2ND		BIT(23)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_ISP_MAIN		BIT(24)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_ISP_MAIN_2ND	BIT(25)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_MDP1		BIT(28)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_MDP1_2ND		BIT(29)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_MAIN		BIT(30)
++#define MT6897_TOP_AXI_PROT_EN_MMSYS1_SET		0x204
++#define MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR		0x208
++#define MT6897_TOP_AXI_PROT_EN_MMSYS1_STA		0x20c
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_CAM_MRAW		BIT(7)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_CAM_MRAW_2ND	BIT(8)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_VEN0		BIT(14)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_VEN0_2ND		BIT(15)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_VEN1		BIT(16)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_VEN1_2ND		BIT(17)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_CAM_VCORE	BIT(19)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_MDP0		BIT(20)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_MDP0_2ND		BIT(21)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_MDP1		BIT(22)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS1_MDP1_2ND		BIT(23)
++#define MT6897_TOP_AXI_PROT_EN_MMSYS2_SET		0x224
++#define MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR		0x228
++#define MT6897_TOP_AXI_PROT_EN_MMSYS2_STA		0x22c
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_MAIN		BIT(0)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_MAIN_2ND	BIT(1)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_DIP1		BIT(2)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_DIP1_2ND	BIT(3)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_CAM_MAIN		BIT(4)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_CAM_VCORE	BIT(5)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_MM_PROC		BIT(12)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_MM_PROC_2ND	BIT(15)
++#define  MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_VCORE	(BIT(18) | BIT(19))
++#define MT6897_TOP_AXI_PROT_EN_CCUSYS0_SET		0x264
++#define MT6897_TOP_AXI_PROT_EN_CCUSYS0_CLR		0x268
++#define MT6897_TOP_AXI_PROT_EN_CCUSYS0_STA		0x26c
++#define  MT6897_TOP_AXI_PROT_EN_CCUSYS0_CAM_CCU		(BIT(8) | BIT(10))
++#define  MT6897_TOP_AXI_PROT_EN_CCUSYS0_CAM_CCU_2ND	(BIT(9) | BIT(11))
++#define  MT6897_TOP_AXI_PROT_EN_CCUSYS0_CAM_VCORE	BIT(12)
++#define MT6897_AXI_PROT_EN_SET				0x804
++#define MT6897_AXI_PROT_EN_CLR				0x808
++#define MT6897_AXI_PROT_EN_STA				0x80c
++#define  MT6897_AXI_PROT_EN_ADSP_AO			BIT(15)
++
++/* VLP bus protection registers */
++#define MT6897_VLP_AXI_PROT_EN_SET			0x214
++#define MT6897_VLP_AXI_PROT_EN_CLR			0x218
++#define MT6897_VLP_AXI_PROT_EN_STA			0x220
++#define  MT6897_VLP_AXI_PROT_EN_MM_PROC			BIT(11)
++#define  MT6897_VLP_AXI_PROT_EN_MM_PROC_2ND		BIT(12)
++#define  MT6897_VLP_AXI_PROT_EN_ADSP_TOP		(GENMASK(18, 14) | BIT(23))
++#define  MT6897_VLP_AXI_PROT_EN_ADSP_TOP_2ND		(BIT(21) | BIT(22) | BIT(25))
++#define MT6897_VLP_AXI_PROT_EN1_SET			0x234
++#define MT6897_VLP_AXI_PROT_EN1_CLR			0x238
++#define MT6897_VLP_AXI_PROT_EN1_STA			0x240
++#define  MT6897_VLP_AXI_PROT_EN1_PEXTP_MAC0		BIT(10)
++#define  MT6897_VLP_AXI_PROT_EN1_PEXTP_PHY0		BIT(12)
++#define  MT6897_VLP_AXI_PROT_EN1_ADSP_TOP		(GENMASK(22, 13) | BIT(24))
++#define  MT6897_VLP_AXI_PROT_EN1_ADSP_AO		GENMASK(24, 22)
++
++/* PWR_CON registers */
++#define MT6897_PWR_ACK					BIT(30)
++#define MT6897_PWR_ACK_2ND				BIT(31)
++
++static enum scpsys_bus_prot_block scpsys_bus_prot_blocks_mt6897[] = {
++	BUS_PROT_BLOCK_INFRA, BUS_PROT_BLOCK_VLP
++};
++
++/*
++ * All domains are default off, so that probe leaves them as the bootloader did:
++ * it keeps the display on for a framebuffer, and genpd would power off an unused
++ * domain that it sees as on at sync_state, even with pd_ignore_unused.
++ *
++ * The numbers of parent domains are lower than those of their subdomains, which
++ * the reverse order of scpsys_domain_cleanup() depends on.
++ */
++static const struct scpsys_domain_data scpsys_domain_data_mt6897[] = {
++	[MT6897_POWER_DOMAIN_MD] = {
++		.name = "md",
++		/* The modem domain does not use PWR_ACK_2ND: check the first bit twice */
++		.sta_mask = MT6897_PWR_ACK,
++		.ctl_offs = 0xe00,
++		.pwr_sta_offs = 0xe00,
++		.pwr_sta2nd_offs = 0xe00,
++		.ext_buck_iso_offs = 0xfa0,
++		.ext_buck_iso_mask = GENMASK(1, 0),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_MD,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_MD,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_EMISYS0_MD,
++					MT6897_TOP_AXI_PROT_EN_EMISYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_EMISYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_EMISYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_EMISYS1_MD,
++					MT6897_TOP_AXI_PROT_EN_EMISYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_EMISYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_EMISYS1_STA),
++		},
++		.caps = MTK_SCPD_MODEM_PWRSEQ | MTK_SCPD_EXT_BUCK_ISO |
++			MTK_SCPD_SKIP_RESET_B | MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CONN] = {
++		.name = "conn",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe04,
++		.pwr_sta_offs = 0xe04,
++		.pwr_sta2nd_offs = 0xe04,
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CONN,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_CONNSYS0_CONN,
++					MT6897_TOP_AXI_PROT_EN_CONNSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_CONNSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_CONNSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CONN_2ND,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_CONNSYS0_CONN_2ND,
++					MT6897_TOP_AXI_PROT_EN_CONNSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_CONNSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_CONNSYS0_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_PEXTP_MAC0] = {
++		.name = "pextp-mac0",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe18,
++		.pwr_sta_offs = 0xe18,
++		.pwr_sta2nd_offs = 0xe18,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(VLP,
++					MT6897_VLP_AXI_PROT_EN1_PEXTP_MAC0,
++					MT6897_VLP_AXI_PROT_EN1_SET,
++					MT6897_VLP_AXI_PROT_EN1_CLR,
++					MT6897_VLP_AXI_PROT_EN1_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_PEXTP_PHY0] = {
++		.name = "pextp-phy0",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe20,
++		.pwr_sta_offs = 0xe20,
++		.pwr_sta2nd_offs = 0xe20,
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(VLP,
++					MT6897_VLP_AXI_PROT_EN1_PEXTP_PHY0,
++					MT6897_VLP_AXI_PROT_EN1_SET,
++					MT6897_VLP_AXI_PROT_EN1_CLR,
++					MT6897_VLP_AXI_PROT_EN1_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_AUDIO] = {
++		.name = "audio",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe2c,
++		.pwr_sta_offs = 0xe2c,
++		.pwr_sta2nd_offs = 0xe2c,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_PERISYS0_AUDIO,
++					MT6897_TOP_AXI_PROT_EN_PERISYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_PERISYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_PERISYS0_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_ADSP_AO] = {
++		.name = "adsp-ao",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe38,
++		.pwr_sta_offs = 0xe38,
++		.pwr_sta2nd_offs = 0xe38,
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(VLP,
++					MT6897_VLP_AXI_PROT_EN1_ADSP_AO,
++					MT6897_VLP_AXI_PROT_EN1_SET,
++					MT6897_VLP_AXI_PROT_EN1_CLR,
++					MT6897_VLP_AXI_PROT_EN1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_ADSP_AO,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_ADSP_AO,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_AXI_PROT_EN_ADSP_AO,
++					MT6897_AXI_PROT_EN_SET,
++					MT6897_AXI_PROT_EN_CLR,
++					MT6897_AXI_PROT_EN_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_ADSP_TOP_DORMANT] = {
++		.name = "adsp-top-dormant",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe30,
++		.pwr_sta_offs = 0xe30,
++		.pwr_sta2nd_offs = 0xe30,
++		/* Note: This is not managing powerdown (pdn), but sleep instead (slp) */
++		.sram_pdn_bits = BIT(9),
++		.sram_pdn_ack_bits = BIT(13),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(VLP,
++					MT6897_VLP_AXI_PROT_EN_ADSP_TOP,
++					MT6897_VLP_AXI_PROT_EN_SET,
++					MT6897_VLP_AXI_PROT_EN_CLR,
++					MT6897_VLP_AXI_PROT_EN_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_ADSP_TOP,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS1_STA),
++			BUS_PROT_WR_IGN(VLP,
++					MT6897_VLP_AXI_PROT_EN_ADSP_TOP_2ND,
++					MT6897_VLP_AXI_PROT_EN_SET,
++					MT6897_VLP_AXI_PROT_EN_CLR,
++					MT6897_VLP_AXI_PROT_EN_STA),
++			BUS_PROT_WR_IGN(VLP,
++					MT6897_VLP_AXI_PROT_EN1_ADSP_TOP,
++					MT6897_VLP_AXI_PROT_EN1_SET,
++					MT6897_VLP_AXI_PROT_EN1_CLR,
++					MT6897_VLP_AXI_PROT_EN1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_ADSP_TOP,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_STA),
++		},
++		.caps = MTK_SCPD_SRAM_ISO | MTK_SCPD_SRAM_PDN_INVERTED |
++			MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_MM_PROC_DORMANT] = {
++		.name = "mm-proc-dormant",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xeb0,
++		.pwr_sta_offs = 0xeb0,
++		.pwr_sta2nd_offs = 0xeb0,
++		/* Note: This is not managing powerdown (pdn), but sleep instead (slp) */
++		.sram_pdn_bits = BIT(9),
++		.sram_pdn_ack_bits = BIT(13),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(VLP,
++					MT6897_VLP_AXI_PROT_EN_MM_PROC,
++					MT6897_VLP_AXI_PROT_EN_SET,
++					MT6897_VLP_AXI_PROT_EN_CLR,
++					MT6897_VLP_AXI_PROT_EN_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_MM_PROC,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++			BUS_PROT_WR_IGN(VLP,
++					MT6897_VLP_AXI_PROT_EN_MM_PROC_2ND,
++					MT6897_VLP_AXI_PROT_EN_SET,
++					MT6897_VLP_AXI_PROT_EN_CLR,
++					MT6897_VLP_AXI_PROT_EN_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_MM_PROC_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++		},
++		.caps = MTK_SCPD_SRAM_ISO | MTK_SCPD_SRAM_PDN_INVERTED |
++			MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_ISP_VCORE] = {
++		.name = "isp-vcore",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe48,
++		.pwr_sta_offs = 0xe48,
++		.pwr_sta2nd_offs = 0xe48,
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_ISP_VCORE,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_ISP_VCORE_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_VCORE,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_ISP_MAIN] = {
++		.name = "isp-main",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe3c,
++		.pwr_sta_offs = 0xe3c,
++		.pwr_sta2nd_offs = 0xe3c,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_ISP_MAIN,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_ISP_MAIN_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_MAIN,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_MAIN_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++		},
++		.caps = MTK_SCPD_DOMAIN_SUPPLY | MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_ISP_DIP1] = {
++		.name = "isp-dip1",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe40,
++		.pwr_sta_offs = 0xe40,
++		.pwr_sta2nd_offs = 0xe40,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_DIP1,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_ISP_DIP1_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_VEN0] = {
++		.name = "ven0",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe5c,
++		.pwr_sta_offs = 0xe5c,
++		.pwr_sta2nd_offs = 0xe5c,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_VEN0,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_VEN0,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_VEN0_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_VEN0_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_VEN1] = {
++		.name = "ven1",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe60,
++		.pwr_sta_offs = 0xe60,
++		.pwr_sta2nd_offs = 0xe60,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_VEN1,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_VEN1,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_VEN1_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_VEN1_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CAM_VCORE] = {
++		.name = "cam-vcore",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe84,
++		.pwr_sta_offs = 0xe84,
++		.pwr_sta2nd_offs = 0xe84,
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CAM_VCORE,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_CAM_VCORE,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CAM_VCORE,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_INFRASYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_VCORE,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CAM_VCORE,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CAM_MAIN] = {
++		.name = "cam-main",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe68,
++		.pwr_sta_offs = 0xe68,
++		.pwr_sta2nd_offs = 0xe68,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_MAIN,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CAM_MAIN,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS2_STA),
++		},
++		.caps = MTK_SCPD_DOMAIN_SUPPLY | MTK_SCPD_ISO_DELAY |
++			MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CAM_MRAW] = {
++		.name = "cam-mraw",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe6c,
++		.pwr_sta_offs = 0xe6c,
++		.pwr_sta2nd_offs = 0xe6c,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CAM_MRAW,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CAM_MRAW_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CAM_SUBA] = {
++		.name = "cam-suba",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe70,
++		.pwr_sta_offs = 0xe70,
++		.pwr_sta2nd_offs = 0xe70,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBA_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CAM_SUBB] = {
++		.name = "cam-subb",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe74,
++		.pwr_sta_offs = 0xe74,
++		.pwr_sta2nd_offs = 0xe74,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBB,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBB_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CAM_SUBC] = {
++		.name = "cam-subc",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe78,
++		.pwr_sta_offs = 0xe78,
++		.pwr_sta2nd_offs = 0xe78,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBC,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CAM_SUBC_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CAM_CCU] = {
++		.name = "cam-ccu",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe88,
++		.pwr_sta_offs = 0xe88,
++		.pwr_sta2nd_offs = 0xe88,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_CAM_CCU,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_CAM_CCU_2ND,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_CCUSYS0_STA),
++		},
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CAM_CCU_AO] = {
++		.name = "cam-ccu-ao",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe8c,
++		.pwr_sta_offs = 0xe8c,
++		.pwr_sta2nd_offs = 0xe8c,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_MDP0_SHUTDOWN] = {
++		.name = "mdp0-shutdown",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe94,
++		.pwr_sta_offs = 0xe94,
++		.pwr_sta2nd_offs = 0xe94,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_MDP0,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_MDP0,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_MDP0_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_MDP0_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++		},
++		.caps = MTK_SCPD_SRAM_ISO | MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_MDP1_SHUTDOWN] = {
++		.name = "mdp1-shutdown",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xe98,
++		.pwr_sta_offs = 0xe98,
++		.pwr_sta2nd_offs = 0xe98,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_MDP1,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_MDP1,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_MDP1_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS0_STA),
++			BUS_PROT_WR_IGN(INFRA,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_MDP1_2ND,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_SET,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_CLR,
++					MT6897_TOP_AXI_PROT_EN_MMSYS1_STA),
++		},
++		.caps = MTK_SCPD_SRAM_ISO | MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_CSI_RX] = {
++		.name = "csi-rx",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xef4,
++		.pwr_sta_offs = 0xef4,
++		.pwr_sta2nd_offs = 0xef4,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_DP_TX] = {
++		.name = "dp-tx",
++		.sta_mask = MT6897_PWR_ACK,
++		.sta2nd_mask = MT6897_PWR_ACK_2ND,
++		.ctl_offs = 0xeb4,
++		.pwr_sta_offs = 0xeb4,
++		.pwr_sta2nd_offs = 0xeb4,
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++};
++
++/* The hardware voter sequences these on its own: they have no bus protection data */
++static const struct scpsys_hwv_domain_data scpsys_hwv_domain_data_mt6897[] = {
++	[MT6897_POWER_DOMAIN_MM_INFRA] = {
++		.name = "mm-infra",
++		.set = 0x0198,
++		.clr = 0x019c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 0,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_VDE0] = {
++		.name = "vde0",
++		.set = 0x0198,
++		.clr = 0x019c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 1,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_VDE1] = {
++		.name = "vde1",
++		.set = 0x0198,
++		.clr = 0x019c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 2,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_DIS0_SHUTDOWN] = {
++		.name = "dis0-shutdown",
++		.set = 0x0198,
++		.clr = 0x019c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 3,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_DIS1_SHUTDOWN] = {
++		.name = "dis1-shutdown",
++		.set = 0x0198,
++		.clr = 0x019c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 4,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_OVL0_SHUTDOWN] = {
++		.name = "ovl0-shutdown",
++		.set = 0x0198,
++		.clr = 0x019c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 5,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++	[MT6897_POWER_DOMAIN_OVL1_SHUTDOWN] = {
++		.name = "ovl1-shutdown",
++		.set = 0x0198,
++		.clr = 0x019c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 6,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++	},
++};
++
++static const struct scpsys_soc_data mt6897_scpsys_data = {
++	.domains_data = scpsys_domain_data_mt6897,
++	.num_domains = ARRAY_SIZE(scpsys_domain_data_mt6897),
++	.hwv_domains_data = scpsys_hwv_domain_data_mt6897,
++	.num_hwv_domains = ARRAY_SIZE(scpsys_hwv_domain_data_mt6897),
++	.bus_prot_blocks = scpsys_bus_prot_blocks_mt6897,
++	.num_bus_prot_blocks = ARRAY_SIZE(scpsys_bus_prot_blocks_mt6897),
++	.type = SCPSYS_MTCMOS_TYPE_MIXED,
++	.staged_pwr_on = true,
++};
++
++#endif /* __SOC_MEDIATEK_MT6897_PM_DOMAINS_H */

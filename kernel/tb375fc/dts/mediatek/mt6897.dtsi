@@ -15,6 +15,7 @@
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/phy/phy.h>
+#include <dt-bindings/power/mediatek,mt6897-power.h>
 #include <dt-bindings/reset/mediatek,mt6897-resets.h>
 
 / {
@@ -376,8 +377,22 @@
 		};
 
 		/*
+		 * Bus protection registers of the power domains, which take them
+		 * as a regmap. They stay disabled: nothing binds to a plain
+		 * syscon, and fw_devlink would make the power controller wait
+		 * for it through access-controllers until the deferred probe
+		 * timeout.
+		 */
+		ifr_bus: syscon@1002c000 {
+			compatible = "mediatek,mt6897-ifr-bus", "syscon";
+			reg = <0 0x1002c000 0 0x1000>;
+			status = "disabled";
+		};
+
+		/*
 		 * Hardware voter: collects the clock votes of the AP and the
-		 * remote processors, and switches some PLLs, muxes and gates.
+		 * remote processors, and switches some PLLs, muxes and gates,
+		 * and some of the power domains.
 		 */
 		hwv: syscon@10320000 {
 			compatible = "mediatek,mt6897-hwv", "syscon";
@@ -899,7 +914,6 @@
 			};
 		};
 
-		/* TOPRGU, already running when the bootloader hands over */
 		i2c3: i2c@11f00000 {
 			compatible = "mediatek,mt6897-i2c", "mediatek,mt8188-i2c";
 			reg = <0 0x11f00000 0 0x1000>, <0 0x11300400 0 0x80>;
@@ -933,9 +947,47 @@
 			status = "disabled";
 		};
 
+		/*
+		 * System Power Manager. A domain joins here with its first
+		 * consumer. The driver does not touch a domain at probe and
+		 * cannot touch one that is not listed, which keeps the display
+		 * domains as the bootloader left them while the screen runs on
+		 * simple-framebuffer. Before any consumer under mm-infra joins,
+		 * the framebuffer has to hold the display domains with
+		 * power-domains: genpd powers mm-infra off with its last user.
+		 * TODO(2d): enable with the first consumer.
+		 */
+		spm: syscon@1c001000 {
+			compatible = "mediatek,mt6897-scpsys", "syscon", "simple-mfd";
+			reg = <0 0x1c001000 0 0x1000>;
+			status = "disabled";
+
+			scpsys: power-controller {
+				compatible = "mediatek,mt6897-power-controller";
+				access-controllers = <&ifr_bus>, <&vlpcfg_bus>;
+				mediatek,hardware-voter = <&hwv>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+
+				power-domain@MT6897_POWER_DOMAIN_CONN {
+					reg = <MT6897_POWER_DOMAIN_CONN>;
+					#power-domain-cells = <0>;
+				};
+			};
+		};
+
+		/* TOPRGU, already running when the bootloader hands over */
 		watchdog: watchdog@1c00a000 {
 			compatible = "mediatek,mt6897-wdt", "mediatek,mt6589-wdt";
 			reg = <0 0x1c00a000 0 0x100>;
+		};
+
+		/* Bus protection registers, disabled like ifr_bus */
+		vlpcfg_bus: syscon@1c00c000 {
+			compatible = "mediatek,mt6897-vlpcfg-bus", "syscon";
+			reg = <0 0x1c00c000 0 0x1000>;
+			status = "disabled";
 		};
 
 		vlpckgen: clock-controller@1c013000 {

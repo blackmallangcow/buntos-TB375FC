@@ -1,0 +1,129 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: power: mediatek: add MT6897 power domains
+
+Add the power controller of the MediaTek MT6897 (Dimensity 8300) SoC and
+the numbers of its domains.
+
+One controller has all the domains, as in the vendor kernel. Seven of them
+are switched through the hardware voter and the others directly: MM_INFRA
+is on the voter, and the directly controlled ISP, camera, video encoder,
+MDP and DP domains are its subdomains. The MT8196 way of one controller
+per kind cannot describe that, because subdomains are child nodes of their
+parent. So the controller takes a phandle to the voter, under the name
+that the clock controllers use for it.
+
+The GPU domains are not here: the GPUEB firmware switches them. The APU
+domain is not either, as it has no registers on this controller.
+
+---
+diff --git a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+index 07f046277..e170c03ae 100644
+--- a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
++++ b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+@@ -26,6 +26,7 @@ properties:
+       - mediatek,mt6735-power-controller
+       - mediatek,mt6795-power-controller
+       - mediatek,mt6893-power-controller
++      - mediatek,mt6897-power-controller
+       - mediatek,mt8167-power-controller
+       - mediatek,mt8173-power-controller
+       - mediatek,mt8183-power-controller
+@@ -57,6 +58,14 @@ properties:
+     minItems: 1
+     maxItems: 3
+ 
++  mediatek,hardware-voter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      Phandle to the hardware voter, the register interface through which some
++      of the domains of this controller are switched. One of them is the parent
++      of domains that are controlled directly, so they cannot be in a controller
++      of their own.
++
+ patternProperties:
+   "^power-domain@[0-9a-f]+$":
+     $ref: "#/$defs/power-domain-node"
+@@ -103,6 +112,7 @@ $defs:
+           Power domain index. Valid values are defined in:
+               "include/dt-bindings/power/mt6795-power.h" - for MT8167 type power domain.
+               "include/dt-bindings/power/mediatek,mt6893-power.h" - for MT6893 type power domain.
++              "include/dt-bindings/power/mediatek,mt6897-power.h" - for MT6897 type power domain.
+               "include/dt-bindings/power/mt8167-power.h" - for MT8167 type power domain.
+               "include/dt-bindings/power/mt8173-power.h" - for MT8173 type power domain.
+               "include/dt-bindings/power/mt8183-power.h" - for MT8183 type power domain.
+@@ -160,6 +170,7 @@ allOf:
+         compatible:
+           contains:
+             enum:
++              - mediatek,mt6897-power-controller
+               - mediatek,mt8183-power-controller
+               - mediatek,mt8196-power-controller
+     then:
+@@ -168,6 +179,19 @@ allOf:
+           minItems: 2
+           maxItems: 2
+ 
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6897-power-controller
++    then:
++      required:
++        - access-controllers
++        - mediatek,hardware-voter
++    else:
++      properties:
++        mediatek,hardware-voter: false
++
+   - if:
+       properties:
+         compatible:
+diff --git a/include/dt-bindings/power/mediatek,mt6897-power.h b/include/dt-bindings/power/mediatek,mt6897-power.h
+new file mode 100644
+index 000000000..b9a9855e2
+--- /dev/null
++++ b/include/dt-bindings/power/mediatek,mt6897-power.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/*
++ * Copyright (c) 2026 buntOS contributors
++ */
++
++#ifndef _DT_BINDINGS_POWER_MEDIATEK_MT6897_POWER_H
++#define _DT_BINDINGS_POWER_MEDIATEK_MT6897_POWER_H
++
++#define MT6897_POWER_DOMAIN_MD			0
++#define MT6897_POWER_DOMAIN_CONN		1
++#define MT6897_POWER_DOMAIN_PEXTP_MAC0		2
++#define MT6897_POWER_DOMAIN_PEXTP_PHY0		3
++#define MT6897_POWER_DOMAIN_AUDIO		4
++#define MT6897_POWER_DOMAIN_ADSP_AO		5
++#define MT6897_POWER_DOMAIN_ADSP_TOP_DORMANT	6
++#define MT6897_POWER_DOMAIN_MM_INFRA		7
++#define MT6897_POWER_DOMAIN_MM_PROC_DORMANT	8
++#define MT6897_POWER_DOMAIN_ISP_VCORE		9
++#define MT6897_POWER_DOMAIN_ISP_MAIN		10
++#define MT6897_POWER_DOMAIN_ISP_DIP1		11
++#define MT6897_POWER_DOMAIN_VDE0		12
++#define MT6897_POWER_DOMAIN_VDE1		13
++#define MT6897_POWER_DOMAIN_VEN0		14
++#define MT6897_POWER_DOMAIN_VEN1		15
++#define MT6897_POWER_DOMAIN_CAM_VCORE		16
++#define MT6897_POWER_DOMAIN_CAM_MAIN		17
++#define MT6897_POWER_DOMAIN_CAM_MRAW		18
++#define MT6897_POWER_DOMAIN_CAM_SUBA		19
++#define MT6897_POWER_DOMAIN_CAM_SUBB		20
++#define MT6897_POWER_DOMAIN_CAM_SUBC		21
++#define MT6897_POWER_DOMAIN_CAM_CCU		22
++#define MT6897_POWER_DOMAIN_CAM_CCU_AO		23
++#define MT6897_POWER_DOMAIN_MDP0_SHUTDOWN	24
++#define MT6897_POWER_DOMAIN_MDP1_SHUTDOWN	25
++#define MT6897_POWER_DOMAIN_DIS0_SHUTDOWN	26
++#define MT6897_POWER_DOMAIN_DIS1_SHUTDOWN	27
++#define MT6897_POWER_DOMAIN_OVL0_SHUTDOWN	28
++#define MT6897_POWER_DOMAIN_OVL1_SHUTDOWN	29
++#define MT6897_POWER_DOMAIN_CSI_RX		30
++#define MT6897_POWER_DOMAIN_DP_TX		31
++
++#endif /* _DT_BINDINGS_POWER_MEDIATEK_MT6897_POWER_H */

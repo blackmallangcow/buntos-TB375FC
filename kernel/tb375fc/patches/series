@@ -77,8 +77,16 @@
 0047-power-supply-add-the-MediaTek-MT6375-charger-with-its-OTG-boost.patch
 0048-dt-bindings-power-supply-add-Nuvolta-NU2115-and-Unisemi-UPM6720.patch
 0049-power-supply-add-the-NU2115-and-UPM6720-VBUS-input-switch.patch
+# 0050~0054: MT6897 전원 도메인(mtk-pm-domains). 0050·0051은 바인딩이다. 0052는 probe가 실패할 때 부트로더가 켠 기본 꺼짐 도메인을 끄지 않게
+# 한다(업스트림에 올라온 패치, 병합 전. 들어오면 뺀다). 0053은 한 제어기에 직접 제어와 HW voter 도메인을 함께 둔다(MM_INFRA는 voter이고 그 자식이 직접 제어다).
+# 0054는 표다(OnePlus 공식 MT6897 커널). 모두 기본 꺼짐이라 probe가 도메인을 건드리지 않는다. GPU 쪽 12개는 mtk-mfg-pmdomain이 맡아 표에 없다.
+# 7.3 이후로 옮길 때는 0053·0054를 다시 쓴다: MT6858 지원(20b68457538f)의 BUS_PROT_BLOCK_VLP와 같은 줄, MTK_SCPD 비트 13·14, 오류 길(1f1bbce068b7). 기기에서 확인한 뒤 낸다
+0050-dt-bindings-power-mediatek-add-MT6897-power-domains.patch
+0051-dt-bindings-mfd-add-MediaTek-MT6897-SCPSYS-and-bus-protection-syscons.patch
+0052-pmdomain-mediatek-Don-t-power-off-default-off-domains-in-probe-cleanup.patch
+0053-pmdomain-mediatek-allow-hardware-voter-domains-in-a-direct-control-controller.patch
+0054-pmdomain-mediatek-add-MT6897-power-domains.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 드라이버가 없다):
-#  - pmdomain: mediatek: add MT6897 power domains (MT8196 틀. UFS·USB에는 없어 2d 뒤)
 #  - pmdomain: mediatek: mtk-mfg MT6897 GPUEB 변형
 #  - soc: mediatek: conninfra(TF-A SIP 호출), wifi: mt76: mt7921 SoC(soc7_0) 버스, bluetooth: BEIF 전송
 #  - drm/panel: novatek-nt36532 백포트(47b823940e38)와 BOE·Tianma·Tianma 무광 패널(DSC 1.1)
