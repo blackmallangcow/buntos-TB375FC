@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.8
+# buntOS TB375FC 포팅 최종 설계안 v1.9
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -9,6 +9,7 @@
 - v1.6(2026-11-01): `clk-mt6897`(패치 0009~0013)과 클럭 컨트롤러 노드를 더했다. 클럭 컨트롤러는 2b까지 끄고, 2a 콘솔(uart0)은 새 클럭 드라이버를 기다리지 않는다(11절)
 - v1.7(2026-11-01): 이미지용 커널의 소스를 kernel.org 원본으로 정했다(D1, 4절). Debian 소스 패키지(패치 77개)에는 MediaTek 관련이 없고 차이는 보안 기본값과 패키징이라 쓰지 않는다. 지금까지의 패치 대기열·장치 트리·조각·`debian-config.sh`는 그대로 쓴다. 이미지 빌드에서 정할 것을 4절과 11절에 적었다
 - v1.8(2026-11-01): 2b의 PMIC와 UFS를 세션 둘로 나눠 마쳤다(패치 0014~0022). PMIC는 MFD `mtk-spmi-pmic`(업스트림 v12 백포트와 인터럽트 고침), MT6363 키, 보드의 MT6363과 UFS 공급이다. UFS는 바인딩·드라이버와 UFS·USB 노드이고, 클럭·리셋 이름과 OPP는 업스트림 MT8196 시리즈(v14, 병합 전) 꼴을 따랐다. 이미지 커널의 디버그 정보는 Debian처럼 켠다(4절). 부트 명령줄에 `regulator_ignore_unused`를 더했다(D4)
+- v1.9(2026-11-01): MT6368(패치 0023~0026)과 보드의 MT6368·USB 공급을 더했다. 업스트림 MT6373 v12와는 레일·레지스터가 달라 7.2.12 `mt6363-regulator`를 틀로 새로 썼다. 7.2.12 MT6363 regulator의 16비트 regmap 결함을 찾아 다음 차례에 적었다(5·10·11절)
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -215,7 +216,7 @@
 | 전원 도메인 | `mtk-pm-domains`(MT8196) | MT6897 데이터(SPM 33개, GPU 12개, 그 가운데 HW voter 7개). UFS·USB에는 없다 | 중간 | 2d·2e·2c(2차) |
 | 클럭 | `clk-mt8196-*`(틀) | `clk-mt6897`(OEM 표). FENC 없는 HW voter 먹스와 PLL HW voter를 더한다. 2b 블록은 패치 0009~0013에 있다 | 큼 | 2b~2e |
 | SPMI·MT6363·MT6319 | `spmi-mtk-pmif`, `mt6363-regulator`, `mt6315-regulator` | SPMI는 MT8196 대체 compatible(P 버스 끔)과 고침 넷(0002·0003·0007·0008), MT6319는 DT만, MT6363은 MFD·키 패치(0014~0018). SPMI 노드, MT6363(키, 레일 23개), MT6319, UFS 공급은 장치 트리에 있다 | 작음~중간 | 2b |
-| MT6368·MT6685·MT6375 | 없음 | MT6895 포크 견본으로 새로. MT6368은 USB `vusb33`(VUSB)과 GPU 코어(VBUCK2), 진동·지문·오디오 레일을 낸다 | 중간~큼 | 2b·2e·3 |
+| MT6368·MT6685·MT6375 | 없음 | MT6368은 패치 0023~0026(regulator 바인딩·드라이버, MFD 데이터)과 보드 노드(펌웨어가 늘 켜 두는 레일 6개, USB `vusb33`). 진동(VIBR)·지문(VFP)·오디오(VAUD18) 레일은 소비자와 함께 3에서 노드를 넣는다. MT6685·MT6375는 MT6895 포크 견본으로 새로 | 중간~큼 | 2b·2e·3 |
 | UFS | `ufs-mediatek`, `phy-mtk-ufs` | 패치 0019~0022: MT6897 compatible(호스트는 match data로 `rtff-mtcmos`·`broken-rtc`·`pmc-via-fastauto`·`tx-skew-fix`), 리셋 셋, M-PHY 새 판(클럭·전원 순서 없음). VCC·VCCQ는 보드. 클럭 스케일링과 MCQ(큐 인터럽트 여덟)는 뒤로 | 작음~중간 | 2b |
 | USB | `mtu3`, `xhci-mtk`, `phy-mtk-xsphy` | DT(펌웨어의 eye 값). 역할 전환은 TCPC 뒤. xsphy MT6897 꼴(U2 INTR_CAL 칸과 efuse, U3 CDR 값)과 깨우기 접점(벤더 판 103)은 드라이버 고침이 필요하다 | 작음~중간 | 2b·3 |
 | 화면 파이프라인 | MT8195·MT8188까지. DSC v9·재구성 v2 시리즈는 미병합, dual-DSI는 아무도 맡지 않았다 | MT6897 데이터, dual-DSI, DSC(1.1과 패널 RC 표) | 큼 | 2c(2차) |
@@ -329,7 +330,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | GenieZone의 EL2 점유 | KVM 불가 | 2a에서 판정(D8). "불가"면 buntOS ADR-011 재검토, gzvm은 미병합이라 나중 |
 | 화면: dual-DSI + DSC가 업스트림에 없음 | 주사율·밝기·화면 끄기가 늦어진다 | simple-framebuffer로 데스크톱(D4), 업스트림 DSC·재구성 시리즈를 따라가고 dual-DSI는 우리가 맡을 수도 있다 |
 | 센서 허브(SCP nanohub) | 자동 회전·조도 없음 | 수동 회전, SCP 길은 3단계에서 조사 |
-| MFD `mtk-spmi-pmic` 미병합 | PMIC가 늦어진다 | 패치 대기열에 넣고 업스트림 판을 따라간다. v12(2026-05) 뒤로 새 판이 없고, BayLibre가 이어받겠다고 했다(2026-10). v12의 인터럽트 결함(마스크가 늘 첫 그룹에 쓰인다)은 대기열에서 고쳤다. 업스트림에 알릴지는 정할 것이다 |
+| MFD `mtk-spmi-pmic` 미병합 | PMIC가 늦어진다 | 패치 대기열에 넣고 업스트림 판을 따라간다. v12(2026-05) 뒤로 새 판이 없고, BayLibre가 이어받겠다고 했다(2026-10). v12의 인터럽트 결함(마스크가 늘 첫 그룹에 쓰인다)은 대기열에서 고쳤다. 업스트림에 알릴지는 정할 것이다. 병합된 MT6363 regulator(7.2.12)의 16비트 regmap은 벅을 끌 때 옆 레일을 함께 끈다. 고침 전에는 MT6363 벅을 끄거나 모드를 바꾸지 않는다 |
 | Mesa 26.3 의존 | GPU 가속이 늦어진다 | 이미지의 Mesa 판 확인, 그 전에는 CPU 렌더링(buntOS는 이미 llvmpipe에서 돈다) |
 | Wi-Fi 펌웨어가 uni cmd를 받지 않음 | 2d 지연 | 레거시 명령 경로(BSS·STA·키·ROC), USB 동글 우회 |
 | LK가 mainline 트리의 connsys 노드에 `emi-addr`·`memory-region`을 써 주지 않음 | Wi-Fi·BT가 펌웨어를 찾지 못한다 | 2d에서 살아 있는 트리로 확인한다. 안 되면 LK가 찾는 노드 이름과 compatible을 맞춘다 |
@@ -356,10 +357,11 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
      - PMIC(패치 0014~0018): MFD `mtk-spmi-pmic`(업스트림 v12 백포트와 고침)과 MT6363 키, 보드 dts의 MT6363(키, 레일 23개)과 UFS 공급. USB `vusb33`은 MT6368 VUSB라 드라이버가 생길 때까지 비워 둔다. VEMC 전압 읽기 결함은 업스트림 고침 후보로 남긴다
      - UFS(패치 0019~0022): 바인딩은 MT6897 호스트(클럭 여섯, OPP 둘, 리셋 셋)와 M-PHY(클럭 없음, 리셋은 선택). 드라이버는 M-PHY에 전원 연산 없는 ops를 주고, 호스트는 펌웨어의 속성 넷을 compatible로 정하고 리셋을 바인딩 이름(`unipro`·`crypto`·`hci`)으로 받는다. dtsi는 `mediatek,ufs-disable-mcq`로 시작한다. USB는 펌웨어의 `maximum-speed`와 U2 eye 값을 넣었다
      - 부트 명령줄에 `regulator_ignore_unused`를 더했다. 소비자가 아직 없는 레일(UFS가 붙기 전의 VEMC 등)이 늦은 정리에서 꺼지지 않는다
+   - v1.9에 끝낸 것: MT6368(패치 0023~0026). 업스트림 MT6373 regulator v12와는 레지스터·레일이 달라(벅 VBUCK1~6와 VPA, LDO 은행 배치, FCCM·키 보호·ELR5 주소) 백포트하지 않고, 7.2.12 `mt6363-regulator`를 틀로 새로 썼다. regmap은 8비트 값이다. MT6373 v12에 대한 리뷰 셋(`regmap_bulk_write` 개수, OC 오류 보고, 해제 때 work 정지)을 반영했다. 보드는 펌웨어가 늘 켜 두는 레일 6개(vbuck2 GPU 코어, vbuck5·6, vio28, vtp, vusb)를 두고 ssusb `vusb33`을 MT6368 VUSB에 이었다. 그래서 2b에서 USB를 켤 때 SPMI와 MT6368도 함께 켜야 한다
 2. **다음(기기 없이, 이 차례로):**
    1. 이미지용 커널 빌드 단계(D1, 4절): `build.sh`에 Debian 설정 + 조각으로 빌드해 .deb를 만드는 단계를 더하고, mkosi 이미지에 넣는다. 디버그 정보는 켠다(v1.8)
-   2. MT6368 regulator(2b의 남은 PMIC): USB `vusb33`(VUSB)과 GPU 코어(VBUCK2). MT6895 포크를 견본으로 새로 쓴다
-   3. 2c(1차) 입력: NT36532 SPI 터치와 펜, 포고 키보드(serdev), 홀 센서(gpio-keys)
+   2. 2c(1차) 입력: NT36532 SPI 터치와 펜, 포고 키보드(serdev), 홀 센서(gpio-keys)
+   3. MT6363 regulator 고침 둘(업스트림에 낼 것): 16비트 값 regmap이 쓸 때 다음 레지스터도 써서, 벅 하나를 끄면 VS1·VS3·VSRAM이 함께 꺼진다. VEMC 전압 읽기의 범위 조건이 반대다. 지금 보드는 그 길을 타지 않는다(벅은 always-on이거나 노드에 없고, 전압 한계를 주지 않는다)
    4. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)
 3. **기기:** 사용자의 TB375FC는 중국판 ZUXOS 1.5.10.044(Android 16)다(2026-11-01). 이 판에서 바로 언락한 보고는 없으니, 16.0.20.091로 내린 뒤 언락하는 길을 쓴다(2.1절). 예비 기기를 살 때는 ZUI 16 기기가 낫다.
 4. **언락 전(지금 할 수 있는 것):**

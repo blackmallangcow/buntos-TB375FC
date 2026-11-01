@@ -72,7 +72,7 @@ python3 -I tools/hw/dts_enabled.py out/merged.dts       # 켜진 노드의 compa
 | GPU | Arm Mali-Valhall(`mali@13000000`). 전원과 주파수는 GPU 내장 컨트롤러 gpueb(펌웨어 `gpueb.img`)와 gpufreq가 다룬다 | `mediatek,mali`, `arm,mali-valhall` | Panthor + Mesa가 GPU를 지원한다. MT6897 쪽 전원·주파수(gpueb) 통합이 포팅 범위다(4.2.1-3) |
 | 저장장치 | UFS(`ufshci@112b0000`), MediaTek UFS PHY | `mediatek,mt8183-ufshci`, 모듈 `ufs-mediatek-mod.ko`, `phy-mtk-ufs.ko` | 업스트림 `ufs-mediatek`이 받는 compatible이다 |
 | USB | mtu3 + xHCI(`usb0@11201000`). USB-C는 MT6375의 TCPC, Type-C 먹스, USB·DP 고르기 | `mediatek,mtu3`, `mediatek,mtk-xhci`, `mediatek,mt6375-tcpc` | mtu3·xhci-mtk는 업스트림에 있다. MT6375 TCPC는 확인 필요 |
-| PMIC | MT6363(주, SPMI), MT6368(보조, 오디오 코덱·이어폰 감지), MT6319 ×3(SPMI 벅), MT6685(RTC·클럭 버퍼), MT6375(충전기·TCPC·ADC, I2C 0x34) | `mediatek,mt6363` 등 | 확인 필요(2b) |
+| PMIC | MT6363(주, SPMI), MT6368(보조: USB VUSB, GPU 코어 VBUCK2, 진동 VIBR, 지문 VFP, 오디오 코덱·이어폰 감지), MT6319 ×3(SPMI 벅), MT6685(RTC·클럭 버퍼), MT6375(충전기·TCPC·ADC, I2C 0x34) | `mediatek,mt6363` 등 | 확인 필요(2b) |
 | 충전 | MT6375 충전기, 차지 펌프 Nuvolta NU2115 ×2와 Southchip/Unisemi UPM6720 ×2(고속 충전, PD·PE) | `nuvolta,nu2115`, `southchip,upm6720` | |
 | 배터리 | 게이지 Mitsumi MM8013(I2C 0x55) | `mediatek,mm8013`, 모듈 `mm8013a_gauge.ko` | |
 | 오디오 | MT6368 코덱, Awinic AW883xx 스마트 앰프 ×4(스피커 넷, I2C 0x34~0x37), FSA4480(USB-C 이어폰 스위치) | `awinic,aw883xx`, `fsa,fsa4480-i2c` | |

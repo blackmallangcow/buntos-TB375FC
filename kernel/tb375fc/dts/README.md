@@ -5,7 +5,7 @@ TB375FC(MediaTek MT6897)의 mainline 장치 트리다. 설계안 [2.3절](../../
 | 파일 | 내용 |
 |---|---|
 | `mediatek/mt6897.dtsi` | SoC. CPU·GIC·아키텍처 타이머·PSCI·PMU·워치독·cpufreq-hw는 켜 두고, UART(보드가 켠다)·systimer·UFS·USB·pio·SPMI·클럭 컨트롤러는 `disabled`로 둔다 |
-| `mediatek/mt6897-lenovo-tb375fc.dts` | 보드. `chosen`, `memory`, UART0을 켠다. framebuffer·ramoops는 기기에서 확인할 때까지 `disabled`. SPMI M 버스에 MT6363(키, 레일 23개)과 MT6319 셋을 두고, UFS 공급(`vcc` MT6363 VEMC, `vccq` MT6319 8/vbuck3)을 잇는다(SPMI는 2b까지 꺼져 있다) |
+| `mediatek/mt6897-lenovo-tb375fc.dts` | 보드. `chosen`, `memory`, UART0을 켠다. framebuffer·ramoops는 기기에서 확인할 때까지 `disabled`. SPMI M 버스에 MT6363(키, 레일 23개), MT6368(레일 6개), MT6319 셋을 두고, UFS 공급(`vcc` MT6363 VEMC, `vccq` MT6319 8/vbuck3)과 USB 공급(`vusb33` MT6368 VUSB)을 잇는다(SPMI는 2b까지 꺼져 있다) |
 | `mediatek/mt6897-lenovo-tb373fu.dts` | 글로벌판(Idea Tab Pro). tb375fc.dts를 include하고 `model`·`compatible`만 바꾼다 |
 
 - `build.sh`가 `mediatek/*.dts*`를 Linux 7.2.12의 `arch/arm64/boot/dts/mediatek/`에 복사하고, 패치 0001이 빌드 목록에 dtb 둘을 더한다.
@@ -29,6 +29,7 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'K=~/buntos-build/tb375fc/
 | 같은 검사(2026-11-01, 클럭 컨트롤러와 소비자 클럭을 더한 뒤) | dtc 경고 0. dt-validate는 위 12건 그대로다. 클럭 컨트롤러와 HW voter는 패치 0009·0010의 바인딩을 통과하고, UART·SPMI·USB·UFS의 클럭 속성에서 새 지적이 없다 |
 | 같은 검사(2026-11-01, UFS 바인딩·드라이버(패치 0019~0022)와 UFS·USB 노드를 마친 뒤) | dtc 경고 0. dt-validate는 위 12건 그대로다(줄 단위로 같다). UFS 호스트·PHY는 패치 0019·0020의 바인딩을 통과한다. 클럭 이름·리셋 차례·`freq-table-hz`·PHY 클럭을 일부러 틀린 dtb는 지적을 받는다 |
 | 같은 검사(2026-11-01, MT6363과 UFS 공급을 더한 뒤, 패치 0014~0022를 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다. MT6363은 패치 0015·0017의 바인딩과 `mediatek,mt6363-regulator.yaml`을, `&ufshci` 공급은 패치 0020의 바인딩을 통과한다. 일부러 틀린 사본(키 인터럽트 이름, 없는 레일)은 스키마가 잡는다 |
+| 같은 검사(2026-11-01, MT6368과 USB 공급을 더한 뒤, 패치 0014~0026을 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다. MT6368은 패치 0023의 `mediatek,mt6368-regulator.yaml`과 0025의 MFD 바인딩을 통과한다. 일부러 틀린 사본(LDO·벅 모드, 없는 레일, MT6368의 `keys`, 틀린 compatible)은 스키마가 잡는다 |
 | 펌웨어 DT와 대조 | 켠 노드와 자리만 둔 노드의 `reg`·`interrupts`가 모두 같다(아래 표의 예외만 일부러 다르다) |
 
 패치를 얹은 트리로 보려면 `build.sh prepare` 뒤 다음을 돌린다(바인딩 스키마는 `out/`에 만든다).
@@ -98,7 +99,9 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `framebuffer0` | `0xfc16f000`, 2944×1840, stride 11776, `a8r8g8b8` | 커뮤니티 | `disabled`. 바인딩대로 `/chosen` 아래에 둔다. 커뮤니티는 LK 기록(mblock 할당, `atag,videolfb`)에서 읽었고, 이 주소로 fbcon을 띄웠다(12GiB 기기) |
 | `framebuffer_mem` | `0xfc16f000`, 0x3e90000(LK가 할당한 크기, 세 화면보다 조금 크다), `no-map` | 커뮤니티 | `disabled`. 부트로더가 이미 예약하면 지운다 |
 | MT6363 `pmic@4` | `interrupts = <4 64 IRQ_TYPE_LEVEL_HIGH>`(SPMI rcs, SID 4. 가운데 칸은 컨트롤러가 버린다), `interrupt-controller`, 셀 셋. `keys`: 전원 PWRKEY 48/뗌 51(`KEY_POWER`, `wakeup-source`), HOMEKEY 49/뗌 52(`KEY_VOLUMEUP`), 길게 누름 리셋 모드 2(전원+볼륨 올림), 시간 0. `regulators@30`: 펌웨어가 늘 켜 두는 22개(`regulator-always-on`)와 VEMC(`vufs_vcc`) | 펌웨어, OnePlus 공식 MT6897 커널(인터럽트 번호, 레지스터) | `mediatek,mt6363`(패치 0015·0016). 레지스터 기준 0x30은 벤더 주소 − 업스트림 주소로 확인했다(TOP_TRAP 0x36/0x6 등). 펌웨어가 필요할 때만 켜는 11개(vbuck1·3·7, vcn13·15, vrf*, vsram-digrf)는 노드에 넣지 않아 리눅스가 건드리지 않는다. 전압 한계도 주지 않는다(코어가 부트로더 전압을 바꾸지 않게. VEMC 전압 읽기는 7.2.12에서 틀린다). 이름은 펌웨어 소비자에서 땄다: `vcore`(dvfsrc), `vsram_gpu`(gpufreq의 vsram), `vmodem`·`vsram_modem`(모뎀), `vufs_vcc`(UFS), `vio18` |
-| `ufshci` 공급 | `vcc-supply = <&mt6363_vemc>`, `vccq-supply = <&mt6319_8_vbuck3>` | 펌웨어 | 펌웨어 `ufshci`와 같다. USB의 `vusb33`은 펌웨어에서 MT6368 VUSB(SID 5)라 드라이버가 없어 넣지 않았다. 펌웨어는 늘 켜 두고, 여기서는 MT6368을 건드리지 않으므로 mtu3는 더미 공급으로 돈다 |
+| `ufshci` 공급 | `vcc-supply = <&mt6363_vemc>`, `vccq-supply = <&mt6319_8_vbuck3>` | 펌웨어 | 펌웨어 `ufshci`와 같다 |
+| MT6368 `pmic@5` | `interrupts = <5 48 IRQ_TYPE_LEVEL_HIGH>`(SPMI rcs, SID 5. 가운데 칸은 컨트롤러가 버린다. 48은 MT6368 RCS0), `interrupt-controller`, 셀 셋. `regulators@30`: 펌웨어가 늘 켜 두는 6개 vbuck2(`vgpu`), vbuck5, vbuck6, vio28, vtp, vusb(`vusb33`). 모두 `regulator-always-on` | 펌웨어, OEM(레지스터, 전압 표, 인터럽트 번호) | `mediatek,mt6368`(패치 0025·0026)과 `mediatek,mt6368-regulator`(0023·0024). 레지스터 기준은 MT6363과 같은 0x30이다(드라이버의 주소 = 벤더 주소 − 0x30). 펌웨어가 늘 켜 두지 않는 레일(vbuck1·3·4, vaux18, vrf13·18-aif, vant18, vibr, vfp, vmc, vaud18, vcn33-1·2, vefuse, vmch-eint-*, vsim2)과 펌웨어에 없는 vpa·vmch는 노드에 넣지 않아 리눅스가 건드리지 않는다. 전압 한계도 주지 않는다(MT6363과 같은 방침). 이름은 펌웨어 소비자에서 땄다: `vgpu`(gpufreq의 `vgpu-supply`), `vusb33`(ssusb의 `vusb33-supply`) |
+| `ssusb` 공급 | `vusb33-supply = <&mt6368_vusb>` | 펌웨어 | 펌웨어 `ssusb`와 같다. 펌웨어처럼 늘 켜 둔다 |
 | `aliases` | `spmi0 = &spmi_m` | 7.2.12 드라이버 | 버스가 둘인 MT8196 꼴은 버스마다 `spmiN` 별칭이 있어야 probe한다 |
 | MT6319 `pmic@6`~`pmic@8` | 6: vbuck1(`vmm`)·vbuck3(`vproc1`)·vbuck4(`vproc3`), 7: vbuck1(`vproc2`)·vbuck3, 8: vbuck3(`vufs_vccq`). 모두 0.3~1.19375V | 펌웨어 | `mediatek,mt6319-regulator` + `mt6315` 대체. 이름은 펌웨어의 소비자에서 땄다(ISP·카메라 전원 도메인, MCUPM CPU DVFS의 proc1~4, UFS VCCQ). 소비자가 아직 없어 모두 `regulator-always-on`이다. 펌웨어는 셋 모두 buck1+buck2 2상인데, 7.2.12 드라이버는 SID로 짝을 정해(6이면 1+2+4) 맞지 않으므로 동작 모드(`regulator-allowed-modes`)는 열지 않는다 |
 | `ramoops` | `0x48090000`, 0xe0000(record 0x20000, console 0x40000, pmsg 0x80000) | 커뮤니티 | `disabled`. `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`) 사이 틈이다. LK가 벤더 커널 명령줄에 넣는 `ramoops.*` 값과 같다(벤더 자신의 ramoops 자리) |
@@ -150,12 +153,12 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
   - 전원 도메인은 필요 없다. 펌웨어의 `mediatek,ufs-rtff-mtcmos`(SMC)·`-broken-rtc`·`-pmc-via-fastauto`·`-tx-skew-fix`는 compatible이 뜻한다(match data)
   - 클럭 스케일링은 없다. 7.2.12 드라이버는 `ufs_sel`과 그 최소·최대 부모가 클럭 목록에 있어야 스케일링한다. 업스트림 리뷰는 그 부모를 `clocks`에서 빼라고 했다. 먹스는 LK가 정한 부모 그대로 돈다
   - PHY(`phy-mtk-ufs`): MT6897 M-PHY는 벤더가 `mphy-ver = <1>`로 다루는 새 판이다. 벤더는 클럭을 받지 않고 power_on/off에서 아무것도 하지 않는다. 0021이 MT6897에 전원 연산 없는 ops를 준다(7.2.12의 MT8183 순서는 PLL·CDR을 강제로 끄고 켠다)
-- **USB.** 가젯용 `dr_mode = "peripheral"`(보드)로 시작한다. `vusb33` 공급은 펌웨어에서 MT6368 VUSB(`mt6368_vusb`)다. MT6368 드라이버가 생길 때까지 넣지 않는다(mtu3 바인딩에서 선택이고, 없으면 더미 공급이다). xsphy에는 펌웨어의 eye 값만 넣었다. 업스트림 드라이버에 MT6897 꼴이 없어 셋은 뒤로 미룬다: U2 내부 저항 보정(INTR_CAL 칸과 efuse), 벤더가 MT6897에만 넣는 U3 RX CDR 값(U3 포트 `+0x408`의 [23:16] `RG_XTP_LN0_RX_CDR_RESERVE` = 0x8), 깨우기 접점(벤더 판 103). 역할 전환은 MT6375 TCPC 뒤다.
+- **USB.** 가젯용 `dr_mode = "peripheral"`(보드)로 시작한다. `vusb33` 공급은 펌웨어처럼 MT6368 VUSB(`mt6368_vusb`, always-on)다. 보드가 이어 두어 **ssusb를 켤 때 SPMI M 버스와 MT6368(MFD·regulator, `CONFIG_REGULATOR_MT6368`)도 켜져 있어야 한다.** 그렇지 않으면 mtu3가 공급을 기다리며 뜨지 않는다. xsphy에는 펌웨어의 eye 값만 넣었다. 업스트림 드라이버에 MT6897 꼴이 없어 셋은 뒤로 미룬다: U2 내부 저항 보정(INTR_CAL 칸과 efuse), 벤더가 MT6897에만 넣는 U3 RX CDR 값(U3 포트 `+0x408`의 [23:16] `RG_XTP_LN0_RX_CDR_RESERVE` = 0x8), 깨우기 접점(벤더 판 103). 역할 전환은 MT6375 TCPC 뒤다.
 - **SPMI.**
   - 벤더 레지스터 표는 업스트림 mt8195 표와 같다(2026-11-01 대조). 그래서 MT8196 데이터를 그대로 쓴다. 커뮤니티는 MT6895 데이터(같은 레지스터, 버스 하나)로 닿았다
   - PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다
   - 업스트림은 자식마다 `rcs` 인터럽트(pio EINT 248)와 클럭 셋(`pmif_sys_ck`, `pmif_tmr_ck`, `spmimst_clk_mux`)을 요구한다. 없으면 probe가 실패한다. rcs 때문에 pinctrl-mt6897 뒤다
-  - 노드는 다 있다(M 버스, 별칭, MT6363, MT6319 셋). 2b에서 pio와 함께 `okay`로 바꾸고, 커널 기록으로 MT6363 MFD·regulator·키와 MT6319 셋의 probe, `/sys/kernel/debug/regulator/regulator_summary`의 레일 이름, 전원 키 이벤트(`evtest`)를 본다. 드라이버 고침 둘(rcs 디먹스, 채널 설정 순서, 패치 0007·0008)과 MFD 인터럽트 고침(0016)도 이때 확인한다. 자세한 확인 목록은 PMIC 작업 보고에 있다
+  - 노드는 다 있다(M 버스, 별칭, MT6363, MT6368, MT6319 셋). 2b에서 pio와 함께 `okay`로 바꾸고, 커널 기록으로 MT6363 MFD·regulator·키, MT6368 MFD·regulator, MT6319 셋의 probe, `/sys/kernel/debug/regulator/regulator_summary`의 레일 이름, 전원 키 이벤트(`evtest`)를 본다. 드라이버 고침 둘(rcs 디먹스, 채널 설정 순서, 패치 0007·0008)과 MFD 인터럽트 고침(0016)도 이때 확인한다. 자세한 확인 목록은 PMIC·MT6368 작업 보고에 있다
 - **핀.** pio 노드와 드라이버(패치 0004~0006)가 있다. 켜면 probe가 EINT 마스크를 모두 세운다(업스트림 동작). 핀 상태(`pinctrl-0`)는 쓰는 노드가 생길 때 더한다
 - **cpufreq-hw.** 바인딩의 `reg` 개수를 고친다.
 
