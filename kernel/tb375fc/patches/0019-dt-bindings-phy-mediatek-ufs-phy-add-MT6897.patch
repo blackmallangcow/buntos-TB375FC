@@ -1,0 +1,74 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: phy: mediatek,ufs-phy: add MT6897
+
+Add the UFS M-PHY of the MediaTek MT6897 (Dimensity 8300) SoC. It is a
+newer revision than the MT8183 one: the vendor kernel takes no clocks for
+it and leaves its power and isolation controls alone. It therefore gets a
+compatible of its own, without the mediatek,mt8183-ufsphy fallback and
+without clocks.
+
+Also document the optional M-PHY reset, which the MT6897 UFS blocks
+provide, as the pending MT8196 series does.
+
+Link: https://lore.kernel.org/r/20261016-mt8196-ufs-v14-1-e8d565e0cd45@collabora.com
+
+---
+diff --git a/Documentation/devicetree/bindings/phy/mediatek,ufs-phy.yaml b/Documentation/devicetree/bindings/phy/mediatek,ufs-phy.yaml
+index 6e2edd43f..69c0fab4e 100644
+--- a/Documentation/devicetree/bindings/phy/mediatek,ufs-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/mediatek,ufs-phy.yaml
+@@ -28,6 +28,7 @@ properties:
+           - enum:
+               - mediatek,mt8195-ufsphy
+           - const: mediatek,mt8183-ufsphy
++      - const: mediatek,mt6897-ufsphy
+       - const: mediatek,mt8183-ufsphy
+ 
+   reg:
+@@ -43,6 +44,10 @@ properties:
+       - const: unipro
+       - const: mp
+ 
++  resets:
++    items:
++      - description: Optional UFS M-PHY reset.
++
+   "#phy-cells":
+     const: 0
+ 
+@@ -50,8 +55,21 @@ required:
+   - compatible
+   - reg
+   - "#phy-cells"
+-  - clocks
+-  - clock-names
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6897-ufsphy
++    then:
++      properties:
++        clocks: false
++        clock-names: false
++    else:
++      required:
++        - clocks
++        - clock-names
+ 
+ additionalProperties: false
+ 
+@@ -66,5 +84,11 @@ examples:
+         clock-names = "unipro", "mp";
+         #phy-cells = <0>;
+     };
++  - |
++    ufs-phy@112a0000 {
++        compatible = "mediatek,mt6897-ufsphy";
++        reg = <0x112a0000 0x10000>;
++        #phy-cells = <0>;
++    };
+ 
+ ...

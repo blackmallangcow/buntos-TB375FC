@@ -433,6 +433,11 @@
 			status = "disabled";
 		};
 
+		/*
+		 * The stock wakeup glue (pericfg_ao 0x200, vendor version 103)
+		 * is a different layout from the mainline version 103 (MT8195
+		 * IP0), so mediatek,syscon-wakeup and wakeup-source are left out.
+		 */
 		ssusb: usb@11201000 {
 			compatible = "mediatek,mt6897-mtu3", "mediatek,mtu3";
 			reg = <0 0x11201000 0 0x2e00>, <0 0x11203e00 0 0x100>;
@@ -448,6 +453,7 @@
 				 <&pericfg_ao CLK_PERI_AO_SSUSB0_FRMCNT>;
 			clock-names = "sys_ck", "ref_ck", "mcu_ck", "dma_ck",
 				      "xhci_ck", "frmcnt_ck";
+			maximum-speed = "super-speed";
 			#address-cells = <2>;
 			#size-cells = <2>;
 			ranges;
@@ -464,31 +470,71 @@
 			};
 		};
 
-		/* The M-PHY SAP clock has no gate on MT6897 */
+		/*
+		 * A newer M-PHY revision ("mphy-ver = <1>" in the stock tree)
+		 * that takes no clocks and no power sequence from the kernel.
+		 * Its reset (ufscfg_ao, MT6897_UFSAO_RST_UFS_MPHY) is left out:
+		 * the vendor kernel does not use it either.
+		 */
 		ufsphy: ufs-phy@112a0000 {
-			compatible = "mediatek,mt8183-ufsphy";
+			compatible = "mediatek,mt6897-ufsphy";
 			reg = <0 0x112a0000 0 0x10000>;
-			clocks = <&ufscfg_ao CLK_UFSAO_UNIPRO_SYS>, <&clk26m>;
-			clock-names = "unipro", "mp";
 			#phy-cells = <0>;
 			status = "disabled";
 		};
 
 		/*
-		 * No power domain: the host is powered through the
-		 * mediatek,ufs-rtff-mtcmos SMC. SPI 177-184 are the MCQ queue
-		 * interrupts. TODO(2b): the other ufscfg clocks and the resets
-		 * need the MT6897 entry in the UFS binding.
+		 * No power domain: the compatible implies the RTFF MTCMOS
+		 * power control through the SiP call. The two OPPs are the
+		 * vendor's low and high parents of the ufs mux (mainpll_d4_d2,
+		 * mmpll_d6) and the aes_ufsfde mux (univpll_d6, mainpll_d4)
+		 * behind the main and aes gates; nothing scales them yet.
+		 * MCQ also needs the queue interrupts SPI 177-184, which the
+		 * UFS binding does not take yet, so start in single doorbell
+		 * mode.
 		 */
 		ufshci: ufshci@112b0000 {
-			compatible = "mediatek,mt8183-ufshci";
+			compatible = "mediatek,mt6897-ufshci";
 			reg = <0 0x112b0000 0 0x3000>;
 			interrupts = <GIC_SPI 168 IRQ_TYPE_LEVEL_HIGH 0>;
 			phys = <&ufsphy>;
-			clocks = <&ufscfg_pdn CLK_UFSPDN_UFSHCI_UFS>;
-			clock-names = "ufs";
-			freq-table-hz = <0 0>;
+			clocks = <&ufscfg_pdn CLK_UFSPDN_UFSHCI_UFS>,
+				 <&ufscfg_pdn CLK_UFSPDN_UFSHCI_AES>,
+				 <&ufscfg_ao CLK_UFSAO_UNIPRO_SYS>,
+				 <&ufscfg_ao CLK_UFSAO_UNIPRO_TX_SYM>,
+				 <&ufscfg_ao CLK_UFSAO_UNIPRO_RX_SYM0>,
+				 <&ufscfg_ao CLK_UFSAO_UNIPRO_RX_SYM1>;
+			clock-names = "main", "aes", "unipro_sysclk", "tx_symbol",
+				      "rx_symbol0", "rx_symbol1";
+			operating-points-v2 = <&ufs_opp_table>;
+			resets = <&ufscfg_pdn MT6897_UFSPDN_RST_UFS_UNIPRO>,
+				 <&ufscfg_pdn MT6897_UFSPDN_RST_UFS_CRYPTO>,
+				 <&ufscfg_pdn MT6897_UFSPDN_RST_UFSHCI>;
+			reset-names = "unipro", "crypto", "hci";
+			mediatek,ufs-disable-mcq;
 			status = "disabled";
+
+			ufs_opp_table: opp-table {
+				compatible = "operating-points-v2";
+
+				opp-273000000 {
+					opp-hz = /bits/ 64 <273000000>,
+						 /bits/ 64 <416000000>,
+						 /bits/ 64 <0>,
+						 /bits/ 64 <0>,
+						 /bits/ 64 <0>,
+						 /bits/ 64 <0>;
+				};
+
+				opp-458333313 {
+					opp-hz = /bits/ 64 <458333313>,
+						 /bits/ 64 <546000000>,
+						 /bits/ 64 <0>,
+						 /bits/ 64 <0>,
+						 /bits/ 64 <0>,
+						 /bits/ 64 <0>;
+				};
+			};
 		};
 
 		ufscfg_ao: clock-controller@112b8000 {
@@ -515,10 +561,18 @@
 			ranges;
 			status = "disabled";
 
+			/*
+			 * The stock eye settings. The stock internal resistor
+			 * calibration (0x25, or the efuse value when set) is left
+			 * out: on MT6897 it sits in a field that the mainline
+			 * driver does not write.
+			 */
 			u2port0: usb-phy@11e40000 {
 				reg = <0 0x11e40000 0 0x400>;
 				clocks = <&clk26m>;
 				clock-names = "ref";
+				mediatek,eye-vrt = <7>;
+				mediatek,eye-term = <3>;
 				#phy-cells = <1>;
 			};
 

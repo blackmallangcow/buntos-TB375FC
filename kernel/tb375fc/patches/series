@@ -27,6 +27,12 @@
 # 0017·0018: MT6363 키(바인딩, 드라이버. 업스트림에 없음). 표는 OnePlus 공식 MT6897 커널에서 옮겼다. 기기에서 확인한 뒤 낸다
 0017-dt-bindings-input-mediatek-pmic-keys-add-MT6363-keys.patch
 0018-Input-mtk-pmic-keys-add-MT6363-support.patch
+# 0019~0022: MT6897 UFS(PHY·호스트 바인딩, PHY·호스트 드라이버). 클럭·리셋 이름과 OPP는 업스트림의 MT8196 시리즈(v14,
+# 아직 병합 전) 꼴을 따른다. 그 시리즈가 들어오면 넷을 그 위로 다시 쓴다
+0019-dt-bindings-phy-mediatek-ufs-phy-add-MT6897.patch
+0020-dt-bindings-ufs-mediatek-ufs-add-MT6897.patch
+0021-phy-mediatek-ufs-add-MT6897-support.patch
+0022-scsi-ufs-mediatek-add-MT6897-support.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363까지 장치 트리에 있다(MT6368·MT6685는 드라이버가 없다):
 #  - regulator: MT6368(VUSB는 USB vusb33, VBUCK2는 GPU 코어. MT6895 포크 견본으로 새로)
 #  - regulator: mt6363: VEMC 전압 읽기 고침(범위를 고르는 조건이 반대다)

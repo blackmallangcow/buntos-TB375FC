@@ -1,0 +1,136 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: ufs: mediatek,ufs: add MT6897
+
+Add the UFS host controller of the MediaTek MT6897 (Dimensity 8300) SoC.
+
+It takes six clocks: the host controller and crypto engine gates of
+ufscfg_pdn, and the UniPro system and symbol clock gates of ufscfg_ao.
+The clock names, and operating-points-v2 in place of freq-table-hz,
+follow the pending rework of this binding, which drops the "ufs_" prefix
+and calls the controller clock "main". The parents of the ufs and
+aes_ufsfde muxes, which the vendor device tree lists for clock scaling,
+stay out, as asked in the review of that rework.
+
+Document the UniPro, crypto engine and host controller resets for all
+compatibles, with the names of the same rework. The M-PHY reset belongs
+to the PHY node.
+
+Link: https://lore.kernel.org/r/20261016-mt8196-ufs-v14-2-e8d565e0cd45@collabora.com
+Link: https://lore.kernel.org/r/20260306163305.GA2680515-robh@kernel.org
+
+---
+diff --git a/Documentation/devicetree/bindings/ufs/mediatek,ufs.yaml b/Documentation/devicetree/bindings/ufs/mediatek,ufs.yaml
+index 15c347f5e..a32add330 100644
+--- a/Documentation/devicetree/bindings/ufs/mediatek,ufs.yaml
++++ b/Documentation/devicetree/bindings/ufs/mediatek,ufs.yaml
+@@ -13,6 +13,7 @@ maintainers:
+ properties:
+   compatible:
+     enum:
++      - mediatek,mt6897-ufshci
+       - mediatek,mt8183-ufshci
+       - mediatek,mt8192-ufshci
+       - mediatek,mt8195-ufshci
+@@ -31,6 +32,18 @@ properties:
+   reg:
+     maxItems: 1
+ 
++  resets:
++    items:
++      - description: reset for the UniPro layer
++      - description: reset for the cryptography engine
++      - description: reset for the host controller
++
++  reset-names:
++    items:
++      - const: unipro
++      - const: crypto
++      - const: hci
++
+   vcc-supply: true
+ 
+   mediatek,ufs-disable-mcq:
+@@ -50,6 +63,28 @@ unevaluatedProperties: false
+ allOf:
+   - $ref: ufs-common.yaml
+ 
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6897-ufshci
++    then:
++      properties:
++        clocks:
++          minItems: 6
++          maxItems: 6
++        clock-names:
++          items:
++            - const: main
++            - const: aes
++            - const: unipro_sysclk
++            - const: tx_symbol
++            - const: rx_symbol0
++            - const: rx_symbol1
++        freq-table-hz: false
++      required:
++        - operating-points-v2
++
+   - if:
+       properties:
+         compatible:
+@@ -70,7 +105,15 @@ allOf:
+             - const: unipro_mp_bclk
+             - const: ufs_tx_symbol
+             - const: ufs_mem_sub
+-    else:
++
++  - if:
++      properties:
++        compatible:
++          contains:
++            enum:
++              - mediatek,mt8183-ufshci
++              - mediatek,mt8192-ufshci
++    then:
+       properties:
+         clocks:
+           maxItems: 1
+@@ -100,3 +143,37 @@ examples:
+             vcc-supply = <&mt_pmic_vemc_ldo_reg>;
+         };
+     };
++  - |
++    #include <dt-bindings/interrupt-controller/arm-gic.h>
++
++    ufshci@112b0000 {
++        compatible = "mediatek,mt6897-ufshci";
++        reg = <0x112b0000 0x3000>;
++        interrupts = <GIC_SPI 168 IRQ_TYPE_LEVEL_HIGH>;
++        phys = <&ufsphy>;
++        clocks = <&ufscfg_pdn 0>, <&ufscfg_pdn 1>, <&ufscfg_ao 3>,
++                 <&ufscfg_ao 0>, <&ufscfg_ao 1>, <&ufscfg_ao 2>;
++        clock-names = "main", "aes", "unipro_sysclk", "tx_symbol",
++                      "rx_symbol0", "rx_symbol1";
++        operating-points-v2 = <&ufs_opp_table>;
++        resets = <&ufscfg_pdn 0>, <&ufscfg_pdn 1>, <&ufscfg_pdn 2>;
++        reset-names = "unipro", "crypto", "hci";
++        vcc-supply = <&mt6363_vemc>;
++        vccq-supply = <&mt6319_8_vbuck3>;
++
++        ufs_opp_table: opp-table {
++            compatible = "operating-points-v2";
++
++            opp-273000000 {
++                opp-hz = /bits/ 64 <273000000>, /bits/ 64 <416000000>,
++                         /bits/ 64 <0>, /bits/ 64 <0>, /bits/ 64 <0>,
++                         /bits/ 64 <0>;
++            };
++
++            opp-458333313 {
++                opp-hz = /bits/ 64 <458333313>, /bits/ 64 <546000000>,
++                         /bits/ 64 <0>, /bits/ 64 <0>, /bits/ 64 <0>,
++                         /bits/ 64 <0>;
++            };
++        };
++    };

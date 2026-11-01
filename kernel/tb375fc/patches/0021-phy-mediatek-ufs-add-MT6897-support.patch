@@ -1,0 +1,74 @@
+From: buntOS contributors
+Subject: [PATCH] phy: mediatek: ufs: add MT6897 support
+
+The UFS M-PHY of MT6897 is a newer revision. The vendor kernel marks it
+with mphy-ver = <1>, takes no clocks for it, and does nothing when it is
+powered on or off: the PLL, CDR and isolation sequence of the MT8183
+M-PHY does not apply to it.
+
+Give the MT6897 compatible phy_ops without power operations, and get the
+two clocks only when the power operations that use them are there.
+
+---
+diff --git a/drivers/phy/mediatek/phy-mtk-ufs.c b/drivers/phy/mediatek/phy-mtk-ufs.c
+index fc19e0fa8..145819e81 100644
+--- a/drivers/phy/mediatek/phy-mtk-ufs.c
++++ b/drivers/phy/mediatek/phy-mtk-ufs.c
+@@ -8,6 +8,7 @@
+ #include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ 
+@@ -146,9 +147,18 @@ static const struct phy_ops ufs_mtk_phy_ops = {
+ 	.owner          = THIS_MODULE,
+ };
+ 
++/*
++ * The M-PHY of MT6897 is a newer revision that is neither clocked nor
++ * powered from here, so it gets no power operations.
++ */
++static const struct phy_ops ufs_mtk_phy_mt6897_ops = {
++	.owner          = THIS_MODULE,
++};
++
+ static int ufs_mtk_phy_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
++	const struct phy_ops *ops;
+ 	struct phy *generic_phy;
+ 	struct phy_provider *phy_provider;
+ 	struct ufs_mtk_phy *phy;
+@@ -164,11 +174,16 @@ static int ufs_mtk_phy_probe(struct platform_device *pdev)
+ 
+ 	phy->dev = dev;
+ 
+-	ret = ufs_mtk_phy_clk_init(phy);
+-	if (ret)
+-		return ret;
++	ops = of_device_get_match_data(dev);
++
++	/* Only the power operations use the clocks */
++	if (ops->power_on) {
++		ret = ufs_mtk_phy_clk_init(phy);
++		if (ret)
++			return ret;
++	}
+ 
+-	generic_phy = devm_phy_create(dev, NULL, &ufs_mtk_phy_ops);
++	generic_phy = devm_phy_create(dev, NULL, ops);
+ 	if (IS_ERR(generic_phy))
+ 		return PTR_ERR(generic_phy);
+ 
+@@ -180,7 +195,8 @@ static int ufs_mtk_phy_probe(struct platform_device *pdev)
+ }
+ 
+ static const struct of_device_id ufs_mtk_phy_of_match[] = {
+-	{.compatible = "mediatek,mt8183-ufsphy"},
++	{ .compatible = "mediatek,mt6897-ufsphy", .data = &ufs_mtk_phy_mt6897_ops },
++	{ .compatible = "mediatek,mt8183-ufsphy", .data = &ufs_mtk_phy_ops },
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(of, ufs_mtk_phy_of_match);
