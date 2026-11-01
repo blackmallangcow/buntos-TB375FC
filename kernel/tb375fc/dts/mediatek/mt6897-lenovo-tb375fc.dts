@@ -559,8 +559,13 @@
 	};
 };
 
-/* USB's analog supply, as in the stock tree */
+/*
+ * USB's analog supply, as in the stock tree. The stock controller is dual role,
+ * but host mode needs VBUS from the MT6375 and the role switch from its TCPC,
+ * so this starts as a USB device only.
+ */
 &ssusb {
+	dr_mode = "peripheral";
 	vusb33-supply = <&mt6368_vusb>;
 };
 
