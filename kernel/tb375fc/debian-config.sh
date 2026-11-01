@@ -15,7 +15,9 @@
 # 패치 대기열이 더하는 기호까지 보려면 KERNEL_TREE에 build.sh prepare가 만든 작업 트리를 준다(그 트리로 빌드하지
 # 않을 때). 산출물은 저장소 밖 $BUNTOS_BUILD_DIR/tb375fc(기본 ~/buntos-build/tb375fc)에 둔다.
 #   debian-config/<snapshot>/config-<판>  Debian 설정 (받은 Release, Packages.xz, 패키지도 여기 둔다)
-#   out-debian/.config                    조각을 합친 설정
+#   out-debian/.config                    조각을 합친 설정 (KERNEL_OUT으로 바꾼다)
+# build.sh image-config는 KERNEL_TREE·KERNEL_OUT에 이미지용 작업 트리와 출력을 주고 STRICT=1로 부른다. STRICT=1이면
+# 조각의 값이 빠지거나 원천 트리에 없는 기호가 있을 때 3으로 끝난다.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -23,7 +25,7 @@ repo=$(cd "$here/../.." && pwd)
 version=7.2.12
 build_root="${BUNTOS_BUILD_DIR:-$HOME/buntos-build}/tb375fc"
 srctree=${KERNEL_TREE:-$build_root/linux-$version}
-out="$build_root/out-debian"
+out=${KERNEL_OUT:-$build_root/out-debian}
 keyring=/usr/share/keyrings/debian-archive-keyring.pgp
 # 설정만 만드니 컴파일하는 것은 kconfig 도구뿐이다. 같은 VM의 커널 빌드를 방해하지 않게 2로 둔다
 jobs=${JOBS:-2}
@@ -118,6 +120,10 @@ config() {
 		echo "알림: 원천 트리에 없는 기호라 보지 못했다(패치 대기열): ${absent[*]}" >&2
 	fi
 	echo "설정: $out/.config (Debian $krel 바탕, 조각에서 빠진 값 $missing개)"
+	if [[ "${STRICT:-}" == 1 && $((missing + ${#absent[@]})) -gt 0 ]]; then
+		echo "조각의 값이 모두 들어가지 않았다 (STRICT=1)" >&2
+		exit 3
+	fi
 }
 
 if [[ $# -gt 0 ]]; then
