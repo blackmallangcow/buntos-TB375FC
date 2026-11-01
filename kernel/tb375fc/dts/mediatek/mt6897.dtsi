@@ -948,6 +948,24 @@
 		};
 
 		/*
+		 * TODO(2c display): compatible, clocks and PHY with the display
+		 * pipeline. See the board's &dsi0 for the panel.
+		 */
+		dsi0: dsi@1400d000 {
+			reg = <0 0x1400d000 0 0x1000>;
+			interrupts = <GIC_SPI 368 IRQ_TYPE_LEVEL_HIGH 0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		dsi1: dsi@1420d000 {
+			reg = <0 0x1420d000 0 0x1000>;
+			interrupts = <GIC_SPI 412 IRQ_TYPE_LEVEL_HIGH 0>;
+			status = "disabled";
+		};
+
+		/*
 		 * System Power Manager. A domain joins here with its first
 		 * consumer. The driver does not touch a domain at probe and
 		 * cannot touch one that is not listed, which keeps the display

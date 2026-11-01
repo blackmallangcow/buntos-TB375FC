@@ -1,0 +1,114 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: display: panel: novatek,nt36532: add the Lenovo TB375FC panels
+
+The Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC) and the Lenovo Idea Tab Pro
+(TB373FU) ship with one of three NT36532 panels: BOE, Tianma, or a matte
+Tianma. A strap tells the BOE panel from the Tianma ones, and the two
+Tianma panels take the same init sequence, so one compatible and the strap
+are enough. The touchscreen side of the controller already reads the same
+strap to pick its firmware.
+
+These panels also take two analog supplies, which on the tablet are the
+enables of an LCD bias chip.
+---
+ Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml |  70 ++
+ 1 file changed, 70 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml b/Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml
+--- a/Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml
++++ b/Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml
+@@ -14,12 +14,28 @@
+ 
+ allOf:
+   - $ref: panel-common-dual.yaml#
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: lenovo,tb375fc-nt36532
++    then:
++      required:
++        - avdd-supply
++        - avee-supply
++        - novatek,panel-id-gpios
++    else:
++      properties:
++        avdd-supply: false
++        avee-supply: false
++        novatek,panel-id-gpios: false
+ 
+ properties:
+   compatible:
+     items:
+       - enum:
+           - csot,ppc100hb1-1
++          - lenovo,tb375fc-nt36532
+       - const: novatek,nt36532
+ 
+   reg:
+@@ -31,6 +47,19 @@
+ 
+   vddio-supply:
+     description: regulator that supplies the I/O voltage
++
++  avdd-supply:
++    description: regulator that supplies the positive analog voltage
++
++  avee-supply:
++    description: regulator that supplies the negative analog voltage
++
++  novatek,panel-id-gpios:
++    maxItems: 1
++    description:
++      Strap that tells apart the panels a device ships with. The Lenovo TB375FC
++      has a BOE panel when it reads low, and a Tianma panel when it reads high.
++      The touchscreen side of the controller reads the same line.
+ 
+   ports: true
+ 
+@@ -80,4 +109,45 @@
+         };
+     };
+ 
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++
++    dsi {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        panel@0 {
++            compatible = "lenovo,tb375fc-nt36532", "novatek,nt36532";
++            reg = <0>;
++            width-mm = <273>;
++            height-mm = <171>;
++
++            reset-gpios = <&pio 41 GPIO_ACTIVE_LOW>;
++            novatek,panel-id-gpios = <&pio 184 GPIO_ACTIVE_HIGH>;
++
++            vddio-supply = <&vddio_1v8>;
++            avdd-supply = <&lcd_avdd>;
++            avee-supply = <&lcd_avee>;
++
++            ports {
++                #address-cells = <1>;
++                #size-cells = <0>;
++
++                port@0 {
++                    reg = <0>;
++                    endpoint {
++                        remote-endpoint = <&dsi0_out>;
++                    };
++                };
++
++                port@1 {
++                    reg = <1>;
++                    endpoint {
++                        remote-endpoint = <&dsi1_out>;
++                    };
++                };
++            };
++        };
++    };
++
+ ...

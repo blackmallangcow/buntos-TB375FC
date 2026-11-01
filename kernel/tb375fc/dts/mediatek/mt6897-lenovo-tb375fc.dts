@@ -44,6 +44,7 @@
 			height = <1840>;
 			stride = <(2944 * 4)>;
 			format = "a8r8g8b8";
+			panel = <&panel0>;
 			status = "disabled";
 		};
 	};
@@ -82,9 +83,10 @@
 	 * The panel's 1.8 V I/O supply behind a switch on GPIO63 (stock
 	 * vddio_1v8-gpios), which the touch side of the NT36532 shares. The
 	 * bootloader turns it on with the panel, and nothing may turn it off
-	 * while the display runs on simple-framebuffer.
-	 * TODO(2c): enable with pio; drop regulator-always-on once a panel
-	 * driver uses it.
+	 * while the display runs on simple-framebuffer. It stays on with the panel
+	 * driver: stock turns it on before the DSI links and off after them, which
+	 * the driver cannot do, and turns it on before it reads the panel ID strap.
+	 * TODO(2c): enable with pio.
 	 */
 	vddio_1v8: regulator-vddio-1v8 {
 		compatible = "regulator-fixed";
@@ -99,6 +101,39 @@
 	};
 
 	/*
+	 * The enables of the panel's bias chip, an SM5109 at 0x3e on i2c13 (stock
+	 * bias_p-gpios and bias_n-gpios). The bootloader turns them on and writes
+	 * 0x12 to its two voltage registers, and the stock kernel does too. Stock
+	 * also waits 80 ms after the panel goes off. TODO(2c display): check that
+	 * the chip keeps the voltages while off; else it needs a driver. 5.8 V is
+	 * the value by the formula of the TPS65132, which has the same two
+	 * registers; the SM5109's is not known.
+	 */
+	lcd_avdd: regulator-lcd-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd_avdd";
+		regulator-min-microvolt = <5800000>;
+		regulator-max-microvolt = <5800000>;
+		gpio = <&pio 187 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+		off-on-delay-us = <80000>;
+		status = "disabled";
+	};
+
+	lcd_avee: regulator-lcd-avee {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd_avee";
+		regulator-min-microvolt = <5800000>;
+		regulator-max-microvolt = <5800000>;
+		gpio = <&pio 186 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+		off-on-delay-us = <80000>;
+		status = "disabled";
+	};
+
+	/*
 	 * Turns the USB VBUS boost on and off from user space, through the state
 	 * attribute of this device, until the TCPC driver takes that over. Stays
 	 * off with the MT6375 (see &i2c5).
@@ -107,6 +142,84 @@
 		compatible = "regulator-output";
 		vout-supply = <&mt6375_otg_vbus>;
 		status = "disabled";
+	};
+};
+
+/*
+ * The tablet ships with one of three panels. The driver tells BOE from Tianma
+ * by the strap on GPIO184, which the touchscreen reads as well; the two Tianma
+ * panels take the same init sequence.
+ *
+ * The stock bootloader does not need these nodes to turn the display on, it has
+ * its own device tree for that. On the way to the kernel it looks for
+ * /soc/dsi/panel<n>/port/endpoint and logs a failure when it is not there.
+ *
+ * TODO(2c display): enable with the display pipeline, and take the panel
+ * property off framebuffer0 at the same time: fw_devlink would hold simpledrm
+ * back until the panel binds. Until then the display runs on simple-framebuffer.
+ * The two LED drivers (SGM37604A at 0x36 on i2c13 and i2c3) have no driver yet.
+ */
+&dsi0 {
+	panel0: panel@0 {
+		compatible = "lenovo,tb375fc-nt36532", "novatek,nt36532";
+		reg = <0>;
+		width-mm = <273>;
+		height-mm = <171>;
+		reset-gpios = <&pio 41 GPIO_ACTIVE_LOW>;
+		novatek,panel-id-gpios = <&pio 184 GPIO_ACTIVE_HIGH>;
+		vddio-supply = <&vddio_1v8>;
+		avdd-supply = <&lcd_avdd>;
+		avee-supply = <&lcd_avee>;
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				panel_in0: endpoint {
+					remote-endpoint = <&dsi0_out>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				panel_in1: endpoint {
+					remote-endpoint = <&dsi1_out>;
+				};
+			};
+		};
+	};
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+
+			dsi0_out: endpoint {
+				remote-endpoint = <&panel_in0>;
+			};
+		};
+	};
+};
+
+&dsi1 {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+
+			dsi1_out: endpoint {
+				remote-endpoint = <&panel_in1>;
+			};
+		};
 	};
 };
 

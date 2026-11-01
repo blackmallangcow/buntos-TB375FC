@@ -86,7 +86,14 @@
 0052-pmdomain-mediatek-Don-t-power-off-default-off-domains-in-probe-cleanup.patch
 0053-pmdomain-mediatek-allow-hardware-voter-domains-in-a-direct-control-controller.patch
 0054-pmdomain-mediatek-add-MT6897-power-domains.patch
+# 0080~0084: NT36532 패널. 0080~0082는 업스트림 백포트다(ffa88de8ddb6은 7.3, 1c523f0a9301·47b823940e38은 7.4 병합 창. 더 새 커널로 가면
+# 뺀다). 드라이버를 쓰는 DSI 호스트가 대기열에 없어 지금은 돌 곳이 없다. 0083·0084는 이 기기의 패널 셋(BOE, Tianma, Tianma 무광)이다: 모드
+# 넷과 주사율 레지스터, DSC 1.1, 편향 전원, DCS 밝기, GPIO184로 고르기. 표는 벤더 드라이버에서 옮겨 순정 모듈·LK 표와 맞댔다. 기기에서 확인한 뒤 낸다
+0080-drm-mipi-dsi-add-flag-for-sending-all-DSC-slices-in-one-packet.patch
+0081-dt-bindings-display-panel-Add-Novatek-NT36532.patch
+0082-drm-panel-Add-Novatek-NT36532-panel-driver.patch
+0083-dt-bindings-display-panel-novatek-nt36532-add-the-Lenovo-TB375FC-panels.patch
+0084-drm-panel-novatek-nt36532-add-the-Lenovo-TB375FC-panels.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 드라이버가 없다):
 #  - pmdomain: mediatek: mtk-mfg MT6897 GPUEB 변형
 #  - soc: mediatek: conninfra(TF-A SIP 호출), wifi: mt76: mt7921 SoC(soc7_0) 버스, bluetooth: BEIF 전송
-#  - drm/panel: novatek-nt36532 백포트(47b823940e38)와 BOE·Tianma·Tianma 무광 패널(DSC 1.1)
