@@ -220,6 +220,7 @@
 | 차지 펌프 | 없음 | 새로(고속 충전) | 중간 | 3 |
 | 오디오 | MT8196·MT8189 AFE, MT6359 코덱, AW88395·AW88399·AW88166, FSA4480 | MT6897 AFE, MT6368 코덱·accdet, 앰프 칩 확인, ACF | 큼 | 3 |
 | SAR | `hx9023s` | HX9031AS를 hx9023s로 시도, HX9036 새로 | 작음/중간 | 3 |
+| 지문 센서 | 모름 | 칩과 연결을 장치 트리에서 확인한다(실기기에 센서가 있고, 입력 장치 `gf-keys`가 있다) | 모름 | 3 |
 | 센서 허브 | MT8183~MT8195 SCP만 | MT6897 SCP(nanohub) 길 조사 | 큼 | 3 |
 | 외부 화면 | `mtk_dp`(MT8195), PS5169/70 패치 | 화면·TCPC 뒤 | 큼 | 3 |
 | 비디오 코덱·카메라 | — | 범위 밖 | — | — |
@@ -343,8 +344,9 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 4. **언락 전(지금 할 수 있는 것):**
    - 자동 업데이트를 끄고 1.5.10.044에 머문다(go/no-go 4번). 1.5.10.103 이후 판에서는 판 바꾸기 문제가 많이 보고됐다
    - SP Flash Tool readback으로 전체 백업과 해시(go/no-go 1번). 인증 DA·auth는 그 판의 레노버 펌웨어 묶음에서 쓴다
-   - ADB로 buntOS 설계안 12장 항목을 잰다: `getevent -lp`, 파티션, vendor 펌웨어 목록, UART 위치
-   - framebuffer 주소와 살아 있는 트리: 안드로이드는 root가 아니면 `/proc/iomem`의 주소를 0으로 보여 주고, `/sys/firmware/fdt`도 root만 읽는다. `/proc/device-tree`는 SELinux가 막지 않으면 root 없이 읽힐 수 있으니 먼저 해 본다. 안 되면 언락하고 root를 얻은 뒤에 읽는다
+   - ADB로 잰 것(2026-11-01, [실측 보고서](../hw/lenovo-tb375fc.md) 7절): 판, 잠금 상태, RAM 8GB와 저장장치 128GB, 화면(2944×1840, 회전 없음), 입력 장치 이름, vendor 펌웨어와 모듈 목록, 지문 센서
+   - root가 필요한 것(언락 뒤): `getevent -lp`, framebuffer 주소와 살아 있는 트리의 값(`/proc/device-tree`는 이름만 보이고 값은 막혀 있다), `/proc/iomem`, 파티션 표
+   - UART 위치는 기기를 열어 찾는다
 5. **언락:** 2.1절의 언락 순서대로 한다. 그 뒤 root로 framebuffer 주소와 살아 있는 트리를 읽어 장치 트리의 framebuffer·ramoops를 켜고, 2a를 한다(`fastboot boot`).
 6. **2b → 2c(1차) → 2d → 2e → 2c(2차) → 3:** 각 단계의 종료 조건을 이 포크의 문서에 남긴다.
 

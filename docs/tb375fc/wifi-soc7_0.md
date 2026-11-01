@@ -95,7 +95,7 @@ Dimensity 8300 기기의 속성으로 적힌 값이다. 2.1의 기기 펌웨어�
 - **예약 메모리**(펌웨어 트리):
   - `consys@18000000`: 12 MiB. RO 6.5 MiB(Wi-Fi 3 MiB, BT 2.875 MiB, GNSS 640 KiB)와 RW 4.5 MiB다. `emi-addr`는 LK가 채운다.
   - `wifi@18000000`: 20 MiB. 호스트 DMA 링과 버퍼를 두는 칸이고, MPU는 LK가 연다. gen4m은 `memory-region`이 없으면 probe에 실패하므로 LK가 이 속성을 붙여 준다고 본다.
-- **linux-firmware에는 soc7_0 파일이 없다.** vendor 파티션의 .bin도 커널이 요청하지 않으니 없을 수 있다.
+- **linux-firmware에는 soc7_0 파일이 없다.** 실기기(ZUXOS 1.5.10.044)의 `/vendor/firmware`에는 BT·MCU RAM 코드(`soc7_0_ram_bt_1_1_hdr.bin`, `soc7_0_ram_mcu_1_1_hdr.bin`과 각 1a·1b판)가 있고, Wi-Fi RAM 코드는 없다(2026-11-01). BT 쪽 이름은 LK를 쓰지 않는 빌드가 찾는 대체 이름과 같다.
 - **방침:** Wi-Fi·BT 펌웨어는 뽑아 둘 파일이 아니라 지켜 둘 파티션이다. `connsys_wifi`·`connsys_bt`를 건드리지 않고 LK 적재본을 쓴다. 재배포 문제도 피한다(buntOS ADR-012).
 
 ## 4. 포팅 설계
