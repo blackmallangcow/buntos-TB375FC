@@ -4,12 +4,12 @@ TB375FC(MediaTek MT6897)의 mainline 장치 트리다. 설계안 [2.3절](../../
 
 | 파일 | 내용 |
 |---|---|
-| `mediatek/mt6897.dtsi` | SoC. CPU·GIC·아키텍처 타이머·PSCI·PMU·워치독·cpufreq-hw는 켜 두고, UART(보드가 켠다)·systimer·UFS·USB·pio·SPMI·클럭 컨트롤러는 `disabled`로 둔다 |
+| `mediatek/mt6897.dtsi` | SoC. CPU·GIC·아키텍처 타이머·PSCI·PMU·워치독·cpufreq-hw는 켜 두고, UART(보드가 켠다)·systimer·UFS·USB·pio·SPMI·클럭 컨트롤러·SPI 여덟은 `disabled`로 둔다 |
 | `mediatek/mt6897-lenovo-tb375fc.dts` | 보드. `chosen`, `memory`, UART0을 켠다. framebuffer·ramoops는 기기에서 확인할 때까지 `disabled`. SPMI M 버스에 MT6363(키, 레일 23개), MT6368(레일 6개), MT6319 셋을 두고, UFS 공급(`vcc` MT6363 VEMC, `vccq` MT6319 8/vbuck3)과 USB 공급(`vusb33` MT6368 VUSB)을 잇는다(SPMI는 2b까지 꺼져 있다) |
 | `mediatek/mt6897-lenovo-tb373fu.dts` | 글로벌판(Idea Tab Pro). tb375fc.dts를 include하고 `model`·`compatible`만 바꾼다 |
 
 - `build.sh`가 `mediatek/*.dts*`를 Linux 7.2.12의 `arch/arm64/boot/dts/mediatek/`에 복사하고, 패치 0001이 빌드 목록에 dtb 둘을 더한다.
-- include는 7.2.12에 있는 `dt-bindings` 헤더(`arm-gic.h`, `input.h`, `irq.h`, `phy.h`, `spmi.h`)와 패치 대기열이 더하는 헤더만 쓴다. pio 바인딩과 `mt6897-pinfunc.h`는 패치 0004·0005가, 클럭·리셋 번호 헤더(`mediatek,mt6897-clock.h`, `mediatek,mt6897-resets.h`)는 0009가 더한다.
+- include는 7.2.12에 있는 `dt-bindings` 헤더(`arm-gic.h`, `gpio.h`, `input.h`, `irq.h`, `phy.h`, `spmi.h`)와 패치 대기열이 더하는 헤더만 쓴다. pio 바인딩과 `mt6897-pinfunc.h`는 패치 0004·0005가(0028이 그 include를 고친다), 클럭·리셋 번호 헤더(`mediatek,mt6897-clock.h`, `mediatek,mt6897-resets.h`)는 0009가 더한다. 보드 dts가 `mt6897-pinfunc.h`를 처음 쓴다.
 - 라이선스는 업스트림 MediaTek DTS와 같은 `GPL-2.0-only OR BSD-2-Clause`다. 커뮤니티 포트의 글은 옮기지 않았고, 사실(주소·인터럽트)만 펌웨어 DT와 대조해 썼다.
 
 ## 검증
@@ -30,6 +30,7 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'K=~/buntos-build/tb375fc/
 | 같은 검사(2026-11-01, UFS 바인딩·드라이버(패치 0019~0022)와 UFS·USB 노드를 마친 뒤) | dtc 경고 0. dt-validate는 위 12건 그대로다(줄 단위로 같다). UFS 호스트·PHY는 패치 0019·0020의 바인딩을 통과한다. 클럭 이름·리셋 차례·`freq-table-hz`·PHY 클럭을 일부러 틀린 dtb는 지적을 받는다 |
 | 같은 검사(2026-11-01, MT6363과 UFS 공급을 더한 뒤, 패치 0014~0022를 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다. MT6363은 패치 0015·0017의 바인딩과 `mediatek,mt6363-regulator.yaml`을, `&ufshci` 공급은 패치 0020의 바인딩을 통과한다. 일부러 틀린 사본(키 인터럽트 이름, 없는 레일)은 스키마가 잡는다 |
 | 같은 검사(2026-11-01, MT6368과 USB 공급을 더한 뒤, 패치 0014~0026을 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다. MT6368은 패치 0023의 `mediatek,mt6368-regulator.yaml`과 0025의 MFD 바인딩을 통과한다. 일부러 틀린 사본(LDO·벅 모드, 없는 레일, MT6368의 `keys`, 틀린 compatible)은 스키마가 잡는다 |
+| 같은 검사(2026-11-01, SPI 여덟과 2c 입력 노드를 더한 뒤, 패치 0027~0031을 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다(dtb마다 24줄). SPI는 패치 0029의 `mediatek,spi-mt65xx.yaml`, 터치는 0030의 `novatek,nt36532-ts.yaml`, 핀 상태는 0004의 pio 바인딩, 홀 센서는 `gpio-keys.yaml`을 통과한다. 꺼진 노드에는 required와 모르는 속성을 묻지 않으므로, spi2를 켠 사본으로도 확인했다 |
 | 펌웨어 DT와 대조 | 켠 노드와 자리만 둔 노드의 `reg`·`interrupts`가 모두 같다(아래 표의 예외만 일부러 다르다) |
 
 패치를 얹은 트리로 보려면 `build.sh prepare` 뒤 다음을 돌린다(바인딩 스키마는 `out/`에 만든다).
@@ -71,6 +72,7 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `clk26m`, `clk13m` | 26 MHz, 26 MHz ÷ 2 | 펌웨어, 7.2.12 | 펌웨어의 `clk13m`은 13 MHz fixed-clock이다. 업스트림처럼 fixed-factor로 썼다 |
 | `systimer` | `0x1cc10000`, SPI 330, `clk13m` | 펌웨어 | 깊은 idle에서 쓸 broadcast 타이머. 펌웨어의 인터럽트 셋 가운데 첫째만 쓴다(바인딩이 하나). 출하 GKI는 업스트림 SYST 드라이버를 쓰지 않으므로(`# CONFIG_MTK_TIMER is not set`) 2a에서는 `disabled`다. 그동안은 hrtimer broadcast가 대신한다 |
 | `uart0`~`uart3` | `0x11001000`~`0x11004000`(0x1000), SPI 250~253 | 펌웨어 | `baud`는 clk26m. 7.2.12 `8250_mtk`는 `baud`가 있으면 `bus`도 요구해 하나만 주면 probe가 실패한다. `bus`는 펌웨어처럼 pericfg_ao의 UART 게이트다. 다만 uart0은 2a 콘솔이라 클럭 컨트롤러를 기다리지 않게 2b까지 clk26m을 둔다 |
+| `spi0`~`spi7` | `0x11010000`~`0x11017000`(0x100), SPI 242~249, `mediatek,pad-select` 0(spi0~5)·1(spi6·7) | 펌웨어, OEM 드라이버 | `disabled`. compatible은 `mediatek,mt6897-spi` + 업스트림 `mediatek,mt6991-spi`(패치 0029). OEM `spi-mt65xx`의 `mt6985` 데이터와 업스트림 `mt6991` 데이터가 같은 기능이다. 클럭은 펌웨어처럼 `parent-clk` = topckgen `mainpll_d6_d2`(spi0~2)·`univpll_d6_d2`(spi3~7), `sel-clk` = spi 먹스, `spi-clk` = pericfg_ao 게이트다. 드라이버가 실제 클럭 값으로 분주를 계산한다(커뮤니티 포트는 26 MHz 자리값 때문에 SCLK가 약 52 MHz였다). OEM의 소프트웨어 CS는 업스트림이 쓰지 않는다 |
 | `watchdog` | `0x1c00a000`(0x100) | 펌웨어 | 7.2.12 `mtk_wdt`는 대체 compatible `mediatek,mt6589-wdt`로 붙고, 켜져 있으면 `WDOG_HW_RUNNING`으로 받아 커널이 쓰다듬는다. 펌웨어의 `syscon`·`simple-mfd`·reboot-mode는 뺐다 |
 | `performance` | `0x11bc10`·`0x11bd30`·`0x11be50`(각 0x120) | 펌웨어 | 노드 이름을 첫 `reg`에 맞췄다(펌웨어 `@11bc00`). mt8195와 같은 CSRAM 배치에 도메인이 하나 더 있다 |
 | `reserved-memory` | 틀(셀 2, `ranges`) | 설계안 2.3 | 고정 예약(ATF, TEE, GenieZone, connsys 등)은 부트로더가 `mblock-*` 노드로 더한다 |
@@ -102,6 +104,10 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `ufshci` 공급 | `vcc-supply = <&mt6363_vemc>`, `vccq-supply = <&mt6319_8_vbuck3>` | 펌웨어 | 펌웨어 `ufshci`와 같다 |
 | MT6368 `pmic@5` | `interrupts = <5 48 IRQ_TYPE_LEVEL_HIGH>`(SPMI rcs, SID 5. 가운데 칸은 컨트롤러가 버린다. 48은 MT6368 RCS0), `interrupt-controller`, 셀 셋. `regulators@30`: 펌웨어가 늘 켜 두는 6개 vbuck2(`vgpu`), vbuck5, vbuck6, vio28, vtp, vusb(`vusb33`). 모두 `regulator-always-on` | 펌웨어, OEM(레지스터, 전압 표, 인터럽트 번호) | `mediatek,mt6368`(패치 0025·0026)과 `mediatek,mt6368-regulator`(0023·0024). 레지스터 기준은 MT6363과 같은 0x30이다(드라이버의 주소 = 벤더 주소 − 0x30). 펌웨어가 늘 켜 두지 않는 레일(vbuck1·3·4, vaux18, vrf13·18-aif, vant18, vibr, vfp, vmc, vaud18, vcn33-1·2, vefuse, vmch-eint-*, vsim2)과 펌웨어에 없는 vpa·vmch는 노드에 넣지 않아 리눅스가 건드리지 않는다. 전압 한계도 주지 않는다(MT6363과 같은 방침). 이름은 펌웨어 소비자에서 땄다: `vgpu`(gpufreq의 `vgpu-supply`), `vusb33`(ssusb의 `vusb33-supply`) |
 | `ssusb` 공급 | `vusb33-supply = <&mt6368_vusb>` | 펌웨어 | 펌웨어 `ssusb`와 같다. 펌웨어처럼 늘 켜 둔다 |
+| `gpio-keys` | `switch-lid`: GPIO1, active low, `SW_LID`, 100 ms, `wakeup-source`. `switch-tablet-mode`: GPIO26, active high, `SW_TABLET_MODE`, 100 ms | 펌웨어(`hall_1` EINT1, `hall_2` EINT26), 제3자 미러 `hall.c` | `disabled`(2c). `hall.c`는 `hall_1`만 붙잡는다(GPIO1이 0이면 덮개 닫힘). `hall_2`에는 드라이버가 없고, 그 GPIO26은 포고 키보드의 `plug-gpios`와 같은 핀이라 뜻과 극성은 기기에서 정한다 |
+| `vddio_1v8` | regulator-fixed 1.8 V, GPIO63, `regulator-boot-on`, `regulator-always-on` | 펌웨어(패널의 `vddio_1v8-gpios`, 터치의 1.8V 핀 상태) | `disabled`(2c). 패널과 터치가 같이 쓰는 I/O 전원이라 simple-framebuffer 동안 꺼지면 안 된다. 패널 드라이버가 생기면 그쪽 공급으로 옮긴다 |
+| `spi2` 터치 `touchscreen@0` | `novatek,nt36532-ts`, 9.6 MHz, IRQ = pio EINT9, 리셋 GPIO60, `iovcc-supply = <&vddio_1v8>`, `firmware-name` 둘(BOE, Tianma), `novatek,panel-id-gpios` = GPIO184, 크기 18401×29441, 171×273 mm, `touchscreen-swapped-x-y` | 펌웨어, OEM(프로토콜), 제3자 미러(패널 판별, 펌웨어 이름), 기기 실측(좌표 범위) | spi2와 함께 꺼져 있다. GPIO184가 0이면 BOE, 1이면 Tianma다. 컨트롤러 좌표는 픽셀의 10배이고 X가 짧은 쪽이다. 축 뒤집기는 기기에서 정한다 |
+| `pio` 핀 상태 | `spi2-pins`(GPIO11~14, 6 mA), `touch-pins`(GPIO9 IRQ, GPIO184 패널 ID, GPIO60 리셋), `hall-pins`(GPIO1·26) | 펌웨어 | drive-strength는 0027이 핀 드라이버에 더한 연산으로 적용된다 |
 | `aliases` | `spmi0 = &spmi_m` | 7.2.12 드라이버 | 버스가 둘인 MT8196 꼴은 버스마다 `spmiN` 별칭이 있어야 probe한다 |
 | MT6319 `pmic@6`~`pmic@8` | 6: vbuck1(`vmm`)·vbuck3(`vproc1`)·vbuck4(`vproc3`), 7: vbuck1(`vproc2`)·vbuck3, 8: vbuck3(`vufs_vccq`). 모두 0.3~1.19375V | 펌웨어 | `mediatek,mt6319-regulator` + `mt6315` 대체. 이름은 펌웨어의 소비자에서 땄다(ISP·카메라 전원 도메인, MCUPM CPU DVFS의 proc1~4, UFS VCCQ). 소비자가 아직 없어 모두 `regulator-always-on`이다. 펌웨어는 셋 모두 buck1+buck2 2상인데, 7.2.12 드라이버는 SID로 짝을 정해(6이면 1+2+4) 맞지 않으므로 동작 모드(`regulator-allowed-modes`)는 열지 않는다 |
 | `ramoops` | `0x48090000`, 0xe0000(record 0x20000, console 0x40000, pmsg 0x80000) | 커뮤니티 | `disabled`. `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`) 사이 틈이다. LK가 벤더 커널 명령줄에 넣는 `ramoops.*` 값과 같다(벤더 자신의 ramoops 자리) |
@@ -167,6 +173,6 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
 - 2c:
   - 패널 노드(부트로더가 찾는 `/soc/dsi@1400d000/panel1@0`~`panel3@2`)와 `framebuffer0`의 `panel`(273×171mm)
   - 포고 키보드: UART3 serdev, 키보드 전원 GPIO61, 연결 감지 GPIO26, 깨우기 GPIO40, tx-en GPIO71, TX·RX 핀의 pinctrl 전환. 벤더 드라이버는 probe·startup·resume마다 pericfg_ao `0x11036050`의 bit4를 켜고 bit0을 끈다
-  - 터치: SPI2 `0x11012000`, 리셋 GPIO60, IRQ GPIO9, 최대 9.6 MHz. SPI 클럭은 실제 값으로 줘야 한다(커뮤니티 포트는 26 MHz 자리값 때문에 SCLK가 약 52 MHz였다)
+  - 터치·펜·홀 센서: 패치 0027~0031과 노드가 있다(꺼 둠). 2c에서 pio·클럭 컨트롤러와 함께 spi2·gpio-keys·`vddio_1v8`을 켜고, spi2의 SCLK(9.6 MHz 아래, 깨지면 `cs-gpios`), 터치의 trim ID·패널 ID·펌웨어 내려받기, `evtest`의 좌표와 축 방향, 펜(압력·기울기·단추·호버, 펜 켜기 명령 `0x7B 0x01`), 서스펜드 뒤 터치, 덮개와 키보드에 따른 GPIO1·26 값을 본다(터치 작업 보고 8절)
 - 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다
 - 2e: mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`

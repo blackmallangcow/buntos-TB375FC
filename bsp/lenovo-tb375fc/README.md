@@ -8,6 +8,7 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `boot/test.sh` | 넷을 만들어 다시 풀고 넣은 것과 바이트를 견준다. 원래 이미지가 있으면 머리 필드도 견준다(`check_images.py`) |
 | `initramfs/` | busybox initramfs. 화면·UART에 셸을 띄우고, 직전 부팅의 pstore 기록을 떠 두고, USB 가젯(ACM + NCM, 기기 172.16.42.1)을 켜고, nvdata·nvcfg·persist를 읽기 전용으로 붙인다 |
 | `firmware/` | 기기에서 받은 원천(파티션 백업, vendor 파일)에서 펌웨어와 보정값을 고른다(`manifest.tsv`). 뽑은 파일은 저장소에 넣지 않는다 |
+| `mkosi.conf` | mkosi 보드 프로필(`tools/image/build.sh lenovo-tb375fc`). Debian 커널 대신 `kernel/tb375fc/build.sh image`가 만든 커널 .deb를 넣고, 루트 파티션 파일과 UKI에서 꺼낸 커널·initrd를 따로 낸다 |
 
 ## 만들기
 
@@ -43,6 +44,18 @@ limactl shell buntos-dev -- bash -lc 'B=~/buntos-build/tb375fc; qemu-system-aarc
 ```
 
 LK처럼 vendor_boot의 램디스크 조각을 initramfs 앞에 이어 붙여 `-initrd`로 주면 init이 표지를 알아본다(2026-11-01 확인).
+
+## 이미지
+
+buntOS 이미지는 공통 레시피(`image/`)에 이 폴더의 `mkosi.conf`를 얹어 만든다.
+
+1. 커널 꾸러미: `kernel/tb375fc/build.sh image`(출력 `~/buntos-build/tb375fc/deb/`)
+2. 이미지: `tools/image/build.sh lenovo-tb375fc`. 맥 여유가 30GB 이상일 때 한다(자체 컴포넌트를 cargo로 빌드하고 mkosi가 최대 약 14GB를 쓴다)
+
+- 공통 레시피의 `Bootable=yes`, `Bootloader=systemd-boot`는 보드 프로필에서 바꿀 수 없다(mkosi가 보드 프로필을 먼저 읽는다). 그래서 이미지에는 ESP, systemd-boot, UKI가 그대로 생긴다. U-Boot로 EFI 부팅을 하게 되면(설계안 D3) 그대로 쓴다.
+- 커널 꾸러미는 커널을 `/boot/vmlinuz-<판>`에 두고, mkosi가 그것을 `/usr/lib/modules/<판>/vmlinuz`로 복사해 UKI를 만든다.
+- LK로 띄울 때는 루트 파티션(`buntos.root-arm64.raw`)만 기기에 굽는다. 부트 이미지는 같은 커널 꾸러미의 Image·장치 트리·모듈로 `boot/mkimages.sh`가 만든다(꾸러미를 `dpkg-deb -x`로 풀어 `--kernel`, `--dtb`, `mkinitramfs.sh --modules`에 준다).
+- 루트 파티션을 둘 자리, 루트로 넘기는 initramfs, 기기에서 커널을 바꾸는 길은 아직 정하지 않았다(설계안 4절).
 
 ## 기기에서 띄우기 전에
 

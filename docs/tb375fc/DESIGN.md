@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.9
+# buntOS TB375FC 포팅 최종 설계안 v1.10
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -10,6 +10,7 @@
 - v1.7(2026-11-01): 이미지용 커널의 소스를 kernel.org 원본으로 정했다(D1, 4절). Debian 소스 패키지(패치 77개)에는 MediaTek 관련이 없고 차이는 보안 기본값과 패키징이라 쓰지 않는다. 지금까지의 패치 대기열·장치 트리·조각·`debian-config.sh`는 그대로 쓴다. 이미지 빌드에서 정할 것을 4절과 11절에 적었다
 - v1.8(2026-11-01): 2b의 PMIC와 UFS를 세션 둘로 나눠 마쳤다(패치 0014~0022). PMIC는 MFD `mtk-spmi-pmic`(업스트림 v12 백포트와 인터럽트 고침), MT6363 키, 보드의 MT6363과 UFS 공급이다. UFS는 바인딩·드라이버와 UFS·USB 노드이고, 클럭·리셋 이름과 OPP는 업스트림 MT8196 시리즈(v14, 병합 전) 꼴을 따랐다. 이미지 커널의 디버그 정보는 Debian처럼 켠다(4절). 부트 명령줄에 `regulator_ignore_unused`를 더했다(D4)
 - v1.9(2026-11-01): MT6368(패치 0023~0026)과 보드의 MT6368·USB 공급을 더했다. 업스트림 MT6373 v12와는 레일·레지스터가 달라 7.2.12 `mt6363-regulator`를 틀로 새로 썼다. 7.2.12 MT6363 regulator의 16비트 regmap 결함을 찾아 다음 차례에 적었다(5·10·11절)
+- v1.10(2026-11-01): 이미지용 커널 빌드 단계(`build.sh image-config`·`image`)와 mkosi 보드 프로필을 만들고 한 번 빌드했다(4절). 2c(1차) 입력의 NT36532 SPI 터치·펜과 홀 센서(패치 0027~0031)를 더했다(5절). initrd 길과 루트 파티션 자리는 남은 결정이다(4·11절)
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -180,11 +181,13 @@
 ## 4. 커널 구성
 
 - **기반(D1):** kernel.org 원본 소스다. 판은 buntOS 이미지의 Debian forky 커널과 같고(지금 7.2.12), 포팅이 진행되면 그때의 Debian 판을 따라간다. 7.2.y stable 고침은 kernel.org에서 바로 따라갈 수 있다.
-- **이미지용 커널:** 같은 원본 소스와 대기열을 이미지와 같은 시점의 Debian forky 커널 설정 + 보드 조각으로 빌드한다(`kernel/tb375fc/debian-config.sh`가 설정을 만든다). 그래서 Debian 커널과 달라지는 것은 Debian 패치에만 있는 설정 셋(binder 모듈, UEFI Secure Boot 잠금, perf 제한)과 우리 대기열·조각이다. 남은 일:
-  - `build.sh`에 이미지 단계를 더한다. `out-debian/.config`로 따로 빌드하고 `make bindeb-pkg`로 커널 .deb를 만든다
-  - 툴체인: 지금은 빌드 VM의 trixie gcc-14로 한다. bindgen이 없어 Rust 쪽 기능이 빠지지만 이 기기가 쓰는 것은 없다. Debian과 같은 컴파일러가 필요해지면 forky 컨테이너를 쓴다
-  - 디버그 정보(2026-11-01 결정): Debian 설정 그대로 DWARF·BTF를 켠다(배포판의 정석). 설치하는 커널·모듈은 strip하고, 디버그 기호는 따로 `-dbg` 패키지로 둔다. 그래서 늘어나는 것은 빌드 디스크다. 빌드 디스크가 빠듯하면 이미지 빌드에서만 디버그 섹션을 zstd로 압축한다(배포 커널은 같다). 빌드 공간을 위해 VM의 데스크톱 이전 빌드 산출물을 지웠다(맥 여유 27GB)
-  - mkosi 이미지에서 Debian 커널 패키지 대신 이 .deb를 넣는 법과 판 이름(`7.2.12-tb375fc`)
+- **이미지용 커널:** 같은 원본 소스와 대기열을 이미지와 같은 시점의 Debian forky 커널 설정 + 보드 조각으로 빌드한다(`kernel/tb375fc/debian-config.sh`가 설정을 만든다). 그래서 Debian 커널과 달라지는 것은 Debian 패치에만 있는 설정 셋(binder 모듈, UEFI Secure Boot 잠금, perf 제한)과 우리 대기열·조각이다.
+  - 빌드(v1.10): `build.sh image`가 자기 작업 트리와 출력(`linux-7.2.12-image`, `out-image/`)을 써서 공용 트리를 잠그지 않는다. 설정 검사는 대기열을 다 얹은 트리로 하고, 조각의 값이 하나라도 빠지면 멈춘다. 꾸러미는 `linux-image-7.2.12-tb375fc`, `linux-headers-…`, `linux-image-…-dbg`, `linux-libc-dev`이고, 판은 `7.2.12-<n>+g<커밋>`이다(n은 `kernel/tb375fc`와 `image/mkosi.conf`를 바꾼 커밋 수, 커밋하지 않은 고침이 있으면 `~dirty`). 커널은 압축하지 않은 Image를 `/boot/vmlinuz-<판>`으로 싣는다(Debian forky arm64와 같고, UKI와 LK가 그대로 쓴다)
+  - 크기와 시간(6코어 빌드 VM, 0001~0022): 컴파일 약 54분, 꾸러미 약 9분. image 97.5MiB(설치 256MiB), headers 9.7MiB, -dbg 1.64GiB(설치 4.4GiB). 빌드 디스크는 작업 트리 2.4GB와 출력 17GB가 정점이라 맥 여유가 약 28GB일 때 시작한다. -dbg는 객체 파일을 지운 뒤 따로 만들고, 끝나면 출력을 지운다. 그래서 다음 이미지 빌드는 처음부터 하고, 이어 빌드는 개발 트리가 맡는다. 고친 흐름을 처음부터 끝까지 한 번에 돌리는 확인은 디스크가 날 때 한다
+  - 툴체인: 빌드 VM의 trixie gcc-14로 한다. bindgen이 없어 Rust 쪽(Rust PHY 둘, 패닉 화면 QR 등)이 빠지고, gcc 15 이상의 `__counted_by`, binutils의 LSUI, 32비트 compat vDSO도 빠진다. 이 기기가 쓰는 것은 없다. Debian과 같은 컴파일러가 필요해지면 forky 컨테이너를 쓴다
+  - 디버그 정보(2026-11-01 결정): Debian 설정 그대로 DWARF·BTF를 켠다(배포판의 정석). 설치하는 커널·모듈은 strip하고 디버그 기호는 `-dbg` 꾸러미로 둔다. 빌드 VM에서는 디스크가 빠듯해 디버그 섹션을 zstd로 줄인다(`DEBUG_INFO_COMPRESS=none`이면 줄이지 않고, 출력이 약 24GB가 된다). 배포 커널은 같다
+  - mkosi(v1.10): 보드 프로필(`bsp/lenovo-tb375fc/mkosi.conf`)이 지역 꾸러미 디렉터리의 커널을 넣고, mkosi가 `/boot/vmlinuz-<판>`을 `/usr/lib/modules/<판>/vmlinuz`로 복사해 UKI를 만든다. 공통 레시피의 `Bootable=yes`·`Bootloader=systemd-boot`는 보드 프로필에서 바꿀 수 없다(mkosi가 보드 프로필을 먼저 읽는다). 그래서 ESP·systemd-boot·UKI가 그대로 생기고, D3의 EFI 길과 맞으므로 지금은 그대로 둔다. LK에는 루트 파티션만 굽고, 부트 이미지는 같은 꾸러미의 Image·장치 트리·모듈로 만든다
+  - 남은 결정: initrd 길(권함: 우리 initramfs에 루트 전환을 더한다. mkosi의 systemd initrd는 38MB라 init_boot 8MiB에 들어가지 않는다), 루트 파티션 자리(권함: 2b는 USB-C 저장장치로 시작하고, 파티션 표를 읽은 뒤 userdata를 줄여 새 GPT 파티션을 만든다. userdata 전체·super·루프 파일은 안드로이드 슬롯을 지키지 못하거나 metadata 암호화로 열 수 없다), 기기에서 커널을 바꾸는 길(LK 부트 이미지를 다시 만들어 쓴다)
   - Debian 패치에서 골라 넣을 후보: binder 모듈(안드로이드 앱 컨테이너를 쓸 때), perf 제한(보안 기본값), 무선 규제 DB 인증서(2d, Debian이 서명한 DB를 쓸 때)
 - **설정과 패치:** 보드 설정 조각(`kernel/config/tb375fc.config`)과 업스트림 제출 대기 패치 대기열(`kernel/patches/`)을 둔다. 대기열에 처음 들어갈 것:
   - NT36532 패널 드라이버 백포트(7.4 병합 창, `47b823940e38`)와 BOE·Tianma 패널 compatible
@@ -194,7 +197,7 @@
   - MFD `mtk-spmi-pmic`(패치 0014~0016): v12에 리뷰 지적과 인터럽트 고침(마스크 레지스터, 초기 마스크, RCS 완료, 깨우기)을 얹었다. 새 판이 나오면 따른다. MT6363 키(0017·0018)는 새로 썼다. MT6685는 범위 밖이다. MT6319는 MFD 없이 `mt6315-regulator`에 DT만 쓴다
   - UFS(패치 0019~0022): MT6897 호스트·M-PHY 바인딩과 드라이버. 클럭·리셋 이름과 OPP는 업스트림 MT8196 시리즈(v14, 병합 전) 꼴이고, 그 시리즈가 들어오면 그 위로 다시 쓴다
   - `mt6897` 전원 도메인 데이터(2d 뒤)
-  - NT36532 SPI 터치와 펜, 포고 키보드(v6 시리즈 위, compatible별 CRC 초기값)
+  - NT36532 SPI 터치와 펜(패치 0027~0031: 핀 drive-strength와 pinmux 헤더 고침, SPI 바인딩의 MT6897, 터치 바인딩·드라이버), 포고 키보드(v6 시리즈 위, compatible별 CRC 초기값)
   - conninfra(SIP 호출과 PMIC 전원), mt76 mt7921의 SoC(AXI) 변형, Bluetooth BEIF 전송
   - GPUEB MT6897 변형
 - **2a에 필요한 설정**(Debian 기본에 대부분 있다):
@@ -202,7 +205,7 @@
   - `DRM_SIMPLEDRM`
   - `PSTORE_RAM`
   - `USB_CONFIGFS_ACM`·`NCM`
-- **buntOS 빌드:** `bsp/lenovo-tb375fc/`를 만든다. mkosi 설정, 커널 조각, 부트 이미지 만들기를 둔다. 이 폴더에서 다듬은 것을 buntOS 저장소로 옮긴다.
+- **buntOS 빌드:** `bsp/lenovo-tb375fc/`에 mkosi 보드 프로필(v1.10), 부트 이미지 만들기, 첫 부팅 initramfs, 펌웨어 추출을 둔다. 이 폴더에서 다듬은 것을 buntOS 저장소로 옮긴다.
 
 ## 5. 블록별 포팅 계획
 
@@ -221,8 +224,8 @@
 | USB | `mtu3`, `xhci-mtk`, `phy-mtk-xsphy` | DT(펌웨어의 eye 값). 역할 전환은 TCPC 뒤. xsphy MT6897 꼴(U2 INTR_CAL 칸과 efuse, U3 CDR 값)과 깨우기 접점(벤더 판 103)은 드라이버 고침이 필요하다 | 작음~중간 | 2b·3 |
 | 화면 파이프라인 | MT8195·MT8188까지. DSC v9·재구성 v2 시리즈는 미병합, dual-DSI는 아무도 맡지 않았다 | MT6897 데이터, dual-DSI, DSC(1.1과 패널 RC 표) | 큼 | 2c(2차) |
 | 패널 NT36532 | `panel-novatek-nt36532`(7.4 병합 창). 패널 쪽 dual-DSI와 DSC가 있다 | compatible 셋, 초기화 순서. 업스트림 패널은 DSC 1.2이고 이 기기 BOE 패널은 DSC 1.1이다 | 작음 | 2c(2차) |
-| 터치 NT36532 SPI + 펜 | I2C 드라이버뿐(SPI RFC 둘은 미병합) | SPI 드라이버, 펌웨어 내려받기, 펜 장치. 펜은 TB371FC 포트가 가까운 참고다 | 중간 | 2c |
-| 홀 센서 | `gpio-keys` | DT(`SW_TABLET_MODE`, `SW_LID`) | 작음 | 2c |
+| 터치 NT36532 SPI + 펜 | I2C 드라이버뿐(SPI RFC 둘은 미병합) | 새 드라이버 `novatek-nvt-spi`(패치 0030·0031): 페이지 단위 SPI 접근, 열 때와 복귀 때 펌웨어 내려받기(ILM·DLM CRC 확인), 손가락 10점, 펜은 둘째 입력 장치(압력 4095, 기울기 ±60°, 단추 둘). 패널 ID GPIO184로 펌웨어를 고른다. SPI 컨트롤러 여덟은 dtsi, 터치 노드는 보드(꺼 둠) | 중간 | 2c |
+| 홀 센서 | `gpio-keys` | 보드 노드(꺼 둠): GPIO1 = `SW_LID`(덮개 닫힘이 0). GPIO26 = `SW_TABLET_MODE` 후보(포고 키보드 `plug-gpios`와 같은 핀이라 기기에서 정한다) | 작음 | 2c |
 | 포고 키보드 | v6 시리즈(미병합, Qualcomm 기기용) | serdev 드라이버. 같은 Tinno 단선 프로토콜로 보이나 이 기기 드라이버 소스는 없다. compatible별 CRC 초기값, TX 핀 pinctrl 전환, UART3 설정(pericfg_ao `0x11036050`) | 중간 | 2c |
 | Wi-Fi·BT | `mt7921`, `mt7915/soc.c`(선례) | soc7_0 버스, conninfra, 펌웨어, FEM, BT 전송 | 큼 | 2d |
 | GPU | panthor(G615), linux-firmware CSF | DT | 작음 | 2e |
@@ -274,7 +277,7 @@
 |---|---|---|---|
 | Mali CSF(`arm/mali/arch11.8/mali_csffw.bin`) | linux-firmware | 커널(panthor) | 가능 |
 | GPUEB(`gpueb.img`) | 기기 파티션 | **LK**(벤더 커널에 request_firmware가 없다) | 해당 없음 |
-| 터치 NT36532(`novatek_ts_fw_boe.bin`, `novatek_ts_fw_tm.bin`) | 기기 vendor | 커널(부팅마다) | 미확인. 기기에서 뽑는다 |
+| 터치 NT36532(`novatek_ts_fw_boe.bin`, `novatek_ts_fw_tm.bin`) | 기기 vendor → `lenovo/tb375fc/` | 커널(터치를 열 때와 깨어날 때) | 미확인. 기기에서 뽑는다 |
 | Wi-Fi·BT soc7_0 | 기기 파티션(`connsys_wifi`, `connsys_bt`) | **LK**(conninfra EMI에 싣는다. 커널은 시작만 시킨다) | 해당 없음. 파티션을 지킨다 |
 | Wi-Fi 보정값·MAC | 기기 nvdata | 커널(NVRAM 명령으로 넘긴다. initramfs가 nvdata를 붙인다) | 기기마다 다르다 |
 | 앰프 AW883xx ACF, SCP·오디오 DSP | 기기 vendor·파티션 | 커널 | 미확인 |
@@ -290,7 +293,7 @@
 | 주사율 | simple-framebuffer 단계는 LK가 정한 모드 하나다. mediatek-drm 단계에서 144/120/60/30Hz를 열고, 움직임이 없으면 낮추는 적응형 주사율(macOS ProMotion처럼)을 둔다 | `comp`의 출력 모드와 프레임 일정 |
 | 터치 | 10점을 그대로 받는다(컴포지터에 손가락 수 제한이 없다). 손바닥 거부와 가장자리 띠(위 24px, 아래 20px)를 실기기에서 맞춘다 | `comp/src/touch.rs` |
 | 펜 | NT36532 펜을 tablet-v2(압력·기울기·단추)로 앱에 보낸다. 컴포지터에 smithay tablet 틀이 있고, 펜 디지타이저는 입력 모드 계산에서 이미 뺀다 | `comp` tablet-v2, 시스템 설정 펜 페이지(나중) |
-| 키보드 커버 | 포고 키보드가 붙으면 포인터 모드, 떼면 터치 모드다(지금 규칙 그대로). plug GPIO26으로 붙음을 안다. 커버를 뒤로 접으면 홀 센서가 `SW_TABLET_MODE`를 보내므로 그때는 키보드·터치패드를 세지 않는 규칙을 더한다(iPad Magic Keyboard처럼) | `comp/src/input_mode.rs`, gpio-keys DT |
+| 키보드 커버 | 포고 키보드가 붙으면 포인터 모드, 떼면 터치 모드다(지금 규칙 그대로). plug GPIO26으로 붙음을 안다. 펌웨어의 두 번째 홀 센서(`hall_2`)가 바로 이 GPIO26이고 드라이버가 없다. 덮개 홀 센서(GPIO1)는 닫힘을 알린다. 뒤로 접은 것을 무엇이 알리는지 기기에서 보고, 그것으로 `SW_TABLET_MODE`를 보내 그때는 키보드·터치패드를 세지 않는 규칙을 더한다(iPad Magic Keyboard처럼) | `comp/src/input_mode.rs`, gpio-keys DT |
 | 회전 | 가속도·자이로(LSM6DSO)와 조도(TCS37013)가 있지만 SCP(nanohub) 뒤에 있다. AP 장치 트리에 노드가 없다(2026-11-01 실측). 그래서 자동 회전이 막힐 수 있다. 처음에는 시스템 설정의 수동 회전이고, SCP 길이 열리면 iio-sensor-proxy로 자동 회전한다. 패널의 자연 방향은 가로다 | 시스템 설정 디스플레이 |
 | 전원 | A715 ×4 + A510 ×4의 EAS, cpufreq-hw, GPU 주파수, s2idle, 덮개(홀)로 잠자기, 45W PD 충전, LVTS 열 관리 | 커널, buntOS 전원 설정 |
 | 오디오 | 오디오가 되기 전에는 USB·Bluetooth 오디오다. 그 뒤 스피커 넷(AW883xx)의 보호 설정과 ALSA UCM을 둔다. 볼륨 키는 PMIC 키다 | UCM, WirePlumber |
@@ -306,11 +309,13 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
   docs/tb375fc/                 이 문서, 조사, Wi-Fi 설계
   docs/hw/lenovo-tb375fc.md     펌웨어 실측
   kernel/tb375fc/
-    build.sh                    Linux 7.2.x 받기·패치·설정·빌드
+    build.sh                    Linux 7.2.x 받기·패치·설정·빌드, 이미지용 커널 .deb (image)
+    debian-config.sh            이미지용 설정 (Debian forky 설정 + 조각)
     config/tb375fc.config       보드 설정 조각
     patches/                    업스트림 제출 대기 패치 (series)
     dts/mediatek/               mt6897.dtsi, mt6897-lenovo-tb375fc.dts, -tb373fu.dts
   bsp/lenovo-tb375fc/
+    mkosi.conf                  mkosi 보드 프로필 (이미지용 커널 .deb, 파티션별 출력)
     boot/                       boot·vendor_boot·init_boot·dtbo 만들기 (헤더 v4, DT 표)
     initramfs/                  첫 부팅용 initramfs (busybox, USB 가젯, nvdata)
     firmware/                   기기에서 펌웨어와 보정값을 뽑는 스크립트 (파일은 두지 않는다)
@@ -358,9 +363,12 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
      - UFS(패치 0019~0022): 바인딩은 MT6897 호스트(클럭 여섯, OPP 둘, 리셋 셋)와 M-PHY(클럭 없음, 리셋은 선택). 드라이버는 M-PHY에 전원 연산 없는 ops를 주고, 호스트는 펌웨어의 속성 넷을 compatible로 정하고 리셋을 바인딩 이름(`unipro`·`crypto`·`hci`)으로 받는다. dtsi는 `mediatek,ufs-disable-mcq`로 시작한다. USB는 펌웨어의 `maximum-speed`와 U2 eye 값을 넣었다
      - 부트 명령줄에 `regulator_ignore_unused`를 더했다. 소비자가 아직 없는 레일(UFS가 붙기 전의 VEMC 등)이 늦은 정리에서 꺼지지 않는다
    - v1.9에 끝낸 것: MT6368(패치 0023~0026). 업스트림 MT6373 regulator v12와는 레지스터·레일이 달라(벅 VBUCK1~6와 VPA, LDO 은행 배치, FCCM·키 보호·ELR5 주소) 백포트하지 않고, 7.2.12 `mt6363-regulator`를 틀로 새로 썼다. regmap은 8비트 값이다. MT6373 v12에 대한 리뷰 셋(`regmap_bulk_write` 개수, OC 오류 보고, 해제 때 work 정지)을 반영했다. 보드는 펌웨어가 늘 켜 두는 레일 6개(vbuck2 GPU 코어, vbuck5·6, vio28, vtp, vusb)를 두고 ssusb `vusb33`을 MT6368 VUSB에 이었다. 그래서 2b에서 USB를 켤 때 SPMI와 MT6368도 함께 켜야 한다
+   - v1.10에 끝낸 것:
+     - 이미지용 커널 빌드 단계(`build.sh image-config`·`image`)와 mkosi 보드 프로필. 대기열 0001~0022로 한 번 빌드했다. 꾸러미의 커널·모듈·장치 트리로 LK 부트 이미지 넷이 파티션 크기 안에 들고, 같은 커널과 initramfs가 QEMU virt에서 init까지 돈다. 이 프로필로 만든 작은 mkosi 이미지에서 커널 꾸러미가 깔리고 UKI가 생긴다. 0001~0031의 이미지 설정도 빠진 값이 없다
+     - 2c(1차) 입력의 터치·펜과 홀 센서(패치 0027~0031과 장치 트리). 업스트림 `novatek-nvt-ts`(I2C, 플래시 있는 칩)에 더하지 않고 새 드라이버로 썼다. SPI 페이지 접근·펌웨어 내려받기·펜이 이 드라이버의 대부분이고, 바인딩도 따로 두며 compatible에 버스 이름을 넣지 않았다(2024 RFC 리뷰). 표와 프로토콜은 OnePlus 공식 MT6897 커널에 든 레노버 NT36532 드라이버에서 옮겼다. SPI 컨트롤러 여덟과 패널 VDDIO(GPIO63)를 더했고, 핀 드라이버의 drive-strength(0027)와 pinmux 헤더 include(0028)를 고쳤다
 2. **다음(기기 없이, 이 차례로):**
-   1. 이미지용 커널 빌드 단계(D1, 4절): `build.sh`에 Debian 설정 + 조각으로 빌드해 .deb를 만드는 단계를 더하고, mkosi 이미지에 넣는다. 디버그 정보는 켠다(v1.8)
-   2. 2c(1차) 입력: NT36532 SPI 터치와 펜, 포고 키보드(serdev), 홀 센서(gpio-keys)
+   1. 2c(1차) 입력: 포고 키보드(serdev). GPIO26(plug, 펌웨어의 `hall_2`)을 누가 가질지 함께 정한다
+   2. 루트로 넘기는 initramfs(4절의 initrd 길): `initramfs/init`이 `root=`를 붙여 `switch_root`하고, 실패하면 USB 가젯 셸로 남는다. 루트 파티션 자리를 정한 뒤에 한다
    3. MT6363 regulator 고침 둘(업스트림에 낼 것): 16비트 값 regmap이 쓸 때 다음 레지스터도 써서, 벅 하나를 끄면 VS1·VS3·VSRAM이 함께 꺼진다. VEMC 전압 읽기의 범위 조건이 반대다. 지금 보드는 그 길을 타지 않는다(벅은 always-on이거나 노드에 없고, 전압 한계를 주지 않는다)
    4. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)
 3. **기기:** 사용자의 TB375FC는 중국판 ZUXOS 1.5.10.044(Android 16)다(2026-11-01). 이 판에서 바로 언락한 보고는 없으니, 16.0.20.091로 내린 뒤 언락하는 길을 쓴다(2.1절). 예비 기기를 살 때는 ZUI 16 기기가 낫다.
@@ -369,6 +377,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
    - 펌웨어: adb 셸은 `/vendor/firmware`의 이름만 보고 파일은 읽지 못한다(2026-11-01). 파일은 아래 readback 백업이나 언락 뒤 root로 얻는다
    - SP Flash Tool readback으로 전체 백업과 해시(go/no-go 1번). 인증 DA·auth는 그 판의 레노버 펌웨어 묶음에서 쓴다
    - ADB로 잰 것(2026-11-01, [실측 보고서](../hw/lenovo-tb375fc.md) 7절): 판, 잠금 상태, RAM 8GB와 저장장치 128GB, 화면(패널 버퍼 가로 2944×1840), 입력 장치 이름, vendor 펌웨어와 모듈 목록, 지문 센서, 센서(LSM6DSO, TCS37013, SCP 뒤)
+   - 파티션 표를 읽은 뒤 루트 파티션 자리와 크기를 정한다(4절): GPT의 userdata 자리, LK fastboot가 새 항목에 굽는지
    - root가 필요한 것(언락 뒤): `getevent -lp`, framebuffer 주소와 살아 있는 트리의 값(`/proc/device-tree`는 이름만 보이고 값은 막혀 있다), `/proc/iomem`, 파티션 표
    - UART 위치는 기기를 열어 찾는다
 5. **언락:** 2.1절의 언락 순서대로 한다. 그 뒤 root로 framebuffer 주소와 살아 있는 트리를 읽어 장치 트리의 framebuffer·ramoops를 켜고, 2a를 한다(`fastboot boot`).

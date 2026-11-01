@@ -128,6 +128,7 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 | 메모리·저장장치 | RAM 8GB(`ro.boot.ddr_size`), 저장장치 128GB(`/data` 108G). 부팅 장치는 UFS `112b0000.ufshci` |
 | 화면 | 패널이 그리는 버퍼는 가로 2944×1840이다(SurfaceFlinger의 `framebufferSpace`, 터치 입력의 `physicalFrame`). 이 크기는 화면 회전 설정과 상관없다. Android는 세로(1840×2944)를 기본 방향으로 두고(`primary_display_orientation=270`) 가속도 센서로 자동 회전한다. 측정 때는 자동 회전이 꺼지고 가로(90°)로 고정되어 있었다. 144Hz, 밀도 340 |
 | 입력 장치(`dumpsys input`) | `NVTCapacitiveTouchScreen`(터치), `touch-pen`(펜), `hall`, `tn_wakeup`(포고 키보드 깨우기), `gf-keys`(지문), `mtk-pmic-keys`, `mtk-kpd`, `mt6897-mt6368 Headset Jack` |
+| 터치·펜 좌표(`dumpsys input`) | `NVTCapacitiveTouchScreen`(버스 0x1C = SPI) X 0~18400·Y 0~29440, 10점, 접촉 크기 0~255. `touch-pen` X 0~18400·Y 0~29440, 압력 0~4095, 거리 0~1, 기울기 ±60. 컨트롤러 좌표는 픽셀의 10배이고 X가 짧은 쪽이다. 덮개 홀 센서(`hall_1`)는 키 이벤트만 낸다 |
 | `getevent -lp` | 입력 장치 7개가 `system` 소유라 셸이 열지 못한다. root가 필요하다 |
 | 살아 있는 트리 | `/proc/device-tree`의 노드와 속성 이름은 보이고 값은 막혀 있다(root 필요). 이름을 보면 LK가 `chosen`에 `atag,videolfb`(framebuffer 주소·크기)와 `bootargs`를 넣고, `reserved-memory`에 `mblock-*` 44개를 더한다. 그 가운데 `mblock-14-framebuffer`, `mblock-2-pstore`, `mblock-4-BL31-reserved`, `mblock-16-gz`, `mblock-38-consys_emi_reserved`, `mblock-42-me_GPUEB_SHARED`가 있다 |
 | `/proc/iomem` | 막혀 있다(root 필요) |
