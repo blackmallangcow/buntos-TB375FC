@@ -12,8 +12,14 @@
 # 버스 등록 뒤에 있다. 내장(=y) PMIC 드라이버가 채널 설정 전에 버스를 쓸 수 있다. 기기에서 확인한 뒤 업스트림에 낸다
 0007-spmi-mtk-pmif-fix-the-RCS-interrupt-bank-calculation.patch
 0008-spmi-mtk-pmif-set-the-channel-up-before-adding-buses.patch
+# 0009~0013: MT6897 클럭(바인딩, HW voter syscon, FENC 없는 HW voter 먹스, PLL HW voter, 드라이버).
+# 표는 OnePlus 공식 MT6897 커널에서 옮겼다
+0009-dt-bindings-clock-mediatek-add-MT6897-clock-controllers.patch
+0010-dt-bindings-mfd-syscon-add-MediaTek-MT6897-hardware-voter.patch
+0011-clk-mediatek-mux-add-hardware-voter-mux-gate-without-FENC.patch
+0012-clk-mediatek-pll-add-hardware-voter-support.patch
+0013-clk-mediatek-add-MT6897-clock-drivers.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MFD·MT6363이 남았다(SPMI 노드와 MT6319는 장치 트리에 있다):
-#  - clk: mediatek: add MT6897 clocks (FENC 없는 HW voter 먹스, PLL HW voter)
 #  - mfd: mtk-spmi-pmic (업스트림 v12와 리뷰 고침. MT6363 regulator와 MT6685가 의존한다), MT6363 키
 #  - pmdomain: mediatek: add MT6897 power domains (MT8196 틀. UFS·USB에는 없어 2d 뒤)
 #  - input: touchscreen: Novatek NT36532 SPI TDDI와 펜

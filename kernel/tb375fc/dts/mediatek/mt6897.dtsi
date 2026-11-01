@@ -11,9 +11,11 @@
  * clock, pinctrl and power domain drivers are described but disabled.
  */
 
+#include <dt-bindings/clock/mediatek,mt6897-clock.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/phy/phy.h>
+#include <dt-bindings/reset/mediatek,mt6897-resets.h>
 
 / {
 	compatible = "mediatek,mt6897";
@@ -35,6 +37,22 @@
 		clock-div = <2>;
 		clock-mult = <1>;
 		clock-output-names = "clk13m";
+	};
+
+	/* The stock firmware gives 32000 Hz, not 32768 */
+	clk32k: oscillator-32k {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <32000>;
+		clock-output-names = "clk32k";
+	};
+
+	/* On-chip ultra low power oscillator, the osc_dN dividers' parent */
+	ulposc: oscillator-ulposc {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <588000000>;
+		clock-output-names = "ulposc";
 	};
 
 	cpus {
@@ -303,6 +321,19 @@
 		};
 
 		/*
+		 * The clock controllers stay off in 2a, which runs on the clocks
+		 * the bootloader left on. TODO(2b): enable all six together with
+		 * pio and SPMI, keeping clk_ignore_unused on the command line.
+		 */
+		topckgen: clock-controller@10000000 {
+			compatible = "mediatek,mt6897-topckgen", "syscon";
+			reg = <0 0x10000000 0 0x1000>;
+			mediatek,hardware-voter = <&hwv>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		/*
 		 * 232 GPIOs and the five EINT blocks. EINTs 232-249 have no
 		 * pin; the driver gives them virtual GPIOs (the SPMI rcs
 		 * interrupt is EINT 248). TODO(2b): enable together with SPMI.
@@ -336,9 +367,27 @@
 			status = "disabled";
 		};
 
+		apmixedsys: clock-controller@1000c000 {
+			compatible = "mediatek,mt6897-apmixedsys", "syscon";
+			reg = <0 0x1000c000 0 0x1000>;
+			mediatek,hardware-voter = <&hwv>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
 		/*
-		 * 8250_mtk needs a "bus" clock next to "baud". TODO(2b): use the
-		 * pericfg_ao UART gates once clk-mt6897 exists.
+		 * Hardware voter: collects the clock votes of the AP and the
+		 * remote processors, and switches some PLLs, muxes and gates.
+		 */
+		hwv: syscon@10320000 {
+			compatible = "mediatek,mt6897-hwv", "syscon";
+			reg = <0 0x10320000 0 0x2000>;
+		};
+
+		/*
+		 * 8250_mtk needs a "bus" clock next to "baud". uart0 is the 2a
+		 * console, so it keeps clk26m there and does not wait for the
+		 * clock controllers. TODO(2b): <&pericfg_ao CLK_PERI_AO_UART0>.
 		 */
 		uart0: serial@11001000 {
 			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
@@ -353,7 +402,7 @@
 			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
 			reg = <0 0x11002000 0 0x1000>;
 			interrupts = <GIC_SPI 251 IRQ_TYPE_LEVEL_HIGH 0>;
-			clocks = <&clk26m>, <&clk26m>;
+			clocks = <&clk26m>, <&pericfg_ao CLK_PERI_AO_UART1>;
 			clock-names = "baud", "bus";
 			status = "disabled";
 		};
@@ -362,7 +411,7 @@
 			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
 			reg = <0 0x11003000 0 0x1000>;
 			interrupts = <GIC_SPI 252 IRQ_TYPE_LEVEL_HIGH 0>;
-			clocks = <&clk26m>, <&clk26m>;
+			clocks = <&clk26m>, <&pericfg_ao CLK_PERI_AO_UART2>;
 			clock-names = "baud", "bus";
 			status = "disabled";
 		};
@@ -371,18 +420,34 @@
 			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
 			reg = <0 0x11004000 0 0x1000>;
 			interrupts = <GIC_SPI 253 IRQ_TYPE_LEVEL_HIGH 0>;
-			clocks = <&clk26m>, <&clk26m>;
+			clocks = <&clk26m>, <&pericfg_ao CLK_PERI_AO_UART3>;
 			clock-names = "baud", "bus";
 			status = "disabled";
 		};
 
-		/* TODO(2b): sys_ck, host_ck (topckgen), frmcnt_ck (pericfg_ao) */
+		pericfg_ao: clock-controller@11036000 {
+			compatible = "mediatek,mt6897-pericfg-ao", "syscon";
+			reg = <0 0x11036000 0 0x1000>;
+			mediatek,hardware-voter = <&hwv>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
 		ssusb: usb@11201000 {
 			compatible = "mediatek,mt6897-mtu3", "mediatek,mtu3";
 			reg = <0 0x11201000 0 0x2e00>, <0 0x11203e00 0 0x100>;
 			reg-names = "mac", "ippc";
 			interrupts = <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH 0>;
 			phys = <&u2port0 PHY_TYPE_USB2>, <&u3port0 PHY_TYPE_USB3>;
+			/*
+			 * MT6897 has no separate ref, mcu or dma clock (the
+			 * stock tree gives none); clk26m keeps their places.
+			 */
+			clocks = <&topckgen CLK_TOP_USB_TOP>, <&clk26m>, <&clk26m>,
+				 <&clk26m>, <&topckgen CLK_TOP_SSUSB_XHCI>,
+				 <&pericfg_ao CLK_PERI_AO_SSUSB0_FRMCNT>;
+			clock-names = "sys_ck", "ref_ck", "mcu_ck", "dma_ck",
+				      "xhci_ck", "frmcnt_ck";
 			#address-cells = <2>;
 			#size-cells = <2>;
 			ranges;
@@ -399,23 +464,46 @@
 			};
 		};
 
-		/* TODO(2b): unipro and mp clocks */
+		/* The M-PHY SAP clock has no gate on MT6897 */
 		ufsphy: ufs-phy@112a0000 {
 			compatible = "mediatek,mt8183-ufsphy";
 			reg = <0 0x112a0000 0 0x10000>;
+			clocks = <&ufscfg_ao CLK_UFSAO_UNIPRO_SYS>, <&clk26m>;
+			clock-names = "unipro", "mp";
 			#phy-cells = <0>;
 			status = "disabled";
 		};
 
 		/*
-		 * TODO(2b): ufs clock, ufscfg resets, power domain. SPI 177-184
-		 * are the MCQ queue interrupts.
+		 * No power domain: the host is powered through the
+		 * mediatek,ufs-rtff-mtcmos SMC. SPI 177-184 are the MCQ queue
+		 * interrupts. TODO(2b): the other ufscfg clocks and the resets
+		 * need the MT6897 entry in the UFS binding.
 		 */
 		ufshci: ufshci@112b0000 {
 			compatible = "mediatek,mt8183-ufshci";
 			reg = <0 0x112b0000 0 0x3000>;
 			interrupts = <GIC_SPI 168 IRQ_TYPE_LEVEL_HIGH 0>;
 			phys = <&ufsphy>;
+			clocks = <&ufscfg_pdn CLK_UFSPDN_UFSHCI_UFS>;
+			clock-names = "ufs";
+			freq-table-hz = <0 0>;
+			status = "disabled";
+		};
+
+		ufscfg_ao: clock-controller@112b8000 {
+			compatible = "mediatek,mt6897-ufscfg-ao", "syscon";
+			reg = <0 0x112b8000 0 0x1000>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+			status = "disabled";
+		};
+
+		ufscfg_pdn: clock-controller@112bb000 {
+			compatible = "mediatek,mt6897-ufscfg-pdn", "syscon";
+			reg = <0 0x112bb000 0 0x1000>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
 			status = "disabled";
 		};
 
@@ -448,6 +536,13 @@
 			reg = <0 0x1c00a000 0 0x100>;
 		};
 
+		vlpckgen: clock-controller@1c013000 {
+			compatible = "mediatek,mt6897-vlpckgen", "syscon";
+			reg = <0 0x1c013000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
 		/*
 		 * SPMI 2.0 arbiter with two buses, laid out like MT8196. The
 		 * vendor register tables match the upstream MT8195 data. All
@@ -455,10 +550,9 @@
 		 * spmi-dev-mask): MT6363 @4, MT6368 @5, MT6319 @6-8 and
 		 * MT6685 @9. The P bus has nothing on it and stays off.
 		 * The driver needs an spmiN alias for each bus.
-		 * TODO(2b): enable with pio. The PMIF and SPMI master clocks
-		 * are the bootloader's until clk-mt6897 exists; clk26m only
-		 * stands in for them, and with no clock driver nothing can
-		 * gate the real ones.
+		 * TODO(2b): enable with pio. MT6897 has no PMIF clock gates
+		 * (MT8195 has them in infracfg_ao, fed by pwrap_ulposc), so the
+		 * PMIF clocks are the VLP pwrap_ulposc mux itself.
 		 */
 		spmi: spmi-arbiter@1cc00000 {
 			compatible = "mediatek,mt6897-spmi", "mediatek,mt8196-spmi";
@@ -474,7 +568,9 @@
 				interrupt-names = "rcs";
 				interrupt-controller;
 				#interrupt-cells = <3>;
-				clocks = <&clk26m>, <&clk26m>, <&clk26m>;
+				clocks = <&vlpckgen CLK_VLP_PWRAP_ULPOSC>,
+					 <&vlpckgen CLK_VLP_PWRAP_ULPOSC>,
+					 <&vlpckgen CLK_VLP_SPMI_M_MST>;
 				clock-names = "pmif_sys_ck", "pmif_tmr_ck", "spmimst_clk_mux";
 				#address-cells = <2>;
 				#size-cells = <0>;

@@ -1,0 +1,276 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: pll: add hardware voter support
+
+On MT6897 the hardware voter (HWV) runs the power sequence of five
+apmixedsys PLLs: the AP writes its vote to the HWV and waits for it to be
+served, instead of writing the PLL power, isolation and enable bits
+itself. Rate changes still go to the PLL registers.
+
+Add mtk_pll_hwv_ops. They follow the sequence of the MediaTek vendor
+driver: wait until the voter is idle, vote (after the dummy read the
+voter bus needs), wait until the vote reads back, then wait until the
+request is done with nothing pending and, when switching on, until the
+PLL enable bit is set.
+
+mtk_clk_register_plls() now looks the HWV regmap up through the
+mediatek,hardware-voter phandle, as the mux and gate code already do,
+and refuses HWV PLLs without it.
+
+---
+diff --git a/drivers/clk/mediatek/clk-pll.c b/drivers/clk/mediatek/clk-pll.c
+index e97064868..0cbb3ab47 100644
+--- a/drivers/clk/mediatek/clk-pll.c
++++ b/drivers/clk/mediatek/clk-pll.c
+@@ -9,11 +9,14 @@
+ #include <linux/delay.h>
+ #include <linux/err.h>
+ #include <linux/io.h>
++#include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/of_address.h>
+ #include <linux/platform_device.h>
++#include <linux/regmap.h>
+ #include <linux/slab.h>
+ 
++#include "clk-mtk.h"
+ #include "clk-pll.h"
+ 
+ #define MHZ			(1000 * 1000)
+@@ -28,6 +31,11 @@
+ 
+ #define AUDPLL_TUNER_EN		BIT(31)
+ 
++/* The voter may take up to 100 ms to bring a PLL up or down */
++#define MTK_WAIT_HWV_PLL_IDLE_US	500
++#define MTK_WAIT_HWV_PLL_VOTE_US	200
++#define MTK_WAIT_HWV_PLL_DONE_US	100000
++
+ /* default 7 bits integer, can be overridden with pcwibits. */
+ #define INTEGER_BITS		7
+ 
+@@ -304,6 +312,87 @@ static void mtk_pll_unprepare_setclr(struct clk_hw *hw)
+ 	writel(BIT(pll->data->pll_en_bit), pll->en_clr_addr);
+ }
+ 
++static int mtk_pll_hwv_vote(struct mtk_clk_pll *pll, bool on)
++{
++	const struct mtk_pll_data *data = pll->data;
++	u32 vote_ofs = on ? data->hwv_set_ofs : data->hwv_clr_ofs;
++	u32 mask = BIT(data->hwv_shift);
++	u32 val;
++	int ret;
++
++	/* Let the voter finish the request in flight first */
++	ret = regmap_read_poll_timeout(pll->regmap_hwv, data->hwv_done_ofs, val,
++				       val & mask, 1, MTK_WAIT_HWV_PLL_IDLE_US);
++	if (ret)
++		return ret;
++
++	/* A dummy read clears the idle signal of the voter bus */
++	regmap_read(pll->regmap_hwv, vote_ofs, &val);
++	regmap_write(pll->regmap_hwv, vote_ofs, mask);
++
++	/* Both vote registers read back the votes held */
++	return regmap_read_poll_timeout(pll->regmap_hwv, vote_ofs, val,
++					!!(val & mask) == on, 2,
++					MTK_WAIT_HWV_PLL_VOTE_US);
++}
++
++static bool mtk_pll_hwv_is_on(struct mtk_clk_pll *pll)
++{
++	const struct mtk_pll_data *data = pll->data;
++	u32 mask = BIT(data->hwv_shift);
++	u32 done, pending;
++
++	regmap_read(pll->regmap_hwv, data->hwv_done_ofs, &done);
++	regmap_read(pll->regmap_hwv, data->hwv_set_sta_ofs, &pending);
++
++	return (done & mask) && !(pending & mask) &&
++	       (readl(pll->en_addr) & BIT(data->pll_en_bit));
++}
++
++static bool mtk_pll_hwv_is_off(struct mtk_clk_pll *pll)
++{
++	const struct mtk_pll_data *data = pll->data;
++	u32 mask = BIT(data->hwv_shift);
++	u32 done, pending;
++
++	regmap_read(pll->regmap_hwv, data->hwv_done_ofs, &done);
++	regmap_read(pll->regmap_hwv, data->hwv_clr_sta_ofs, &pending);
++
++	return (done & mask) && !(pending & mask);
++}
++
++static int mtk_pll_hwv_prepare(struct clk_hw *hw)
++{
++	struct mtk_clk_pll *pll = to_mtk_clk_pll(hw);
++	bool on;
++	int ret;
++
++	ret = mtk_pll_hwv_vote(pll, true);
++	if (ret)
++		return ret;
++
++	return read_poll_timeout(mtk_pll_hwv_is_on, on, on, 1,
++				 MTK_WAIT_HWV_PLL_DONE_US, false, pll);
++}
++
++static void mtk_pll_hwv_unprepare(struct clk_hw *hw)
++{
++	struct mtk_clk_pll *pll = to_mtk_clk_pll(hw);
++	bool off;
++	int ret;
++
++	ret = mtk_pll_hwv_vote(pll, false);
++	if (!ret) {
++		/* Give the voter time to take the request before trusting done */
++		fsleep(100);
++		ret = read_poll_timeout(mtk_pll_hwv_is_off, off, off, 1,
++					MTK_WAIT_HWV_PLL_DONE_US, false, pll);
++	}
++	if (ret)
++		pr_warn("%s: hardware voter did not release the PLL: %d\n",
++			clk_hw_get_name(hw), ret);
++}
++
+ const struct clk_ops mtk_pll_ops = {
+ 	.is_prepared	= mtk_pll_is_prepared,
+ 	.prepare	= mtk_pll_prepare,
+@@ -323,6 +412,20 @@ const struct clk_ops mtk_pll_fenc_clr_set_ops = {
+ };
+ EXPORT_SYMBOL_GPL(mtk_pll_fenc_clr_set_ops);
+ 
++/*
++ * The hardware voter runs the whole power sequence of these PLLs, so the
++ * AP only votes. Rate changes still go to the PLL registers.
++ */
++const struct clk_ops mtk_pll_hwv_ops = {
++	.is_prepared	= mtk_pll_is_prepared,
++	.prepare	= mtk_pll_hwv_prepare,
++	.unprepare	= mtk_pll_hwv_unprepare,
++	.recalc_rate	= mtk_pll_recalc_rate,
++	.determine_rate	= mtk_pll_determine_rate,
++	.set_rate	= mtk_pll_set_rate,
++};
++EXPORT_SYMBOL_GPL(mtk_pll_hwv_ops);
++
+ struct clk_hw *mtk_clk_register_pll_ops(struct mtk_clk_pll *pll,
+ 					const struct mtk_pll_data *data,
+ 					void __iomem *base,
+@@ -377,19 +480,25 @@ struct clk_hw *mtk_clk_register_pll_ops(struct mtk_clk_pll *pll,
+ 	return &pll->hw;
+ }
+ 
+-struct clk_hw *mtk_clk_register_pll(struct device *dev,
+-				    const struct mtk_pll_data *data,
+-				    void __iomem *base)
++static struct clk_hw *__mtk_clk_register_pll(struct device *dev,
++					     const struct mtk_pll_data *data,
++					     void __iomem *base,
++					     struct regmap *regmap_hwv)
+ {
+ 	struct mtk_clk_pll *pll;
+ 	struct clk_hw *hw;
+ 	const struct clk_ops *pll_ops = data->ops ? data->ops : &mtk_pll_ops;
+ 
++	if (pll_ops == &mtk_pll_hwv_ops && !regmap_hwv)
++		return dev_err_ptr_probe(dev, -ENXIO,
++					 "regmap not found for hardware voter clocks\n");
++
+ 	pll = kzalloc_obj(*pll);
+ 	if (!pll)
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	pll->dev = dev;
++	pll->regmap_hwv = regmap_hwv;
+ 
+ 	hw = mtk_clk_register_pll_ops(pll, data, base, pll_ops);
+ 	if (IS_ERR(hw))
+@@ -398,6 +507,13 @@ struct clk_hw *mtk_clk_register_pll(struct device *dev,
+ 	return hw;
+ }
+ 
++struct clk_hw *mtk_clk_register_pll(struct device *dev,
++				    const struct mtk_pll_data *data,
++				    void __iomem *base)
++{
++	return __mtk_clk_register_pll(dev, data, base, NULL);
++}
++
+ void mtk_clk_unregister_pll(struct clk_hw *hw)
+ {
+ 	struct mtk_clk_pll *pll;
+@@ -416,6 +532,7 @@ int mtk_clk_register_plls(struct device *dev,
+ 			  struct clk_hw_onecell_data *clk_data)
+ {
+ 	void __iomem *base;
++	struct regmap *regmap_hwv;
+ 	int i;
+ 	struct clk_hw *hw;
+ 
+@@ -425,6 +542,14 @@ int mtk_clk_register_plls(struct device *dev,
+ 		return -EINVAL;
+ 	}
+ 
++	regmap_hwv = mtk_clk_get_hwv_regmap(dev->of_node);
++	if (IS_ERR(regmap_hwv)) {
++		iounmap(base);
++		return dev_err_probe(dev, PTR_ERR(regmap_hwv),
++				     "Cannot find hardware voter regmap for %pOF\n",
++				     dev->of_node);
++	}
++
+ 	for (i = 0; i < num_plls; i++) {
+ 		const struct mtk_pll_data *pll = &plls[i];
+ 
+@@ -434,7 +559,7 @@ int mtk_clk_register_plls(struct device *dev,
+ 			continue;
+ 		}
+ 
+-		hw = mtk_clk_register_pll(dev, pll, base);
++		hw = __mtk_clk_register_pll(dev, pll, base, regmap_hwv);
+ 
+ 		if (IS_ERR(hw)) {
+ 			pr_err("Failed to register clk %s: %pe\n", pll->name,
+diff --git a/drivers/clk/mediatek/clk-pll.h b/drivers/clk/mediatek/clk-pll.h
+index f49dc2732..46d5f86d0 100644
+--- a/drivers/clk/mediatek/clk-pll.h
++++ b/drivers/clk/mediatek/clk-pll.h
+@@ -11,6 +11,7 @@
+ #include <linux/types.h>
+ 
+ struct device;
++struct regmap;
+ 
+ struct mtk_pll_div_table {
+ 	u32 div;
+@@ -52,6 +53,13 @@ struct mtk_pll_data {
+ 	u8 pll_en_bit; /* Assume 0, indicates BIT(0) by default */
+ 	u8 pcw_chg_bit;
+ 	u8 fenc_sta_bit;
++	/* Hardware voter registers, for mtk_pll_hwv_ops */
++	u32 hwv_set_ofs;
++	u32 hwv_clr_ofs;
++	u32 hwv_done_ofs;
++	u32 hwv_set_sta_ofs;
++	u32 hwv_clr_sta_ofs;
++	u8 hwv_shift;
+ };
+ 
+ /*
+@@ -75,6 +83,7 @@ struct mtk_clk_pll {
+ 	void __iomem	*en_set_addr;
+ 	void __iomem	*en_clr_addr;
+ 	void __iomem	*fenc_addr;
++	struct regmap	*regmap_hwv;
+ 	const struct mtk_pll_data *data;
+ };
+ 
+@@ -86,6 +95,7 @@ void mtk_clk_unregister_plls(const struct mtk_pll_data *plls, int num_plls,
+ 
+ extern const struct clk_ops mtk_pll_ops;
+ extern const struct clk_ops mtk_pll_fenc_clr_set_ops;
++extern const struct clk_ops mtk_pll_hwv_ops;
+ 
+ static inline struct mtk_clk_pll *to_mtk_clk_pll(struct clk_hw *hw)
+ {

@@ -1,0 +1,513 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: clock: mediatek: add MT6897 clock controllers
+
+Add the bindings for the clock controllers of the MediaTek MT6897
+(Dimensity 8300) SoC:
+
+- The system clock controllers apmixedsys, topckgen and vlpckgen provide
+  the PLLs, dividers and muxes.
+- The functional clock controllers pericfg_ao, ufscfg_ao and ufscfg_pdn
+  provide clock gates. The two UFS blocks also provide the reset lines of
+  the UFS M-PHY, UniPro, crypto engine and host controller.
+
+As on MT8196, some PLLs, muxes and gates are switched through the
+hardware voter, which the nodes point to with mediatek,hardware-voter.
+
+The clock identifiers follow the tables of the MediaTek vendor driver
+(OnePlus Pad GPL release), without the vendor's one-to-one alias clocks.
+
+---
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+new file mode 100644
+index 000000000..60db7997f
+--- /dev/null
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+@@ -0,0 +1,92 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/mediatek,mt6897-clock.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek Functional Clock Controller for MT6897
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++description: |
++  The clock architecture in MediaTek SoCs is structured like below:
++  PLLs -->
++          dividers -->
++                      muxes
++                           -->
++                              clock gate
++
++  The device nodes provide clock gate control in different IP blocks. The
++  two UFS blocks also provide the reset lines of the UFS M-PHY, UniPro,
++  inline crypto engine and host controller.
++
++  The identifiers of the clocks are in
++  include/dt-bindings/clock/mediatek,mt6897-clock.h and those of the resets
++  in include/dt-bindings/reset/mediatek,mt6897-resets.h.
++
++properties:
++  compatible:
++    items:
++      - enum:
++          - mediatek,mt6897-pericfg-ao
++          - mediatek,mt6897-ufscfg-ao
++          - mediatek,mt6897-ufscfg-pdn
++      - const: syscon
++
++  reg:
++    maxItems: 1
++
++  '#clock-cells':
++    const: 1
++
++  '#reset-cells':
++    const: 1
++
++  mediatek,hardware-voter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      Phandle to the hardware voter (HWV) register block. The HWV is a
++      SoC-internal MCU that collects clock votes from the application
++      processor and the remote processors. On MT6897 it opens and closes
++      some of the pericfg_ao gates.
++
++required:
++  - compatible
++  - reg
++  - '#clock-cells'
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6897-pericfg-ao
++    then:
++      required:
++        - mediatek,hardware-voter
++      properties:
++        '#reset-cells': false
++    else:
++      required:
++        - '#reset-cells'
++      properties:
++        mediatek,hardware-voter: false
++
++additionalProperties: false
++
++examples:
++  - |
++    clock-controller@11036000 {
++        compatible = "mediatek,mt6897-pericfg-ao", "syscon";
++        reg = <0x11036000 0x1000>;
++        mediatek,hardware-voter = <&hwv>;
++        #clock-cells = <1>;
++    };
++  - |
++    clock-controller@112bb000 {
++        compatible = "mediatek,mt6897-ufscfg-pdn", "syscon";
++        reg = <0x112bb000 0x1000>;
++        #clock-cells = <1>;
++        #reset-cells = <1>;
++    };
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6897-sys-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6897-sys-clock.yaml
+new file mode 100644
+index 000000000..6a84f67fb
+--- /dev/null
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6897-sys-clock.yaml
+@@ -0,0 +1,87 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/mediatek,mt6897-sys-clock.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek System Clock Controller for MT6897
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++description: |
++  The clock architecture in MediaTek SoCs is structured like below:
++  PLLs -->
++          dividers -->
++                      muxes
++                           -->
++                              clock gate
++
++  The apmixedsys provides most of the PLLs, which are generated from the
++  SoC's 26MHz crystal oscillator. The topckgen and vlpckgen provide dividers
++  and muxes which provide the clock source to other IP blocks.
++
++  The identifiers of the clocks are in
++  include/dt-bindings/clock/mediatek,mt6897-clock.h.
++
++properties:
++  compatible:
++    items:
++      - enum:
++          - mediatek,mt6897-apmixedsys
++          - mediatek,mt6897-topckgen
++          - mediatek,mt6897-vlpckgen
++      - const: syscon
++
++  reg:
++    maxItems: 1
++
++  '#clock-cells':
++    const: 1
++
++  mediatek,hardware-voter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      Phandle to the hardware voter (HWV) register block. The HWV is a
++      SoC-internal MCU that collects clock votes from the application
++      processor and the remote processors. On MT6897 it powers some PLLs up
++      and down and opens or closes the gates of some topckgen muxes. The
++      parent selection of those muxes and the rate of those PLLs are still
++      set through the clock controller registers.
++
++required:
++  - compatible
++  - reg
++  - '#clock-cells'
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            enum:
++              - mediatek,mt6897-apmixedsys
++              - mediatek,mt6897-topckgen
++    then:
++      required:
++        - mediatek,hardware-voter
++    else:
++      properties:
++        mediatek,hardware-voter: false
++
++additionalProperties: false
++
++examples:
++  - |
++    clock-controller@1000c000 {
++        compatible = "mediatek,mt6897-apmixedsys", "syscon";
++        reg = <0x1000c000 0x1000>;
++        mediatek,hardware-voter = <&hwv>;
++        #clock-cells = <1>;
++    };
++  - |
++    clock-controller@1c013000 {
++        compatible = "mediatek,mt6897-vlpckgen", "syscon";
++        reg = <0x1c013000 0x1000>;
++        #clock-cells = <1>;
++    };
+diff --git a/include/dt-bindings/clock/mediatek,mt6897-clock.h b/include/dt-bindings/clock/mediatek,mt6897-clock.h
+new file mode 100644
+index 000000000..7f52c80a0
+--- /dev/null
++++ b/include/dt-bindings/clock/mediatek,mt6897-clock.h
+@@ -0,0 +1,274 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/*
++ * Copyright (c) 2026 buntOS contributors
++ */
++
++#ifndef _DT_BINDINGS_CLK_MEDIATEK_MT6897_H
++#define _DT_BINDINGS_CLK_MEDIATEK_MT6897_H
++
++/* TOPCKGEN */
++#define CLK_TOP_AXI			0
++#define CLK_TOP_PERI_FAXI		1
++#define CLK_TOP_UFS_FAXI		2
++#define CLK_TOP_BUS_AXIMEM		3
++#define CLK_TOP_DISP0			4
++#define CLK_TOP_DISP1			5
++#define CLK_TOP_OVL0			6
++#define CLK_TOP_OVL1			7
++#define CLK_TOP_MDP0			8
++#define CLK_TOP_MDP1			9
++#define CLK_TOP_MMINFRA			10
++#define CLK_TOP_DSP			11
++#define CLK_TOP_MFG_REF			12
++#define CLK_TOP_MFGSC_REF		13
++#define CLK_TOP_CAMTG2			14
++#define CLK_TOP_CAMTG3			15
++#define CLK_TOP_CAMTG4			16
++#define CLK_TOP_CAMTG5			17
++#define CLK_TOP_CAMTG6			18
++#define CLK_TOP_CAMTG7			19
++#define CLK_TOP_CAMTG8			20
++#define CLK_TOP_UART			21
++#define CLK_TOP_MSDC_MACRO_1P		22
++#define CLK_TOP_MSDC_MACRO_2P		23
++#define CLK_TOP_MSDC30_1		24
++#define CLK_TOP_MSDC30_2		25
++#define CLK_TOP_AUD_INTBUS		26
++#define CLK_TOP_ATB			27
++#define CLK_TOP_DP			28
++#define CLK_TOP_DISP_PWM		29
++#define CLK_TOP_USB_TOP			30
++#define CLK_TOP_SSUSB_XHCI		31
++#define CLK_TOP_I2C			32
++#define CLK_TOP_SENINF			33
++#define CLK_TOP_SENINF1			34
++#define CLK_TOP_SENINF2			35
++#define CLK_TOP_SENINF3			36
++#define CLK_TOP_SENINF4			37
++#define CLK_TOP_SENINF5			38
++#define CLK_TOP_AUD_ENGEN1		39
++#define CLK_TOP_AUD_ENGEN2		40
++#define CLK_TOP_AES_UFSFDE		41
++#define CLK_TOP_UFS			42
++#define CLK_TOP_PEXTP_MBIST		43
++#define CLK_TOP_AUD_1			44
++#define CLK_TOP_AUD_2			45
++#define CLK_TOP_ADSP			46
++#define CLK_TOP_AUDIO_LOCAL_BUS		47
++#define CLK_TOP_DPMAIF_MAIN		48
++#define CLK_TOP_VENC			49
++#define CLK_TOP_VDEC			50
++#define CLK_TOP_PWM			51
++#define CLK_TOP_AUDIO_H			52
++#define CLK_TOP_MCUPM			53
++#define CLK_TOP_MEM_SUB			54
++#define CLK_TOP_PERI_FMEM_SUB		55
++#define CLK_TOP_UFS_FMEM_SUB		56
++#define CLK_TOP_EMI_N			57
++#define CLK_TOP_EMI_S			58
++#define CLK_TOP_CCU_AHB			59
++#define CLK_TOP_AP2CONN_HOST		60
++#define CLK_TOP_IMG1			61
++#define CLK_TOP_IPE			62
++#define CLK_TOP_MCU_ACP			63
++#define CLK_TOP_MCU_L3GIC		64
++#define CLK_TOP_MCU_INFRA		65
++#define CLK_TOP_TL			66
++#define CLK_TOP_PEXTP_FAXI		67
++#define CLK_TOP_PEXTP_FMEM_SUB		68
++#define CLK_TOP_EMI_IF_546		69
++#define CLK_TOP_SPI0			70
++#define CLK_TOP_SPI1			71
++#define CLK_TOP_SPI2			72
++#define CLK_TOP_SPI3			73
++#define CLK_TOP_SPI4			74
++#define CLK_TOP_SPI5			75
++#define CLK_TOP_SPI6			76
++#define CLK_TOP_SPI7			77
++#define CLK_TOP_MMUP			78
++#define CLK_TOP_DBGAO_26M		79
++#define CLK_TOP_CAM			80
++#define CLK_TOP_CAMTM			81
++#define CLK_TOP_DPE			82
++#define CLK_TOP_APLL_I2SIN0_MCK		83
++#define CLK_TOP_APLL_I2SIN1_MCK		84
++#define CLK_TOP_APLL_I2SIN2_MCK		85
++#define CLK_TOP_APLL_I2SIN3_MCK		86
++#define CLK_TOP_APLL_I2SIN4_MCK		87
++#define CLK_TOP_APLL_I2SIN6_MCK		88
++#define CLK_TOP_APLL_I2SOUT0_MCK	89
++#define CLK_TOP_APLL_I2SOUT1_MCK	90
++#define CLK_TOP_APLL_I2SOUT2_MCK	91
++#define CLK_TOP_APLL_I2SOUT3_MCK	92
++#define CLK_TOP_APLL_I2SOUT4_MCK	93
++#define CLK_TOP_APLL_I2SOUT6_MCK	94
++#define CLK_TOP_APLL_FMI2S_MCK		95
++#define CLK_TOP_APLL_TDMOUT_MCK		96
++#define CLK_TOP_APLL12_DIV_I2SIN0	97
++#define CLK_TOP_APLL12_DIV_I2SIN1	98
++#define CLK_TOP_APLL12_DIV_I2SIN2	99
++#define CLK_TOP_APLL12_DIV_I2SIN3	100
++#define CLK_TOP_APLL12_DIV_I2SIN4	101
++#define CLK_TOP_APLL12_DIV_I2SIN6	102
++#define CLK_TOP_APLL12_DIV_I2SOUT0	103
++#define CLK_TOP_APLL12_DIV_I2SOUT1	104
++#define CLK_TOP_APLL12_DIV_I2SOUT2	105
++#define CLK_TOP_APLL12_DIV_I2SOUT3	106
++#define CLK_TOP_APLL12_DIV_I2SOUT4	107
++#define CLK_TOP_APLL12_DIV_I2SOUT6	108
++#define CLK_TOP_APLL12_DIV_FMI2S	109
++#define CLK_TOP_APLL12_DIV_TDMOUT_M	110
++#define CLK_TOP_APLL12_DIV_TDMOUT_B	111
++#define CLK_TOP_MAINPLL_D3		112
++#define CLK_TOP_MAINPLL_D4		113
++#define CLK_TOP_MAINPLL_D4_D2		114
++#define CLK_TOP_MAINPLL_D4_D4		115
++#define CLK_TOP_MAINPLL_D4_D8		116
++#define CLK_TOP_MAINPLL_D5		117
++#define CLK_TOP_MAINPLL_D5_D2		118
++#define CLK_TOP_MAINPLL_D5_D4		119
++#define CLK_TOP_MAINPLL_D6		120
++#define CLK_TOP_MAINPLL_D6_D2		121
++#define CLK_TOP_MAINPLL_D7		122
++#define CLK_TOP_MAINPLL_D7_D2		123
++#define CLK_TOP_MAINPLL_D7_D4		124
++#define CLK_TOP_MAINPLL_D7_D8		125
++#define CLK_TOP_MAINPLL_D9		126
++#define CLK_TOP_UNIVPLL_D3		127
++#define CLK_TOP_UNIVPLL_D4		128
++#define CLK_TOP_UNIVPLL_D4_D2		129
++#define CLK_TOP_UNIVPLL_D4_D4		130
++#define CLK_TOP_UNIVPLL_D4_D8		131
++#define CLK_TOP_UNIVPLL_D5		132
++#define CLK_TOP_UNIVPLL_D5_D2		133
++#define CLK_TOP_UNIVPLL_D5_D4		134
++#define CLK_TOP_UNIVPLL_D6		135
++#define CLK_TOP_UNIVPLL_D6_D2		136
++#define CLK_TOP_UNIVPLL_D6_D4		137
++#define CLK_TOP_UNIVPLL_D6_D8		138
++#define CLK_TOP_UNIVPLL_D6_D16		139
++#define CLK_TOP_UNIVPLL_D7		140
++#define CLK_TOP_UNIVPLL_D7_D2		141
++#define CLK_TOP_UNIVPLL_192M_D4		142
++#define CLK_TOP_UNIVPLL_192M_D8		143
++#define CLK_TOP_UNIVPLL_192M_D10	144
++#define CLK_TOP_UNIVPLL_192M_D16	145
++#define CLK_TOP_UNIVPLL_192M_D32	146
++#define CLK_TOP_UNIVPLL_192M		147
++#define CLK_TOP_APLL1_D2		148
++#define CLK_TOP_APLL1_D4		149
++#define CLK_TOP_APLL1_D8		150
++#define CLK_TOP_APLL2_D2		151
++#define CLK_TOP_APLL2_D4		152
++#define CLK_TOP_APLL2_D8		153
++#define CLK_TOP_IMGPLL_D2		154
++#define CLK_TOP_IMGPLL_D5		155
++#define CLK_TOP_MMPLL_D3		156
++#define CLK_TOP_MMPLL_D4		157
++#define CLK_TOP_MMPLL_D4_D2		158
++#define CLK_TOP_MMPLL_D5		159
++#define CLK_TOP_MMPLL_D5_D2		160
++#define CLK_TOP_MMPLL_D6		161
++#define CLK_TOP_MMPLL_D6_D2		162
++#define CLK_TOP_MMPLL_D7		163
++#define CLK_TOP_MMPLL_D9		164
++#define CLK_TOP_TVDPLL_D2		165
++#define CLK_TOP_TVDPLL_D4		166
++#define CLK_TOP_TVDPLL_D8		167
++#define CLK_TOP_TVDPLL_D16		168
++#define CLK_TOP_MSDCPLL_D2		169
++#define CLK_TOP_F26M_D2			170
++#define CLK_TOP_OSC_D2			171
++#define CLK_TOP_OSC_D3			172
++#define CLK_TOP_OSC_D4			173
++#define CLK_TOP_OSC_D5			174
++#define CLK_TOP_OSC_D6			175
++#define CLK_TOP_OSC_D7			176
++#define CLK_TOP_OSC_D8			177
++#define CLK_TOP_OSC_D10			178
++#define CLK_TOP_OSC_D14			179
++#define CLK_TOP_OSC_D16			180
++#define CLK_TOP_OSC_D20			181
++#define CLK_TOP_OSC_D32			182
++#define CLK_TOP_OSC_D40			183
++
++/* APMIXEDSYS */
++#define CLK_APMIXED_MAINPLL		0
++#define CLK_APMIXED_UNIVPLL		1
++#define CLK_APMIXED_MSDCPLL		2
++#define CLK_APMIXED_MMPLL		3
++#define CLK_APMIXED_ADSPPLL		4
++#define CLK_APMIXED_TVDPLL		5
++#define CLK_APMIXED_APLL1		6
++#define CLK_APMIXED_APLL2		7
++#define CLK_APMIXED_MPLL		8
++#define CLK_APMIXED_EMIPLL		9
++#define CLK_APMIXED_IMGPLL		10
++
++/* VLPCKGEN */
++#define CLK_VLP_SCP			0
++#define CLK_VLP_SCP_SPI			1
++#define CLK_VLP_SCP_IIC			2
++#define CLK_VLP_SCP_SPI_HIGH_SPD	3
++#define CLK_VLP_SCP_IIC_HIGH_SPD	4
++#define CLK_VLP_PWRAP_ULPOSC		5
++#define CLK_VLP_SPMI_M_MST		6
++#define CLK_VLP_SPMI_P_MST		7
++#define CLK_VLP_DVFSRC			8
++#define CLK_VLP_PWM_VLP			9
++#define CLK_VLP_AXI_VLP			10
++#define CLK_VLP_SYSTIMER_26M		11
++#define CLK_VLP_SSPM			12
++#define CLK_VLP_SRCK			13
++#define CLK_VLP_SRAMRC			14
++#define CLK_VLP_CAMTG			15
++#define CLK_VLP_IPS			16
++#define CLK_VLP_26M_SSPM		17
++#define CLK_VLP_ULPOSC_SSPM		18
++#define CLK_VLP_CCUSYS			19
++#define CLK_VLP_CCUTM			20
++
++/* PERICFG_AO */
++#define CLK_PERI_AO_UART0		0
++#define CLK_PERI_AO_UART1		1
++#define CLK_PERI_AO_UART2		2
++#define CLK_PERI_AO_UART3		3
++#define CLK_PERI_AO_PWM_HCLK		4
++#define CLK_PERI_AO_PWM_BCLK		5
++#define CLK_PERI_AO_PWM_FBCLK1		6
++#define CLK_PERI_AO_PWM_FBCLK2		7
++#define CLK_PERI_AO_PWM_FBCLK3		8
++#define CLK_PERI_AO_PWM_FBCLK4		9
++#define CLK_PERI_AO_DISP_PWM0		10
++#define CLK_PERI_AO_DISP_PWM1		11
++#define CLK_PERI_AO_SPI0_BCLK		12
++#define CLK_PERI_AO_SPI1_BCLK		13
++#define CLK_PERI_AO_SPI2_BCLK		14
++#define CLK_PERI_AO_SPI3_BCLK		15
++#define CLK_PERI_AO_SPI4_BCLK		16
++#define CLK_PERI_AO_SPI5_BCLK		17
++#define CLK_PERI_AO_SPI6_BCLK		18
++#define CLK_PERI_AO_SPI7_BCLK		19
++#define CLK_PERI_AO_DMA_BCLK		20
++#define CLK_PERI_AO_SSUSB0_FRMCNT	21
++#define CLK_PERI_AO_MSDC1		22
++#define CLK_PERI_AO_MSDC1_FCLK		23
++#define CLK_PERI_AO_MSDC1_HCLK		24
++#define CLK_PERI_AO_MSDC2		25
++#define CLK_PERI_AO_MSDC2_FCLK		26
++#define CLK_PERI_AO_MSDC2_HCLK		27
++#define CLK_PERI_AO_AUDIO_SLV_CK	28
++#define CLK_PERI_AO_AUDIO_MST_CK	29
++#define CLK_PERI_AO_AUDIO_INTBUS_CK	30
++
++/* UFSCFG_AO */
++#define CLK_UFSAO_UNIPRO_TX_SYM		0
++#define CLK_UFSAO_UNIPRO_RX_SYM0	1
++#define CLK_UFSAO_UNIPRO_RX_SYM1	2
++#define CLK_UFSAO_UNIPRO_SYS		3
++
++/* UFSCFG_PDN */
++#define CLK_UFSPDN_UFSHCI_UFS		0
++#define CLK_UFSPDN_UFSHCI_AES		1
++
++#endif /* _DT_BINDINGS_CLK_MEDIATEK_MT6897_H */
+diff --git a/include/dt-bindings/reset/mediatek,mt6897-resets.h b/include/dt-bindings/reset/mediatek,mt6897-resets.h
+new file mode 100644
+index 000000000..a85535972
+--- /dev/null
++++ b/include/dt-bindings/reset/mediatek,mt6897-resets.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/*
++ * Copyright (c) 2026 buntOS contributors
++ */
++
++#ifndef _DT_BINDINGS_RESET_CONTROLLER_MT6897
++#define _DT_BINDINGS_RESET_CONTROLLER_MT6897
++
++/* UFSCFG_AO resets */
++#define MT6897_UFSAO_RST_UFS_MPHY		0
++
++/* UFSCFG_PDN resets */
++#define MT6897_UFSPDN_RST_UFS_UNIPRO		0
++#define MT6897_UFSPDN_RST_UFS_CRYPTO		1
++#define MT6897_UFSPDN_RST_UFSHCI		2
++
++#endif  /* _DT_BINDINGS_RESET_CONTROLLER_MT6897 */
