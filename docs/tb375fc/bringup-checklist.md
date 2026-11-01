@@ -14,7 +14,7 @@
 - 항목의 차례를 지킨다. 읽기만 하는 확인이 켜는 일보다 먼저다.
 - 장치 트리의 노드는 대부분 꺼져 있다. 그 단계에서 말한 노드만 `status = "okay"`로 바꾸고 이미지를 다시 만든다. 노드의 값과 출처는 [장치 트리 README](../../kernel/tb375fc/dts/README.md)에, 이미지 만들기는 [BSP README](../../bsp/lenovo-tb375fc/README.md)의 "만들기"에 있다.
 - 시험 도구: 진짜 루트에는 보드 프로필의 `evtest`, `i2c-tools`, `gpiod`가 있다. 물리 주소는 `busybox devmem <주소> 32`로 읽는다. 이미지용 커널은 `CONFIG_IO_STRICT_DEVMEM=y`라 드라이버가 잡은 곳을 막으므로, 그런 주소를 읽을 때는 명령줄에 `iomem=relaxed`를 더한다. 개발용 커널은 이 값이 꺼져 있다.
-- 기본 커널 명령줄은 `console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused regulator_ignore_unused`다. 뒤의 셋은 소비자가 아직 없는 클럭·전원 도메인·레귤레이터를 늦은 정리에서 끄지 않게 한다. 이 목록의 단계에서는 빼지 않는다(`clk_ignore_unused`를 빼는 일은 2e다).
+- 기본 커널 명령줄은 `console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused regulator_ignore_unused`다. 뒤의 셋은 소비자가 아직 없는 클럭·전원 도메인·레귤레이터를 늦은 정리에서 끄지 않게 한다. `pd_ignore_unused`는 늦은 정리만 막고 sync_state의 끄기는 막지 못한다(7.2.12). LK가 켠 도메인이 꺼지지 않는 것은 패치 0054의 표가 모두 기본 꺼짐이고 장치 트리에 conn만 있기 때문이다. 이 목록의 단계에서는 빼지 않는다(`clk_ignore_unused`를 빼는 일은 2e다).
 
 위험 표시는 `위험:`으로 찾을 수 있다. 표시 안에 먼저 둘 것과 되돌리는 길을 적었다.
 
@@ -283,7 +283,11 @@ fastboot flash init_boot <패치한 이미지>
 2. [ ] idle·cpufreq를 본다. 멈추면 `cpuidle.off=1`, `initcall_blacklist=mtk_cpufreq_hw_driver_init`로 하나씩 뺀다.
 3. [ ] systimer는 첫 부팅이 된 뒤에 켜 본다. 펌웨어가 같은 채널(`+0x40`)을 쓰지 않는지(멈춤, 인터럽트 폭주) 본다. 그 전에는 `disabled`이고 hrtimer broadcast가 대신한다.
 
-### 5.7 EL2 판정
+### 5.7 전원 도메인 상태 (읽기만)
+
+1. [ ] `0x1c001fb0`, `0x1c001fb4`(SPM 상태), `0x1c001e04`(conn), `0x10321410`(HW voter EN). 화면이 켜져 있으면 EN의 bit 0, 3, 4, 5, 6이 설 것으로 본다(짐작). 다르면 패치 0054의 표를 의심한다. 물리 주소 읽기는 1절의 시험 도구를 쓴다.
+
+### 5.8 EL2 판정
 
 1. [ ] 커널 기록의 `CPU: All CPU(s) started at EL2`(또는 `EL1`)와 kvm 초기화 메시지를 본다([buntOS 설계안](../design/ARCHITECTURE.md) 12.1절). 안드로이드 쪽 예비 판정은 GenieZone이 EL2를 차지할 가능성이 높다는 것이다.
     - 가능: 커널이 EL2에서 시작하고 `/dev/kvm`이 생긴다.
@@ -729,6 +733,12 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 
 이미 적힌 확인만 잃지 않게 옮겨 둔다.
 
+- 2d 전원 도메인:
+    1. `&spm`만 켠다(`ifr_bus`·`vlpcfg_bus`는 켜지 않는다). `/sys/kernel/debug/pm_genpd/pm_genpd_summary`에 conn이 `off-0`인지 본다. 부팅 로그의 `A default off power domain has been ON`은 LK가 켠 도메인이다.
+    2. `scpsys`가 뜬 뒤, 그리고 conn을 켜고 끈 뒤 fbcon이 그대로인지 본다. 꺼지면 EN과 PWR_CON을 먼저 읽는다. `위험: 부팅 불가`는 아니지만 화면 콘솔을 잃는다. USB 가젯 셸을 먼저 띄워 둔다.
+    3. conn을 켤 때 ACK가 오지 않으면 소비자의 전원 도메인 붙이기가 `-ETIMEDOUT`으로 실패한다. `0x1c001e04`의 bit 30·31을 본다.
+    4. conn을 끌 때 버스 보호 SET이 시간 초과면 벤더의 EN 재시도와 되돌리기가 필요한지 본다(메인라인에 없다). 켜고 끄기를 몇 번 돌린다.
+- 2c 2차와 코덱·카메라 앞: MM_INFRA 아래 첫 소비자 전에 `simple-framebuffer`에 `power-domains`(DIS0, DIS1, OVL0, OVL1)를 건다.
 - 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다. 진짜 루트에서 nvdata를 붙일 때는 initramfs처럼 `blockdev --setro`와 `ro,noload`로 붙인다.
 - 2e: 전원 키로 s2idle에서 깨는지, mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`, mtu3 깨우기 접점, 커넥터 과열 보호(`usb_board_ntc`, GPIO179).
 - 2c 2차: 패널 드라이버가 생기면 터치를 패널 팔로워로 잇고, 끌 때 GPIO184를 0으로 둘지 본다.

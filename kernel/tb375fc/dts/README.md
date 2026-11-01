@@ -33,6 +33,7 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'K=~/buntos-build/tb375fc/
 | 같은 검사(2026-11-01, SPI 여덟과 2c 입력 노드를 더한 뒤, 패치 0027~0031을 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다(dtb마다 24줄). SPI는 패치 0029의 `mediatek,spi-mt65xx.yaml`, 터치는 0030의 `novatek,nt36532-ts.yaml`, 핀 상태는 0004의 pio 바인딩, 홀 센서는 `gpio-keys.yaml`을 통과한다. 꺼진 노드에는 required와 모르는 속성을 묻지 않으므로, spi2를 켠 사본으로도 확인했다 |
 | 같은 검사(2026-11-01, UART 패드 모드와 키보드 노드를 더한 뒤, 패치 0032~0036을 함께 얹어) | dtc 경고 0. dt-validate는 uart 넷의 8줄이 줄어 dtb마다 16줄이다(0035의 MT6897 compatible). 새 지적은 없다. 키보드는 패치 0032의 `oneplus,pogo-keyboard.yaml`로 본다 |
 | 같은 검사(2026-11-01, I2C 14개와 USB 호스트 VBUS 노드를 더한 뒤, 패치 0042~0049를 함께 얹어) | dtc 경고 0. dt-validate는 dtb마다 16줄 그대로다. 새 노드를 모두 켜고 `dr_mode = "otg"`로 바꾼 사본에도 새 지적이 없다 |
+| 같은 검사(2026-11-01, `spm`·`scpsys`·`ifr_bus`·`vlpcfg_bus`를 더한 뒤, 패치 0050~0054를 함께 얹어) | dtc 경고 0. dt-validate는 줄 단위로 그대로다. 켠 사본, 도메인 32개를 모두 적은 사본도 새 줄 0. 틀린 사본 다섯(voter 없음, access-controllers 없음·하나, 틀린 compatible 둘)은 스키마가 잡는다 |
 | 펌웨어 DT와 대조 | 켠 노드와 자리만 둔 노드의 `reg`·`interrupts`가 모두 같다(아래 표의 예외만 일부러 다르다) |
 
 패치를 얹은 트리로 보려면 `build.sh prepare` 뒤 다음을 돌린다(바인딩 스키마는 `out/`에 만든다).
@@ -76,6 +77,9 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `uart0`~`uart3` | `0x11001000`~`0x11004000`(0x1000), SPI 250~253 | 펌웨어 | `baud`는 clk26m. 7.2.12 `8250_mtk`는 `baud`가 있으면 `bus`도 요구해 하나만 주면 probe가 실패한다. `bus`는 펌웨어처럼 pericfg_ao의 UART 게이트다. 다만 uart0은 2a 콘솔이라 클럭 컨트롤러를 기다리지 않게 2b까지 clk26m을 둔다. `uart3`에는 `mediatek,syscon-pad-mode = <&pericfg_ao 0x50>`을 둔다(패치 0035·0036). 이 UART는 패드나 UART 허브로 나가고, OEM `uarthub` 코드로 bit 4가 1이면 패드다. MT6897은 허브를 쓰지 않는다(펌웨어 `uarthub-disable`) |
 | `i2c0`~`i2c13` | 펌웨어와 같은 주소·AP-DMA·SPI 186~199, `clock-div = 1` | 펌웨어, OEM 드라이버 | `disabled`. compatible은 `mediatek,mt6897-i2c` + 업스트림 `mediatek,mt8188-i2c`(패치 0042). 벤더 `mt6897_compat`이 mt8188 데이터와 같다. `main` = imp_iic_wrap 게이트, `dma` = pericfg_ao `DMA_BCLK`. 펌웨어처럼 i2c6 말고는 핀을 설정하지 않는다(LK가 먹스한다). 벤더의 `mediatek,fifo-use-polling`·`scl-gpio-id`는 뺐다 |
 | `imp_iic_wrap_{c,en,es,n,s}` | `0x11281000`, `0x11b74000`, `0x11cc4000`, `0x11f02000`, `0x11d03000`(각 0x1000) | 펌웨어 | `disabled`. 게이트 번호는 펌웨어의 소비자와 같다. 부모는 topckgen `i2c`(HW voter) |
+| `spm` | `0x1c001000`(0x1000), `mediatek,mt6897-scpsys` + syscon + simple-mfd | 펌웨어(`scpsys`) | 업스트림 꼴로 나눴다: 부모는 레지스터(syscon), 자식 `scpsys`가 제어기다. 펌웨어는 한 노드다. 업스트림 dtsi는 부모를 `scpsys`, 자식을 `spm`이라 부르는데, 소비자가 펌웨어처럼 `<&scpsys …>`로 쓰게 라벨을 바꿔 달았다 |
+| `scpsys` | `mediatek,mt6897-power-controller`, `access-controllers` = IFR·VLP, `mediatek,hardware-voter` = `hwv` | 펌웨어, 패치 0050 | 도메인은 첫 소비자가 생길 때 적는다(지금 conn). 벤더 번호 그대로라 부모가 자식보다 작다. 자식 노드의 `status`는 드라이버가 보지 않으니(`scpsys_add_subdomain`) 켜지 않으려면 노드를 적지 않는다 |
+| `ifr_bus`, `vlpcfg_bus` | `0x1002c000`, `0x1c00c000`(0x1000) | 펌웨어 | 버스 보호. 늘 꺼 둔다: 드라이버가 regmap으로 쓸 때는 `status`를 보지 않고(`device_node_to_regmap`), 켜면 드라이버 없는 장치가 생겨 fw_devlink가 `access-controllers`를 보고 `scpsys`를 deferred probe 시간 한도(10초)까지 붙든다 |
 | `spi0`~`spi7` | `0x11010000`~`0x11017000`(0x100), SPI 242~249, `mediatek,pad-select` 0(spi0~5)·1(spi6·7) | 펌웨어, OEM 드라이버 | `disabled`. compatible은 `mediatek,mt6897-spi` + 업스트림 `mediatek,mt6991-spi`(패치 0029). OEM `spi-mt65xx`의 `mt6985` 데이터와 업스트림 `mt6991` 데이터가 같은 기능이다. 클럭은 펌웨어처럼 `parent-clk` = topckgen `mainpll_d6_d2`(spi0~2)·`univpll_d6_d2`(spi3~7), `sel-clk` = spi 먹스, `spi-clk` = pericfg_ao 게이트다. 드라이버가 실제 클럭 값으로 분주를 계산한다(커뮤니티 포트는 26 MHz 자리값 때문에 SCLK가 약 52 MHz였다). OEM의 소프트웨어 CS는 업스트림이 쓰지 않는다 |
 | `watchdog` | `0x1c00a000`(0x100) | 펌웨어 | 7.2.12 `mtk_wdt`는 대체 compatible `mediatek,mt6589-wdt`로 붙고, 켜져 있으면 `WDOG_HW_RUNNING`으로 받아 커널이 쓰다듬는다. 펌웨어의 `syscon`·`simple-mfd`·reboot-mode는 뺐다 |
 | `performance` | `0x11bc10`·`0x11bd30`·`0x11be50`(각 0x120) | 펌웨어 | 노드 이름을 첫 `reg`에 맞췄다(펌웨어 `@11bc00`). mt8195와 같은 CSRAM 배치에 도메인이 하나 더 있다 |
@@ -192,4 +196,5 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
     9. 잠든 사이 펼치기와 접기: 깬 뒤 SLEEP 0 다음에 MCU가 0x93/0x03을 다시 보내는지. 보내지 않으면 접은 것을 깬 뒤 알 수 없다
   - 터치·펜·홀 센서: 패치 0027~0031과 노드가 있다(꺼 둠). 2c에서 pio·클럭 컨트롤러와 함께 spi2·gpio-keys·`vddio_1v8`을 켜고, spi2의 SCLK(9.6 MHz 아래, 깨지면 `cs-gpios`), 터치의 trim ID·패널 ID·펌웨어 내려받기, `evtest`의 좌표와 축 방향, 펜(압력·기울기·단추·호버, 펜 켜기 명령 `0x7B 0x01`), 서스펜드 뒤 터치, 덮개와 키보드에 따른 GPIO1·26 값을 본다([체크리스트](../../../docs/tb375fc/bringup-checklist.md) 7절)
 - 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다
+  - `&spm`을 켠다(`status = "okay"`). `ifr_bus`·`vlpcfg_bus`는 켜지 않는다. 소비자는 `power-domains = <&scpsys MT6897_POWER_DOMAIN_CONN>`
 - 2e: mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`
