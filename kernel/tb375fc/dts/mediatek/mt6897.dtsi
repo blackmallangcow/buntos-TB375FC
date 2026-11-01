@@ -416,12 +416,17 @@
 			status = "disabled";
 		};
 
+		/*
+		 * UART3 reaches its pads or the UART hub, which this SoC has
+		 * but MT6897 boards do not use (stock uarthub-disable).
+		 */
 		uart3: serial@11004000 {
 			compatible = "mediatek,mt6897-uart", "mediatek,mt6577-uart";
 			reg = <0 0x11004000 0 0x1000>;
 			interrupts = <GIC_SPI 253 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&clk26m>, <&pericfg_ao CLK_PERI_AO_UART3>;
 			clock-names = "baud", "bus";
+			mediatek,syscon-pad-mode = <&pericfg_ao 0x50>;
 			status = "disabled";
 		};
 

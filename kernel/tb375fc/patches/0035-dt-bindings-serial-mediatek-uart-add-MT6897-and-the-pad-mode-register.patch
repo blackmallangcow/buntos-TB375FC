@@ -1,0 +1,68 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: serial: mediatek,uart: add MT6897 and the pad mode register
+
+The MediaTek MT6897 (Dimensity 8300) UARTs work like those of the other
+MediaTek SoCs, so add MT6897 with mediatek,mt6577-uart as the fallback.
+
+SoCs of this generation have a UART hub in front of one of the UARTs,
+UART3 on MT6897. A register in the pericfg_ao block routes that UART to
+the hub or to its pads, and nothing comes out of the pads in hub mode.
+All four UARTs share a compatible, so the compatible does not tell which
+one has this mux. Add a property on that UART that points at the register.
+MT6897 boards do not use the hub: its node in the MediaTek device trees
+says uarthub-disable, and the Lenovo TB375FC has its keyboard cover on
+the pads of UART3.
+
+The syscon and the offset follow mediatek,syscon-wakeup of the MediaTek
+USB bindings.
+
+---
+ .../bindings/serial/mediatek,uart.yaml        | 21 +++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/serial/mediatek,uart.yaml b/Documentation/devicetree/bindings/serial/mediatek,uart.yaml
+index 5bd8a88..67d3f06 100644
+--- a/Documentation/devicetree/bindings/serial/mediatek,uart.yaml
++++ b/Documentation/devicetree/bindings/serial/mediatek,uart.yaml
+@@ -11,6 +11,15 @@ maintainers:
+ 
+ allOf:
+   - $ref: serial.yaml#
++  - if:
++      not:
++        properties:
++          compatible:
++            contains:
++              const: mediatek,mt6897-uart
++    then:
++      properties:
++        mediatek,syscon-pad-mode: false
+ 
+ description: |
+   The MediaTek UART is based on the basic 8250 UART and compatible
+@@ -35,6 +44,7 @@ properties:
+               - mediatek,mt6795-uart
+               - mediatek,mt6797-uart
+               - mediatek,mt6893-uart
++              - mediatek,mt6897-uart
+               - mediatek,mt7622-uart
+               - mediatek,mt7623-uart
+               - mediatek,mt7629-uart
+@@ -91,6 +101,17 @@ properties:
+       - const: uart
+       - const: wakeup
+ 
++  mediatek,syscon-pad-mode:
++    $ref: /schemas/types.yaml#/definitions/phandle-array
++    description:
++      On SoCs with a UART hub, one UART reaches either its pads or the hub,
++      as selected by a register in the pericfg_ao block. Given on that UART
++      to use it on its pads.
++    items:
++      - items:
++          - description: The pericfg_ao syscon
++          - description: The offset of the register
++
+   pinctrl-0: true
+   pinctrl-1: true
+ 

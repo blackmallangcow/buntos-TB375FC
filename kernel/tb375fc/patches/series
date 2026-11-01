@@ -48,6 +48,15 @@
 0029-dt-bindings-spi-mediatek-spi-mt65xx-add-MT6897.patch
 0030-dt-bindings-input-touchscreen-add-Novatek-NT36532.patch
 0031-Input-add-Novatek-NT36532-SPI-touchscreen-driver.patch
+# 0032~0036: 2c(1차) 입력의 포고 키보드 커버. 0032·0033은 업스트림 OnePlus/OPPO 시리즈 v6 백포트(미병합. 새 판이 나오면 바꾼다)에 리뷰
+# 지적(터치 속성 빼기, MAINTAINERS 순서, 봇의 경합 넷)과 서스펜드를 얹었다. 0032에는 레노버 compatible·plug-gpios도 있다. 0034는 레노버
+# 키보드다: 스톡 tn_keyboard.ko에서 읽은 옛 꼴(시작 0x25, 니블 치환, 8비트 합, 명령 0x61~)이라 v6의 CRC 틀이 통하지 않는다. 0035·0036은
+# UART 바인딩의 MT6897과 패드 모드(pericfg_ao 0x50), 8250_mtk 고침이다. 모두 기기에서 확인한 뒤 낸다
+0032-dt-bindings-input-add-OnePlus-pogo-pin-keyboard.patch
+0033-Input-add-OnePlus-OPPO-Pad-pogo-pin-keyboard-serdev-driver.patch
+0034-Input-oneplus-pogo-kbd-add-the-Lenovo-TB375FC-keyboard.patch
+0035-dt-bindings-serial-mediatek-uart-add-MT6897-and-the-pad-mode-register.patch
+0036-serial-8250_mtk-select-the-pads-of-a-UART-shared-with-the-UART-hub.patch
 # 0037~0041: MT6363 regulator 고침(업스트림에 낼 것. 7.2.12·master·regulator for-next·next-20261030이 같은 파일이다).
 # 0037 8비트 값 regmap(16비트 값은 쓸 때 다음 레지스터도 써서, 벅을 끄면 VS1·VS3·VSRAM이 꺼진다), 0038 VEMC 전압 읽기·쓰기(범위
 # 조건, TOP_TRAP=1의 VOSEL_1), 0039·0040 OC 보고와 해제 때 work 취소(MT6373 v12에 대한 Mark Brown의 리뷰), 0041 VSRAM_CPUB·CPUM·
@@ -60,7 +69,6 @@
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 드라이버가 없다):
 #  - mfd·regulator: MT6375(I2C5, OTG 레귤레이터). USB 호스트의 VBUS다
 #  - pmdomain: mediatek: add MT6897 power domains (MT8196 틀. UFS·USB에는 없어 2d 뒤)
-#  - input: OnePlus/OPPO Pad pogo-pin 키보드 v6 + compatible별 CRC 초기값
 #  - pmdomain: mediatek: mtk-mfg MT6897 GPUEB 변형
 #  - soc: mediatek: conninfra(TF-A SIP 호출), wifi: mt76: mt7921 SoC(soc7_0) 버스, bluetooth: BEIF 전송
 #  - drm/panel: novatek-nt36532 백포트(47b823940e38)와 BOE·Tianma·Tianma 무광 패널(DSC 1.1)

@@ -47,13 +47,12 @@
 	};
 
 	/*
-	 * Hall sensors. GPIO1 (stock hall_1) goes low when the cover closes
-	 * over the screen. The stock tree's hall_2 is GPIO26, which is also
-	 * the plug-gpios of the stock pogo keyboard driver and has no driver
-	 * of its own there; whether low means the keyboard is attached or
-	 * folded back is not known yet.
-	 * TODO(2c): enable with pio, check both levels with evtest, and decide
-	 * whether GPIO26 belongs to the pogo keyboard driver instead.
+	 * Hall sensor. GPIO1 (stock hall_1) goes low when the cover closes
+	 * over the screen. The stock hall_2 is the keyboard's plug-gpios, under
+	 * &uart3. The tablet has no sensor for the keyboard folded back: the
+	 * keyboard reports that itself, and its driver turns it into
+	 * SW_TABLET_MODE.
+	 * TODO(2c): enable with pio and check both levels with evtest.
 	 */
 	gpio-keys {
 		compatible = "gpio-keys";
@@ -68,14 +67,6 @@
 			linux,code = <SW_LID>;
 			debounce-interval = <100>;
 			wakeup-source;
-		};
-
-		switch-tablet-mode {
-			label = "Tablet mode";
-			gpios = <&pio 26 GPIO_ACTIVE_HIGH>;
-			linux,input-type = <EV_SW>;
-			linux,code = <SW_TABLET_MODE>;
-			debounce-interval = <100>;
 		};
 	};
 
@@ -109,9 +100,47 @@
 &pio {
 	hall_pins: hall-pins {
 		pins-hall {
-			pinmux = <PINMUX_GPIO1__FUNC_GPIO1>,
-				 <PINMUX_GPIO26__FUNC_GPIO26>;
+			pinmux = <PINMUX_GPIO1__FUNC_GPIO1>;
 			input-enable;
+		};
+	};
+
+	/*
+	 * The keyboard cover has one data wire on its pogo pins. UART3 TX drives
+	 * it through a gate on GPIO71, and UART3 RX and GPIO40 listen to it.
+	 * The stock driver leaves TX on the UART and bias on GPIO26 and GPIO40
+	 * as the bootloader set it.
+	 */
+	pogo_keyboard_pins: pogo-keyboard-pins {
+		pins-tx {
+			pinmux = <PINMUX_GPIO181__FUNC_UTXD3>;
+		};
+
+		pins-in {
+			pinmux = <PINMUX_GPIO26__FUNC_GPIO26>,
+				 <PINMUX_GPIO40__FUNC_GPIO40>;
+			input-enable;
+		};
+
+		pins-out {
+			pinmux = <PINMUX_GPIO61__FUNC_GPIO61>,
+				 <PINMUX_GPIO71__FUNC_GPIO71>;
+		};
+	};
+
+	pogo_keyboard_rx_pins: pogo-keyboard-rx-pins {
+		pins-rx {
+			pinmux = <PINMUX_GPIO180__FUNC_URXD3>;
+			input-enable;
+		};
+	};
+
+	/* Nothing drives the wire without a keyboard, so RX leaves the UART */
+	pogo_keyboard_rx_detached_pins: pogo-keyboard-rx-detached-pins {
+		pins-rx {
+			pinmux = <PINMUX_GPIO180__FUNC_GPIO180>;
+			input-enable;
+			bias-disable;
 		};
 	};
 
@@ -538,6 +567,30 @@
 /* Debug UART, GPIO207 (TX) and GPIO208 (RX) */
 &uart0 {
 	status = "okay";
+};
+
+/*
+ * TODO(2c): uart3 stays disabled (mt6897.dtsi) until pio and the clock
+ * controllers are on. Then check the attach and detach levels of GPIO26, that
+ * the first frames decode, and what the keyboard sends when folded back.
+ */
+&uart3 {
+	/*
+	 * The keyboard cover. GPIO61 switches its supply, GPIO26 (stock hall_2)
+	 * goes low when a keyboard is attached and GPIO40 wakes the system when
+	 * a sleeping keyboard starts to send.
+	 */
+	keyboard {
+		compatible = "lenovo,tb375fc-pogo-keyboard";
+		power-gpios = <&pio 61 GPIO_ACTIVE_HIGH>;
+		tx-enable-gpios = <&pio 71 GPIO_ACTIVE_HIGH>;
+		wake-gpios = <&pio 40 GPIO_ACTIVE_HIGH>;
+		plug-gpios = <&pio 26 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default", "detached";
+		pinctrl-0 = <&pogo_keyboard_pins>, <&pogo_keyboard_rx_pins>;
+		pinctrl-1 = <&pogo_keyboard_pins>, <&pogo_keyboard_rx_detached_pins>;
+		wakeup-source;
+	};
 };
 
 /* UFS supplies, as in the stock tree */

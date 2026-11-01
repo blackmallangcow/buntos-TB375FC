@@ -1,0 +1,150 @@
+From: buntOS contributors
+Subject: [PATCH] serial: 8250_mtk: select the pads of a UART shared with the UART hub
+
+On MediaTek SoCs with a UART hub, one UART (UART3 on MT6897) reaches
+either the hub or its pads. Bit 4 of the PERI_UART_WAKEUP register in the
+pericfg_ao block selects between them: 1 is the pads, 0 the hub. Bit 0
+enables the wakeup logic of the hub path.
+
+The MediaTek 8250 driver in the OnePlus MT6897 kernel clears bit 0 and
+sets bit 4 in probe when it runs that UART without the hub, and its UART
+hub driver reads bit 4 as the pad mode. The stock 8250 driver of the
+Lenovo TB375FC does the same in probe, in startup and on resume, with
+comments that say the setting changes behind the driver and breaks the
+keyboard cover on those pads, and that bit 0 costs power.
+
+Do the same for a UART whose node has mediatek,syscon-pad-mode.
+
+---
+ drivers/tty/serial/8250/8250_mtk.c | 42 ++++++++++++++++++++++++++++--
+ drivers/tty/serial/8250/Kconfig    |  1 +
+ 2 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/tty/serial/8250/8250_mtk.c b/drivers/tty/serial/8250/8250_mtk.c
+index e6a56cf..2dc5b98 100644
+--- a/drivers/tty/serial/8250/8250_mtk.c
++++ b/drivers/tty/serial/8250/8250_mtk.c
+@@ -7,12 +7,14 @@
+  */
+ #include <linux/clk.h>
+ #include <linux/io.h>
++#include <linux/mfd/syscon.h>
+ #include <linux/module.h>
+ #include <linux/of_irq.h>
+ #include <linux/of_platform.h>
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
++#include <linux/regmap.h>
+ #include <linux/serial_8250.h>
+ #include <linux/serial_reg.h>
+ #include <linux/console.h>
+@@ -58,6 +60,10 @@
+ #define MTK_UART_XON1		40	/* I/O: Xon character 1 */
+ #define MTK_UART_XOFF1		42	/* I/O: Xoff character 1 */
+ 
++/* Pad mode register of a UART shared with the UART hub (pericfg_ao) */
++#define MTK_PERI_UART_WAKEUP_EN	BIT(0)	/* Wakeup through the UART hub */
++#define MTK_PERI_UART_PAD_MODE	BIT(4)	/* 1: the UART pads, 0: the UART hub */
++
+ #ifdef CONFIG_SERIAL_8250_DMA
+ enum dma_rx_status {
+ 	DMA_RX_START = 0,
+@@ -77,6 +83,8 @@ struct mtk8250_data {
+ 	enum dma_rx_status	rx_status;
+ #endif
+ 	int			rx_wakeup_irq;
++	struct regmap		*pad_mode_regmap;
++	unsigned int		pad_mode_reg;
+ };
+ 
+ /* flow control mode */
+@@ -188,11 +196,25 @@ static void mtk8250_dma_enable(struct uart_8250_port *up)
+ }
+ #endif
+ 
++/*
++ * On SoCs with a UART hub, one UART reaches either its pads or the hub. Nothing
++ * comes out of the pads in hub mode, and the wakeup logic of the hub path draws
++ * power when left on. The setting does not survive everything the UART goes
++ * through, so this runs whenever the UART is about to be used.
++ */
++static void mtk8250_select_pads(struct mtk8250_data *data)
++{
++	if (data->pad_mode_regmap)
++		regmap_update_bits(data->pad_mode_regmap, data->pad_mode_reg,
++				   MTK_PERI_UART_PAD_MODE | MTK_PERI_UART_WAKEUP_EN,
++				   MTK_PERI_UART_PAD_MODE);
++}
++
+ static int mtk8250_startup(struct uart_port *port)
+ {
++	struct mtk8250_data *data = port->private_data;
+ #ifdef CONFIG_SERIAL_8250_DMA
+ 	struct uart_8250_port *up = up_to_u8250p(port);
+-	struct mtk8250_data *data = port->private_data;
+ 
+ 	/* disable DMA for console */
+ 	if (uart_console(port))
+@@ -205,6 +227,8 @@ static int mtk8250_startup(struct uart_port *port)
+ #endif
+ 	memset(&port->icount, 0, sizeof(port->icount));
+ 
++	mtk8250_select_pads(data);
++
+ 	return serial8250_do_startup(port);
+ }
+ 
+@@ -474,10 +498,22 @@ static bool mtk8250_dma_filter(struct dma_chan *chan, void *param)
+ static int mtk8250_probe_of(struct platform_device *pdev, struct uart_port *p,
+ 			   struct mtk8250_data *data)
+ {
++	struct device_node *np = pdev->dev.of_node;
+ #ifdef CONFIG_SERIAL_8250_DMA
+ 	int dmacnt;
+ #endif
+ 
++	if (of_property_present(np, "mediatek,syscon-pad-mode")) {
++		data->pad_mode_regmap =
++			syscon_regmap_lookup_by_phandle_args(np, "mediatek,syscon-pad-mode",
++							     1, &data->pad_mode_reg);
++		if (IS_ERR(data->pad_mode_regmap))
++			return dev_err_probe(&pdev->dev, PTR_ERR(data->pad_mode_regmap),
++					     "Can't get the pad mode register\n");
++
++		mtk8250_select_pads(data);
++	}
++
+ 	data->uart_clk = devm_clk_get_enabled(&pdev->dev, "baud");
+ 	if (IS_ERR(data->uart_clk)) {
+ 		/*
+@@ -499,7 +535,7 @@ static int mtk8250_probe_of(struct platform_device *pdev, struct uart_port *p,
+ 
+ 	data->dma = NULL;
+ #ifdef CONFIG_SERIAL_8250_DMA
+-	dmacnt = of_property_count_strings(pdev->dev.of_node, "dma-names");
++	dmacnt = of_property_count_strings(np, "dma-names");
+ 	if (dmacnt == 2) {
+ 		data->dma = devm_kzalloc(&pdev->dev, sizeof(*data->dma),
+ 					 GFP_KERNEL);
+@@ -639,6 +675,8 @@ static int __maybe_unused mtk8250_resume(struct device *dev)
+ 		disable_irq_wake(irq);
+ 	pinctrl_pm_select_default_state(dev);
+ 
++	mtk8250_select_pads(data);
++
+ 	serial8250_resume_port(data->line);
+ 
+ 	return 0;
+diff --git a/drivers/tty/serial/8250/Kconfig b/drivers/tty/serial/8250/Kconfig
+index fc3e58d..69d4e25 100644
+--- a/drivers/tty/serial/8250/Kconfig
++++ b/drivers/tty/serial/8250/Kconfig
+@@ -485,6 +485,7 @@ config SERIAL_8250_MT6577
+ 	tristate "Mediatek serial port support"
+ 	depends on SERIAL_8250
+ 	depends on ARCH_MEDIATEK || COMPILE_TEST
++	select MFD_SYSCON
+ 	help
+ 	  If you have a Mediatek based board and want to use the
+ 	  serial port, say Y to this option. If unsure, say N.
