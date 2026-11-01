@@ -193,7 +193,7 @@ fastboot flash init_boot <패치한 이미지>
     - 후보(커뮤니티 포트): `0xfc16f000`, 2944×1840, stride 11776, `a8r8g8b8`, 예약 크기 `0x3e90000`(LK가 할당한 크기, 세 화면보다 조금 크다). 그 포트는 LK 기록(mblock 할당, `atag,videolfb`)에서 읽어 이 주소로 fbcon을 띄웠다(12GiB 기기). 우리 기기는 8GB다. 같은지 본다.
     - 맞으면: `framebuffer0`을 켠다. 부트로더가 예약하지 않으면 `framebuffer_mem`도 켜고, 이미 예약하면 `framebuffer_mem`을 지운다.
     - 다르면: 읽은 주소로 `simple-framebuffer`를 만든다.
-3. [ ] 화면의 실제 크기 약 273×171mm를 확인해 둔다. 2c에서 `panel` 노드의 `width-mm`·`height-mm`로 쓴다. DSI에는 EDID가 없다.
+3. [ ] 화면의 실제 크기를 확인해 둔다(벤더 값 273.615×171.009mm, 트리에 273×171을 넣었다). DSI에는 EDID가 없다.
 4. [ ] ramoops 틈을 본다. 살아 있는 트리의 예약 영역으로 `0x48090000`~`0x4816ffff`가 비었는지 본다. 앞뒤는 `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`)다.
     - LK는 pstore 자리를 `mblock-2-pstore`로 예약한다(이름은 실측, 값은 root 필요).
     - LK가 명령줄에 `ramoops.*`를 넣으면 노드와 겹쳐 장치가 둘 생긴다. 하나만 둔다.
@@ -269,6 +269,7 @@ fastboot flash init_boot <패치한 이미지>
     - `/memory`가 실제 크기로 바뀌는지 본다. 우리 트리는 1GiB 자리이고, 부트로더가 8·12GiB로 고친다.
     - `/reserved-memory`에 `mblock-*` 노드가 붙는지 본다. BL31(`0x48800000`, 2MB)이 들어오지 않으면 직접 예약한다.
     - `/cpus` 노드를 이름으로 건드리는지 본다. 우리 이름(`cpu@100`)이 펌웨어 이름(`cpu@100` = 첫 A715)과 가리키는 코어가 다르다.
+2. [ ] LK 기록에 `get panel node:... failed`가 나오고 부팅이 이어지는지 본다. 우리 트리에는 LK가 찾는 패널 경로가 없다. 역어셈블로는 기록만 남기는 길이고, 멈추면 2a를 막는 일이다. 같은 기록의 `we will use lcm: …`로 이 기기의 패널을 적어 두고 GPIO184 값과 맞는지 본다.
 
 ### 5.5 화면, pstore, UART
 
@@ -535,7 +536,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
     - `vendor/firmware/novatek_ts_fw_boe.bin` → `/lib/firmware/lenovo/tb375fc/novatek_ts_fw_boe.bin`
     - `vendor/firmware/novatek_ts_fw_tm.bin` → `/lib/firmware/lenovo/tb375fc/novatek_ts_fw_tm.bin`
 3. [ ] 노드를 켠다. pio·클럭 컨트롤러에 더해 `spi2`, `gpio-keys`, `vddio_1v8`, `uart3`이다. `vddio_1v8`(GPIO63)은 패널과 터치가 같이 쓰는 I/O 전원이라 simple-framebuffer 동안 꺼지면 안 된다. 그래서 `regulator-always-on`이다.
-4. [ ] 패널 노드(부트로더가 찾는 `/soc/dsi@1400d000/panel1@0`~`panel3@2`)와 `framebuffer0`의 `panel`(273×171mm)을 더한다.
+4. [ ] 패널 노드와 `framebuffer0`의 `panel`이 트리에 있다(꺼 둠). simpledrm 커넥터의 크기(`modetest` 또는 `/sys/class/drm`)가 273×171mm인지, 기본 배율이 225%인지 본다.
 5. [ ] 전체 이미지에서 `greetd`·`bunt-comp`와의 관계, 공통 설치 뒤 스크립트와의 순서(보드 것이 먼저 돈다)를 본다. 작은 시험 이미지에는 데스크톱 꾸러미가 없어 보지 못했다.
 
 ### 7.2 터치
@@ -547,7 +548,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
     - 전송이 깨지면 `cs-gpios = <&pio 12 GPIO_ACTIVE_LOW>`(GPIO12를 GPIO로)를 쓴다. OEM의 소프트웨어 CS를 업스트림이 쓰지 않는다. 이 드라이버는 전송 하나짜리 메시지만 써서 차이가 작을 것으로 보지만 기기에서 본다.
 2. [ ] 터치 probe를 본다. `dyndbg`로 `novatek_nvt_spi`를 켠다.
     - trim ID: `xx xx xx 32 65 03`.
-    - 패널 ID(GPIO184): 0이면 BOE(`novatek_ts_fw_boe.bin`), 1이면 Tianma와 Tianma 무광(`novatek_ts_fw_tm.bin`).
+    - 패널 ID(GPIO184): 0이면 BOE(`novatek_ts_fw_boe.bin`), 1이면 Tianma와 Tianma 무광(`novatek_ts_fw_tm.bin`). LK 기록의 패널과 맞는지 본다. 패널 드라이버도 이 줄로 고른다.
 3. [ ] 열 때를 본다(`evtest`). 펌웨어는 터치를 열 때 내려받는다. 리셋 상태 0xA0·0xA1, 펌웨어 판, 손가락 좌표를 본다. 컨트롤러 좌표는 X 0~18400, Y 0~29440이고 픽셀의 10배다(실측).
 4. [ ] 화면 네 모서리를 눌러 축을 정한다. `touchscreen-inverted-x/y`를 여기서 정한다. `touchscreen-swapped-x-y`는 보드에 있다.
 5. [ ] 서스펜드·복귀 뒤 터치와 시간을 본다. 복귀 때 펌웨어를 다시 올린다.
@@ -741,7 +742,13 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 - 2c 2차와 코덱·카메라 앞: MM_INFRA 아래 첫 소비자 전에 `simple-framebuffer`에 `power-domains`(DIS0, DIS1, OVL0, OVL1)를 건다.
 - 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다. 진짜 루트에서 nvdata를 붙일 때는 initramfs처럼 `blockdev --setro`와 `ro,noload`로 붙인다.
 - 2e: 전원 키로 s2idle에서 깨는지, mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`, mtu3 깨우기 접점, 커넥터 과열 보호(`usb_board_ntc`, GPIO179).
-- 2c 2차: 패널 드라이버가 생기면 터치를 패널 팔로워로 잇고, 끌 때 GPIO184를 0으로 둘지 본다.
+- 2c 2차(화면 파이프라인이 온 뒤):
+    1. 패널이 뜨는지(첫 prepare 깜빡임 포함), 144·120·60·30Hz 전환과 실제 주사율을 본다. 벤더 PHY 기준으로 계산한 값은 143.97, 119.57Hz다.
+    2. DCS 0x51로 밝기가 도는지, 0에서 어두워지는지, 화면을 끌 때 LED가 꺼지는지(SGM37604A), 대기 전류를 본다.
+    3. 편향을 껐다 켠 뒤 전압이 유지되는지 본다(SM5109). SGM37604A 둘과 SM5109의 드라이버는 아직 없다. 이 결과로 필요한지 정한다.
+    4. 터치를 패널 팔로워로 잇는다(`drm_panel_follower`). 벤더 터치는 화면 통지로 재시작하고 패치 0031은 시스템 PM뿐이라, 화면을 끄고 켠 뒤 터치 펌웨어가 죽을 수 있다(TDDI). 패널 리셋(GPIO41)과 터치 리셋(GPIO60)은 다르다. 끌 때 GPIO184를 0으로 둘지도 본다.
+    5. 패널 노드를 켜면 GPIO184가 터치와 공유되어 `gpio-shared-proxy` 모듈이 있어야 한다. 없으면 터치와 패널이 둘 다 미뤄진다. udev가 올리고, 터치나 패널을 initramfs에 넣으면 `modules.list`에 함께 넣는다.
+    6. 중국판 펌웨어의 패널 모듈이 같은지 본다. 사용자 기기에서 vendor_boot를 뜨면 글로벌판 모듈과 표를 맞댄다.
 - 3: 볼륨 내림(SoC 키패드)이 업스트림 `mt6779-keypad`로 되는지 본다.
 
 ## 10. 아직 비어 있는 것

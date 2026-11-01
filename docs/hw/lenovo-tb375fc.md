@@ -66,7 +66,7 @@ python3 -I tools/hw/dts_enabled.py out/merged.dts       # 켜진 노드의 compa
 | 블록 | 부품 | 근거 | 업스트림 |
 |---|---|---|---|
 | SoC | MediaTek MT6897 (Dimensity 8300) | `model = "MT6897"`, `compatible = "mediatek,MT6897"` | SoC 지원 없음(4.2.1-2) |
-| 화면 | DSI0(`dsi@1400d000`) 비디오 모드 패널 셋 가운데 하나. BOE NT36532, Tianma NT36532, Tianma "paper"(무광) NT36532. LK가 패널을 읽어 고른다 | 노드 `panel1@0`~`panel3@2`, 모듈 `panel-nt36532-dsi-vdo-{boe,tianma,tianma-paper}.ko` | 패널 드라이버 셋을 새로 써야 한다. 해상도와 주사율(공개 사양 2944×1840, 144Hz)은 펌웨어에서 확인하지 않았다 |
+| 화면 | DSI0(`dsi@1400d000`) 비디오 모드 패널 셋 가운데 하나. BOE NT36532, Tianma NT36532, Tianma "paper"(무광) NT36532. LK가 GPIO184·183 삼상(0이면 BOE)과 DCS 0xDA(0이면 Tianma, 5면 Tianma 무광)로 고른다. 실제 크기 273.615×171.009mm. 편향 SM5109(i2c13 0x3e, GPIO187·186), 백라이트 SGM37604A 둘(i2c13·i2c3 0x36), 밝기는 DCS 0x51 12비트 | 노드 `panel1@0`~`panel3@2`, 모듈 `panel-nt36532-dsi-vdo-{boe,tianma,tianma-paper}.ko` | 패널 드라이버 셋을 새로 써야 한다. |
 | 터치 | Novatek NT36532. 화면 구동 칩에 터치를 넣은 TDDI다. SPI2(`spi2@11012000`) CS0, 9.6MHz, 리셋 GPIO 60, 인터럽트 GPIO 9, 감지 채널 18×36, 펜 지원(`novatek,pen-support`) | `compatible = "novatek,NVT-ts-spi"`, 모듈 `nt36532.ko` | **동시 10손가락.** 드라이버가 `max_touch_num`에 10을 넣고 `input_mt_init_slots(dev, 10, 0)`을 부른다(역어셈블). 업스트림 `novatek-nvt-ts`는 I2C 칩용이라 SPI로 붙은 이 칩에는 바로 쓸 수 없다(확인 필요) |
 | 외부 화면 | DP 출력(`dp-tx@11e10000`). USB-C DP Alt 모드, Parade PS5170 리드라이버 | `mediatek,mt6897-dp_tx`, `parade,ps5170` | |
 | GPU | Arm Mali-Valhall(`mali@13000000`). 전원과 주파수는 GPU 내장 컨트롤러 gpueb(펌웨어 `gpueb.img`)와 gpufreq가 다룬다 | `mediatek,mali`, `arm,mali-valhall` | Panthor + Mesa가 GPU를 지원한다. MT6897 쪽 전원·주파수(gpueb) 통합이 포팅 범위다(4.2.1-3) |
