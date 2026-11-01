@@ -79,7 +79,8 @@ prepare() {
 config() {
 	mkdir -p "$out"
 	make_k defconfig >/dev/null
-	"$tree/scripts/kconfig/merge_config.sh" -m -O "$out" "$out/.config" "$here/config/tb375fc.config" >/dev/null
+	# merge_config.sh는 임시 파일을 현재 디렉터리에 만든다. 저장소가 아닌 출력 디렉터리에서 돌린다
+	(cd "$out" && "$tree/scripts/kconfig/merge_config.sh" -m -O "$out" "$out/.config" "$here/config/tb375fc.config" >/dev/null)
 	make_k olddefconfig >/dev/null
 	# 조각에 적은 값이 그대로 들어갔는지 본다(의존 기호가 꺼져 있으면 빠진다)
 	local line sym missing=0
@@ -87,7 +88,7 @@ config() {
 		[[ "$line" =~ ^(CONFIG_[A-Z0-9_]+)=(.*)$ ]] || continue
 		sym=${BASH_REMATCH[1]}
 		if ! grep -qx -- "$line" "$out/.config"; then
-			echo "알림: $line 이 들어가지 않았다 (지금: $(grep -E "^(# )?$sym[= ]" "$out/.config" || echo 없음))" >&2
+			echo "알림: $line 이 들어가지 않았다 (지금: $(grep -E "^(# )?${sym}[= ]" "$out/.config" || echo 없음))" >&2
 			missing=$((missing + 1))
 		fi
 	done <"$here/config/tb375fc.config"

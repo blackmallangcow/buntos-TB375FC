@@ -22,3 +22,5 @@ usb_f_ecm
 # UFS (nvdata·nvcfg·persist)
 phy_mtk_ufs
 ufs_mediatek
+# nvdata·nvcfg·persist의 파일 시스템 (init의 mount_ro가 -t ext4로 붙인다. Debian 설정에서는 모듈이다)
+ext4
