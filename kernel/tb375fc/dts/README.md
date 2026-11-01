@@ -128,6 +128,8 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `conn_pins_off`, `conn_pins_on` | GPIO192~202 | 펌웨어, 벤더 | consys가 쓴다(2d) |
 | 레일 `mt6363_vcn13`, `mt6363_vrfio18`, `mt6368_vant18`, `mt6368_vcn33_1`, `mt6368_vcn33_2` | 1.35 V, 1.7 V(벤더가 쓰는 값), 나머지는 범위 없음 | 펌웨어, 벤더 | `disabled`(2d). of_regulator가 사용 가능한 자식만 보므로 리눅스가 건드리지 않는다 |
 | `pmic@9` MT6685 | `reg = <0x9 SPMI_USID>` | 펌웨어 | `disabled`(2d). 드라이버가 없고 connsys가 DCXO 레지스터 하나를 읽는다 |
+| `battery` | `simple-battery`: CV 4.34 V, 충전 2 A, 종료 350 mA, 과전압 4.41 V, 0~50도 | 펌웨어(`maintenance-*`, `ichg`, `ieoc`, 온도 값) | `disabled`(2e). `battery-cv`의 4.5 V는 쓰지 않는다. 충전기에 `monitored-battery`와 게이지 참조가 있어야 드라이버가 넘겨받는다 |
+| `&i2c5` `pmic@34`의 `mt6375_tcpc` | `mediatek,mt6375-tcpc`, `usb-c-connector`: 싱크, 장치, 1.5A, `pd-disable` | 펌웨어(`pd,sink-pdo-data`, `tcpc,rp-level`) | `disabled`(2e). `self-powered`를 넣지 않는다(포트 리셋에서 CC를 열어 PC가 VBUS를 내린다). `usb_vbus_output`과 함께 켜지 않는다 |
 | `spi2` 터치 `touchscreen@0` | `novatek,nt36532-ts`, 9.6 MHz, IRQ = pio EINT9, 리셋 GPIO60, `iovcc-supply = <&vddio_1v8>`, `firmware-name` 둘(BOE, Tianma), `novatek,panel-id-gpios` = GPIO184, 크기 18401×29441, 171×273 mm, `touchscreen-swapped-x-y` | 펌웨어, OEM(프로토콜), 제3자 미러(패널 판별, 펌웨어 이름), 기기 실측(좌표 범위) | spi2와 함께 꺼져 있다. GPIO184가 0이면 BOE, 1이면 Tianma다. 컨트롤러 좌표는 픽셀의 10배이고 X가 짧은 쪽이다. 축 뒤집기는 기기에서 정한다 |
 | `pio` 핀 상태 | `spi2-pins`(GPIO11~14, 6 mA), `touch-pins`(GPIO9 IRQ, GPIO184 패널 ID, GPIO60 리셋), `hall-pins`(GPIO1), `pogo-keyboard-pins`(GPIO181 UTXD3, GPIO26·40 입력, GPIO61·71), `pogo-keyboard-rx-pins`(GPIO180 URXD3), `pogo-keyboard-rx-detached-pins`(GPIO180 입력) | 펌웨어 | drive-strength는 0027이 핀 드라이버에 더한 연산으로 적용된다 |
 | `aliases` | `spmi0 = &spmi_m` | 7.2.12 드라이버 | 버스가 둘인 MT8196 꼴은 버스마다 `spmiN` 별칭이 있어야 probe한다 |
@@ -208,4 +210,4 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
   - 패널: `dsi0`·`dsi1`에 compatible과 파이프라인을 붙이고 `panel0`·`lcd_avdd`·`lcd_avee`를 켜고 `framebuffer0`의 `panel`을 뺀다(패치 0083·0084)
 - 2d: `consys@18001000`(`mediatek,mt6897-consys`), `wifi@18000000`(`mediatek,mt6897-wifi`), `bluetooth@18800000`, `pmic@9`, 레일 다섯을 켠다. 루트의 `gps`·`connscp`는 그때까지 트리에 없다. LK는 status를 보지 않아, 넷이 다 있으면 메모리를 나누고 펌웨어를 싣기 때문이다. LK가 `emi-addr`와 `memory-region`을 채우는지 본다
   - `&spm`을 켠다(`status = "okay"`). `ifr_bus`·`vlpcfg_bus`는 켜지 않는다. 소비자는 `power-domains = <&scpsys MT6897_POWER_DOMAIN_CONN>`
-- 2e: mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`
+- 2e: 충전과 TCPC는 체크리스트 9.3절의 단계대로 켠다. mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`

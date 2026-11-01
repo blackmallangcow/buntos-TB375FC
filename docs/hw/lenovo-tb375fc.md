@@ -150,6 +150,20 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 - **지문 센서**가 있다. 포팅 블록 표(포크 설계안 5절)에 아직 없다.
 - 차지 펌프: `/sys/bus/i2c/drivers/upm6720`에 `10-0065`가 붙어 있고 `nu2115`에는 없다(2026-11-01). 이 기기의 VBUS 입력 FET는 I2C10의 UPM6720 @0x65가 다룬다. 순정 트리에는 후보 넷이 있어 다른 기기는 부품이 다를 수 있다
 
+### 배터리와 충전 값 (순정 ZUXOS, USB에 꽂혀 100%, 29.7도, 22회)
+
+| 읽은 곳 | 값 | 뜻 |
+|---|---|---|
+| `primary_chg` `CONSTANT_CHARGE_VOLTAGE` | 4340 | MT6375의 CV 레지스터(mV). 실제 충전 전압이다 |
+| `battery`, `battery_mm8013` `CONSTANT_CHARGE_VOLTAGE` | 4310 | 게이지의 `REG_CHARGEVOLT`(0x30, mV). 게이지가 만충을 판단하는 값이다 |
+| `VOLTAGE_NOW` | 4326 | 게이지가 잰 전압 |
+| `CHARGE_FULL_DESIGN` | 10200 | 설계 용량(mAh) |
+| `PRECHARGE_CURRENT` | 100 | 전류가 아니다. 순정이 이 칸으로 건강 %를 돌려준다 |
+| `primary_chg` `CALIBRATE` | 4375 | 칩 ADC의 VBAT. 게이지보다 49 mV 높다. 까닭은 기기에서 본다 |
+| `primary_chg` 입력·충전·MIVR·종료, `USB_TYPE` | 2000 mA, 3000 mA, 4600 mV, 300 mA, SDP | Android의 값이다. LK의 500 mA를 부정하지 않는다 |
+
+`battery_maintenance_on=1`, `persist.sys.battery.battery_maintenance_v2.enabled=1`이다. 순정의 '배터리 유지 관리'는 충전 전압을 표로 정한다. 충전기/게이지 값은 v10이 사이클에 따라 150회 미만 4500/4530, 150~1019회 4480/4470, 1020~1049회 4430/4410, 1050회부터 4340/4310이고, v20은 사이클과 상관없이 4340/4310이다. 이 기기는 22회인데 4340/4310이므로 v20이다.
+
 ## 8. 남은 것
 
 - super의 vendor는 ZIP에서 내려받으면서 풀 수 있다(`.handoff/tb375fc-pogo/wip/super_stream.py`, 5.7GB 스트리밍, 디스크는 고른 파티션만 쓴다). 2026-11-01에 이렇게 `tn_keyboard.ko`와 키보드 HAL을 읽었다. 파티션은 모두 EROFS다

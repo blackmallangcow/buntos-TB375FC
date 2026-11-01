@@ -223,6 +223,12 @@ fastboot flash init_boot <패치한 이미지>
 2. [ ] 이미지 넷(boot, vendor_boot, init_boot, dtbo)을 만든다. [BSP README](../../bsp/lenovo-tb375fc/README.md) "만들기" 1~3번이다. 입력, 명령줄, 해시는 `images.txt`에 남는다. 기기 없이 할 수 있는 시험(`boot/test.sh`, QEMU 맛보기, `initramfs/test.sh`)도 그 README에 있다.
 3. [ ] `mkimages.sh --boot-ramdisk`로 만든 boot.img도 만들어 둔다. initramfs를 boot.img에도 넣은 이미지다.
 4. [ ] 멈춤을 볼 도구를 고른다. 부팅 단계마다 화면에 블록을 그리는 카나리와 `panic=0`(패닉 화면을 남긴다)을 쓸 수 있다.
+5. [ ] Android에서 100%까지 충전하고 `dumpsys battery`로 전압과 온도를 적어 둔다. 충전 드라이버가 없는 2a~2d 동안 배터리는 다음과 같다(MediaTek LK2 코드로 본 것이고 기기의 LK는 더 새 판이다).
+    - LK는 입력과 충전을 500 mA로 두고 충전기 종류와 상관없이 그대로 넘긴다. 5 V 500 mA면 약 2.2 W이고 화면과 CPU 부하는 그보다 클 것으로 본다(추정, 측정 아님). PC나 벽 충전기에 꽂아 두어도 천천히 줄 수 있다.
+    - 게이지가 없으면 잔량 경고도 저전압 종료도 없다. 마지막 방어선은 PMIC UVLO(순정 값 2.5 V)이고, 거기까지 가면 예고 없이 꺼지며 로그도 사라진다. 순정이 종료하는 값은 3.0 V 근처다.
+    - 과충전 쪽 위험은 작다. 드라이버가 없으면 아무도 칩에 쓰지 않고, 칩 자체 보호는 LK가 둔 그대로다. 다만 온도에 따라 멈추는 소프트웨어 JEITA는 없다.
+    - 몇 시간짜리 시험이면 중간에 잔량을 본다. 싼 차례는 게이지(I2C7 @0x55, 드라이버가 없어도 `i2cget`으로 읽기만), MT6363 AUXADC(`mt6359-auxadc`, 노드를 더해야 한다), Android로 재부팅, USB-C 전력계(입력이 500 mA에 붙어 있으면 부하가 입력보다 크다)다.
+    - 전원을 끈 뒤 USB를 꽂으면 LK는 꺼진 채 충전하지 않고 커널을 띄운다(코드 기준). 충전이 필요할 때를 위해 Android로 돌아갈 길을 끝까지 남긴다. buntOS 커널을 굽는 시점에 다른 슬롯이나 되돌릴 이미지를 먼저 챙긴다.
 
 ### 5.2 `fastboot boot`
 
@@ -730,7 +736,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 
 ## 9. 나머지 단계
 
-2d 무선의 차례는 9.1절과 9.2절에 있다. 2e GPU·전원, 2c 화면(2차), 3 최적화의 목록은 나중에 더한다. 그 일이 아직 진행 중이다(GPU 전원과 열·게이지 0070~0079, 충전·TCPC 0090~0099).
+2d 무선의 차례는 9.1절과 9.2절에, 2e 충전과 TCPC의 차례는 9.3절에 있다. 2e GPU·전원, 2c 화면(2차), 3 최적화의 목록은 나중에 더한다. 그 일이 아직 진행 중이다(GPU 전원과 열·게이지 0070~0079).
 
 이미 적힌 확인만 잃지 않게 옮겨 둔다.
 
@@ -989,6 +995,144 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 - 대기 전력: 열려 있는 동안 MCU가 깨어 있다(driver own). 2e에서 수면 길을 넣기 전까지 큰 값이 나온다.
 - 서스펜드: 들어갈 때 링이 비어 있으면 MCU를 펌웨어에 돌려준다(`BGF: firmware own`), 보낼 것이 생기면 찾아온다(`BGF: driver own`). 깨우기 원천이 아니라 잠든 동안 온 데이터는 깨어나서 받는다. 2e에서 본다.
 - 되풀이 실패: 켜자마자 죽으면 스택이 닫고 여는 것을 세 번 하고 `it keeps failing, not starting it again`을 남긴다. 60초 넘게 살아 있었으면 다시 센다.
+
+### 9.3 2e 충전과 TCPC
+
+기본 상태에서는 새 노드가 모두 `disabled`이고 `dr_mode = "peripheral"`이다. 아래는 한 단계씩 고치는 줄이다. 앞 단계를 기기에서 확인한 뒤 다음 단계로 간다.
+
+단계 A와 B는 충전, C와 D는 TCPC다. 8절(VBUS)은 단계 D로 합쳐진다. D에서는 `usb_vbus_output`을 켜지 않는다.
+
+코드와 자료로 짠 차례이고 기기에서 돌린 적이 없다. UFS 루트와 USB 가젯이 기기에서 된 뒤에 한다. 모든 시험은 **시간이 지나면 저절로 되돌아가는 배경 스크립트**로 하고, 결과는 UFS에 남긴다. 멈추면 전원 키 길게. 먼저 Android에서 100%까지 충전하고 `dumpsys battery`로 전압과 온도를 적어 둔다. 게이지 값과 견줄 기준이다.
+
+#### A. 읽기만 (쓰기 0번)
+
+8절 1단계와 같은 버스 확인을 끝낸 뒤.
+
+```dts
+&i2c5 { status = "okay"; };        /* 클럭 컨트롤러 &imp_iic_wrap_n/en과 함께 */
+&mt6375 { status = "okay"; };
+```
+
+모듈: `mt6375`, `mt6375-charger`. 결과: `/sys/class/power_supply/mt6375-charger`(쓰기 불가), dmesg에 LK가 남긴 값 한 줄. 충전은 LK 상태 그대로다.
+
+1. [ ] `modprobe mt6375 mt6375-charger`. dmesg 한 줄이 LK가 남긴 값이다: `CV .. ICHG .. AICR .. CHG_EN .. BUCK_EN .. HZ .. WDT_EN ..`.
+2. [ ] 전후 레지스터가 같아야 한다.
+
+    ```bash
+    for r in 0x20 0x21 0x22 0x23 0x24 0x25 0x26 0x27 0x28 0x29 0x2a 0x33 0x34 0x50 0xe0 0xe1 0xe4; do echo "$r $(i2cget -f -y 5 0x34 $r)"; done
+    ```
+
+3. [ ] 볼 값: AICR·ICHG가 0.5 A인가, CV가 얼마인가(4.35 V면 LK2와 같다. 넘겨받기 전에는 이 값으로 충전된다), `0x27` bit 7(타이머), `0x2a` bit 3(워치독). 워치독이 켜져 있으면 60초 뒤 값이 바뀌는지 본다. **이것이 칩 기본값을 알 유일한 기회다.**
+4. [ ] I2C7을 켰으면 게이지의 만충 값을 읽는다: `i2cget -f -y 7 0x55 0x30 w`. Android를 거치고 재부팅한 뒤에도 4310(`0x10d6`)인지, 전원을 껐다 켜도 남는지 본다.
+5. [ ] `online`, `status`가 케이블에 따라 맞게 바뀌는지 본다. 쓰기 파일은 모두 읽기 전용이어야 한다.
+6. [ ] 부하 전력: PC에 꽂고 USB-C 전력계로 입력을 잰다. 500 mA에 붙어 있으면 배터리가 줄고 있다. 5.1절의 추정을 이 값으로 고친다.
+
+#### B. 충전 넘겨받기
+
+게이지(tb375fc-gpu-thermal의 0079와 `&i2c7`)가 기기에서 돈 뒤. 게이지 노드에 라벨 `fuel_gauge:`를 붙인다.
+
+```dts
+&battery { status = "okay"; };
+&mt6375 {
+	charger {
+		monitored-battery = <&battery>;
+		mediatek,fuel-gauge = <&fuel_gauge>;
+	};
+};
+```
+
+결과: 온도를 따라 충전을 끄고 켠다. 입력과 충전 전류는 500 mA 그대로다(C 전에는 포트 정보가 없다). CV는 4.34 V가 된다(45도 위와 충전을 못 할 때는 4.24 V).
+
+**조건:** 게이지가 돌고 온도가 방 온도와 맞을 것, 전압이 Android 값과 맞을 것. 배터리 30~70%(CV 구간을 피한다). 전력계를 끼우고, 사람이 곁에 있고, 태블릿을 단단한 바닥에 둔다. 부스트는 꺼 둔다.
+
+**재는 것:** VBUS, IBUS(전력계), 배터리 전압·전류·온도(게이지), `status`, `health`, 레지스터. 뒷면 온도를 손으로 본다.
+
+**멈추는 길(먼저 시험한다):** `echo inhibit-charge > /sys/class/power_supply/mt6375-charger/charge_behaviour`. 전력계의 입력이 시스템 부하만큼으로 줄고 `status`가 `Not charging`이면 된다. 그다음 `auto`로 되돌린다. 다른 길: 케이블을 뽑는다, `rmmod mt6375-charger`(0.5 A로 되돌리고 감시를 끝낸다), 전원 키 길게.
+
+1. [ ] 스크립트로 10분 뒤 `inhibit-charge`를 걸어 두고 시작한다.
+2. [ ] B를 더한 dtb로 부팅한다. 레지스터를 전후로 본다.
+3. [ ] 전류가 500 mA 안에 머무는지 본다.
+4. [ ] 게이지를 멈추었을 때(`/sys/bus/i2c/drivers/mm8013/unbind`) 30초 안에 `CHG_EN`이 0이 되는지 본다. 다시 바인드하면 돌아와야 한다.
+5. [ ] 만충까지 한 번, 곁에서. 게이지 전압이 Android 실측(4326 mV)처럼 4340 mV 밑에서 멈추고 `Full`이 되는지, 4.41 V 멈춤이 잘못 걸리지 않는지 본다. 걸리면 임계값을 고친다. 그때 게이지 잔량이 100%인지도 본다(게이지 만충 값은 Android가 쓴 값이다).
+
+#### C. 인터럽트와 TCPC, 싱크만
+
+```dts
+&mt6375 {
+	interrupt-parent = <&pio>;
+	interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
+
+	charger {
+		mediatek,usb-port = <&mt6375_tcpc>;
+	};
+};
+&mt6375_tcpc { status = "okay"; };
+```
+
+모듈을 더한다: `typec`, `tcpm`, `tcpci`, `tcpci_mt6375`(조각에 한 줄). 결과: 프로브가 칩 인터럽트를 모두 가리고 TCPC를 초기화한다. CC는 Rd 그대로이고 Rp를 내지 않는다. 포트가 1.5A나 3A를 알리면 입력이 올라간다(상한 2A). `usb-role-switch`가 없어 가젯은 건드리지 않는다.
+
+1. [ ] **먼저 읽기만:** PC를 꽂은 채 `i2cget -f -y 5 0x4e 0x1e`와 `0x9f`, `0x1a`, `0x1d`. `0x1e` bit 2(VBUS_PRES)가 1이고 빼면 0인가? `0x9f` bit 5와 같은가? **다르면 멈춘다.** 글루에 벤더 레지스터를 읽는 길을 더해야 한다.
+2. [ ] ID: `0x00`~`0x03`이 `cf 29 75 63`이어야 한다. 다르면 프로브가 실패하고 쓰기는 0번이다.
+3. [ ] 인터럽트를 켠 dtb로 부팅해 가젯이 그대로인지 본다(마스크만 쓴다). GPIO7 인터럽트 수가 멈춰 있어야 한다(`/proc/interrupts`).
+4. [ ] PC를 꽂은 채 시간 제한으로 올린다: `( sleep 20; modprobe tcpci_mt6375; sleep 60; rmmod tcpci_mt6375 ) &`. SSH가 끊기는지 본다.
+5. [ ] **케이블을 뒤집어 같은 시험을 한다.** TCPM이 잠깐 CC2를 연다. PC가 VBUS를 내리면 멈추고 보고한다.
+6. [ ] `/sys/class/typec/port0`, `typec-power-opmode`, 충전기의 입력 값. 1.5A·3A 충전기로 입력이 오르는지, 뽑으면 바로 0.5 A로 돌아오는지 전력계로 본다.
+7. [ ] `rmmod` 뒤 `0x1a`가 `0x0a`이고 가젯이 그대로인지, 재부팅 뒤 fastboot가 PC에 보이는지 본다.
+
+#### D. DRP와 호스트
+
+```dts
+&mt6375_tcpc {
+	connector {
+		data-role = "dual";
+		power-role = "dual";
+		try-power-role = "sink";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				typec_hs: endpoint {
+					remote-endpoint = <&usb_role_sw>;
+				};
+			};
+		};
+	};
+};
+
+&ssusb {
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";	/* 빼면 TCPM의 역할 없음이 호스트가 된다 */
+
+	port {
+		usb_role_sw: endpoint {
+			remote-endpoint = <&typec_hs>;
+		};
+	};
+};
+
+&xhci0 { status = "okay"; };
+```
+
+`&usb_vbus_output`은 꺼 둔다(두 소비자가 부스트를 켜지 않게). 부스트와 FET는 TCPM이 켠다. 8절 4단계를 TCPM 길로 한다. 차례: 가젯이 그대로인지 → 브레이크아웃으로 5 V와 뺀 뒤 0 V → 작은 USB 메모리 → 켠 채 재부팅(부스트 꺼짐, CC Rd). 켠 채 PC를 꽂으면 TCPM이 어떻게 하는지 본다(Try.SNK). VCONN은 Ra가 있는 케이블에서 처음 나간다. 커넥터 온도를 본다. 이 차례에서 처음으로 부트 직후 호스트 역할을 거칠 수 있다(otg 프로브 동작). `role-switch-default-mode`가 꼭 있어야 한다.
+
+#### E. PD
+
+`pd-disable`과 `typec-power-opmode`를 빼고 넣는다.
+
+```dts
+source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_USB_COMM)>;   /* pd,source-pdo-data */
+sink-pdos = <PDO_FIXED(5000, 2000, PDO_FIXED_USB_COMM)>;     /* pd,sink-pdo-data */
+op-sink-microwatt = <10000000>;
+```
+
+`dt-bindings/usb/pd.h`를 보드에 더한다. 5 V만 받으니 고속 충전이 아니다. 협상이 실패하면 하드 리셋으로 상대가 VBUS를 내리므로 D가 안정된 뒤에 한다. 전압을 올리는 일은 차지 펌프 충전과 함께 3단계에서 정한다.
+
+D가 안정된 뒤 5 V 충전기와 PC에서 한 번씩. 하드 리셋이 나는지 `tcpm` 로그를 본다.
 
 ## 10. 아직 비어 있는 것
 
