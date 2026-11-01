@@ -1,0 +1,54 @@
+From: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Date: Mon, 11 May 2026 12:13:53 +0200
+Subject: [PATCH] dt-bindings: iio: adc: mt6359: Allow reg for SPMI PMICs AuxADC
+
+[ Not upstream yet: v12 3/5 from
+  https://lore.kernel.org/r/20260511101355.122478-4-angelogioacchino.delregno@collabora.com ]
+
+When one or multiple Auxiliary ADC IPs are embedded in a SPMI PMIC
+it is reachable at a specific address.
+
+Allow specifying the `reg` property and make it a required one for
+MediaTek MT6363/6373 PMICs as those communicate over SPMI and also
+disallow it for the others (as it wouldn't be applicable).
+
+Reviewed-by: Rob Herring (Arm) <robh@kernel.org>
+Signed-off-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+[ buntOS: placed the reg property after the compatible list of 7.2, which
+  also takes mediatek,mt6365-auxadc with the mt6359 fallback. ]
+---
+ .../iio/adc/mediatek,mt6359-auxadc.yaml         | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/iio/adc/mediatek,mt6359-auxadc.yaml b/Documentation/devicetree/bindings/iio/adc/mediatek,mt6359-auxadc.yaml
+index 9936aa6..5ee1184 100644
+--- a/Documentation/devicetree/bindings/iio/adc/mediatek,mt6359-auxadc.yaml
++++ b/Documentation/devicetree/bindings/iio/adc/mediatek,mt6359-auxadc.yaml
+@@ -30,6 +30,9 @@ properties:
+               - mediatek,mt6365-auxadc
+           - const: mediatek,mt6359-auxadc
+ 
++  reg:
++    maxItems: 1
++
+   "#io-channel-cells":
+     const: 1
+ 
+@@ -38,3 +41,17 @@ required:
+   - "#io-channel-cells"
+ 
+ additionalProperties: false
++
++if:
++  properties:
++    compatible:
++      contains:
++        enum:
++          - mediatek,mt6363-auxadc
++          - mediatek,mt6373-auxadc
++then:
++  required:
++    - reg
++else:
++  properties:
++    reg: false

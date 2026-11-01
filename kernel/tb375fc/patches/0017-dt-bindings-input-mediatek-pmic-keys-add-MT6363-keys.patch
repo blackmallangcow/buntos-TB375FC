@@ -1,0 +1,103 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: input: mediatek,pmic-keys: add MT6363 keys
+
+The MT6363 is an SPMI PMIC whose functions are described as child nodes
+of the PMIC, so its keys cannot get their interrupts as named resources
+from the MFD core. The binding already documents a press and a release
+interrupt for each key; require them for the MT6363.
+
+Add the mediatek,mt6363-keys compatible and allow the keys node in the
+MT6363 binding.
+
+The interrupt numbers in the example are the PWRKEY and PWRKEY_R
+interrupts of the MediaTek MT6363 driver in the OnePlus MT6897 kernel.
+---
+diff --git a/Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml b/Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml
+index 140a862..0100775 100644
+--- a/Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml
++++ b/Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml
+@@ -11,6 +11,20 @@ maintainers:
+ 
+ allOf:
+   - $ref: input.yaml#
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6363-keys
++    then:
++      patternProperties:
++        "^((power|home)|(key-[a-z0-9-]+|[a-z0-9-]+-key))$":
++          properties:
++            interrupts:
++              minItems: 2
++          required:
++            - interrupts
++            - interrupt-names
+ 
+ description: |
+   There are two key functions provided by MT6397, MT6323 and other MediaTek
+@@ -21,6 +35,10 @@ description: |
+   For MediaTek MT6323/MT6397 PMIC bindings see
+   Documentation/devicetree/bindings/mfd/mediatek,mt6397.yaml
+ 
++  The MT6363 is an SPMI PMIC, see
++  Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml. Each of its
++  keys carries its own press and release interrupts.
++
+ properties:
+   compatible:
+     oneOf:
+@@ -31,6 +49,7 @@ properties:
+           - mediatek,mt6357-keys
+           - mediatek,mt6358-keys
+           - mediatek,mt6359-keys
++          - mediatek,mt6363-keys
+           - mediatek,mt6397-keys
+       - items:
+           - enum:
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml
+index 18711d3..7bdb129 100644
+--- a/Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt6363.yaml
+@@ -49,6 +49,13 @@ properties:
+   "#interrupt-cells":
+     const: 3
+ 
++  keys:
++    type: object
++    $ref: /schemas/input/mediatek,pmic-keys.yaml#
++    unevaluatedProperties: false
++    description:
++      Power and Home keys.
++
+ patternProperties:
+   "^adc@[0-9a-f]+$":
+     type: object
+@@ -68,6 +75,7 @@ additionalProperties: false
+ 
+ examples:
+   - |
++    #include <dt-bindings/input/input.h>
+     #include <dt-bindings/interrupt-controller/irq.h>
+     #include <dt-bindings/spmi/spmi.h>
+ 
+@@ -84,6 +92,18 @@ examples:
+         #interrupt-cells = <3>;
+         #size-cells = <0>;
+ 
++        keys {
++          compatible = "mediatek,mt6363-keys";
++
++          power-key {
++            interrupts = <4 48 IRQ_TYPE_LEVEL_HIGH>,
++                         <4 51 IRQ_TYPE_LEVEL_HIGH>;
++            interrupt-names = "powerkey", "powerkey_r";
++            linux,keycodes = <KEY_POWER>;
++            wakeup-source;
++          };
++        };
++
+         regulators@30 {
+           compatible = "mediatek,mt6363-regulator";
+           reg = <0x30>;

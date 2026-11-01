@@ -19,8 +19,17 @@
 0011-clk-mediatek-mux-add-hardware-voter-mux-gate-without-FENC.patch
 0012-clk-mediatek-pll-add-hardware-voter-support.patch
 0013-clk-mediatek-add-MT6897-clock-drivers.patch
-# 다음 차례(아직 없음). 2b의 PMIC 쪽은 MFD·MT6363이 남았다(SPMI 노드와 MT6319는 장치 트리에 있다):
-#  - mfd: mtk-spmi-pmic (업스트림 v12와 리뷰 고침. MT6363 regulator와 MT6685가 의존한다), MT6363 키
+# 0014~0016: MFD mtk-spmi-pmic(업스트림 v12 3/5·4/5·5/5 백포트. 미병합이다). 5/5에는 리뷰 지적과 인터럽트 고침을
+# 얹었다(마스크가 늘 첫 그룹에 쓰여 PWRKEY 등이 켜지지 않았다). 새 판이 나오면 셋을 그 판으로 바꾼다
+0014-dt-bindings-iio-adc-mt6359-Allow-reg-for-SPMI-PMICs-AuxADC.patch
+0015-dt-bindings-mfd-Add-binding-for-MediaTek-MT6363-series-SPMI-PMIC.patch
+0016-mfd-Add-support-for-MediaTek-SPMI-PMICs-and-MT6363-73.patch
+# 0017·0018: MT6363 키(바인딩, 드라이버. 업스트림에 없음). 표는 OnePlus 공식 MT6897 커널에서 옮겼다. 기기에서 확인한 뒤 낸다
+0017-dt-bindings-input-mediatek-pmic-keys-add-MT6363-keys.patch
+0018-Input-mtk-pmic-keys-add-MT6363-support.patch
+# 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363까지 장치 트리에 있다(MT6368·MT6685는 드라이버가 없다):
+#  - regulator: MT6368(VUSB는 USB vusb33, VBUCK2는 GPU 코어. MT6895 포크 견본으로 새로)
+#  - regulator: mt6363: VEMC 전압 읽기 고침(범위를 고르는 조건이 반대다)
 #  - pmdomain: mediatek: add MT6897 power domains (MT8196 틀. UFS·USB에는 없어 2d 뒤)
 #  - input: touchscreen: Novatek NT36532 SPI TDDI와 펜
 #  - input: OnePlus/OPPO Pad pogo-pin 키보드 v6 + compatible별 CRC 초기값
