@@ -31,6 +31,7 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'K=~/buntos-build/tb375fc/
 | 같은 검사(2026-11-01, MT6363과 UFS 공급을 더한 뒤, 패치 0014~0022를 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다. MT6363은 패치 0015·0017의 바인딩과 `mediatek,mt6363-regulator.yaml`을, `&ufshci` 공급은 패치 0020의 바인딩을 통과한다. 일부러 틀린 사본(키 인터럽트 이름, 없는 레일)은 스키마가 잡는다 |
 | 같은 검사(2026-11-01, MT6368과 USB 공급을 더한 뒤, 패치 0014~0026을 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다. MT6368은 패치 0023의 `mediatek,mt6368-regulator.yaml`과 0025의 MFD 바인딩을 통과한다. 일부러 틀린 사본(LDO·벅 모드, 없는 레일, MT6368의 `keys`, 틀린 compatible)은 스키마가 잡는다 |
 | 같은 검사(2026-11-01, SPI 여덟과 2c 입력 노드를 더한 뒤, 패치 0027~0031을 함께 얹어) | dtc 경고 0. dt-validate는 위 12건 그대로다(dtb마다 24줄). SPI는 패치 0029의 `mediatek,spi-mt65xx.yaml`, 터치는 0030의 `novatek,nt36532-ts.yaml`, 핀 상태는 0004의 pio 바인딩, 홀 센서는 `gpio-keys.yaml`을 통과한다. 꺼진 노드에는 required와 모르는 속성을 묻지 않으므로, spi2를 켠 사본으로도 확인했다 |
+| 같은 검사(2026-11-01, UART 패드 모드와 키보드 노드를 더한 뒤, 패치 0032~0036을 함께 얹어) | dtc 경고 0. dt-validate는 uart 넷의 8줄이 줄어 dtb마다 16줄이다(0035의 MT6897 compatible). 새 지적은 없다. 키보드는 패치 0032의 `oneplus,pogo-keyboard.yaml`로 본다 |
 | 펌웨어 DT와 대조 | 켠 노드와 자리만 둔 노드의 `reg`·`interrupts`가 모두 같다(아래 표의 예외만 일부러 다르다) |
 
 패치를 얹은 트리로 보려면 `build.sh prepare` 뒤 다음을 돌린다(바인딩 스키마는 `out/`에 만든다).
@@ -71,7 +72,7 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `timer` | PPI 13·14·11·10 `LEVEL_HIGH`, 13 MHz | 펌웨어 | 커뮤니티는 `LEVEL_LOW`로 적었으나 펌웨어 값(4)은 HIGH다. `clock-frequency`는 mt8188처럼 둔다 |
 | `clk26m`, `clk13m` | 26 MHz, 26 MHz ÷ 2 | 펌웨어, 7.2.12 | 펌웨어의 `clk13m`은 13 MHz fixed-clock이다. 업스트림처럼 fixed-factor로 썼다 |
 | `systimer` | `0x1cc10000`, SPI 330, `clk13m` | 펌웨어 | 깊은 idle에서 쓸 broadcast 타이머. 펌웨어의 인터럽트 셋 가운데 첫째만 쓴다(바인딩이 하나). 출하 GKI는 업스트림 SYST 드라이버를 쓰지 않으므로(`# CONFIG_MTK_TIMER is not set`) 2a에서는 `disabled`다. 그동안은 hrtimer broadcast가 대신한다 |
-| `uart0`~`uart3` | `0x11001000`~`0x11004000`(0x1000), SPI 250~253 | 펌웨어 | `baud`는 clk26m. 7.2.12 `8250_mtk`는 `baud`가 있으면 `bus`도 요구해 하나만 주면 probe가 실패한다. `bus`는 펌웨어처럼 pericfg_ao의 UART 게이트다. 다만 uart0은 2a 콘솔이라 클럭 컨트롤러를 기다리지 않게 2b까지 clk26m을 둔다 |
+| `uart0`~`uart3` | `0x11001000`~`0x11004000`(0x1000), SPI 250~253 | 펌웨어 | `baud`는 clk26m. 7.2.12 `8250_mtk`는 `baud`가 있으면 `bus`도 요구해 하나만 주면 probe가 실패한다. `bus`는 펌웨어처럼 pericfg_ao의 UART 게이트다. 다만 uart0은 2a 콘솔이라 클럭 컨트롤러를 기다리지 않게 2b까지 clk26m을 둔다. `uart3`에는 `mediatek,syscon-pad-mode = <&pericfg_ao 0x50>`을 둔다(패치 0035·0036). 이 UART는 패드나 UART 허브로 나가고, OEM `uarthub` 코드로 bit 4가 1이면 패드다. MT6897은 허브를 쓰지 않는다(펌웨어 `uarthub-disable`) |
 | `spi0`~`spi7` | `0x11010000`~`0x11017000`(0x100), SPI 242~249, `mediatek,pad-select` 0(spi0~5)·1(spi6·7) | 펌웨어, OEM 드라이버 | `disabled`. compatible은 `mediatek,mt6897-spi` + 업스트림 `mediatek,mt6991-spi`(패치 0029). OEM `spi-mt65xx`의 `mt6985` 데이터와 업스트림 `mt6991` 데이터가 같은 기능이다. 클럭은 펌웨어처럼 `parent-clk` = topckgen `mainpll_d6_d2`(spi0~2)·`univpll_d6_d2`(spi3~7), `sel-clk` = spi 먹스, `spi-clk` = pericfg_ao 게이트다. 드라이버가 실제 클럭 값으로 분주를 계산한다(커뮤니티 포트는 26 MHz 자리값 때문에 SCLK가 약 52 MHz였다). OEM의 소프트웨어 CS는 업스트림이 쓰지 않는다 |
 | `watchdog` | `0x1c00a000`(0x100) | 펌웨어 | 7.2.12 `mtk_wdt`는 대체 compatible `mediatek,mt6589-wdt`로 붙고, 켜져 있으면 `WDOG_HW_RUNNING`으로 받아 커널이 쓰다듬는다. 펌웨어의 `syscon`·`simple-mfd`·reboot-mode는 뺐다 |
 | `performance` | `0x11bc10`·`0x11bd30`·`0x11be50`(각 0x120) | 펌웨어 | 노드 이름을 첫 `reg`에 맞췄다(펌웨어 `@11bc00`). mt8195와 같은 CSRAM 배치에 도메인이 하나 더 있다 |
@@ -96,7 +97,7 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 |---|---|---|---|
 | `model`, `compatible` | `lenovo,tb375fc`, `mediatek,mt6897` | 설계안 | TB373FU는 `lenovo,tb373fu` |
 | `chosen` | `stdout-path = "serial0:921600n8"` | MTK 관례 | 부트로더가 `bootargs`, initrd, `kaslr-seed`, `atag,*`를 더한다 |
-| `uart0` | `okay`. TX GPIO207, RX GPIO208(mode 1) | 벤더 pinfunc | 디버그 UART다. UART3은 포고 키보드 줄(GPIO180 URXD3, GPIO181 UTXD3, mode 2)이라 꺼 둔다 |
+| `uart0` | `okay`. TX GPIO207, RX GPIO208(mode 1) | 벤더 pinfunc | 디버그 UART다 |
 | `memory@40000000` | 1GiB 자리 | 펌웨어 | 부트로더가 실제 크기(8·12GiB)로 고친다. 펌웨어 정적 트리도 1GiB 자리다 |
 | `framebuffer0` | `0xfc16f000`, 2944×1840, stride 11776, `a8r8g8b8` | 커뮤니티 | `disabled`. 바인딩대로 `/chosen` 아래에 둔다. 커뮤니티는 LK 기록(mblock 할당, `atag,videolfb`)에서 읽었고, 이 주소로 fbcon을 띄웠다(12GiB 기기) |
 | `framebuffer_mem` | `0xfc16f000`, 0x3e90000(LK가 할당한 크기, 세 화면보다 조금 크다), `no-map` | 커뮤니티 | `disabled`. 부트로더가 이미 예약하면 지운다 |
@@ -104,10 +105,11 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `ufshci` 공급 | `vcc-supply = <&mt6363_vemc>`, `vccq-supply = <&mt6319_8_vbuck3>` | 펌웨어 | 펌웨어 `ufshci`와 같다 |
 | MT6368 `pmic@5` | `interrupts = <5 48 IRQ_TYPE_LEVEL_HIGH>`(SPMI rcs, SID 5. 가운데 칸은 컨트롤러가 버린다. 48은 MT6368 RCS0), `interrupt-controller`, 셀 셋. `regulators@30`: 펌웨어가 늘 켜 두는 6개 vbuck2(`vgpu`), vbuck5, vbuck6, vio28, vtp, vusb(`vusb33`). 모두 `regulator-always-on` | 펌웨어, OEM(레지스터, 전압 표, 인터럽트 번호) | `mediatek,mt6368`(패치 0025·0026)과 `mediatek,mt6368-regulator`(0023·0024). 레지스터 기준은 MT6363과 같은 0x30이다(드라이버의 주소 = 벤더 주소 − 0x30). 펌웨어가 늘 켜 두지 않는 레일(vbuck1·3·4, vaux18, vrf13·18-aif, vant18, vibr, vfp, vmc, vaud18, vcn33-1·2, vefuse, vmch-eint-*, vsim2)과 펌웨어에 없는 vpa·vmch는 노드에 넣지 않아 리눅스가 건드리지 않는다. 전압 한계도 주지 않는다(MT6363과 같은 방침). 이름은 펌웨어 소비자에서 땄다: `vgpu`(gpufreq의 `vgpu-supply`), `vusb33`(ssusb의 `vusb33-supply`) |
 | `ssusb` 공급 | `vusb33-supply = <&mt6368_vusb>` | 펌웨어 | 펌웨어 `ssusb`와 같다. 펌웨어처럼 늘 켜 둔다 |
-| `gpio-keys` | `switch-lid`: GPIO1, active low, `SW_LID`, 100 ms, `wakeup-source`. `switch-tablet-mode`: GPIO26, active high, `SW_TABLET_MODE`, 100 ms | 펌웨어(`hall_1` EINT1, `hall_2` EINT26), 제3자 미러 `hall.c` | `disabled`(2c). `hall.c`는 `hall_1`만 붙잡는다(GPIO1이 0이면 덮개 닫힘). `hall_2`에는 드라이버가 없고, 그 GPIO26은 포고 키보드의 `plug-gpios`와 같은 핀이라 뜻과 극성은 기기에서 정한다 |
+| `gpio-keys` | `switch-lid`: GPIO1, active low, `SW_LID`, 100 ms, `wakeup-source` | 펌웨어(`hall_1` EINT1), 제3자 미러 `hall.c` | `disabled`(2c). GPIO1이 0이면 덮개 닫힘이다. 펌웨어의 `hall_2`(GPIO26)는 키보드 줄을 본다 |
+| `uart3` 키보드 `keyboard` | `lenovo,tb375fc-pogo-keyboard`. `power-gpios` GPIO61, `tx-enable-gpios` GPIO71, `wake-gpios` GPIO40(상승 에지), `plug-gpios` GPIO26(active low), `wakeup-source`, 핀 상태 `default`·`detached` | 펌웨어 `tinno,tn_keyboard`, 스톡 모듈 | `disabled`(uart3, 2c). 스톡 모듈이 쓰는 핀 상태만 옮겼다: RX는 붙으면 URXD3, 떼면 GPIO180 입력(바이어스 없음), TX는 늘 UTXD3. `uart_wake_*` 상태와 `uart_rx_gpio`(EINT 없음)는 돌 때 쓰지 않는다 |
 | `vddio_1v8` | regulator-fixed 1.8 V, GPIO63, `regulator-boot-on`, `regulator-always-on` | 펌웨어(패널의 `vddio_1v8-gpios`, 터치의 1.8V 핀 상태) | `disabled`(2c). 패널과 터치가 같이 쓰는 I/O 전원이라 simple-framebuffer 동안 꺼지면 안 된다. 패널 드라이버가 생기면 그쪽 공급으로 옮긴다 |
 | `spi2` 터치 `touchscreen@0` | `novatek,nt36532-ts`, 9.6 MHz, IRQ = pio EINT9, 리셋 GPIO60, `iovcc-supply = <&vddio_1v8>`, `firmware-name` 둘(BOE, Tianma), `novatek,panel-id-gpios` = GPIO184, 크기 18401×29441, 171×273 mm, `touchscreen-swapped-x-y` | 펌웨어, OEM(프로토콜), 제3자 미러(패널 판별, 펌웨어 이름), 기기 실측(좌표 범위) | spi2와 함께 꺼져 있다. GPIO184가 0이면 BOE, 1이면 Tianma다. 컨트롤러 좌표는 픽셀의 10배이고 X가 짧은 쪽이다. 축 뒤집기는 기기에서 정한다 |
-| `pio` 핀 상태 | `spi2-pins`(GPIO11~14, 6 mA), `touch-pins`(GPIO9 IRQ, GPIO184 패널 ID, GPIO60 리셋), `hall-pins`(GPIO1·26) | 펌웨어 | drive-strength는 0027이 핀 드라이버에 더한 연산으로 적용된다 |
+| `pio` 핀 상태 | `spi2-pins`(GPIO11~14, 6 mA), `touch-pins`(GPIO9 IRQ, GPIO184 패널 ID, GPIO60 리셋), `hall-pins`(GPIO1), `pogo-keyboard-pins`(GPIO181 UTXD3, GPIO26·40 입력, GPIO61·71), `pogo-keyboard-rx-pins`(GPIO180 URXD3), `pogo-keyboard-rx-detached-pins`(GPIO180 입력) | 펌웨어 | drive-strength는 0027이 핀 드라이버에 더한 연산으로 적용된다 |
 | `aliases` | `spmi0 = &spmi_m` | 7.2.12 드라이버 | 버스가 둘인 MT8196 꼴은 버스마다 `spmiN` 별칭이 있어야 probe한다 |
 | MT6319 `pmic@6`~`pmic@8` | 6: vbuck1(`vmm`)·vbuck3(`vproc1`)·vbuck4(`vproc3`), 7: vbuck1(`vproc2`)·vbuck3, 8: vbuck3(`vufs_vccq`). 모두 0.3~1.19375V | 펌웨어 | `mediatek,mt6319-regulator` + `mt6315` 대체. 이름은 펌웨어의 소비자에서 땄다(ISP·카메라 전원 도메인, MCUPM CPU DVFS의 proc1~4, UFS VCCQ). 소비자가 아직 없어 모두 `regulator-always-on`이다. 펌웨어는 셋 모두 buck1+buck2 2상인데, 7.2.12 드라이버는 SID로 짝을 정해(6이면 1+2+4) 맞지 않으므로 동작 모드(`regulator-allowed-modes`)는 열지 않는다 |
 | `ramoops` | `0x48090000`, 0xe0000(record 0x20000, console 0x40000, pmsg 0x80000) | 커뮤니티 | `disabled`. `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`) 사이 틈이다. LK가 벤더 커널 명령줄에 넣는 `ramoops.*` 값과 같다(벤더 자신의 ramoops 자리) |
@@ -159,7 +161,7 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
   - 전원 도메인은 필요 없다. 펌웨어의 `mediatek,ufs-rtff-mtcmos`(SMC)·`-broken-rtc`·`-pmc-via-fastauto`·`-tx-skew-fix`는 compatible이 뜻한다(match data)
   - 클럭 스케일링은 없다. 7.2.12 드라이버는 `ufs_sel`과 그 최소·최대 부모가 클럭 목록에 있어야 스케일링한다. 업스트림 리뷰는 그 부모를 `clocks`에서 빼라고 했다. 먹스는 LK가 정한 부모 그대로 돈다
   - PHY(`phy-mtk-ufs`): MT6897 M-PHY는 벤더가 `mphy-ver = <1>`로 다루는 새 판이다. 벤더는 클럭을 받지 않고 power_on/off에서 아무것도 하지 않는다. 0021이 MT6897에 전원 연산 없는 ops를 준다(7.2.12의 MT8183 순서는 PLL·CDR을 강제로 끄고 켠다)
-- **USB.** 가젯용 `dr_mode = "peripheral"`(보드)로 시작한다. `vusb33` 공급은 펌웨어처럼 MT6368 VUSB(`mt6368_vusb`, always-on)다. 보드가 이어 두어 **ssusb를 켤 때 SPMI M 버스와 MT6368(MFD·regulator, `CONFIG_REGULATOR_MT6368`)도 켜져 있어야 한다.** 그렇지 않으면 mtu3가 공급을 기다리며 뜨지 않는다. xsphy에는 펌웨어의 eye 값만 넣었다. 업스트림 드라이버에 MT6897 꼴이 없어 셋은 뒤로 미룬다: U2 내부 저항 보정(INTR_CAL 칸과 efuse), 벤더가 MT6897에만 넣는 U3 RX CDR 값(U3 포트 `+0x408`의 [23:16] `RG_XTP_LN0_RX_CDR_RESERVE` = 0x8), 깨우기 접점(벤더 판 103). 역할 전환은 MT6375 TCPC 뒤다.
+- **USB.** 가젯용 `dr_mode = "peripheral"`(보드)로 시작한다. `vusb33` 공급은 펌웨어처럼 MT6368 VUSB(`mt6368_vusb`, always-on)다. 보드가 이어 두어 **ssusb를 켤 때 SPMI M 버스와 MT6368(MFD·regulator, `CONFIG_REGULATOR_MT6368`)도 켜져 있어야 한다.** 그렇지 않으면 mtu3가 공급을 기다리며 뜨지 않는다. xsphy에는 펌웨어의 eye 값만 넣었다. 업스트림 드라이버에 MT6897 꼴이 없어 셋은 뒤로 미룬다: U2 내부 저항 보정(INTR_CAL 칸과 efuse), 벤더가 MT6897에만 넣는 U3 RX CDR 값(U3 포트 `+0x408`의 [23:16] `RG_XTP_LN0_RX_CDR_RESERVE` = 0x8), 깨우기 접점(벤더 판 103). 호스트 모드는 MT6375 OTG의 VBUS 뒤, 역할 전환은 TCPC 뒤다.
 - **SPMI.**
   - 벤더 레지스터 표는 업스트림 mt8195 표와 같다(2026-11-01 대조). 그래서 MT8196 데이터를 그대로 쓴다. 커뮤니티는 MT6895 데이터(같은 레지스터, 버스 하나)로 닿았다
   - PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다
@@ -172,7 +174,14 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
 
 - 2c:
   - 패널 노드(부트로더가 찾는 `/soc/dsi@1400d000/panel1@0`~`panel3@2`)와 `framebuffer0`의 `panel`(273×171mm)
-  - 포고 키보드: UART3 serdev, 키보드 전원 GPIO61, 연결 감지 GPIO26, 깨우기 GPIO40, tx-en GPIO71, TX·RX 핀의 pinctrl 전환. 벤더 드라이버는 probe·startup·resume마다 pericfg_ao `0x11036050`의 bit4를 켜고 bit0을 끈다
+  - 포고 키보드: 패치 0032~0036과 노드가 있다(꺼 둠). 2c에서 pio·클럭 컨트롤러와 함께 uart3을 켜고 아래를 본다.
+    1. `mediatek,syscon-pad-mode`: 켠 뒤 `0x11036050`의 값(bit 4 = 1, bit 0 = 0). 스톡 로그의 "first get uart3_def_value"처럼 바뀌기 전 값도 본다
+    2. GPIO26이 키보드를 붙이면 0, 떼면 1인지. GPIO61이 따라가는지
+    3. 처음 프레임(`dyndbg`로 `oneplus_pogo_kbd`): 0x7B가 오는지, "bad sum"이 없는지. 전 판과 다르면 여기서 보인다
+    4. `evtest`: 키, 미디어 키, 터치패드(손가락 넷, 2944×1840. 해상도는 실측으로 정한다), Caps Lock LED(0x6A/0x27)
+    5. 키보드를 뒤로 접을 때 0x93/0x03 프레임과 `SW_TABLET_MODE`
+    6. 921600에서 PIO로 넘침이 있는지(`/proc/tty/driver/serial`의 oe). 스톡은 APDMA를 쓴다
+    7. 서스펜드: 0x92/0x02 응답, 키로 깨우기(GPIO40), 붙이고 떼어 깨우기(GPIO26)
   - 터치·펜·홀 센서: 패치 0027~0031과 노드가 있다(꺼 둠). 2c에서 pio·클럭 컨트롤러와 함께 spi2·gpio-keys·`vddio_1v8`을 켜고, spi2의 SCLK(9.6 MHz 아래, 깨지면 `cs-gpios`), 터치의 trim ID·패널 ID·펌웨어 내려받기, `evtest`의 좌표와 축 방향, 펜(압력·기울기·단추·호버, 펜 켜기 명령 `0x7B 0x01`), 서스펜드 뒤 터치, 덮개와 키보드에 따른 GPIO1·26 값을 본다(터치 작업 보고 8절)
 - 2d: `consys@18000000`(`mediatek,mt6897-consys-atf`)와 `wifi@18000000`. LK가 `emi-addr`와 `memory-region`을 채우는지 본다
 - 2e: mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`

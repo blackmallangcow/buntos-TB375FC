@@ -78,7 +78,7 @@ python3 -I tools/hw/dts_enabled.py out/merged.dts       # 켜진 노드의 compa
 | 오디오 | MT6368 코덱, Awinic AW883xx 스마트 앰프 ×4(스피커 넷, I2C 0x34~0x37), FSA4480(USB-C 이어폰 스위치) | `awinic,aw883xx`, `fsa,fsa4480-i2c` | |
 | 무선 | MediaTek connsys 통합 Wi-Fi·Bluetooth·GPS(`wifi@18000000`, `bt@18000000`, `gps@18c00000`). 펌웨어 `connsys_wifi.img`, `connsys_bt.img`, `connsys_gnss.img` | `mediatek,wifi`, `mediatek,bt`, `mediatek,mt6897-gps` | 외장 칩이 아니라 SoC 통합형이다. 휴대기기용 connsys는 업스트림 드라이버가 없는 것으로 안다(4.2.1-4, 2d에서 확인) |
 | 센서 | 센서 허브 SCP(`scp@1c400000`, 펌웨어 `scp.img`), 홀 센서 둘(`hall_1`, `hall_2`: 키보드 커버), SAR 센서 TYHX HX9036·HX9031AS | `mediatek,scp`, `tyhx,hx9031as` | 가속도·조도 센서는 SCP 뒤에 있는 것으로 보인다(확인 필요) |
-| 키보드 커버 | 포고 핀 키보드(Tinno), 키보드 전원 GPIO | `tinno,tn_keyboard`, `mediatek,keyboard_gpio` | |
+| 키보드 커버 | 포고 핀 키보드(Tinno), 3핀(전원, 접지, 데이터 한 줄). 키보드 전원 GPIO61, 붙음 GPIO26(`hall_2`) | `tinno,tn_keyboard`, `mediatek,keyboard_gpio` | 드라이버 대기열(0032~0036) |
 | 카메라 | 이미지 센서 둘(I2C 0x10 두 곳), AF GT9772B, EEPROM 둘, 플래시 OCP811 | `mediatek,imgsensor` | 범위 밖 |
 | 진동·지문 | `regulator-vibrator`와 Goodix 지문(`mediatek,goodix-fp`, `mediatek,finger-goodix`) 노드가 켜져 있다 | 장치 트리 | MediaTek 참조 보드의 노드가 남은 것일 수 있다. 실물은 기기에서 확인 |
 | 보안 | GenieZone 위의 Trusty·Nebula, Trustonic Kinibi(`trustonic,mobicore`), Microtrust(`microtrust,utos`) 노드가 켜져 있다 | 장치 트리 | buntOS에는 필요 없다 |
@@ -150,6 +150,7 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 
 ## 8. 남은 것
 
+- super의 vendor는 ZIP에서 내려받으면서 풀 수 있다(`.handoff/tb375fc-pogo/wip/super_stream.py`, 5.7GB 스트리밍, 디스크는 고른 파티션만 쓴다). 2026-11-01에 이렇게 `tn_keyboard.ko`와 키보드 HAL을 읽었다. 파티션은 모두 EROFS다
 - super.img의 vendor·vendor_dlkm에서 모듈과 펌웨어 파일을 뽑는다. 목록은 기기에서 읽었다(7절). 파일 자체는 root나 super.img가 필요하다(ADR-012의 재배포 분류). SP Flash Tool readback으로 super를 뜨면 `extract.sh`에 super를 풀어 `vendor/`를 만드는 단계(lpunpack 등)를 더해야 한다.
 - root가 필요한 것(언락 뒤): `getevent -lp`, 살아 있는 트리의 값(framebuffer 주소·크기, pstore·BL31 자리, 메모리 배치), `/proc/iomem`, 파티션 표
 - 12.1절 EL2 판정(2a 첫 부팅)
