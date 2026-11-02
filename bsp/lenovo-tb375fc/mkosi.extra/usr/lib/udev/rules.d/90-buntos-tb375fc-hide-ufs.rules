@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# TB375FC: 내부 저장장치(UFS)를 데스크톱의 저장장치 목록에서 감춘다. UFS에는 buntOS 루트와 함께 안드로이드 슬롯(복귀 길)과
+# nvdata·nvcfg·persist(Wi-Fi MAC·보정값, 잃으면 되살릴 수 없다)가 있다. 전체 이미지에는 udisks2가 들어와(nautilus → gvfs) 이
+# 파티션들이 파일 관리자에 볼륨으로 보이고, 관리자 인증 뒤에는 쓰기 가능으로 붙일 수 있다. ext4인 nvdata·persist는 붙이기만
+# 해도 저널을 되살리며 바뀐다 (docs/tb375fc/bringup-checklist.md 7.1절).
+#
+# - 이름이 아니라 장치로 고른다. 안드로이드 파티션 이름의 전체 목록은 기기에서 fastboot getvar all을 하기 전에는 알 수 없고,
+#   이름으로 막으면 빠진 것이 샌다. UFS 호스트 아래의 모든 LU(디스크)와 파티션이 걸리므로 이름이 무엇이든, 몇 개이든 가려진다.
+#   buntOS 루트도 같은 디스크라서 함께 걸린다. `/`에 붙은 루트는 gvfs가 원래 보이지 않으므로 잃는 것이 없다.
+# - UFS 호스트는 블록 장치의 부모로 알아본다. 둘 중 하나면 된다: 호스트의 커널 드라이버 이름이 ufshcd로 시작하거나
+#   (MediaTek은 ufshcd-mtk, QEMU의 PCI UFS는 ufshcd), 장치 트리 노드 이름이 ufshci인 플랫폼 장치다(mt6897.dtsi의
+#   ufshci@112b0000 → 112b0000.ufshci). USB 저장장치, SD 카드, 가상 디스크의 부모는 이 둘이 아니라서 그대로 보인다.
+# - UDISKS_IGNORE=1은 감춤이다. 막지는 않는다. udisks2는 이것을 Block.HintIgnore 속성으로 알릴 뿐 스스로는 쓰지 않고
+#   (udiskslinuxblock.c), gvfs가 이 속성이 참인 블록의 볼륨을 만들지 않아 파일 관리자에서 사라진다
+#   (gvfsudisks2volumemonitor.c의 should_include_volume). udisksctl이나 D-Bus로 장치를 직접 지목한 붙이기는 막지 않는다.
+#   그것까지 막으려면 polkit 규칙이 따로 필요하다. (확인한 판: udisks2 2.11.2, gvfs 1.62.0)
+# - UDISKS_SYSTEM=1, UDISKS_AUTO=0: UFS의 LU가 이동식(sysfs removable=1)으로 보여도 자동으로 붙이지 않고, 붙일 때 관리자 인증을
+#   요구한다. udisks2는 이동식을 인증 없이 붙이는 장치로 보기 때문이다. removable이 0이면 둘 다 기본값과 같아 아무 일도 하지 않는다.
+# - 건드리지 않는 것: /dev의 노드와 /dev/disk/by-partlabel 같은 링크(진짜 루트에서 nvdata를 ro,noload로 붙일 때 쓴다), 소유자와
+#   모드, 읽기 전용 여부. initramfs에는 udev가 없어 이 규칙이 닿지 않는다. 안드로이드 슬롯을 dd로 굽는 일도 그대로 된다.
+# - 90번: 80-udisks2.rules 뒤에 돌아, 그 규칙이 UDISKS_IGNORE를 되돌리지 못한다.
+
+SUBSYSTEM=="block", DRIVERS=="ufshcd*", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_SYSTEM}="1", ENV{UDISKS_AUTO}="0"
+SUBSYSTEM=="block", SUBSYSTEMS=="platform", KERNELS=="*.ufshci", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_SYSTEM}="1", ENV{UDISKS_AUTO}="0"
