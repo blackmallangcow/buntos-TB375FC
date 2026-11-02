@@ -24,3 +24,12 @@ image/x-icon=org.gnome.Loupe.desktop
 image/vnd.microsoft.icon=org.gnome.Loupe.desktop
 image/apng=org.gnome.Loupe.desktop
 video/webm=org.gnome.Showtime.desktop
+# 설치 파일은 패키지 매니저가 연다. rpm과 snap은 설치하지 못하지만 까닭을 알려 준다
+application/vnd.debian.binary-package=org.buntos.PackageManager.desktop
+application/vnd.appimage=org.buntos.PackageManager.desktop
+application/x-iso9660-appimage=org.buntos.PackageManager.desktop
+application/vnd.flatpak=org.buntos.PackageManager.desktop
+application/vnd.flatpak.ref=org.buntos.PackageManager.desktop
+application/vnd.flatpak.repo=org.buntos.PackageManager.desktop
+application/x-rpm=org.buntos.PackageManager.desktop
+application/vnd.snap=org.buntos.PackageManager.desktop

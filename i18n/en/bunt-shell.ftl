@@ -220,6 +220,19 @@ secret-cancel = Cancel
 secret-join = Join
 # Administrator authentication message (auth-action-…). NetworkManager asks when it saves a Wi-Fi password in a system connection
 auth-action-org-freedesktop-NetworkManager-settings-modify-system = { $app } wants to change network settings for all users.
+# The administrator window's description (auth-action-…). Package Manager and the App Store ask this through PackageKit
+auth-action-org-freedesktop-packagekit-package-install = { $app } wants to install new software.
+auth-action-org-freedesktop-packagekit-package-install-untrusted = { $app } wants to install new unsigned software.
+auth-action-org-freedesktop-packagekit-package-reinstall = { $app } wants to reinstall software.
+auth-action-org-freedesktop-packagekit-package-downgrade = { $app } wants to change software to an earlier version.
+auth-action-org-freedesktop-packagekit-package-remove = { $app } wants to remove software.
+auth-action-org-freedesktop-packagekit-system-update = { $app } wants to update software.
+auth-action-org-freedesktop-packagekit-system-sources-configure = { $app } wants to change software repository settings.
+auth-action-org-freedesktop-Flatpak-configure-remote = { $app } wants to change software repository settings.
+auth-action-org-freedesktop-Flatpak-app-install = { $app } wants to install a new app.
+auth-action-org-freedesktop-Flatpak-runtime-install = { $app } wants to install a runtime that an app needs.
+auth-action-org-freedesktop-Flatpak-app-uninstall = { $app } wants to remove an app.
+auth-action-org-freedesktop-Flatpak-runtime-uninstall = { $app } wants to remove a runtime.
 
 ## Bluetooth pairing dialog (pairing_agent.rs, BlueZ pairing agent), like the macOS pairing request. $name is the device name
 pairing-title = Bluetooth Pairing Request

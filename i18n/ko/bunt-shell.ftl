@@ -217,6 +217,19 @@ secret-cancel = 취소
 secret-join = 연결
 # 관리자 인증 창의 설명(auth-action-…). Wi-Fi 암호를 시스템 연결에 저장할 때 NetworkManager가 묻는다
 auth-action-org-freedesktop-NetworkManager-settings-modify-system = 모든 사용자의 네트워크 설정을 바꾸려고 합니다.
+# 관리자 인증 창의 설명(auth-action-…). 패키지 매니저와 앱 스토어가 PackageKit으로 설치하고 지울 때 묻는다
+auth-action-org-freedesktop-packagekit-package-install = 새로운 소프트웨어를 설치하려고 합니다.
+auth-action-org-freedesktop-packagekit-package-install-untrusted = 서명되지 않은 새로운 소프트웨어를 설치하려고 합니다.
+auth-action-org-freedesktop-packagekit-package-reinstall = 소프트웨어를 다시 설치하려고 합니다.
+auth-action-org-freedesktop-packagekit-package-downgrade = 소프트웨어를 이전 판으로 바꾸려고 합니다.
+auth-action-org-freedesktop-packagekit-package-remove = 소프트웨어를 제거하려고 합니다.
+auth-action-org-freedesktop-packagekit-system-update = 소프트웨어를 업데이트하려고 합니다.
+auth-action-org-freedesktop-packagekit-system-sources-configure = 소프트웨어 저장소 설정을 바꾸려고 합니다.
+auth-action-org-freedesktop-Flatpak-configure-remote = 소프트웨어 저장소 설정을 바꾸려고 합니다.
+auth-action-org-freedesktop-Flatpak-app-install = 새로운 앱을 설치하려고 합니다.
+auth-action-org-freedesktop-Flatpak-runtime-install = 앱에 필요한 런타임을 설치하려고 합니다.
+auth-action-org-freedesktop-Flatpak-app-uninstall = 앱을 제거하려고 합니다.
+auth-action-org-freedesktop-Flatpak-runtime-uninstall = 런타임을 제거하려고 합니다.
 
 ## Bluetooth 페어링 창 (pairing_agent.rs, BlueZ 페어링 에이전트). macOS의 페어링 요청을 따른다. $name은 기기 이름
 pairing-title = Bluetooth 페어링 요청

@@ -25,3 +25,8 @@ theme-name='buntos'
 # 기본 배경화면 (tools/wallpapers/generate.py). 그리는 것은 bunt-shell이다
 picture-uri='file:///usr/share/backgrounds/buntos/buntos-dawn.png'
 picture-uri-dark='file:///usr/share/backgrounds/buntos/buntos-dawn.png'
+
+[org.gnome.software]
+# 앱 스토어(GNOME Software)는 한 번 열면 창을 닫아도 세션 끝까지 뒤에 남는다. 그동안 업데이트를 혼자 내려받지 않는다.
+# 업데이트는 앱 스토어의 업데이트 탭에서 사람이 고른다
+download-updates=false
