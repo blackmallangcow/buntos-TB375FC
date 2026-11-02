@@ -519,7 +519,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 11. [ ] 실제 UFS의 btrfs를 본다. `discard=async`가 저절로 켜진다(QEMU의 마운트 옵션에서 봤다). UFS의 UNMAP과 안드로이드 쪽 영향은 파티션 안이라 없을 것으로 보지만 기기에서 본다.
 12. [ ] 넘어간 뒤의 화면을 본다. simpledrm의 fbcon이 systemd, greetd를 지나도 사는지 본다.
 13. [ ] 워치독을 본다. `mtk_wdt`는 내장이고 넘어가도 커널이 먹인다(`WATCHDOG_HANDLE_BOOT_ENABLED=y`). systemd의 `RuntimeWatchdogSec`을 켜지 않아도 오래 사는지 본다.
-14. [ ] 안드로이드 파티션이 70개쯤일 때 `systemd-udevd`와 `blkid`가 걸리는 시간을 본다.
+14. [ ] 안드로이드 파티션이 70개쯤일 때 `systemd-udevd`와 `blkid`가 걸리는 시간을 본다. UFS를 가리는 규칙(`90-buntos-tb375fc-hide-ufs.rules`)은 부모 사슬만 보고 프로그램을 돌리지 않는다(시간은 재지 않았다).
 15. [ ] 실제 크기의 btrfs 늘리기와 첫 부팅 시간, `systemd-firstboot`(`systemd.firstboot=no`)를 본다. 늘리기는 `systemd-growfs-root.service`이고 파일 시스템만 늘린다.
 16. [ ] pstore를 본다. ramoops 자리를 정한 뒤 `/run/buntos/pstore`와 `systemd-pstore`(`/var/lib/systemd/pstore`)에 남는지 본다.
 17. [ ] 가상화 판별이 `none`인지 본다. `buntos-vm-sleep.service`가 `ConditionVirtualization=vm`이라 기기에서는 돌지 않아야 한다.
@@ -633,11 +633,31 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 
 ### 7.1 준비
 
-1. [ ] 데스크톱 전에 안드로이드 파티션을 가린다. 전체 이미지에는 `udisks2`가 들어온다(`nautilus` → `gvfs`).
+1. [ ] 데스크톱 전에 안드로이드 파티션이 가려졌는지 본다. 전체 이미지에는 `udisks2`가 들어온다(`nautilus` → `gvfs`). 규칙은 `90-buntos-tb375fc-hide-ufs.rules`(이미지의 `/usr/lib/udev/rules.d/`)이고, 파티션 이름이 아니라 UFS 호스트 아래의 모든 블록 장치에 `UDISKS_IGNORE=1`, `UDISKS_SYSTEM=1`, `UDISKS_AUTO=0`을 준다. QEMU에서는 시험했고(`bsp/lenovo-tb375fc/udev/test.sh --root …`) 기기에서만 볼 수 있는 것이 아래다.
 
     > **위험: 데이터 손실.** 내부 디스크는 자동으로 붙지 않지만 파일 관리자에 보이고, 관리자 인증 뒤 쓰기 가능으로 붙을 수 있다. `nvdata`, `persist`는 ext4라 저널을 되살리며 바뀐다.
     >
-    > **먼저 둘 것.** 보드의 udev 규칙으로 UFS의 다른 파티션에 `ENV{UDISKS_IGNORE}="1"`을 준다. UFS 장치 경로의 짝(`DRIVERS`, `KERNELS`)을 기기에서 본 뒤 만든다. UFS LU가 이동식으로 보이지 않는지도 기기에서 본다.
+    > **먼저 둘 것.** 데스크톱(`greetd`)을 켜기 전에 아래 a~d를 본다. 명령줄에 `systemd.unit=multi-user.target`을 주면 데스크톱 없이 올라온다. 숨김은 막는 것이 아니다. 기기의 안드로이드 파티션은 `ro`로도 붙이지 않는다(ext4는 블록 장치가 쓰기 가능이면 읽기 전용 마운트에서도 저널을 되살린다). 붙여 보는 시험은 QEMU에서 했다.
+
+    - a. 규칙이 기대는 두 값을 본다. 하나라도 맞으면 걸리지만, 둘 다 없으면 규칙이 빗나간다.
+
+      ```bash
+      udevadm info -a -n /dev/sda | grep -E 'DRIVERS|KERNELS' | head -n 12
+      ```
+
+      기대: `DRIVERS=="ufshcd-mtk"`와 `KERNELS=="112b0000.ufshci"`(부모 사슬의 위쪽). 순정 안드로이드의 부팅 장치도 `112b0000.ufshci`다(실측 보고서).
+    - b. UFS의 모든 LU(`sda`, `sdb` …)와 파티션에 값이 붙었는지 본다. `fastboot getvar all`의 파티션 목록과 개수가 맞는지도 본다.
+
+      ```bash
+      for d in /sys/class/block/sd*; do n=${d##*/}; echo "$n $(udevadm info -q property -n /dev/$n | grep -E '^UDISKS_(IGNORE|SYSTEM|AUTO)=' | tr '\n' ' ')"; done
+      ```
+
+      기대: 줄마다 `UDISKS_AUTO=0 UDISKS_IGNORE=1 UDISKS_SYSTEM=1`. 비어 있는 줄이 있으면 그 장치의 `udevadm info -a`를 읽는다.
+    - c. LU가 이동식으로 보이는지 본다: `cat /sys/block/sd*/removable`. 1이어도 규칙의 `UDISKS_SYSTEM`·`UDISKS_AUTO`가 인증과 자동 붙임을 막는다. 값만 적어 둔다.
+    - d. udisks2가 속성을 받았는지 본다: `udisksctl info -b /dev/sda3 | grep -E 'Hint(Ignore|System|Auto)'` → `HintAuto: false`, `HintIgnore: true`, `HintSystem: true`.
+    - e. 데스크톱에서 파일 관리자(Nautilus)의 사이드바에 UFS 파티션이 하나도 없고, 파일 선택 창(앱의 열기·저장)의 목록에도 없는지 본다. 규칙을 가린 대조는 기기에서 하지 않는다(안드로이드 파티션이 목록에 나타난다. QEMU 시험이 이 대조를 한다). 주소 표시줄에 `computer:///`를 치면 볼륨 없는 드라이브가 남는 것이 정상이다.
+    - f. USB 메모리는 그대로 보여야 한다. USB 호스트가 되는 8절 6단계 뒤에 꽂아 사이드바에 나타나고 붙는지 본다. `udevadm info -q property -n /dev/sdX1 | grep UDISKS_`는 비어 있어야 한다.
+    - g. 숨김일 뿐 막지 않는다는 것은 소스와 QEMU에서 확인했으므로 기기에서 붙여 보지 않는다.
 
 2. [ ] 터치 펌웨어를 넣는다. 드라이버는 터치를 열 때 루트에서 읽는다(`TOUCHSCREEN_NOVATEK_NVT_SPI=m`).
     - `vendor/firmware/novatek_ts_fw_boe.bin` → `/lib/firmware/lenovo/tb375fc/novatek_ts_fw_boe.bin`
@@ -812,6 +832,8 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
     ```
 
     기대: HS로 붙는다. SS는 PS5170 전까지 안 된다. USB3 장치도 HS로 내려 붙어야 한다(스펙 동작, 기기에서 본다). 안 되면 `mediatek,u3p-dis-msk = <1>`이 후보다.
+
+    데스크톱이 떠 있으면 USB 메모리가 파일 관리자에 보이고 붙는지도 본다. UFS를 가리는 규칙(7.1절 1번)은 USB를 건드리지 않아야 한다.
 4. [ ] 시험 시간은 수십 초로 하고 커넥터 온도를 손으로 본다. 과열 보호가 없다(순정의 `usb_board_ntc` 드라이버가 이 커널에 없다). 게이지(MM8013)를 켰으면 배터리 전류도 본다.
 
 ### 7단계. 끈 뒤

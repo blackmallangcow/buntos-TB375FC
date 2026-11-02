@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.25
+# buntOS TB375FC 포팅 최종 설계안 v1.26
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -26,6 +26,7 @@
 - v1.23(2026-11-02): 2e의 GPU 전원·열·게이지 패치 0070~0079를 더했다. 모두 꺼 둔 노드다. GPUEB는 "오프셋만 다른 변형"이 아니었다: LK가 띄우고 멈추지 않으며(GHPM·클럭·레귤레이터 없음), 공유 메모리는 LK가 `/soc/gpueb`에 적어 주고, OPP는 CMD_COMMIT이다. LVTS는 센서가 16개가 아니라 도메인 넷에 32개이고, 펌웨어가 켜 둔 것을 읽기만 하며, 보정값은 efuse 블록이 아니라 LK가 넘기는 devinfo에 있다.
 - v1.24(2026-11-02): 화면·MDP·코덱의 클럭 게이트를 만들었다(패치 0100~0104, 블록 열하나, 게이트 256). 표가 OEM 소스·스톡 모듈과 맞는다. 이 블록은 전원 도메인이 켜져 있을 때만 답하는데 클럭 노드에 `power-domains`를 달지 않는다: VEN·MDP 도메인은 자기 블록의 게이트를 써서 서로 기다리고, 나머지는 probe가 도메인을 켰다 끄면 MM_INFRA까지 꺼져 LK 화면이 꺼진다. 그래서 게이트에 `.is_enabled`를 두지 않아 클럭 코어가 블록을 읽지 않는다. HW voter 게이트는 벤더 순서로 투표하고, HW voter 한도를 30µs에서 5ms로 올렸다. 노드는 모두 꺼져 있다.
 - v1.25(2026-11-02): MT6685 RTC(패치 0110~0113)를 더했다. 노드는 꺼 두었다. 시간 읽기와 쓰기만 한다. 드라이버는 업스트림 v1을 그대로 쓰지 않고 벤더 판을 따라 새로 썼다: 연도 칸은 1968부터(업스트림 v1은 안드로이드의 2026을 2086으로 읽는다), 읽기에 BBPU 쓰기 없음(2025년 뒤 MediaTek 판), 게이트는 드라이버가 직접. 쓰기는 regmap이 게이트 둘·시간 칸 여섯·트리거로 막는다(칸은 벤더처럼 두 바이트로 쓴다). 알람은 뒤로 미뤘다: `spmi-mtk-pmif`가 SID 이벤트를 체인 처리기에서만 지우므로 직접 요청하면 EINT 248이 계속 울린다. 클럭 버퍼 드라이버는 만들지 않는다: 순정 트리에 소비자가 없고 벤더 `clkbuf`도 디버그용이며(프로브 쓰기 0번, `xo-cmd` 없음), 업스트림 "MT6685 클럭" 시리즈는 XO가 아니라 RTC의 SCK_TOP 게이트 다섯이다. 첫 소비자는 단계 3 오디오의 BBCK5다.
+- v1.26(2026-11-02): UFS의 안드로이드 파티션을 데스크톱에서 가리는 udev 규칙을 만들었다(`bsp/lenovo-tb375fc/mkosi.extra/usr/lib/udev/rules.d/90-buntos-tb375fc-hide-ufs.rules`, 시험은 `bsp/lenovo-tb375fc/udev/test.sh`). 파티션 이름이 아니라 UFS 호스트(드라이버 `ufshcd*` 또는 플랫폼 장치 `*.ufshci`) 아래의 모든 LU와 파티션에 걸어, `fastboot getvar all` 전에도 빠지는 파티션이 없다. 이미지의 udisks2 2.11.2와 gvfs 1.62.0의 소스를 읽어 `UDISKS_IGNORE`가 숨김일 뿐임을 확인했다: gvfs가 그 볼륨을 만들지 않아 파일 관리자에서 사라지지만 udisksctl과 D-Bus의 붙이기는 막히지 않는다. 막으려면 polkit 규칙이 따로 필요한데 지금은 넣지 않았다(11절). `mkinitramfs.sh`가 가끔 SIGPIPE로 죽던 것도 함께 고쳤다. 진짜 커널과 이미지의 udev(systemd 262)로 QEMU에서 UFS(LU 둘)와 USB 메모리를 함께 달아 시험했다. 기기 시험은 없다
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -357,9 +358,10 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
   bsp/lenovo-tb375fc/
     mkosi.conf                  mkosi 보드 프로필 (이미지용 커널 .deb, 파티션별 출력, 개발용 SSH)
     mkosi.postinst.chroot       GPT를 고치는 것 가리기, 파일 시스템 늘리기
-    mkosi.extra/                진짜 루트에 넣는 것 (개발용 USB 길, 프리셋)
+    mkosi.extra/                진짜 루트에 넣는 것 (개발용 USB 길, 프리셋, UFS를 데스크톱에서 가리는 udev 규칙)
     boot/                       boot·vendor_boot·init_boot·dtbo 만들기 (헤더 v4, DT 표)
     initramfs/                  첫 부팅용 initramfs (busybox, 루트로 넘기기, USB 가젯, nvdata), QEMU 시험
+    udev/                       UFS 가리기 규칙의 시험 (규칙 검사, QEMU에서 UFS·USB)
     firmware/                   기기에서 펌웨어와 보정값을 뽑는 스크립트 (파일은 두지 않는다)
   tools/hw/                     펌웨어 받기·풀기 도구
 ```
@@ -372,6 +374,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | 위험 | 영향 | 대응 |
 |---|---|---|
 | 언락 중 벽돌, nvdata 손실 | 개발 중단, Wi-Fi 보정값 잃음 | 예비 1대, go/no-go 넷. SP Flash Tool readback으로 전체 백업을 뜨고 해시로 확인한 뒤에만 언락한다. 복구도 같은 도구와 순정 펌웨어 묶음으로 한다(2.1절) |
+| 내부 디스크가 파일 관리자에 보여 안드로이드 파티션을 붙인다 | nvdata·persist가 바뀌거나 슬롯이 깨짐, 복귀 길을 잃음 | UFS 호스트 아래의 모든 블록 장치에 `UDISKS_IGNORE=1`(규칙 `90-buntos-tb375fc-hide-ufs.rules`). 숨김일 뿐이라 `udisksctl`로 직접 붙이는 길은 polkit 인증만 받으면 열려 있다(11절) |
 | 언락 길이 판에 묶임 | 받은 기기의 판에서 언락이 안 될 수 있다 | 받자마자 OTA를 끄고 판을 적는다. 그 판의 성공 보고를 확인한다. 안 되면 중국판 ZUI 16으로 내릴지 따로 정하고, 그래도 안 되면 buntOS ADR-011(기기 선택)을 다시 본다 |
 | 개발용 LK의 출처를 모름 | 남이 고친 부트로더를 굽는다 | 굽기 전에 순정 LK와 견준다(문자열, 서명 영역). 언락한 뒤에는 바로 순정 LK로 되돌린다 |
 | GenieZone의 EL2 점유 | KVM 불가 | 2a에서 판정(D8). "불가"면 buntOS ADR-011 재검토, gzvm은 미병합이라 나중 |
@@ -446,12 +449,12 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
    - v1.20에 끝낸 것: connsys 전원과 mt76 SoC 변형(패치 0055~0060), Bluetooth 전송(패치 0085·0086). 노드를 켜기 전에는 돌지 않고 기기 시험은 없다. Wi-Fi 벤더 대조의 어긋남 넷은 벤더 표에 없는 MT7921 명령이고 코드 오류가 아니다(`MAC_INIT_CTRL`은 `ip link up`에서 처음 본다). Bluetooth는 벤더 코드와 같은 모델에서 레지스터 쓰기와 링 메모리의 어긋남이 0이다. 켜는 차례는 [체크리스트](bringup-checklist.md) 9.1절과 9.2절이다
    - v1.21에 끝낸 것: MT6375 충전과 TCPC(패치 0090~0097). 켜는 단계는 읽기, 충전, TCPC 싱크, DRP·호스트, PD 다섯이고 앞에서 멈출 수 있다([체크리스트](bringup-checklist.md) 9.3절). 충전 코드는 언락 전에 독립 검토를 한 번 더 받는다(고친 뒤 코드는 다시 검토받지 않았다). 사이클 표를 따라 상한을 올릴지, 절전 중 충전을 어떻게 할지는 기기를 본 뒤 정한다
    - v1.22~v1.25에 끝낸 것: 충전과 Wi-Fi의 독립 재검토 반영(같은 번호), GPU 전원·열·게이지(0070~0079), 화면·MDP·코덱 클럭 게이트(0100~0104), MT6685 RTC(0110~0113). 모두 꺼 둔 노드이고 기기 시험은 없다. 켜는 차례는 [체크리스트](bringup-checklist.md) 6.10절(RTC), 9.3절(충전), 9.4절(GPU·열·게이지)이다. GPU 쪽 커널에 남은 것: `clk_ignore_unused`를 뺄 때 `mfgsc_ref`에도 `CLK_IGNORE_UNUSED`(0013은 `mfg_ref`에만 있다), GPU 쿨링 지도와 `dynamic-power-coefficient`, I/O 코히어런시. 게이지의 충전 전압(`0x30`)은 쓰지 않고 기기에서 읽은 뒤 정한다
+   - v1.26에 끝낸 것: UFS의 안드로이드 파티션 가리기. 전체 이미지에는 `udisks2`가 들어온다(`nautilus` → `gvfs`). 내부 디스크는 자동으로 붙지 않지만 파일 관리자에 보이고, 관리자 인증 뒤 쓰기 가능으로 붙을 수 있다. 규칙(`90-buntos-tb375fc-hide-ufs.rules`)이 UFS 호스트의 모든 블록 장치에 `UDISKS_IGNORE=1`(숨김), `UDISKS_SYSTEM=1`, `UDISKS_AUTO=0`(UFS의 LU가 이동식으로 보여도 인증을 받고 자동으로 붙지 않는다)을 준다. USB 저장장치와 SD 카드는 부모가 달라 걸리지 않는다. buntOS 루트도 같은 디스크라 함께 걸리는데, `/`에 붙은 루트는 gvfs가 어차피 내놓지 않아 잃는 것이 없다. **숨김일 뿐 막지는 않는다**: udisks2는 `UDISKS_IGNORE`를 `Block.HintIgnore` 속성으로 알릴 뿐 스스로 쓰지 않으므로(`udiskslinuxblock.c`), `udisksctl mount`나 D-Bus의 `Mount()`는 polkit 인증(`filesystem-mount-system`, 기본 `auth_admin_keep`)만 받으면 붙는다. 인증 뒤 붙이기까지 막는 polkit 규칙은 지금 넣지 않았다. 실수로 붙이는 길은 숨김으로 닫혔고, 일부러 붙이는 것까지 막을지는 뒤에 정한다(UFS는 늘 `-system` 동작을 고르므로 `org.freedesktop.udisks2.*-system`을 거부하면 되고, QEMU에서 UFS는 거부되고 USB 메모리는 붙었다. root는 polkit이 늘 허용해 못 막는다). `computer:///`에는 볼륨 없는 드라이브가 남는다(Nautilus 사이드바에는 이동식이 아닌 빈 드라이브가 나오지 않는다). 규칙이 기대는 이름(`ufshcd-mtk`, `112b0000.ufshci`)은 QEMU로 닿지 않으므로 기기에서 체크리스트 7.1절 1번으로 보기 전에는 끝난 것이 아니다
 2. **다음(기기 없이, 이 차례로):**
    1. 진행 중(세션): 처리기 없는 SID의 RCS를 지우는 PMIF 고침(0114)
    2. 그다음: 화면 파이프라인(dual-DSI, DSC, MT6897 데이터), 업스트림 제출 준비(MT6363의 확실한 패치 둘은 2026-11-02에 regulator 유지자와 메일링 리스트로 보냈다). 패널의 SGM37604A 둘과 SM5109 드라이버는 기기에서 본 뒤 정한다
-   3. 2c 전에: 안드로이드 파티션을 데스크톱에서 가린다. 전체 이미지에는 `udisks2`가 들어온다(`nautilus` → `gvfs`). 내부 디스크는 자동으로 붙지 않지만 파일 관리자에 보이고, 관리자 인증 뒤 쓰기 가능으로 붙을 수 있다. udev 규칙의 `UDISKS_IGNORE=1`로 가린다
-   4. 출시 전에: 개발용 USB 길을 이미지에서 빼는 프로필, initramfs의 암호 없는 셸을 없애거나 막는 길, 공통 레시피의 `Autologin=yes`
-   5. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)
+   3. 출시 전에: 개발용 USB 길을 이미지에서 빼는 프로필, initramfs의 암호 없는 셸을 없애거나 막는 길, 공통 레시피의 `Autologin=yes`
+   4. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)
       - USB 호스트: 사용자 기기의 차지 펌프는 UPM6720 @0x65다(2026-11-01 adb, `/sys/bus/i2c/drivers/upm6720/10-0065`. NU2115에는 붙은 장치가 없다). 부품이 다른 기기가 있을 수 있어 `i2cdetect -r`로 다시 본 뒤 그 노드를 켠다. 시험 차례는 [체크리스트](bringup-checklist.md) 8절
 3. **기기:** 차례와 명령은 [bring-up 체크리스트](bringup-checklist.md)에 모았다. 사용자의 TB375FC는 중국판 ZUXOS 1.5.10.044(Android 16)다(2026-11-01). 이 판에서 바로 언락한 보고는 없으니, 16.0.20.091로 내린 뒤 언락하는 길을 쓴다(2.1절). 예비 기기를 살 때는 ZUI 16 기기가 낫다.
 4. **언락 전(지금 할 수 있는 것):**

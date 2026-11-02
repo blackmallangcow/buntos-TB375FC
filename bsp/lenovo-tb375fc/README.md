@@ -8,7 +8,8 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `boot/test.sh` | 넷을 만들어 다시 풀고 넣은 것과 바이트를 견준다. 원래 이미지가 있으면 머리 필드도 견준다(`check_images.py`) |
 | `initramfs/` | busybox initramfs. 화면·UART에 셸을 띄우고, 직전 부팅의 pstore 기록을 떠 둔다. 명령줄에 `root=`가 있으면 그 파티션으로 넘어간다(`switch_root`). 못 넘어가면 까닭을 남기고 USB 가젯(ACM + NCM, 기기 172.16.42.1) 셸로 남아 nvdata·nvcfg·persist를 읽기 전용으로 붙인다 |
 | `initramfs/test.sh` | 루트 전환을 QEMU virt에서 시험한다. 쪽 4096바이트 GPT 디스크, 넘어가지 못하는 경우 열아홉 가지, `--root`를 주면 systemd·가젯·SSH까지 본다. 시험 이미지 설정은 `initramfs/test-image/` |
-| `mkosi.extra/` | 진짜 루트에 넣는 것: 개발용 USB 길(가젯 스크립트, 서비스 셋), 프리셋, 파일 시스템 늘리기 설정 |
+| `mkosi.extra/` | 진짜 루트에 넣는 것: 개발용 USB 길(가젯 스크립트, 서비스 셋), 프리셋, 파일 시스템 늘리기 설정, UFS를 데스크톱에서 가리는 udev 규칙(`usr/lib/udev/rules.d/90-buntos-tb375fc-hide-ufs.rules`) |
+| `udev/test.sh` | UFS 가리기 규칙을 시험한다. 인자 없이 돌면 몇 초 만에 `udevadm verify`와 규칙 검사(UDISKS_* 말고는 정하지 않는지, 규칙이 기대는 장치 트리 노드·드라이버 이름이 소스에 있는지)를 본다. `--root`를 주면 QEMU virt에서 UFS(LU 둘, 4096바이트 쪽 GPT에 안드로이드를 흉내 낸 파티션과 buntOS 루트)와 USB 메모리를 함께 달아 initramfs로 루트에 넘어간 뒤, 진짜 udev가 UFS에만 값을 붙이는지, `/dev/disk/by-partlabel`·nvdata `ro,noload` 붙이기·슬롯 굽기가 그대로인지, 이미지에 udisks2가 있으면 gvfs가 UFS 볼륨을 내놓지 않는지까지 본다 |
 | `mkosi.postinst.chroot` | systemd-repart와 gpt-auto 생성기를 가리고, 파일 시스템 늘리기를 켠다. 이 기기에서는 GPT를 고치면 안 된다 |
 | `firmware/` | 기기에서 받은 원천(파티션 백업, vendor 파일)에서 펌웨어와 보정값을 고른다(`manifest.tsv`). 뽑은 파일은 저장소에 넣지 않는다 |
 | `mkosi.conf` | mkosi 보드 프로필(`tools/image/build.sh lenovo-tb375fc`). Debian 커널 대신 `kernel/tb375fc/build.sh image`가 만든 커널 .deb를 넣고, 루트 파티션 파일과 UKI에서 꺼낸 커널·initrd를 따로 낸다 |
@@ -60,6 +61,13 @@ systemd까지 보려면 작은 시험 이미지를 만들어 `--root`로 준다(
 limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'O=~/buntos-build/tb375fc/initramfs-verify/mkosi-out && mkosi -C bsp/lenovo-tb375fc/initramfs/test-image --include="$PWD/bsp/lenovo-tb375fc" --output-directory=$O -f build && bsp/lenovo-tb375fc/initramfs/test.sh --root $O/buntos.root-arm64.raw'
 ```
 
+7. UFS 가리기 규칙 시험: 규칙 검사는 몇 초면 된다. `--root`를 주면 QEMU에서 UFS와 USB 메모리를 달아 본다(빌드 디스크를 1GB 안팎 쓰고, 끝나면 기록만 남긴다. 호스트가 한가하면 3~4분이다). 6번의 작은 시험 이미지나 전체 이미지의 루트 파티션 파일을 줄 수 있다. 보드 프로필(`--include`)로 만든 것이어야 규칙이 들어 있다. 이미지에 udisks2·gvfs·dbus가 있으면 gvfs와 udisksctl 시험도 한다.
+
+   ```bash
+   limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'bsp/lenovo-tb375fc/udev/test.sh'
+   limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'bsp/lenovo-tb375fc/udev/test.sh --root <루트 파티션 파일>'
+   ```
+
 ## 이미지
 
 buntOS 이미지는 공통 레시피(`image/`)에 이 폴더의 `mkosi.conf`를 얹어 만든다.
@@ -72,6 +80,7 @@ buntOS 이미지는 공통 레시피(`image/`)에 이 폴더의 `mkosi.conf`를 
 - LK로 띄울 때는 루트 파티션(`buntos.root-arm64.raw`)만 기기에 굽는다. 부트 이미지는 같은 커널 꾸러미의 Image·장치 트리·모듈로 `boot/mkimages.sh`가 만든다(꾸러미를 `dpkg-deb -x`로 풀어 `--kernel`, `--dtb`, `mkinitramfs.sh --modules`에 준다).
 - 이 기기의 UFS에는 안드로이드 파티션이 함께 있다. 공통 레시피는 처음 켤 때 `systemd-repart`로 GPT를 고쳐 루트를 늘리는데, 보드 프로필은 이것을 가린다(`mkosi.postinst.chroot`). GPT 형식 GUID로 파티션을 붙이는 `systemd-gpt-auto-generator`도 가린다. EFI가 아니어도 도는 생성기다. 작게 구운 btrfs는 `systemd-growfs-root.service`로 파일 시스템만 파티션 끝까지 늘린다. initramfs도 넘어가기 전에 `/run`에서 같은 것을 가리므로, 다른 보드의 이미지를 잘못 구워도 GPT를 고치지 않는다.
 - 공통 레시피와 달리 `systemctl disable`은 듣지 않는다. mkosi가 설치 뒤 스크립트 다음에 `preset-all`을 돌려 되살린다. 그래서 켜고 끄는 것은 프리셋(`mkosi.extra/usr/lib/systemd/system-preset/`)으로 정한다.
+- UFS의 안드로이드 파티션과 nvdata는 데스크톱에서 가린다. 전체 이미지에는 udisks2가 들어와(nautilus → gvfs) 가리지 않으면 파일 관리자에 볼륨으로 보인다. `mkosi.extra/usr/lib/udev/rules.d/90-buntos-tb375fc-hide-ufs.rules`가 UFS 호스트 아래의 모든 블록 장치(buntOS 루트 포함)에 `UDISKS_IGNORE=1`을 준다. 이름 목록이 아니라 장치로 고르므로 파티션 이름을 몰라도 빠지지 않고, USB 저장장치는 그대로 보인다. 숨김일 뿐이다: udisksctl로 직접 붙이는 일은 막지 않는다(polkit이 따로 필요). `/dev/disk/by-partlabel` 링크, nvdata를 `ro,noload`로 붙이는 길, 슬롯 굽기에는 영향이 없다.
 
 ## 루트로 넘기기
 
