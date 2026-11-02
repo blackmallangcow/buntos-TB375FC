@@ -52,8 +52,8 @@ again on the way down either.
 
 The reset work starts over for a firmware that comes up and then stops
 answering, with a power cycle and a calibration each time. That ends after
-twenty restarts in ten minutes, with the WF part off. Removal has to wait
-for the work, so it ends the tries too.
+twenty restarts, each less than ten minutes after the last, with the WF
+part off. Removal has to wait for the work, so it ends the tries too.
 
 A page held by a socket keeps its place in the DMA window, so sockets can
 fill it up. Refills then fail, and they only happen in NAPI, which a ring
@@ -71,16 +71,21 @@ on, which the vendor driver does when it has no backup), runtime power
 management and system sleep, so no wake on WLAN either, the notice to the
 modem of the power state and the second interrupt, the assert notice.
 
+The debugfs switch of runtime power management is in the common code, so
+it needs to do no harm. Its .fw_own gives up nothing, a reset clears the
+state bit, which would leave all replies to a wake work that waits for
+that reset, and removal disables its works as well.
+
 All steps are logged, as a wrong one can hang the bus without a word.
 None of this has run on hardware.
 ---
  .../net/wireless/mediatek/mt76/mt7921/Kconfig |   14 +
  .../wireless/mediatek/mt76/mt7921/Makefile    |    2 +
- .../net/wireless/mediatek/mt76/mt7921/soc.c   | 1360 +++++++++++++++++
+ .../net/wireless/mediatek/mt76/mt7921/soc.c   | 1374 +++++++++++++++++
  .../net/wireless/mediatek/mt76/mt7921/soc.h   |   68 +
  .../wireless/mediatek/mt76/mt7921/soc_dma.c   |  294 ++++
  .../wireless/mediatek/mt76/mt7921/soc_mcu.c   |  495 ++++++
- 6 files changed, 2233 insertions(+)
+ 6 files changed, 2247 insertions(+)
 
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/Kconfig b/drivers/net/wireless/mediatek/mt76/mt7921/Kconfig
 index 37b5f46..bf814c5 100644
@@ -127,10 +132,10 @@ index 3ef7c9c..d60822a 100644
  mt7921u-y := usb.o
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
 new file mode 100644
-index 0000000..a662ea0
+index 0000000..412f19b
 --- /dev/null
 +++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
-@@ -0,0 +1,1360 @@
+@@ -0,0 +1,1374 @@
 +// SPDX-License-Identifier: BSD-3-Clause-Clear
 +/*
 + * The MT7921 on the SoC bus: the Wi-Fi of the MT6897 connsys ("soc7_0").
@@ -266,9 +271,10 @@ index 0000000..a662ea0
 +/*
 + * A firmware that comes up to stop answering again gets this many chances. The
 + * reset work takes up to 10 of them in one go, and that leaves one more go.
++ * This long without a restart gives them all back.
 + */
 +#define MT_SOC_RESTART_MAX		20
-+#define MT_SOC_RESTART_WINDOW		(10 * 60 * HZ)
++#define MT_SOC_RESTART_CALM		(10 * 60 * HZ)
 +
 +#define MT_SOC_RX_RETRY_DELAY		(HZ / 10)
 +
@@ -913,7 +919,9 @@ index 0000000..a662ea0
 +/*
 + * A firmware that comes up and then doesn't answer has the reset work start
 + * over after all its tries, for good: a power cycle and a calibration every few
-+ * seconds. Removal has to wait for that work, so it ends the tries too.
++ * seconds, or every minute or two for one that lasts a while each time. So it
++ * is the time since the last one that counts and not how many fit in some
++ * period. Removal has to wait for that work, so it ends the tries too.
 + */
 +static bool mt7921_soc_may_restart(struct mt792x_dev *dev)
 +{
@@ -922,18 +930,17 @@ index 0000000..a662ea0
 +	if (READ_ONCE(soc->removing))
 +		return false;
 +
-+	if (time_after(jiffies, soc->restart_window + MT_SOC_RESTART_WINDOW)) {
-+		soc->restart_window = jiffies;
++	if (time_after(jiffies, soc->last_restart + MT_SOC_RESTART_CALM))
 +		soc->restarts = 0;
-+	}
 +
 +	if (soc->restarts < MT_SOC_RESTART_MAX) {
 +		soc->restarts++;
++		soc->last_restart = jiffies;
 +		return true;
 +	}
 +
 +	dev_err_ratelimited(dev->mt76.dev,
-+			    "no more WF restarts: %d in 10 minutes\n",
++			    "no more WF restarts: %d, under 10 minutes apart\n",
 +			    MT_SOC_RESTART_MAX);
 +
 +	return false;
@@ -973,6 +980,13 @@ index 0000000..a662ea0
 +	bool powered = READ_ONCE(mt7921_soc_of(dev)->wf_on);
 +	bool owned = powered;
 +	int i, err;
++
++	/*
++	 * With this set the NAPI leaves all replies to the wake work, which has
++	 * to wait for this work on the same queue. And here it stands for
++	 * nothing in the hardware: .fw_own doesn't give up the ownership.
++	 */
++	clear_bit(MT76_STATE_PM, &dev->mphy.state);
 +
 +	if (powered) {
 +		mt7921_soc_force_host_csr_irq(dev);
@@ -1314,7 +1328,6 @@ index 0000000..a662ea0
 +	soc->connsys = connsys;
 +	soc->irq = irq;
 +	soc->infra = infra;
-+	soc->restart_window = jiffies;
 +	timer_setup(&soc->rx_retry, mt7921_soc_rx_retry, 0);
 +
 +	ret = mt7921_soc_parse_fem(soc, d);
@@ -1446,8 +1459,14 @@ index 0000000..a662ea0
 +	timer_shutdown_sync(&dev->phy.roc_timer);
 +	skb_queue_purge(&dev->phy.scan_event_list);
 +	skb_queue_purge(&dev->coredump.msg_list);
-+	cancel_delayed_work_sync(&pm->ps_work);
-+	cancel_work_sync(&pm->wake_work);
++
++	/*
++	 * Not before .stop, which can need them. The TX NAPI and worker stay
++	 * until the DMA cleanup below and would start them again, and ps_work
++	 * goes by a timer.
++	 */
++	disable_delayed_work_sync(&pm->ps_work);
++	disable_work_sync(&pm->wake_work);
 +
 +	mt76_connac2_tx_token_put(&dev->mt76);
 +
@@ -1493,7 +1512,7 @@ index 0000000..a662ea0
 +MODULE_LICENSE("Dual BSD/GPL");
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
 new file mode 100644
-index 0000000..f1c892c
+index 0000000..c6a501e
 --- /dev/null
 +++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
 @@ -0,0 +1,68 @@
@@ -1535,8 +1554,8 @@ index 0000000..f1c892c
 +	struct mt76_queue_regs ring_scratch;
 +	/* Rings short of window memory hear of nothing that would fill them */
 +	struct timer_list rx_retry;
-+	/* Restarts of the WF part so far in this window of time */
-+	unsigned long restart_window;
++	/* Restarts of the WF part in a row, and when the last one was */
++	unsigned long last_restart;
 +	unsigned int restarts;
 +	bool removing;
 +	int irq;
