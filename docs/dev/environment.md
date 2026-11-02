@@ -67,12 +67,13 @@ VM 안에서 다음을 확인한다.
 limactl shell buntos-dev tools/image/build.sh qemu-aarch64
 ```
 
-e2e 1번(부팅 → 로그인 화면 → 셸), e2e 5번(에이전트의 앱 간 제어), e2e 6번(키보드 단축키), e2e 4번(한글 입력), e2e 7번(화면 잠금)을 이 차례로 한 부팅에서 돌린다.
+e2e 1번(부팅 → 로그인 화면 → 셸), e2e 8번(데스크탑 항목), e2e 5번(에이전트의 앱 간 제어), e2e 6번(키보드 단축키), e2e 4번(한글 입력), e2e 7번(화면 잠금), e2e 9번(패키지 매니저)을 이 차례로 한 부팅에서 돌린다.
 - 시험 계정을 자격 증명으로 넘겨 부팅하고, 로그인 화면에 QMP로 암호를 쳐 들어간 뒤 sudo가 암호를 묻는지 보고, 에이전트로 그래픽 셸을 확인한 다음 e2e 5번(`tests/e2e/agent-apps.sh`)을 돌린다.
 - e2e 6번은 QMP로 단축키를 넣고 게스트 쪽 도우미(`tests/e2e/shortcuts.sh`)로 결과를 읽는다.
 - e2e 4번은 QMP로 2벌식 자판의 키를 쳐(`dkssud` → 안녕) fcitx5가 조합하게 하고, 게스트 쪽 도우미(`tests/e2e/hangul.sh`)가 앱의 글(에이전트), 입력기 상태(`fcitx5-remote`, fcitx5 D-Bus `DebugInfo`), 메뉴 막대의 입력 소스 표시, 터미널(foot)의 cat이 받은 바이트를 읽는다. 텍스트 편집기, 시스템 설정, foot, Firefox(새 프로필)를 쓴다.
 - e2e 7번은 QMP로 ⌃⌘Q를 넣어 화면을 잠그고 잠금 화면에 암호를 쳐 푼다. 게스트 쪽 도우미(`tests/e2e/session-lock.sh`)가 컴포지터 API(`GetLocked`)와 저널로 잠김과 에이전트 거절을 읽는다.
-- 자체 컴포넌트를 넣지 않은 이미지(그래픽 세션이 없는 지금의 x86-64)에서는 e2e 8·5·6·4·7번을 건너뛴다.
+- e2e 9번은 게스트에서 작은 `.deb`와 AppImage를 만들어(`tests/e2e/packages.sh`) 패키지 매니저로 설치, 실행, 제거한다. 인증 창의 암호는 QMP로 친다. 맨 끝에 돈다.
+- 자체 컴포넌트를 넣지 않은 이미지(그래픽 세션이 없는 지금의 x86-64)에서는 e2e 8·5·6·4·7·9번을 건너뛴다.
 
 ```bash
 limactl shell buntos-dev tests/e2e/boot-to-shell.sh qemu-aarch64
@@ -137,6 +138,28 @@ x86-64는 보드 이름만 `x86_64-generic`으로 바꾸면 된다. Apple Silico
 - mkosi는 `setup.sh`에 고정한 판이고, mkosi가 부르는 이미지 도구(systemd, systemd-repart·ukify, bootctl, mkfs, QEMU, OVMF)는 빌드 VM과 같은 Debian 13의 도구 트리에서 쓴다(`tools/image/tools-tree.sh`, `build.sh`의 `BUNTOS_TOOLS_TREE`). 두 스크립트는 docker가 있는 Linux에서 쓴다.
 - e2e가 실패하면 직렬 콘솔, 게스트 저널, 그때의 화면이 아티팩트(`e2e-x86_64-generic`)로 남는다. 로컬에서도 `E2E_LOG_DIR=디렉터리`를 주면 같은 기록(`console.log`, `journal.log`, 실패하면 `screen.png`)을 남긴다.
 - CI에서 드러난 x86-64 문제는 `BOARD=x86_64-generic tools/image/vmctl.sh start`로 화면을 보며 재현한다(q35 기계와 OVMF. Apple Silicon에서는 TCG라 느리다).
+
+### 디스크가 빠듯할 때
+
+전체 이미지는 작업 트리(5~6GB), mkfs가 만드는 복사본과 임시 btrfs, 최종 이미지가 한꺼번에 있어 빌드 중에 맥 디스크를 14GB 넘게 늘린다. 맥 여유가 그만큼 없으면 레시피에서 펌웨어만 뺀 이미지를 메모리 위에서 만든다(2026-11-03, 빌드 1분 40초, 메모리 3.6GB, 맥 디스크 2.3GB). 저장소의 레시피는 그대로 두고 복사본을 고친다.
+
+1. 저장소를 `~/buntos-build/<이름>/tree`로 복사한다(`tar`로 수정 시각을 그대로 옮긴다).
+2. 복사본의 `image/mkosi.conf.d/40-drivers.conf`에서 `firmware-*`, `bluez-firmware`, `[Distribution]` 묶음을 지운다.
+3. 복사본의 `image/mkosi.repart/10-root.conf`에서 `Minimize=guess`를 `SizeMinBytes=7G`와 `SizeMaxBytes=7G`로 바꾼다. mkfs를 한 번만 돌리고, 이미지는 쓴 만큼만 차지하는 성긴 파일이 된다.
+4. 작업 공간을 메모리 위의 btrfs로 둔다. reflink로 복사본이 자리를 차지하지 않고 압축으로 트리가 3GB 아래가 된다.
+
+   ```bash
+   sudo mount -t tmpfs -o size=6500M tmpfs "$ram"
+   truncate -s 24G "$ram/ws.img" && sudo mkfs.btrfs -q "$ram/ws.img"
+   sudo mount -o loop,compress-force=zstd:1,noatime,discard=sync "$ram/ws.img" "$ws"
+   sudo chown "$(id -u):$(id -g)" "$ws"
+   ```
+
+   복사본의 `image/mkosi.conf.d/99-test.conf`에 `[Build]`과 `WorkspaceDirectory=$ws`를 적는다.
+5. `CARGO_TARGET_DIR=<새 디렉터리> CARGO_PROFILE_RELEASE_DEBUG=0 BUNTOS_IMAGE_DIR=<출력> tree/tools/image/build.sh qemu-aarch64`로 빌드한다. 자체 컴포넌트 전체가 2분 22초, 대상 디렉터리 982MB다(디버그 정보를 뺐다).
+6. 시험 VM의 덮어쓰기도 메모리에 둔다: `BUNTOS_BUILD_DIR=<tmpfs> VMCTL_ID=<이름> BUNTOS_IMAGE_DIR=<출력> VMCTL_QEMU_ARGS="-m 2560M" tree/tools/image/vmctl.sh start`. 4.4GB tmpfs면 Flatpak 런타임 하나(GNOME Platform 약 1.2GB + Mesa 확장)까지 시험할 수 있다. 차면 QEMU가 멈추므로 멈춘 VM은 버리고 다시 띄운다.
+
+`mkosi vm`을 쓰는 e2e는 덮어쓰기를 `/tmp`(tmpfs)에 둔다. 같은 이미지로 그대로 돈다(`BUNTOS_IMAGE_DIR=<출력> tree/tests/e2e/boot-to-shell.sh qemu-aarch64`).
 
 ### 그래픽 세션 보기
 
@@ -343,6 +366,7 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 경고음과 시동음 arm64 (11-01) | 직접 합성한 buntOS 사운드 테마(`tools/sounds/generate.py`, 빌드 VM에서 5초)와 로그인 화면의 시동음을 넣어 이미지를 빌드했다(2분 30초, 6.0G). fmt, 작업 공간 clippy(경고 0), bunt-sound·bunt-settings·bunt-greeter 시험 통과.<br>- 이미지: `/usr/share/sounds/buntos`에 index.theme와 WAV 여덟 개가 있고, root와 `_greetd`의 `theme-name`이 `'buntos'`다. 로그인 화면이 뜨자 `/run/bunt-greeter/startup-sound-played`(`_greetd` 소유)가 생기고 7ms 뒤 `ready (login)`이 찍혔다. 계정 만들기 서비스(buntd-setup)는 여전히 GTK·GIO를 링크하지 않는다<br>- 소리: `vmctl.sh`의 사본을 `-audiodev wav`로 띄워 게스트가 낸 소리를 녹음했다(QEMU는 스트림이 열린 동안만 쓴다). 시동음 3.7초(가장 큰 값 −25.4 dBFS: 원본 −1.5에 로그인 화면 사용자의 출력 음량 40%의 −23.9dB), 시스템 설정에서 고른 종 1.85초(−35.0 dBFS: 경고음 음량 0.75의 세제곱과 출력 음량)가 한 번씩이고, 로그아웃해 다시 뜬 로그인 화면에서는 소리가 없었다(표시 파일 시각이 그대로)<br>- 시스템 설정: 사운드 페이지의 경고음이 "차임"이고, 펼친 목록이 차임, 물방울, 종, 오름, 반짝, 둥, 핑이다. 종을 고르면 `alert-sound`가 `'bell'`이 된다<br>- e2e 1·8·5·6·4·7번 통과(처음 시도): 로그인 화면 16초, 로그인 19초, 그래픽 셸 19초, e2e 8번 10개(34초), 5번 28개(131초), 6번 19개(169초), 4번 25개(233초), 7번 8개(249초), 전원 꺼짐까지 251초 |
 | 사운드 문구 arm64 (11-01) | 사운드 페이지 문구를 이 Mac(macOS 27.0.1)의 시스템 설정 > 사운드 한국어 문구(`/System/Library/ExtensionKit/Extensions/Sound.appex`의 `Localizable.loctable`, `plutil -p`로 읽는다)에 맞춰 이미지를 빌드했다(2분 21초). fmt, bunt-settings·bunt-shell clippy(경고 0)와 시험 통과.<br>- 시험 VM: 사운드 페이지에 `slider "알림 음량"`, `checkbox "소리 끔"`, `slider "밸런스"`, 설명 "경고음, 출력 기기와 입력 기기, 음량을 정합니다."가 보였다. 메뉴 막대 사운드 메뉴의 단추도 `button "소리 끔"`이다<br>- e2e 1·8·5·6·4·7번 통과(처음 시도). Mac이 바빠 느렸다: 로그인 화면 16초, 그래픽 셸 21초, e2e 8번 10개(36초), 5번 28개(468초), 6번 19개(507초), 4번 25개(602초), 7번 8개(617초), 전원 꺼짐까지 619초(앞 줄은 251초) |
 | 알림 센터 카드 테두리 arm64 (11-01) | 사람이 Mac 창 VM에서 알린 것(알림 센터 카드의 테두리가 잘림, 머리 줄 "알림 센터"가 흐림)을 시험 VM에서 재현했다. 흰 배경화면(`gsettings`로 흰 PNG)에서 QMP 화면을 찍어 픽셀을 보니 카드의 위·옆 1px 테두리와 그림자가 스크롤 영역 경계(x=922, y=72) 바깥에서 모두 흰색(255)이었다.<br>- 고친 셸을 빌드 VM의 HTTP로 넣어 다시 로그인해 확인했다: 카드 테두리가 위쪽까지 이어지고 그림자가 보인다. 제목은 800 굵기에 진한 윤곽으로 흰 배경에서도 읽히고, 기본 배경화면에서도 또렷하다. 셸 clippy(경고 0)와 시험 95개 통과, 이미지 빌드 2분 52초<br>- e2e는 돌리지 않았다: 처음 돌린 것은 Mac 부하(5.5)로 e2e 5번의 Firefox 단계가 접근성 요청에 3초 안에 답하지 못하는 일을 되풀이하다 전체 제한(1200초)에 걸렸고(8번까지 통과), 제한을 늘려 다시 돌린 것은 사람의 결정으로 멈췄다(UI만 바꾼 것이라 다음 변경과 함께 돌린다) |
+| 패키지 매니저 arm64 (11-03) | 맥 여유 14GB라 펌웨어를 뺀 시험 이미지로 확인했다(4장 "디스크가 빠듯할 때": 빌드 1분 30초~1분 50초, 메모리 3.6GB, 맥 디스크 2.3GB). arm64 QEMU에서 e2e 1·8·5·6·4·7·9번을 한 부팅에서 통과했다(9번 24개, 전원 꺼짐까지 220초). x86-64는 돌리지 않았다. 손으로 VS Code·`gnome-sudoku`·Obsidian·Flathub 앱을 설치, 실행, 제거했다(설계안 11장). 전체 이미지와 x86-64는 확인하지 않았다. 이 e2e는 밀려 있던 196fdd8(알림 센터 카드)도 함께 덮는다 |
 | 확인하지 않은 것 | 사용자가 쓰는 Mac 창 VM에서의 새 배너와 깜빡임 수정(시험 VM에서만 봤다). GTK3 앱(Firefox)의 신호등과 foot·Chromium 계열이 그리는 창 단추. 실제 GPU에서의 창 그림 뜨기와 앱 전환 창이 뜨는 데 걸리는 시간(시험 VM이 바빠 처음 뜰 때 1초 넘게 걸렸다). 타이머(5초, 10초)와 데스크탑·문서·클립보드 저장 위치. 미리 보기를 끌어서 다른 앱에 놓기. 밝게만 봤다(어둡게의 앱 전환 창, 도구 막대, 회색 신호등). Chromium 계열의 접근성 트리. Chromium·Electron 앱에서의 화면 밖 요소와 휠 스크롤(시험은 Firefox와 GTK4 앱으로 했다). Mac 창에 보이는 커서의 모양과 자리(QMP 화면 캡처에는 커서 평면이 나오지 않는다). 실제 USB·Bluetooth 마우스의 이름·연결 방식과 이동 속도·자연스러운 스크롤·보조 클릭(QEMU에는 가상 태블릿뿐이고 절대 좌표 장치에는 가속이 없다). `tools/devvm/buntos-dev.yaml`의 컨테이너 런타임 끄기 설정(검증한 VM은 그 설정을 넣기 전에 만들었다). Bluetooth 연결·페어링, 배터리 표시, 화면 밝기, 실제 Wi-Fi 칩(QEMU에 장치가 없다). 실제 앱이 보낸 알림(시험 알림만 썼다)과 nm-applet 밖의 실제 앱 항목(10-31에 nm-applet으로 봤다). 분수 배율의 실제 HiDPI 화면(QEMU 화면은 약 100ppi라 기본 배율은 늘 100%다). Mac 창(view-mac.sh)에서 사람이 조작한 배율 변경. 클립보드로 낸 스크린샷(⌃⇧⌘3·⌃⇧⌘4)을 붙여넣는 앱(이미지를 받는 앱이 이미지에 없다). Mac 창의 `--full-grab`(QEMU에 손쉬운 사용 권한이 필요해 사람이 확인한다)과 실제 Mac·PC 키보드의 ⌘. Firefox에서의 ⌘ 단축키와 글 입력 판단(시험은 텍스트 편집기, 시스템 설정, foot으로 했다). 여러 화면과 회전한 화면의 스크린샷. 합친 이미지(10-30)에서 보지 않은 것: GPU 경로(virgl `VMCTL_GPU=virgl`, 하드웨어 GPU), 흐림 위에 겹친 불투명한 창과 창을 옮길 때의 컴포지터 CPU, 화면 둘, Bluetooth 페어링(QEMU에 장치가 없다. Bumble 가상 컨트롤러로 볼 수 있다), 잠자기 전후의 잠금, 5번 틀린 뒤 기다리기, 사운드의 균형과 입력 레벨, 앱별 알림 시트의 설정. Mac 스피커로 들은 시동음과 경고음(11-01에는 시험 VM에서 녹음해 파형으로만 봤다), 실기기 스피커에서의 크기 |
 
 ## 7. 알려진 문제
@@ -439,3 +463,9 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | root 콘솔에서 `sudo -u buntos python3 mcp-check.py`로 띄운 MCP 시험이 "mcp-check.py is not allowed to control this computer"로 거절되고 AI 접근 요청 창이 뜸 | 데몬은 소켓에 붙은 `bunt`에서 위로 올라가며 AI 클라이언트를 찾고, root가 `bunt`를 직접(또는 sudo 같은 감싼 프로그램으로) 부를 때만 관리자로 본다. 사용자로 띄운 스크립트는 사람이 허용할 AI다(설계대로) | 시험에서는 `bunt-access-helper add-client '이름' "$(readlink -f /usr/bin/python3)" /tmp/mcp-check.py`로 더하고 끝나면 `remove-client`. AI 접근 요청 창은 키보드를 가져가지 않으므로 QMP Esc가 닿지 않는다. [거부]를 누른다. 창이 떠 있는 동안은 에이전트의 창 활성화도 거절된다 |
 | `bunt agent repl`이 시험 VM의 Firefox에서 "the code ran past its time limit (30000 ms)" | 호출의 기본 시간 상한은 30초인데, 바쁜 Mac의 시험 VM에서 Firefox가 file:// 페이지를 여는 데 1분 가까이 걸린다 | `bunt agent repl --timeout 120000`으로 늘린다(최대 120초) |
 | e2e 5번 끝에 확인을 더하자 e2e 6번의 ⌘⇥ 확인 셋이 실패(시스템 설정 대신 계산기로 감) | e2e 6번의 ⌘⇥는 e2e 5번이 남긴 앱 차례(마지막이 시스템 설정, 계산기와 Firefox는 닫힘)를 쓴다. 끝에 넣은 REPL 확인이 계산기를 다시 열어 가장 최근 앱이 되었다 | e2e 5번에 앱을 여는 확인을 더할 때는 그 앱이 원래 떠 있는 자리(계산기는 닫기 전)에 두거나 끝나기 전에 닫는다(2026-10-31) |
+| 받은 앱을 시험 VM에서 띄웠는데 PackageKit이 `uid 1000 failed to obtain auth`로 곧바로 거절함(인증 창 없음, 목록 갱신도) | root 콘솔에서 `sudo -u buntos`로 띄운 프로세스는 root의 콘솔 세션에 든다. polkit은 지금 쓰는 자리의 세션만 `allow_active`로 본다 | 시험에서는 `sudo -u buntos env WAYLAND_DISPLAY=wayland-1 … systemd-run --user --quiet --scope <명령>`으로 사용자 관리자의 범위에 넣는다(`tests/e2e/packages.sh`의 `session`). 파일 앱, Dock, `bunt agent launch`로 뜬 앱은 문제없다 |
+| `systemd-run --user gio open 파일`로 열었는데 앱이 뜨지 않음 | 서비스로 띄우면 `gio`가 끝날 때 그 cgroup의 자식(앱)도 함께 끝난다 | `--scope`로 띄운다. 그러면 호출한 쪽의 환경을 받으므로 `WAYLAND_DISPLAY`, `LANG`을 함께 준다 |
+| 파일 앱에서 연 패키지 매니저가 Debian 게임의 `.desktop`을 읽지 못함("cannot open …", 아이콘도 없음) | GIO는 Exec의 프로그램이 PATH에 없는 항목을 없는 앱으로 친다. 셸의 PATH(`/etc/profile`)에는 `/usr/games`가 있지만 systemd 사용자 관리자의 PATH에는 없었다 | `image/mkosi.extra/usr/lib/environment.d/70-buntos-games.conf`로 더했다(2026-11-03) |
+| Flatpak 경로가 XDG_DATA_DIRS에 두 번 들어감 | greetd가 세션 전에 `/etc/profile`을 읽어 `flatpak.sh`가 이미 더한다. 세션 스크립트에서 또 더했다 | 세션 스크립트에서 뺐다. 더할 필요가 없다 |
+| 작업 공간을 메모리나 압축 btrfs에 두고 이미지를 만들면 `mkfs.btrfs`가 "Short write … Input/output error"로 실패 | 메모리는 트리가 복사본까지 두 벌 들어가 찼고, 압축 btrfs는 `Minimize=guess`가 블록 수로 잰 크기가 작게 나온다 | 시험 이미지는 `Minimize=guess` 대신 고정 크기로 만든다(아래 "디스크가 빠듯할 때") |
+| 앱 스토어를 닫아도 `gnome-software`가 남음(약 190MB) | GNOME Software의 동작이다. `--gapplication-service`가 아니어도 창만 숨긴다 | 그대로 둔다. 세션을 끝내면 사라진다(ARCHITECTURE 5.5) |

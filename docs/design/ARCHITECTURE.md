@@ -1,8 +1,9 @@
-# buntOS 설계안 v0.7.0
+# buntOS 설계안 v0.8.0
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
 - 개정 이력
+  - v0.8.0 (2026-11-03): 앱 설치를 더했다(ADR-014). 5.5절(패키지 매니저 `bunt-packages`, 앱 스토어 GNOME Software와 Flathub, 파일 연결, 권한)을 새로 쓰고, 3장, 5.2절, 6.5절, 9.2절(e2e 9번), 10장, 11장(결과와 다음 작업 13번), 13장에 반영했다
   - v0.7.0 (2026-11-01): 제품 라인을 나눴다(1.1절, 사람이 결정). 이 저장소는 x86-64·arm64 데스크톱 라인(GPU 가속)이고, 태블릿은 arm64를 포크해 기기마다 최적화하는 라인이다. TB375FC는 첫 태블릿 포크 `buntos-TB375FC`로 옮겼다. 1장, 3장, 4.1·4.2절, 9.3·9.4절, 10장, 11장의 로드맵·진행 상황·다음 작업, 12장, 13장을 고쳤다
   - v0.6.20 (2026-11-01): 4.2절과 4.2.1절(위험 4, 7), 11장에 TB375FC 포팅 설계를 반영했다. 포팅 재료(같은 SoC 태블릿의 OEM GPL 소스, 이 기기의 커뮤니티 mainline 포트)를 찾았고 Wi-Fi(connsys soc7_0, MT7921 계열)를 확인했다. 최종 설계안은 별도 작업 공간 `buntos-TB375FC`의 DESIGN.md다
   - v0.6.19 (2026-11-01): 4.2절, 11장, 12장에 TB375FC 중국판 펌웨어와 글로벌판의 장치 트리를 견줘 같은 하드웨어임을 확인한 것을 적었다(ADR-011의 글로벌판 동일성)
@@ -140,7 +141,7 @@
 |   - 렌더러: GLES(EGL) | pixman(소프트웨어 폴백)                              |
 +--------------------------------------------------------------------------+
 |  시스템 서비스: systemd, PipeWire, NetworkManager, fcitx5, Secret Service,  |
-|  podman, systemd-oomd, zram, snapper(btrfs)                                |
+|  PackageKit, Flatpak, podman, systemd-oomd, zram, snapper(btrfs)           |
 +--------------------------------------------------------------------------+
 |  Debian 사용자 공간 (glibc) -- 양 아키텍처 동일                              |
 +--------------------------------------+-----------------------------------+
@@ -298,6 +299,8 @@ Phase 2의 종료 조건은 2a~2d다(11장). 2e는 Phase 4·5의 실기기 판�
 | `bunt-comp` | Rust, Smithay | 창 관리, 애니메이션, 제스처, 다중 seat, 신뢰 레이어. 창 목록·창 조작 프로토콜(wlr-foreign-toplevel)은 컴포지터가 직접 띄운 셸에게만, 입력기 프로토콜(input-method-v2, virtual-keyboard)은 직접 띄운 입력기(fcitx5)에게만, 화면 키보드 프로토콜(`bunt_osk_v1`)은 직접 띄운 셸에게만 연다. 앱에는 text-input-v3를 준다. 시스템 설정과 셸이 쓰는 제어 API(D-Bus `org.buntos.Compositor1`: 화면 모드·배율, 키 반복, 마우스와 연결된 포인터 장치, 막대 자동 가리기, 키보드 단축키, 입력 모드)를 낸다. 셸의 메뉴 막대와 Dock을 macOS의 WindowServer처럼 숨기고 꺼낸다. 키보드 단축키(5.3절), 창 최소화·가리기, 스크린샷을 맡는다. 창이 없는 곳을 누르면 키보드를 받는 아래 층 레이어(셸의 데스크탑 항목 창)에 포커스를 주고, 팝업 메뉴가 닫히면 메뉴를 연 표면이 키보드를 받을 수 있을 때 그리로 돌려준다. 터치 화면(wl_touch)을 받는다: 손가락마다 그 아래의 표면에 보내고, 앱이 손가락으로 청한 창 옮기기·크기 조절과 ⇧⌘4·⇧⌘5의 고르기를 손가락으로 받으며, 가장자리에서 밀어 숨은 메뉴 막대·Dock을 꺼낸다(제스처로 잡은 손가락은 앱에서 거둔다, wl_touch.cancel). 화면 키보드가 보이면 창 자리를 키보드 위까지로 줄이고, 아래 가장자리 밀기는 Dock으로 보지 않는다. 화면 잠금(ext-session-lock-v1), 로그아웃, 응용 프로그램 강제 종료와 logind 연동을 맡는다(5.4절) |
 | `bunt-shell` | Rust, 레이어 셸 클라이언트. v0은 GTK4 + gtk4-layer-shell로 만들었고 ADR-001의 GTK4 시제품을 겸한다 | 메뉴바, 메뉴 막대 항목(입력 소스, 사운드, 배터리·전원 모드, Wi-Fi, Bluetooth, 앱의 StatusNotifierItem), 제어 센터, Dock, 모든 앱 패널, 알림, 배경화면, 화면 키보드 창(`bunt-osk`), 데스크탑 항목(데스크탑 폴더의 파일과 폴더, 드래그해 여러 항목 선택, [디자인 스펙](DESIGN-SPEC.md) 8장). 로고 메뉴(macOS의 Apple 메뉴 순서)와 로그아웃 확인 창, 응용 프로그램 강제 종료 창(5.4절). 시스템 서비스가 사람에게 묻는 세션 쪽 도우미(polkit 인증 에이전트, NetworkManager 비밀 에이전트, BlueZ 페어링 에이전트)와 그 창(관리자 인증, Wi-Fi 암호, Bluetooth 페어링, 6.5절). 메뉴바의 앱 메뉴는 앱이 D-Bus로 내보내는 동작(GAction)과 창 목록 프로토콜로 만든다. GNOME 앱처럼 창 안의 메뉴를 밖으로 내보내지 않는 앱은 그 메뉴를 옮길 수 없다 |
 | `bunt-settings` | Rust, 시스템 앱. v0은 ADR-001 잠정안대로 libadwaita 없이 GTK4와 자체 CSS로 만들었고, GTK4 시제품을 겸한다 | 시스템 설정. macOS 26 시스템 설정의 구성(검색 사이드바, 묶음 상자)을 따른다. Wi-Fi, Bluetooth, 네트워크, 배터리, 화면 모드, 메뉴 막대, 데스크탑 및 Dock, 배경화면, 디스플레이, 알림(GNOME과 같은 앱별 GSettings), 사운드(PipeWire·WirePlumber, 셸과 같은 `bunt-sound` 크레이트), 키보드, 마우스, 언어, 날짜와 시간, 기본 앱, AI 에이전트(6.5절), 사용자 및 그룹(AccountsService로 이름·사진, passwd로 암호), 정보 |
+| `bunt-packages` | Rust, GTK4(시스템 설정과 같이 libadwaita 없이 자체 CSS) | 패키지 매니저. 받은 설치 파일(.deb, AppImage, Flatpak)의 설치 창과 설치한 것의 목록 창(5.5절, [디자인 스펙](DESIGN-SPEC.md) 16장) |
+| 앱 스토어 | Debian GNOME Software와 Flatpak·deb 플러그인 | 앱을 찾아 설치하고 업데이트한다. Flathub는 이미지가 넣는다. 모든 앱에는 "앱 스토어"로 보인다(5.5절) |
 | 로그인 관리자 | Debian greetd + `bunt-greeter`(Rust, GTK4) | greetd가 VT1에 로그인 화면을 로그인 화면 사용자(`_greetd`)로 띄운다. 로그인 화면은 로그인 화면용 설정(`/etc/buntos/greeter.toml`)의 `bunt-comp` 위에서 셸로 뜨고, 로그인해 셸이 끝나면 컴포지터도 끝난다(`[session] exit-with-shell`). macOS 로그인 창처럼 흐린 배경화면, 시각, 사진, 이름, 암호 칸이 있고, 정규 계정이 없으면 macOS 설정 지원처럼 계정을 만든다. 로그인은 greetd IPC(PAM)로 하고, 같은 VT에서 사용자 세션을 연다. 부팅 뒤 처음 뜨면 시동음(buntOS 사운드 테마의 system-ready)을 한 번 낸다 |
 | 잠금 화면 `bunt-lock` | Rust, GTK4 + gtk4-layer-shell 1.2 이상의 세션 잠금 API(`greeter/` 크레이트의 둘째 실행 파일) | 컴포지터가 화면을 잠근 뒤 그 사용자로 띄운다. 로그인 화면과 같은 모양(흐린 배경화면, 날짜와 큰 시각, 사진, 별칭, 암호 칸)이고, 암호를 PAM 서비스 `bunt-lock`(`common-auth`)으로 확인한다(5.4절) |
 | `buntd-setup` | Rust, 시스템 버스 서비스 `org.buntos.Setup1`(버스 활성화) | 정규 계정이 없을 때만 관리자 계정을 만든다(useradd, chpasswd). root와 로그인 화면 사용자만 부른다. 시험·개발 VM은 부팅 때 systemd 자격 증명 `buntos.account`로 같은 코드를 거쳐 계정을 미리 만든다 |
@@ -362,6 +365,30 @@ macOS 26의 화면 잠금(⌃⌘Q), 로그아웃(⇧⌘Q), 응용 프로그램 �
 - 셸 전용 메서드(`LogOut`, `GetApps`, `ForceQuit`)는 컴포지터가 띄운 셸 프로세스(pid)만 부른다. `Lock`과 `GetLocked`(신호 `LockedChanged`)는 세션의 누구나 부른다.
 - 셸이 끝나면 컴포지터도 끝나는 설정(`[session] exit-with-shell`): 로그인 화면이 쓴다. 로그인하면 bunt-greeter가 끝나고 컴포지터가 따라 끝나 greetd가 사용자 세션을 연다. 전에는 로그인 화면의 `greeter-shell` 스크립트가 컴포지터에 SIGTERM을 보냈다.
 - 빠른 사용자 전환은 하지 않았다. greetd는 VT 하나에서 로그인 화면과 사용자 세션을 차례로 띄우고, 세션이 떠 있는 동안 다른 로그인 화면을 띄우는 길이 없다. 하려면 세션마다 VT를 따로 쓰고(logind의 `SwitchTo`나 VT 전환), 잠긴 세션에서 새 로그인 화면을 띄우는 관리자가 있어야 한다(GDM의 방식).
+
+### 5.5 앱 설치: 패키지 매니저와 앱 스토어
+
+인터넷에서 받은 설치 파일을 터미널 없이 설치하고 지운다(ADR-014). 받은 파일은 패키지 매니저(`bunt-packages`, `packages/`)가 맡고, 앱을 찾아 받는 일은 앱 스토어(GNOME Software + Flathub)가 맡는다. 화면은 [디자인 스펙](DESIGN-SPEC.md) 16장에 있다.
+
+| 형식 | 설치 | 권한 | 제거 |
+|---|---|---|---|
+| `.deb` | PackageKit `InstallFiles`. apt가 의존성을 푼다 | 관리자 인증(`package-install-untrusted`) | `RemovePackages`(기대는 패키지와, 이것 때문에 들어온 의존성까지). 관리자 인증(`package-remove`) |
+| AppImage (2형, squashfs) | `unsquashfs -o <오프셋>`으로 `~/Applications/<이름>`에 풀고 `~/.local/share/applications`에 `.desktop`을 쓴다 | 없음 (이 사용자의 폴더) | 폴더와 `.desktop`을 지운다 |
+| `.flatpak`, `.flatpakref` | `flatpak install -y --system`. 표준 사용자와, 시스템 설치본에 넣지 못한 것(번들, 새 저장소의 `.flatpakref`는 원격을 더해야 하는데 `-y`가 인증 창을 띄우지 못한다)은 `--user` | 관리자는 flatpak의 polkit 규칙으로 암호 없음. `--user`는 인증 없음 | `flatpak uninstall`과 `--unused`(이제 쓰지 않는 런타임) |
+| `.flatpakrepo` | `flatpak remote-add --if-not-exists` | 관리자 인증(flatpak의 `configure-remote`) | 패키지 매니저에는 지우는 길이 없다 |
+| `.rpm`, `.snap`, 그 밖 | 하지 않는다 | | 설치할 수 없는 까닭과 다른 판을 찾으라는 안내를 보인다 |
+
+- **형식은 내용으로 안다**(`packages/src/package.rs`): deb의 ar 머리, ELF의 `AI` 표시, 키 파일의 머리글. 확장자가 `.deb`여도 내용이 다르면 설치 파일이 아니다. 다른 아키텍처(`.deb`의 Architecture, AppImage 런타임의 e_machine, 번들의 ref)는 설치 단추 대신 까닭을 보인다.
+- **창을 띄워 보여 주기 전에는 받은 코드를 실행하지 않는다.** `.deb`는 `dpkg-deb --field`와 `--fsys-tarfile`의 tar 흐름을 메모리에서 읽어 `.desktop`과 아이콘만 꺼낸다(디스크에 풀지 않으므로 안의 경로와 링크가 무엇을 가리켜도 상관없다, 항목마다 4MB 상한). AppImage는 ELF 머리로 squashfs의 자리를 찾아 `unsquashfs -cat`으로 읽는다. 번들은 파일 끝의 GVariant 프레이밍 값으로 메타데이터 사전만 읽는다.
+- **의존성은 암호를 묻기 전에 본다.** `.deb`를 열면 apt 목록이 없거나 하루가 지났으면 받고(`RefreshCache`, 인증 없음), `InstallFiles`의 `SIMULATE`로 함께 설치·업데이트·제거될 패키지를 창에 보인다. 풀 수 없으면 그 까닭으로 끝난다.
+- **이미 설치되었으면**(`dpkg --compare-versions`) 주 단추가 업데이트, 다시 설치(`ALLOW_REINSTALL`), 이 버전으로 바꾸기(`ALLOW_DOWNGRADE`)가 되고 [제거…]가 나온다.
+- **목록 창에는 사용자가 고른 것만 있다.** 설치된 패키지에서 이미지에 든 것(`/usr/share/buntos/base-packages`, `mkosi.postinst.chroot`가 만든다)과 자동 설치 표시(`/var/lib/apt/extended_states`)를 뺀다. 그래서 다른 곳(앱 스토어, `apt`)에서 넣은 것도 보이고, 시스템의 일부는 지우지 못한다. 이미지 목록이 없는 시스템에서는 패키지를 하나도 보이지 않는다. 지우기 전에 미리 해 보아 함께 지워질 것을 보이고, 이미지의 패키지가 끼면 자동 제거를 빼고 다시 본 뒤에도 끼면 지우지 않는다.
+- **AppImage를 푸는 까닭**: 옛 런타임은 `libfuse.so.2`를 찾는데 Debian forky에 그 라이브러리가 없다(ADR-014). 푼 앱은 `env APPDIR=<폴더> <폴더>/AppRun`으로 뜬다(AppImage 런타임이 주던 APPDIR). `.desktop`은 받은 항목에서 이름, 설명, 분류, MimeType, StartupWMClass 같은 키만 옮기고 Exec의 프로그램은 AppRun으로 바꾼다. 같은 이름의 폴더나 항목이 사용자 것이면 덮어쓰지 않고 다른 이름을 쓴다. 옛 판은 새 판을 다 푼 뒤에 바꾼다. 1형과 DwarFS AppImage는 받은 프로그램을 실행해야 풀 수 있어 받지 않는다.
+- **파일 연결**: `image/mkosi.extra/usr/share/applications/mimeapps.list`가 위 형식의 기본 앱을 `org.buntos.PackageManager.desktop`으로 정한다. 파일 앱, 데스크탑 항목, Firefox가 모두 GIO로 연다. 시스템 설정의 기본 앱 페이지에 "설치 파일" 행이 있다. 앱은 GApplication이라 이미 떠 있으면 새 파일은 떠 있는 앱의 새 창으로 열린다.
+- **세션 환경**: greetd가 세션을 열 때 `/etc/profile`을 읽어 flatpak의 `/etc/profile.d/flatpak.sh`가 `XDG_DATA_DIRS`에 Flatpak 내보내기 경로를 더한다. systemd 사용자 관리자는 flatpak의 환경 생성기로 같은 값을 받는다. 그래서 설치한 Flatpak 앱이 모든 앱과 `bunt agent apps --installed`에 보인다. GIO는 Exec의 프로그램이 PATH에 없는 항목을 없는 앱으로 치는데 사용자 관리자의 PATH에 `/usr/games`가 없어, `/usr/lib/environment.d/70-buntos-games.conf`로 더한다.
+- **앱을 열 때**: Flathub와 GNOME의 앱은 D-Bus로 뜨는 것이 많다(`DBusActivatable`). 뜨는 사이에 부른 쪽이 세션 버스를 떠나면 dbus-daemon이 실행 요청을 버려 앱이 창 없이 떴다가 사라진다. 그래서 [열기]를 누르면 창은 바로 닫고 프로세스는 앱이 답할 때까지(GDBus 기본 25초) 남는다(`packages/src/ui.rs`의 `launch_app`).
+- **앱 스토어**: `gnome-software`와 `-plugin-deb`, `-plugin-flatpak`. fwupd 플러그인(Recommends)은 넣지 않는다. Flathub는 이미지를 만들 때 `flatpak remote-add`로 넣고(저장소 파일 `/usr/share/buntos/flathub.flatpakrepo`, Flathub가 내는 파일 그대로), 지우면 다시 생기지 않는다. 이름은 `/usr/local/share/applications/org.gnome.Software.desktop`이 바꾼다. 세션이 XDG 자동 시작을 돌리지 않으므로 앱을 열기 전에는 메모리를 쓰지 않는다. 한 번 열면 창을 닫아도 세션이 끝날 때까지 약 190MB로 남는다(GNOME Software의 동작). 그동안 업데이트를 혼자 내려받지 않게 `download-updates=false`로 둔다.
+- **apt 저장소**: mkosi는 이미지의 sources에 스냅숏을 적지 않으므로 설치한 시스템의 apt는 live forky(`deb.debian.org`)를 본다. 목록은 약 200MB이고 `deb-src`와 `-debug`가 그 가운데 절반쯤이다. 앱 스토어와 .deb 설치가 받은 패키지는 이미지보다 새 판일 수 있다. Debian 기본값대로 Recommends도 함께 설치한다(이미지가 Recommends 없이 만들어져 2.4MB인 `gnome-sudoku`가 yelp 등 패키지 141개를 더 끌어왔다).
 
 ---
 
@@ -650,6 +677,8 @@ v0 구현 (2026-10-29, 접근 정책):
   - 세션의 polkit 인증 에이전트는 bunt-shell이다(macOS 인증 창 모양, [디자인 스펙](DESIGN-SPEC.md)).
   - polkit 128은 `polkit-agent-helper-1`을 setuid 없이 소켓 활성화(`/run/polkit/agent-helper.socket`)로 root로 띄운다. 인증 에이전트는 그 소켓에 사용자 이름과 쿠키를 쓰고 PAM 물음에 답한다.
   - 에이전트는 인증 창을 읽지도 조작하지도 못한다(6.3절).
+  - 패키지 설치(5.5절): `.deb`를 넣고 지우는 PackageKit 동작은 매번 관리자 암호를 묻는다. PackageKit 기본값의 `auth_admin_keep`(`package-install`, `package-reinstall`, `package-eula-accept`, `system-sources-configure`)을 `/usr/share/polkit-1/rules.d/49-buntos-packagekit.rules`가 `auth_admin`으로 바꾼다. 까닭은 접근 정책과 같다: 인증한 뒤 몇 분 동안 같은 세션의 허용받은 AI가 남은 인증을 쓸 수 있다. 에이전트는 패키지 매니저의 단추를 누를 수 있지만 그 뒤의 인증 창에 답하지 못한다.
+    - 한계: Debian의 규칙이 sudo 그룹의 시스템 업데이트(`system-update`)와 flatpak의 설치·제거를 암호 없이 허용한다. Debian 저장소의 서명된 업데이트와 샌드박스 앱이고, flatpak은 `--user`로 어차피 인증 없이 설치되므로 그대로 둔다. AppImage는 이 사용자의 폴더에 풀 뿐이라 묻지 않는다. 같은 사용자의 프로그램이 할 수 있는 일을 넘지 않는다.
   - 화면 잠금(5.4절): 잠긴 동안 에이전트는 아무것도 읽거나 하지 못하고, 잠금 화면도 읽지 못한다. 잠금을 푸는 길은 사람이 잠금 화면에 친 암호뿐이다. 컴포지터 API에 잠금 해제 메서드가 없다.
   - Wi-Fi 암호와 Bluetooth PIN·확인 번호도 사람만 답한다. 세션의 NetworkManager 비밀 에이전트(`shell/src/secret_agent.rs`)와 BlueZ 기본 페어링 에이전트(`shell/src/pairing_agent.rs`, 능력 KeyboardDisplay)가 bunt-shell이다.
     - 창은 인증 창과 같은 틀이고 레이어 이름이 `bunt-secret-agent`, `bunt-pairing-agent`다. 컴포지터(`comp/src/agent.rs`의 `AUTH_NAMESPACES`)와 buntd-agent(`agent/src/atspi.rs`의 `HUMAN_ONLY_WINDOWS`)가 같은 목록으로 이 창들을 막는다. 컴포지터는 이 이름의 레이어 표면을 `GetLayers`에 알리지 않고, `ClickLayer`는 이 이름이면 창이 떠 있지 않아도 거절한다.
@@ -787,6 +816,7 @@ v0 구현 (2026-10-29, 접근 정책):
     - 만들며 찾아 고친 것: 조합 중 다른 창을 누르면 글자가 사라졌다(컴포지터가 키보드 포커스를 옮기기 직전에 확정한다). 터미널에서 조합 중 Enter를 누르면 가끔 마지막 글자가 줄바꿈 뒤로 갔다(입력기의 commit serial이 어긋나면 smithay가 앱에 done(0)을 보내고 foot은 그 done을 버린다. 늘 글 입력의 serial로 보낸다). 왼쪽 Shift만 눌렀다 떼면 영문으로 바뀌었다(fcitx5 기본 단축키 AltTriggerKeys를 끈다). GTK4 앱의 창 안에서 다른 칸을 누르면 조합하던 글자가 사라지는 것은 GTK의 동작이라 남았다([개발 환경](../dev/environment.md) 7장)
   - e2e 7번(2026-10-30, `tests/e2e/session-lock.sh`)은 e2e 4번에 이어 돈다. QMP로 ⌃⌘Q를 넣어 잠그고, 잠금 화면이 뜨는지(`GetLocked`, 저널의 `bunt-lock: ready`), 잠긴 동안 에이전트의 스냅샷과 앱 목록이 거절되는지, 틀린 암호로는 풀리지 않는지, 잠금 화면에 QMP로 친 암호로 풀리는지, 풀린 뒤 에이전트가 다시 읽는지 본다. 잠금은 사람의 암호로만 풀리므로 시험도 그 길로만 푼다. 잠그기 전에는 VM에서 logind가 잠자기를 받지 않고(CanSuspend no) 셸의 잠자기 동작이 꺼졌는지(셸이 D-Bus로 내보내는 `org.gtk.Actions`) 본다(2026-10-30 밤부터, 5.4절)
   - e2e 8번(2026-10-31, 데스크탑 항목, `tests/e2e/desktop.sh`)은 e2e 1번 바로 뒤, 앱 창이 데스크탑을 가리기 전에 돈다. 데스크탑 폴더에 파일 넷과 폴더 하나를 만들어 셸이 이름 차례로 보이는지 보고, QMP로 누르기·드래그·키를 넣어 고르기, 데스크탑의 키보드 포커스, 드래그해 여러 항목 선택, ⌘A·Esc, 단축 메뉴의 새로운 폴더와 이름 변경, ⌘⌫ 휴지통, 항목 보기 끄고 켜기를 본다. 결과는 에이전트(목록 항목과 selected 상태)와 데스크탑 폴더로 읽는다. 단축 메뉴 뒤 이름 변경은 컴포지터가 메뉴를 닫은 뒤 키보드를 돌려주는지도 본다
+  - e2e 9번(2026-11-03, 패키지 매니저, `tests/e2e/packages.sh`)은 e2e 7번 뒤, 맨 끝에 돈다. 게스트에서 의존성 없는 작은 `.deb`와 AppImage를 만들어 형식의 기본 앱이 패키지 매니저인지 보고, GIO로 열어(파일 앱에서 두 번 누른 것과 같은 길) 설치, 실행, 목록 창에서 제거까지 한다. 창은 에이전트로 읽고 누르고, `.deb`의 관리자 인증 창은 사람만 답하므로 암호를 QMP로 친다. 처음 열 때 apt 목록을 받지만 인터넷이 없어도 통과한다
   - 시나리오는 드라이버에 독립적인 형식(단계 = {동작, 기대값})으로 작성하고, Phase 3에는 드라이버만 교체한다
 - 시나리오 예 (워크플로우 단위):
   1. 부팅 → 로그인 → 셸 표시
@@ -795,6 +825,7 @@ v0 구현 (2026-10-29, 접근 정책):
   4. 한국어 입력: 텍스트 필드에 한글 조합 입력 후 값 검증
   5. 에이전트가 앱 A의 값을 읽어 앱 B에 입력 (앱 간 제어)
   6. 에이전트가 `sensitive` 동작 시도 → 승인 UI 표시 → 에이전트 seat로 승인 불가 확인
+  9. 받은 설치 파일을 열어 설치 → 실행 → 목록에서 제거 (패키지 매니저)
 
 ### 9.3 실기기
 
@@ -806,7 +837,7 @@ v0 구현 (2026-10-29, 접근 정책):
 ### 9.4 CI 구성 (ADR-010)
 
 - 저장소: GitHub 공개 저장소 [`blackmallangcow/buntOS`](https://github.com/blackmallangcow/buntOS). 실기기(TB375FC) 시험을 마친 뒤 공개하기로 했으며(2026-10-30 결정. 제품 라인을 나눈 뒤 다시 정한다, 11장 다음 작업 11번), 그 전까지는 비공개로 두고 aarch64 빌드·e2e는 로컬 개발 VM(`tools/devvm/`)에서 돌린다(arm64 호스티드 러너 무료 제공은 공개 저장소 한정)
-- x86-64 e2e: GitHub 호스티드 Linux 러너(`ubuntu-26.04`, 비공개 저장소는 2코어)에서 KVM 가속으로 전체 시나리오(e2e 1·8·5·6·4·7번. 8번은 2026-10-31에 더해 x86-64에서는 아직 돌리지 않았다)를 돌린다(`.github/workflows/x86-64.yml`, 2026-10-31). 자체 컴포넌트는 이미지와 같은 Debian 스냅숏의 컨테이너에서, 이미지는 빌드 VM과 같은 Debian 13의 도구 트리로 만들어 로컬과 같은 판의 도구를 쓴다. 작업 하나가 15~19분이라 비공개 저장소의 Actions 시간 때문에 main에서는 손으로 돌린다(하루 한 번 돌릴지는 정하지 않았다)
+- x86-64 e2e: GitHub 호스티드 Linux 러너(`ubuntu-26.04`, 비공개 저장소는 2코어)에서 KVM 가속으로 전체 시나리오(e2e 1·8·5·6·4·7·9번. 8번과 9번은 2026-10-31, 2026-11-03에 더해 x86-64에서는 아직 돌리지 않았다)를 돌린다(`.github/workflows/x86-64.yml`, 2026-10-31). 자체 컴포넌트는 이미지와 같은 Debian 스냅숏의 컨테이너에서, 이미지는 빌드 VM과 같은 Debian 13의 도구 트리로 만들어 로컬과 같은 판의 도구를 쓴다. 작업 하나가 15~19분이라 비공개 저장소의 Actions 시간 때문에 main에서는 손으로 돌린다(하루 한 번 돌릴지는 정하지 않았다)
 - aarch64 e2e: Phase 0 첫 주에 호스티드 arm64 러너(`ubuntu-24.04-arm`)의 `/dev/kvm` 유무를 확인해 둘 중 하나로 확정한다
   - KVM 있음: 호스티드 arm64 러너에서 전체 시나리오
   - KVM 없음: PR에서는 TCG로 핵심 시나리오를 돌린다. 가속이 필요한 전체 시나리오는 리뷰를 마친 코드에 한해 메인테이너의 Apple Silicon Mac에서 실행하고(비공개 미러 저장소의 self-hosted 러너 또는 로컬 실행), 그 결과를 병합 전 확인 항목으로 둔다(9.1)
@@ -833,6 +864,7 @@ buntOS/
   comp/                   bunt-comp (Rust)
   shell/                  bunt-shell (Rust)
   settings/               bunt-settings, 시스템 설정 앱 (Rust)
+  packages/               bunt-packages, 패키지 매니저 (Rust)
   agent/                  buntd-agent, bunt CLI, MCP 어댑터 (Rust)
   i18n/                   Fluent 리소스 (ko, en)와 이를 읽는 공용 크레이트 bunt-i18n
   policy/                 기본 권한/전원/메모리 정책 TOML
@@ -1093,6 +1125,25 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
   - 포크에는 커널 커스텀(Linux 7.2.12와 보드 설정 조각, 패치 대기열. 판 `7.2.12-tb375fc`), 업스트림 꼴 장치 트리, 부트 이미지 넷과 첫 부팅 initramfs 도구가 있다. 기기 없이 이미지 시험 21개와 QEMU 맛보기를 통과했다.
   - 오픈소스 조사(부트 체인, 커뮤니티 포트, SoC 기반, 업스트림 진행, Wi-Fi)를 포크 설계안에 적었다. Wi-Fi·BT 펌웨어는 LK가 싣고, UFS·USB에는 전원 도메인이 없다. 언락 전 백업과 복구는 SP Flash Tool과 순정 펌웨어 묶음의 인증 DA로 하는 길이 있다(포럼 보고).
 
+- 패키지 매니저와 앱 스토어 (2026-11-03, ADR-014, 5.5절): 사람이 "받은 설치 파일을 커맨드 없이 설치하고, 앱스토어 같은 것도 넣어라"라고 요청했다. 자체 앱 `bunt-packages`와 GNOME Software + Flathub를 넣었다.
+  - 구조: 형식 판별과 읽기(`packages/src/package.rs`), PackageKit D-Bus(`packagekit.rs`), flatpak 명령(`flatpak.rs`), AppImage 풀기(`appimage.rs`), 목록과 제거(`installed.rs`), 설치 창(`installer.rs`), 목록 창(`manager.rs`). 단위 시험 33개.
+  - 이미지: `image/mkosi.conf.d/35-packages.conf`(꾸러미 18개가 더해지고 설치 크기 약 37MB, 다른 앱과 함께 쓰는 라이브러리는 빼고 잰 값), mimeapps.list, Flathub, 앱 스토어 이름, polkit 규칙, 사용자 PATH. Dock의 시스템 설정 앞에 앱 스토어를 놓았다.
+  - 시험 VM(arm64 KVM, 펌웨어를 뺀 시험 이미지)에서 실제로 해 본 것:
+    - `.deb`: 파일 앱에서 두 번 눌러 인증, 설치, [열기], 목록에서 제거까지. 받은 파일은 작은 시험 패키지, Debian의 `gnome-sudoku`(의존성 141개, 40초), Microsoft의 VS Code arm64(228MB, 의존성 63개, 42초, 창까지 확인, 제거하면 이미지의 패키지 711개로 돌아왔다). 업데이트, 다시 설치, 이전 버전으로 바꾸기, 창에서 제거.
+    - AppImage: 시험 파일과 Obsidian 1.14.5 arm64(옛 런타임, 140MB가 365MB로 풀린다. 창까지 확인). 암호 없이 설치, 제거.
+    - Flatpak: `.flatpakref`(Flathub의 GNOME Mines, 런타임 포함 약 1분 30초, 파일 앱에서 두 번 눌러 설치하고 [열기]로 창까지 확인, 목록에서 지우면 런타임도 지워진다), 직접 만든 `.flatpak` 번들(런타임까지 사용자 설치본에, 샌드박스에서 실행), `.flatpakrepo`(Flathub Beta, 관리자 인증).
+    - 앱 스토어: 처음 열면 Flathub와 Debian 카탈로그를 받아 13~45초 뒤에 뜬다. 찾기, Color Picker(Flatpak) 암호 없이 설치, ⌘스페이스로 찾아 실행(로그아웃 없이 모든 앱에 나온다), 패키지 매니저 목록에 보이고 지우면 런타임도 지워진다.
+    - 여는 길: 파일 앱 두 번 누르기, 데스크탑 항목 두 번 누르기, Firefox의 다운로드 패널, 창에 끌어다 놓기, [설치 파일 열기…].
+    - 안 되는 파일: 다른 아키텍처(`.deb`, AppImage), 풀 수 없는 의존성, 깨진 `.deb`, rpm, 깨진 `.flatpak`. 모두 까닭을 보이고 닫기만 남는다.
+    - 어둡게, 영어, 125% 배율, 터치 모드(단추 44px), Return·Esc, 인증 창 닫기.
+    - 설치 창이 뜨는 데 0.56초, 메모리 66MB(cairo). 앱 스토어는 창을 닫은 뒤 약 190MB.
+  - e2e 9번을 더했고(9.2절) arm64 QEMU에서 e2e 1·8·5·6·4·7·9번을 한 부팅에서 통과했다(9번 24개, 전원 꺼짐까지 220초). x86-64는 돌리지 않았다.
+  - 만들며 찾아 고친 것: 설치 창 객체가 읽기가 끝나면 해제되어 단추가 듣지 않았다. 목록 창을 숨기기만 하면 앱이 끝나지 않았다. 사용자 관리자의 PATH에 `/usr/games`가 없어 파일 앱에서 연 앱이 Debian 게임을 찾지 못했다. `flatpak install -y`는 인증 창을 띄우지 못해 번들이 "ConfigureRemote not allowed"로 실패했다(사용자 설치본으로 넘어간다). 받은 항목의 번역이 `KEEP_TRANSLATIONS` 없이 사라졌다. [열기] 뒤에 앱이 바로 끝나면 D-Bus로 뜨는 앱(Mines)의 실행 요청이 버려져 창이 뜨지 않았다(5.5절). 앱 메뉴의 종료가 설치 중에도 앱을 끝냈다(이제 창을 닫는 동작이라 설치하는 창은 남는다). `.flatpakrepo`의 인증 창을 닫으면 영어 오류와 함께 실패 화면으로 갔다(이제 다른 형식처럼 소개로 돌아온다).
+  - 확인하지 못한 것:
+    - 전체 이미지(펌웨어 포함)와 x86-64. 맥 여유가 14GB라 펌웨어를 뺀 이미지로 확인했다. 레시피에서 뺀 것은 펌웨어 꾸러미뿐이고, 같은 꾸러미가 forky amd64에 있음은 색인으로 확인했다.
+    - 표준 사용자(관리자가 아닌 계정)의 흐름.
+    - 옛 런타임 AppImage를 그대로 실행했을 때의 실패(문서와 런타임의 문자열로 판단했다), 1형·DwarFS AppImage, debconf·EULA를 묻는 패키지(`DEBIAN_FRONTEND` 없이 기본값으로 지나간다, VS Code의 저장소 질문), 느린 회선.
+
 데스크톱 라인의 다음 작업 (2026-11-01, 제품 라인을 나눈 뒤 아래 목록보다 먼저 한다)
 
 - A. 실기기 정하기: x86-64 시험 기기(Intel 내장 GPU 노트북 하나, AMD GPU 데스크톱이나 노트북 하나)와 arm64 데스크톱 후보(mainline 지원이 있는 기기)를 정한다
@@ -1118,6 +1169,7 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
 10. 실기기 실측 보고서(TB375FC): 태블릿 라인으로 옮겼다(v0.7.0). 포크 `buntos-TB375FC`의 설계안 11절에서 한다. 펌웨어로 알 수 있는 항목(부트 이미지, 벤더 DTB, 터치·패널, 무선 구분, 커널)은 글로벌판 펌웨어로 먼저 채웠다(`docs/hw/lenovo-tb375fc.md`, 2026-11-01)
 11. 저장소 공개 전환: 실기기 시험을 마친 뒤에 한다(2026-10-30 결정, [결정 자료](DECISION-BRIEF.md) 0.3절). 그때의 실기기는 TB375FC였으므로, 제품 라인을 나눈 뒤 데스크톱 라인의 공개 시점을 다시 정한다. 공개 이미지에서는 직렬 콘솔의 root 자동 로그인을 막고, e2e는 시험 계정의 sudo로 바꾼다
 12. 터치와 입력 모드의 남은 것(Phase 4, 5.1절): 보통(떠 있는) 창을 글 커서 위로 옮기기(화면 키보드는 최대화·전체 화면 창만 줄인다), ASCII 밖 기호(€ 등)와 문장 첫 글자 자동 대문자 같은 iPadOS 키보드의 나머지([디자인 스펙](DESIGN-SPEC.md) 15장), 화면 키보드 e2e, 125%와 어둡게에서의 키보드, 손가락을 따라 나오는 막대, 최대화한 창의 제목 막대가 위 끝에 닿아 있으면 위에서 밀기가 창 끌기가 되는 것(iPadOS는 시스템 제스처가 먼저다), 가장자리 스와이프로 거둔 손가락에도 GTK 글 칸이 글 손잡이를 보이는 것, 터치 모드의 커서와 태블릿 모드 스위치(2-in-1), 실기기의 터치 보정(회전한 패널과 libinput 보정 행렬)과 키보드 덮개·펜 확인(태블릿 포크에서 한다), smithay에 터치 문제 둘 올려 보내기. 컴포지터의 터치 입력, 포인터·터치 모드 자동 전환, 화면 키보드는 2026-10-31에 넣었다
+13. 앱 설치의 남은 것(5.5절): x86-64 이미지에서 확인, 전체 이미지(펌웨어 포함)에서 확인, 1형·DwarFS AppImage, AppImage의 자체 업데이트(`$APPIMAGE`), 설치 프로그램의 사용권 단계(debconf·EULA를 묻는 패키지), Recommends를 함께 설치할지(지금은 Debian 기본값), apt 목록에서 `deb-src`와 `-debug` 빼기, 모든 앱 패널에서 앱 지우기, Flatpak 앱의 창 단추와 권한 보기, 앱 스토어를 macOS 모양으로 만들지
 
 ---
 
@@ -1186,6 +1238,7 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
 | ADR-011 | 실기기: TB375FC 2대(개발 1, 예비 1). EL2 "불가" 판정 시 기기 재검토, 글로벌판 동일성 확인. v0.7.0부터 태블릿 라인의 결정이다 | 4.2, 4.2.3, 12장 | v0.3 |
 | ADR-012 | 재배포 불가 펌웨어: 허용하되 공개 이미지·저장소에 넣지 않고 사용자 기기에서만 추출 | 2.1절 | v0.3 |
 | ADR-013 | 제품 라인: 이 저장소는 x86-64·arm64 데스크톱 라인(GPU 가속), 태블릿은 arm64 포크 라인(기기마다 최적화) | 1.1절, 3장, 4.1절, 11장 | v0.7.0 |
+| ADR-014 | 앱 설치: 설치 파일은 자체 앱 패키지 매니저(.deb는 PackageKit, Flatpak은 flatpak, AppImage는 풀어서), 앱 스토어는 GNOME Software + Flathub | 5.5절, 6.5절 | v0.8.0 |
 
 ADR-007·008은 구 Track A 폐기로 무효가 됐다. 각 항목의 선택지와 근거는 [DECISION-BRIEF.md](DECISION-BRIEF.md)에 있다.
 

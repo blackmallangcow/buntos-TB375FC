@@ -1,7 +1,8 @@
-# buntOS 설계 결정 자료 v0.3.10
+# buntOS 설계 결정 자료 v0.3.11
 
 - 작성일: 2026-10-27
 - 변경 이력
+  - v0.3.11 (2026-11-03): 앱 설치 결정(ADR-014)을 더했다. 설치 파일은 자체 앱 패키지 매니저(bunt-packages)가, 앱 찾기는 GNOME Software와 Flathub가 맡는다
   - v0.3.10 (2026-11-01): ADR-011의 언락 보고를 고쳤다. 16.0.20.091에는 성공과 실패 보고가 함께 있고, ZUXOS(Android 16) 기기는 16.0.20.091로 내린 뒤 언락했다
   - v0.3.9 (2026-11-01): 제품 라인 결정(ADR-013)을 더했다. 이 저장소는 데스크톱 라인이고, 태블릿은 arm64 포크 라인이다. ADR-011은 태블릿 라인의 결정이 됐고, XDA 언락 원문을 브라우저로 확인한 것을 적었다
   - v0.3.8 (2026-11-01): ADR-011에 펌웨어로 확인한 것을 더했다(TB375FC와 TB373FU는 같은 하드웨어, Wi-Fi는 SoC 통합 connsys, GenieZone 흔적)
@@ -41,6 +42,7 @@
 | ADR-011 | 실기기: **TB375FC 2대(개발 1, 예비 1)**. EL2 "불가" 판정 시 기기 재검토, 글로벌판 동일성 확인 | v0.3 |
 | ADR-012 | 재배포 불가 펌웨어: **허용**하되 공개 이미지·저장소에 넣지 않고 사용자 기기에서만 추출 | v0.3 |
 | ADR-013 | 제품 라인: **이 저장소는 x86-64·arm64 데스크톱 라인**(GPU 가속), **태블릿은 arm64 포크 라인**(기기마다 최적화, 첫 포크 `buntos-TB375FC`) | v0.3.9 |
+| ADR-014 | 앱 설치: **설치 파일은 자체 앱 패키지 매니저**(.deb는 PackageKit, Flatpak은 flatpak, AppImage는 풀어서), **앱 스토어는 GNOME Software + Flathub** | v0.3.11 |
 | ADR-007·008 | 폐기 (구 Track A 폐기로 전제 소멸) | v0.2 |
 
 ### 0.2 결론은 실측 후에 내되, 평가 기준은 지금 고정할 것
@@ -370,6 +372,51 @@ v0.3.9: ADR-013으로 이 결정은 태블릿 라인(포크 `buntos-TB375FC`)의
 - ADR-011(TB375FC)은 태블릿 라인의 결정이 된다. 이 저장소의 Phase 2는 데스크톱 실기기로 바꾼다(ARCHITECTURE 11장).
 - 공개 시점(0.3절)은 라인에 맞춰 다시 정한다.
 
+### ADR-014. 앱 설치 → 자체 패키지 매니저와 GNOME Software + Flathub
+
+**사실관계**
+- 사람의 요청(2026-11-02): "인터넷에서 리눅스 설치파일을 다운받아도 설치매니저가 없으니 커맨드를 써야해서 불편하다. 패키지 매니저라는 명칭으로 사용하여 설치를 쉽게 하고 리눅스 앱스토어 같은것도 있으면 추가해둬라."
+- **[확인]** 이미지에는 apt만 있었다. 받은 파일을 두 번 누르면 열 앱이 없었다(mimeapps.list).
+- **[실측]** 이미지가 고정한 Debian forky 스냅숏(`20261027T083111Z`)에 PackageKit 1.4.0, flatpak 1.18.4, GNOME Software 51.0(플러그인 `-deb`, `-flatpak`), Bazaar 0.9.4가 arm64로 있다. Debian 꾸러미 색인을 읽어 확인했다.
+- **[실측]** 같은 스냅숏에 `libfuse2`가 없다(`libfuse3-4`와 `fuse3`만 있다). 실제 AppImage(Obsidian 1.14.5 arm64)의 런타임에 `libfuse.so.2` 문자열이 있고 이미지에 그 라이브러리가 없다. AppImage 문서는 FUSE가 없으면 풀어서 실행하라고 안내한다(S43).
+- **[확인]** GNOME Software는 PackageKit(Debian 패키지), Flatpak, Snap, 펌웨어 플러그인을 갖고 앱과 OS 업데이트까지 맡는다(S44). 한국어 번역이 있고 Debian main에 있다.
+- **[확인]** Bazaar는 Flathub와 Flatpak 원격 전용 스토어다. Flathub의 Debian 안내가 그래픽 스토어로 권하지만 Debian 꾸러미는 공식 지원이 아니라고 스스로 적는다(S45, S46). PackageKit을 쓰지 않아 Debian 패키지와 시스템 업데이트를 맡지 못한다. Debian의 판은 0.9.4다.
+
+**선택지**
+
+앱 스토어:
+
+| 선택지 | 좋은 점 | 나쁜 점 | 판단 |
+|---|---|---|---|
+| GNOME Software + Flathub | Debian과 Flathub를 한곳에서 찾고 업데이트까지 한다. Debian main, 한국어 번역, GTK4 | 한 번 열면 세션 끝까지 약 190MB 상주, 모양이 macOS App Store와 다르다 | **채택** |
+| Bazaar | 빠르고 Flathub가 권한다 | Flatpak 전용, Debian 꾸러미 비공식, WebKit 의존 | 나중에 사람이 고를 수 있다 |
+| KDE Discover | 기능이 비슷하다 | Qt·KDE 프레임워크를 끌어온다 | 제외 |
+| 자체 스토어 | macOS App Store 모양 | Flathub API와 카탈로그, 평점, 업데이트를 새로 만들어야 하고 지금 요청에 비해 크다 | 지금은 하지 않는다 |
+
+설치 파일:
+
+| 선택지 | 좋은 점 | 나쁜 점 | 판단 |
+|---|---|---|---|
+| 자체 앱 `bunt-packages` | macOS 설치 프로그램의 흐름, "패키지 매니저"라는 이름, AppImage까지, 뜨는 데 1초 안쪽 | 코드를 지켜야 한다 | **채택** |
+| GNOME Software의 로컬 파일 열기 | 코드 없음 | 이름과 흐름을 맞출 수 없고 AppImage를 못 다루며, 뜨는 데 카탈로그를 읽는다 | 제외 |
+| gdebi | 오래된 .deb 설치기 | GTK3, Python, .deb만 | 제외 |
+
+뒷단:
+- **.deb는 PackageKit.** 자체 root 도우미(pkexec + apt-get)는 입력 검증과 잠금을 스스로 맡아야 한다. PackageKit은 polkit 인증, 진행 상황, apt 잠금 줄서기, 미리 해 보기(`SIMULATE`)를 D-Bus로 주고 앱 스토어와 같은 서비스다.
+- **Flatpak은 flatpak 명령.** libflatpak 바인딩은 빌드 의존성(`libflatpak-dev`)과 크레이트를 더한다. 명령의 진행 출력으로 백분율을 읽을 수 있음을 시험했다.
+- **AppImage는 풀어서 설치.** ~/Applications/<이름>에 unsquashfs로 푼다. 받은 파일을 그대로 실행하면 libfuse2가 없어 옛 런타임이 뜨지 않을 것이고(**[추정]** 문서와 런타임의 문자열로 판단했고 직접 실행해 보지는 않았다), 런타임을 설치 때 실행해야 메타데이터를 읽을 수 있다. 푸는 길은 FUSE가 필요 없고 받은 코드를 실행하지 않는다. 대가는 디스크(Obsidian 140MB → 365MB)와 앱의 자체 업데이트(`$APPIMAGE`)가 꺼지는 것이다.
+
+**결정 (2026-11-03)**
+- 이름은 사람이 정한 "패키지 매니저"다. 설치 파일 형식은 .deb, AppImage(2형 squashfs), .flatpak, .flatpakref, .flatpakrepo다. rpm과 snap은 까닭을 알린다.
+- 앱 스토어는 GNOME Software와 Flathub이고 모든 앱에는 "앱 스토어"로 보인다. Flathub는 이미지가 넣는다(사용자가 지우면 다시 생기지 않는다). 업데이트 자동 내려받기는 끈다.
+- 이미지에 든 패키지는 목록에 없고 지우지 못한다(`/usr/share/buntos/base-packages`).
+- 패키지 설치는 매번 관리자 인증을 받는다. PackageKit의 `auth_admin_keep`을 규칙으로 `auth_admin`으로 바꾼다(ARCHITECTURE 6.5절). Flatpak은 샌드박스이고 `--user`로는 어차피 인증 없이 설치되므로 flatpak의 기본 규칙(관리자는 암호 없음)을 둔다.
+
+**결과** (ARCHITECTURE 5.5절, 디자인 스펙 16장)
+- 이미지에 PackageKit, flatpak, GNOME Software가 들어간다. 설치 크기는 ADR-014를 넣기 전과 견줘 측정해 ARCHITECTURE 11장에 적는다.
+- Flathub에는 자유 소프트웨어가 아닌 앱도 있다. D8의 개방성은 OS 자체의 코드에 대한 것이고 사용자가 고른 앱은 D9(막지 않는다)에 든다.
+- **[실측]** 이미지의 apt는 live forky를 본다(mkosi가 스냅숏을 이미지의 sources에 적지 않는다). 받은 .deb의 의존성을 풀 때 이미지보다 새 패키지가 들어올 수 있다. forky 정식 릴리스 전의 보안 지원 없음(ADR-004)과 같은 조건이다.
+
 ---
 
 ## 4. 실측으로 결정할 항목 (기준과 잠정 가설)
@@ -558,4 +605,9 @@ v0.3.9: ADR-013으로 이 결정은 태블릿 라인(포크 `buntos-TB375FC`)의
 - S39. REUSE 규격 3.3: https://reuse.software/spec-3.3/
 - S40. 리눅스 커널 패치 제출 문서 (DCO): https://www.kernel.org/doc/html/latest/process/submitting-patches.html
 - S41. XDA 비공식 언락 글타래 (2025-02~2026-10, 2026-11-01 브라우저로 확인): https://xdaforums.com/t/unofficial-unlocking-lenovo-xiaoxin-pad-pro-2025-tb375fc.4717695/
+- S42. Debian forky 꾸러미 색인 (스냅숏 20261027T083111Z, 2026-11-02 조회): https://snapshot.debian.org/archive/debian/20261027T083111Z/dists/forky/main/binary-arm64/Packages.xz
+- S43. AppImage 문서, FUSE 문제 해결 (2026-11-02 조회): https://docs.appimage.org/user-guide/troubleshooting/fuse.html , 형식 규격: https://github.com/AppImage/AppImageSpec/blob/master/draft.md
+- S44. GNOME Software README (2026-11-02 조회): https://gitlab.gnome.org/GNOME/gnome-software/-/blob/main/README.md
+- S45. Bazaar README (2026-11-02 조회): https://gitlab.gnome.org/World/bazaar/-/blob/main/README.md
+- S46. Flathub의 Debian 설치 안내 (2026-11-02 조회): https://flathub.org/setup/Debian
 - 미확인: XDA 비공식 언락 스레드(접근 차단): https://xdaforums.com/t/unofficial-unlocking-lenovo-xiaoxin-pad-pro-2025-tb375fc.4717695/
