@@ -3,7 +3,8 @@ Subject: [PATCH] power: supply: mt6375-charger: show the state of charging
 
 Add a power supply that only reads. The state and the limits of charging
 are the first thing to know on a new board, and the driver also logs
-what the bootloader left at probe. Nothing is written.
+what the bootloader left at probe, with the IR compensation that adds to
+the charge voltage. Nothing is written.
 
 The boost now turns the charger watchdog off first, if it is on. Stock
 keeps it off from probe on, and a chip of the same family stops the boost
@@ -11,8 +12,8 @@ when it ends.
 
 ---
  drivers/power/supply/Kconfig          |   7 +-
- drivers/power/supply/mt6375-charger.c | 265 +++++++++++++++++++++++++-
- 2 files changed, 264 insertions(+), 8 deletions(-)
+ drivers/power/supply/mt6375-charger.c | 271 +++++++++++++++++++++++++-
+ 2 files changed, 270 insertions(+), 8 deletions(-)
 
 diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
 index c310511..c4934d8 100644
@@ -34,15 +35,15 @@ index c310511..c4934d8 100644
  	  This driver can also be built as a module. If so, the module
  	  will be called "mt6375-charger".
 diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
-index 8791906..d21c99c 100644
+index 8791906..8b2aa0b 100644
 --- a/drivers/power/supply/mt6375-charger.c
 +++ b/drivers/power/supply/mt6375-charger.c
 @@ -1,11 +1,11 @@
  // SPDX-License-Identifier: GPL-2.0-only
  /*
 - * MediaTek MT6375 charger: the boost that sources USB VBUS
-+ * MediaTek MT6375 charger: the boost that sources USB VBUS, and a read-only view
-+ * of battery charging
++ * MediaTek MT6375 charger: the boost that sources USB VBUS, and a read-only
++ * view of battery charging
   *
 - * Only the OTG boost is here so far. Battery charging, the USB switch, BC1.2,
 - * the watchdog and the interrupts stay as the bootloader left them, and neither
@@ -54,7 +55,7 @@ index 8791906..d21c99c 100644
   *
   * The registers, the parameters and their order come from the MediaTek driver
   * in the OnePlus MT6897 kernel.
-@@ -16,16 +16,26 @@
+@@ -16,19 +16,30 @@
  #include <linux/bitfield.h>
  #include <linux/bits.h>
  #include <linux/kernel.h>
@@ -81,7 +82,11 @@ index 8791906..d21c99c 100644
  #define MT6375_REG_OTG_LBP		0x130
  #define MT6375_REG_OTG_V		0x131
  #define MT6375_REG_OTG_C		0x132
-@@ -47,6 +57,7 @@
++#define MT6375_REG_BAT_COMP		0x133
+ #define MT6375_REG_CHG_STAT		0x134
+ #define MT6375_REG_CHG_DUMY0		0x135
+ #define MT6375_REG_CHG_HD_BUCK5		0x140
+@@ -47,6 +58,7 @@
  #define MT6375_COMP_CLAMP_MASK		GENMASK(1, 0)
  #define MT6375_BUCK_RAMPOFT_MASK	GENMASK(7, 6)
  #define MT6375_ST_PWR_RDY		BIT(0)
@@ -89,7 +94,7 @@ index 8791906..d21c99c 100644
  
  /*
   * OTG_LBP holds 2700 mV from 4 up in steps of 100 mV, OTG_V holds 4850 mV from
-@@ -61,10 +72,54 @@
+@@ -61,10 +73,54 @@
  #define MT6375_OTG_UV			5000000
  #define MT6375_OTG_CC_1800MA		4
  
@@ -144,19 +149,20 @@ index 8791906..d21c99c 100644
  };
  
  /* The chip wants these set differently for the boost than for charging */
-@@ -143,6 +198,11 @@ static int mt6375_otg_enable(struct regulator_dev *rdev)
+@@ -143,6 +199,12 @@ static int mt6375_otg_enable(struct regulator_dev *rdev)
  		return -EBUSY;
  	}
  
-+	/* Stock keeps this watchdog off. It may well stop the boost when it ends */
-+	ret = regmap_update_bits(chg->regmap, MT6375_REG_CHG_WDT, MT6375_WDT_EN, 0);
++	/* Stock keeps this watchdog off. It may stop the boost at its end */
++	ret = regmap_update_bits(chg->regmap, MT6375_REG_CHG_WDT,
++				 MT6375_WDT_EN, 0);
 +	if (ret)
 +		return ret;
 +
  	ret = regmap_update_bits(chg->regmap, MT6375_REG_OTG_LBP,
  				 MT6375_OTG_LBP_MASK, MT6375_OTG_LBP_2800MV);
  	if (ret)
-@@ -237,11 +297,192 @@ static const struct regulator_desc mt6375_otg_desc = {
+@@ -237,11 +299,194 @@ static const struct regulator_desc mt6375_otg_desc = {
  	.enable_mask = MT6375_OTG_EN,
  };
  
@@ -164,8 +170,8 @@ index 8791906..d21c99c 100644
 + * Reads a limit. A selector out of the range reads as the end of the range, as
 + * the chip treats it in the MediaTek driver.
 + */
-+static int mt6375_chg_get_limit(struct mt6375_chg *chg, enum mt6375_chg_field fd,
-+				int *val)
++static int mt6375_chg_get_limit(struct mt6375_chg *chg,
++				enum mt6375_chg_field fd, int *val)
 +{
 +	const struct linear_range *r = &mt6375_chg_ranges[fd];
 +	unsigned int sel, uval;
@@ -175,7 +181,8 @@ index 8791906..d21c99c 100644
 +	if (ret)
 +		return ret;
 +
-+	ret = linear_range_get_value(r, clamp(sel, r->min_sel, r->max_sel), &uval);
++	ret = linear_range_get_value(r, clamp(sel, r->min_sel, r->max_sel),
++				     &uval);
 +	if (ret)
 +		return ret;
 +
@@ -323,7 +330,7 @@ index 8791906..d21c99c 100644
 +/* What the bootloader left. It is the first thing to know about a new board */
 +static void mt6375_chg_log_state(struct mt6375_chg *chg)
 +{
-+	unsigned int en, buck, hz, wdt;
++	unsigned int en, buck, hz, wdt, bat_comp;
 +	int cv, ichg, aicr;
 +
 +	if (mt6375_chg_get_limit(chg, F_CV, &cv) ||
@@ -332,11 +339,12 @@ index 8791906..d21c99c 100644
 +	    regmap_field_read(chg->fields[F_CHG_EN], &en) ||
 +	    regmap_field_read(chg->fields[F_BUCK_EN], &buck) ||
 +	    regmap_field_read(chg->fields[F_HZ], &hz) ||
-+	    regmap_field_read(chg->fields[F_WDT_EN], &wdt))
++	    regmap_field_read(chg->fields[F_WDT_EN], &wdt) ||
++	    regmap_read(chg->regmap, MT6375_REG_BAT_COMP, &bat_comp))
 +		return;
 +
-+	dev_info(chg->dev, "CV %d uV, ICHG %d uA, AICR %d uA, CHG_EN %u, BUCK_EN %u, HZ %u, WDT_EN %u\n",
-+		 cv, ichg, aicr, en, buck, hz, wdt);
++	dev_info(chg->dev, "CV %d uV, ICHG %d uA, AICR %d uA, CHG_EN %u, BUCK_EN %u, HZ %u, WDT_EN %u, BAT_COMP 0x%02x\n",
++		 cv, ichg, aicr, en, buck, hz, wdt, bat_comp);
 +}
 +
  static int mt6375_chg_probe(struct platform_device *pdev)
@@ -349,27 +357,29 @@ index 8791906..d21c99c 100644
  
  	chg = devm_kzalloc(dev, sizeof(*chg), GFP_KERNEL);
  	if (!chg)
-@@ -252,6 +493,13 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+@@ -252,6 +497,14 @@ static int mt6375_chg_probe(struct platform_device *pdev)
  	if (!chg->regmap)
  		return dev_err_probe(dev, -ENODEV, "Failed to get regmap\n");
  
 +	ret = devm_regmap_field_bulk_alloc(dev, chg->regmap, chg->fields,
 +					   mt6375_chg_reg_fields, F_MAX);
 +	if (ret)
-+		return dev_err_probe(dev, ret, "Failed to allocate the fields\n");
++		return dev_err_probe(dev, ret,
++				     "Failed to allocate the fields\n");
 +
 +	mt6375_chg_log_state(chg);
 +
  	cfg.dev = dev;
  	cfg.driver_data = chg;
  	cfg.regmap = chg->regmap;
-@@ -260,6 +508,13 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+@@ -260,6 +513,14 @@ static int mt6375_chg_probe(struct platform_device *pdev)
  		return dev_err_probe(dev, PTR_ERR(chg->rdev),
  				     "Failed to register the OTG regulator\n");
  
 +	psy_cfg.drv_data = chg;
 +	psy_cfg.fwnode = dev_fwnode(dev);
-+	chg->psy = devm_power_supply_register(dev, &mt6375_chg_psy_desc, &psy_cfg);
++	chg->psy = devm_power_supply_register(dev, &mt6375_chg_psy_desc,
++					      &psy_cfg);
 +	if (IS_ERR(chg->psy))
 +		return dev_err_probe(dev, PTR_ERR(chg->psy),
 +				     "Failed to register the power supply\n");

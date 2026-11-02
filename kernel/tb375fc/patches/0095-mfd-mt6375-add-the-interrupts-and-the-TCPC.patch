@@ -13,8 +13,8 @@ the probe still writes nothing.
 
 ---
  drivers/mfd/Kconfig  |   4 +-
- drivers/mfd/mt6375.c | 181 ++++++++++++++++++++++++++++++++++++++-----
- 2 files changed, 164 insertions(+), 21 deletions(-)
+ drivers/mfd/mt6375.c | 183 ++++++++++++++++++++++++++++++++++++++-----
+ 2 files changed, 167 insertions(+), 20 deletions(-)
 
 diff --git a/drivers/mfd/Kconfig b/drivers/mfd/Kconfig
 index 251e412..013f7e1 100644
@@ -38,7 +38,7 @@ index 251e412..013f7e1 100644
  	  This driver can also be built as a module. If so, the module
  	  will be called "mt6375".
 diff --git a/drivers/mfd/mt6375.c b/drivers/mfd/mt6375.c
-index e23ab2b..f41c044 100644
+index d549011..aef5c7c 100644
 --- a/drivers/mfd/mt6375.c
 +++ b/drivers/mfd/mt6375.c
 @@ -4,13 +4,16 @@
@@ -108,7 +108,7 @@ index e23ab2b..f41c044 100644
  #define MT6375_REG_CHG_TOP1	0x120
  #define MT6375_BATFET_DIS	BIT(6)
  #define MT6375_REG_CHG_AICR	0x122
-@@ -77,14 +102,22 @@ static bool mt6375_value_is_safe(unsigned int reg, u8 val)
+@@ -78,14 +103,22 @@ static bool mt6375_value_is_safe(unsigned int reg, u8 val)
  	}
  }
  
@@ -133,7 +133,7 @@ index e23ab2b..f41c044 100644
  	if (ret < 0)
  		return ret;
  
-@@ -93,20 +126,23 @@ static int mt6375_regmap_read(void *context, const void *reg_buf,
+@@ -94,21 +127,24 @@ static int mt6375_regmap_read(void *context, const void *reg_buf,
  
  static int mt6375_regmap_write(void *context, const void *data, size_t count)
  {
@@ -148,10 +148,10 @@ index e23ab2b..f41c044 100644
 +
  	for (i = MT6375_REG_OFFSET_SIZE; i < count; i++, reg++) {
  		if (!mt6375_value_is_safe(reg, buf[i])) {
--			dev_err(&i2c->dev, "Refused 0x%02x for register 0x%03x\n",
--				buf[i], reg);
+-			dev_err(&i2c->dev,
 +			dev_err(&mt->i2c[MT6375_BANK_PMU]->dev,
-+				"Refused 0x%02x for register 0x%03x\n", buf[i], reg);
+ 				"Refused 0x%02x for register 0x%03x\n",
+ 				buf[i], reg);
  			return -EPERM;
  		}
  	}
@@ -161,7 +161,7 @@ index e23ab2b..f41c044 100644
  					      count - MT6375_REG_OFFSET_SIZE,
  					      buf + MT6375_REG_OFFSET_SIZE);
  }
-@@ -119,6 +155,7 @@ static const struct regmap_bus mt6375_regmap_bus = {
+@@ -121,6 +157,7 @@ static const struct regmap_bus mt6375_regmap_bus = {
  };
  
  static const struct regmap_range mt6375_rd_ranges[] = {
@@ -169,7 +169,7 @@ index e23ab2b..f41c044 100644
  	regmap_reg_range(MT6375_REG_PMU_FIRST, MT6375_REG_PMU_LAST),
  };
  
-@@ -128,18 +165,42 @@ static const struct regmap_access_table mt6375_rd_table = {
+@@ -130,18 +167,42 @@ static const struct regmap_access_table mt6375_rd_table = {
  };
  
  /*
@@ -177,16 +177,16 @@ index e23ab2b..f41c044 100644
 - * same bank holds the USB switch, BC1.2, the ADCs and the protection settings,
 - * which these drivers must leave alone. The cell that takes those over extends
 - * this list.
-+ * The registers of the TCPC, the interrupts, the OTG boost and battery charging,
-+ * and nothing else. The PMU bank also holds the USB switch, BC1.2, the ADCs and
-+ * the protection settings, which these drivers must leave alone. The cell that
-+ * takes those over extends this list.
++ * The registers of the TCPC, the interrupts, the OTG boost and battery
++ * charging, and nothing else. The PMU bank also holds the USB switch, BC1.2,
++ * the ADCs and the protection settings, which these drivers must leave alone.
++ * The cell that takes those over extends this list.
   */
  static const struct regmap_range mt6375_wr_ranges[] = {
 +	regmap_reg_range(0x010, 0x014),		/* ALERT to POWER_STATUS_MASK */
 +	regmap_reg_range(0x019, 0x01a),		/* TCPC_CTRL, ROLE_CTRL */
 +	regmap_reg_range(0x01c, 0x01c),		/* POWER_CTRL */
-+	regmap_reg_range(0x01f, 0x020),		/* FAULT_STATUS, written as 16 bits */
++	regmap_reg_range(0x01f, 0x020),		/* FAULT_STATUS, as 16 bits */
 +	regmap_reg_range(0x023, 0x023),		/* COMMAND */
 +	regmap_reg_range(0x02e, 0x02f),		/* MSG_HDR_INFO, RX_DETECT */
 +	regmap_reg_range(0x050, 0x06f),		/* TRANSMIT and its buffer */
@@ -197,14 +197,14 @@ index e23ab2b..f41c044 100644
 +	regmap_reg_range(0x091, 0x097),		/* MTMASK1 to MTMASK7 */
 +	regmap_reg_range(0x098, 0x09e),		/* MTINT1 to MTINT7 */
 +	regmap_reg_range(0x0ac, 0x0ac),		/* PHYCTRL9 */
-+	regmap_reg_range(0x0b0, 0x0b4),		/* SYSCTRL3, TCPCCTRL1 to TCPCCTRL3 */
++	regmap_reg_range(0x0b0, 0x0b4),		/* SYSCTRL3, TCPCCTRL1 to 3 */
 +	regmap_reg_range(0x0bb, 0x0bb),		/* LPWRCTRL3 */
 +	regmap_reg_range(0x0be, 0x0bf),		/* WATCHDOGCTRL, I2CTORSTCTRL */
 +	regmap_reg_range(0x0c8, 0x0c8),		/* HILOCTRL9 */
 +	regmap_reg_range(0x0ca, 0x0ca),		/* SHIELDCTRL1 */
 +	regmap_reg_range(0x0cf, 0x0cf),		/* FODCTRL */
  	regmap_reg_range(0x107, 0x107),		/* TM_PAS_CODE1 */
- 	regmap_reg_range(0x120, 0x122),		/* CHG_TOP1, CHG_TOP2, CHG_AICR */
+ 	regmap_reg_range(0x120, 0x122),		/* CHG_TOP1 to CHG_AICR */
  	regmap_reg_range(0x125, 0x12a),		/* CHG_VCHG to CHG_WDT */
  	regmap_reg_range(0x130, 0x132),		/* OTG_LBP, OTG_V, OTG_C */
  	regmap_reg_range(0x135, 0x135),		/* CHG_DUMY0 */
@@ -216,7 +216,7 @@ index e23ab2b..f41c044 100644
  };
  
  static const struct regmap_access_table mt6375_wr_table = {
-@@ -156,18 +217,85 @@ static const struct regmap_config mt6375_regmap_config = {
+@@ -158,18 +219,86 @@ static const struct regmap_config mt6375_regmap_config = {
  	.wr_table		= &mt6375_wr_table,
  };
  
@@ -293,8 +293,9 @@ index e23ab2b..f41c044 100644
 +		return -ENOMEM;
 +
 +	data->i2c[MT6375_BANK_PMU] = i2c;
-+	data->i2c[MT6375_BANK_TCPC] = devm_i2c_new_dummy_device(dev, i2c->adapter,
-+								MT6375_TCPC_I2C_ADDR);
++	data->i2c[MT6375_BANK_TCPC] =
++		devm_i2c_new_dummy_device(dev, i2c->adapter,
++					  MT6375_TCPC_I2C_ADDR);
 +	if (IS_ERR(data->i2c[MT6375_BANK_TCPC]))
 +		return dev_err_probe(dev, PTR_ERR(data->i2c[MT6375_BANK_TCPC]),
 +				     "Failed to add the TCPC I2C client\n");
@@ -303,27 +304,30 @@ index e23ab2b..f41c044 100644
  				  &mt6375_regmap_config);
  	if (IS_ERR(regmap))
  		return dev_err_probe(dev, PTR_ERR(regmap),
-@@ -186,8 +314,23 @@ static int mt6375_probe(struct i2c_client *i2c)
+@@ -188,8 +317,26 @@ static int mt6375_probe(struct i2c_client *i2c)
  	dev_info(dev, "MT6375 revision %lu\n",
  		 FIELD_GET(MT6375_REV_MASK, devinfo));
  
 -	return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO, mt6375_devices,
 -				    ARRAY_SIZE(mt6375_devices), NULL, 0, NULL);
 +	if (i2c->irq <= 0)
-+		return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO, mt6375_devices,
++		return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO,
++					    mt6375_devices,
 +					    ARRAY_SIZE(mt6375_devices), NULL, 0,
 +					    NULL);
 +
 +	ret = mt6375_quiet_irqs(regmap);
 +	if (ret)
-+		return dev_err_probe(dev, ret, "Failed to mask the interrupts\n");
++		return dev_err_probe(dev, ret,
++				     "Failed to mask the interrupts\n");
 +
 +	ret = devm_regmap_add_irq_chip(dev, regmap, i2c->irq, IRQF_ONESHOT, 0,
 +				       &mt6375_irq_chip, &irq_data);
 +	if (ret)
 +		return dev_err_probe(dev, ret, "Failed to add the irq chip\n");
 +
-+	return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO, mt6375_irq_devices,
++	return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO,
++				    mt6375_irq_devices,
 +				    ARRAY_SIZE(mt6375_irq_devices), NULL, 0,
 +				    regmap_irq_get_domain(irq_data));
  }
