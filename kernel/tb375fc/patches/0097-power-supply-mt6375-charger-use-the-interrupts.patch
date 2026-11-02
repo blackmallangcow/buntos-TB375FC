@@ -14,7 +14,7 @@ failure here leaves the chip alone.
  1 file changed, 80 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
-index ea2d939..9fa9069 100644
+index 2fed29f..aac3025 100644
 --- a/drivers/power/supply/mt6375-charger.c
 +++ b/drivers/power/supply/mt6375-charger.c
 @@ -3,9 +3,10 @@
@@ -39,7 +39,7 @@ index ea2d939..9fa9069 100644
  #include <linux/kernel.h>
  #include <linux/linear_range.h>
  #include <linux/mod_devicetable.h>
-@@ -1332,6 +1334,77 @@ static void mt6375_chg_log_state(struct mt6375_chg *chg)
+@@ -1328,6 +1330,77 @@ static void mt6375_chg_log_state(struct mt6375_chg *chg)
  		 cv, ichg, aicr, en, buck, hz, wdt, bat_comp);
  }
  
@@ -117,7 +117,7 @@ index ea2d939..9fa9069 100644
  static void mt6375_chg_stop_control(struct mt6375_chg *chg)
  {
  	disable_delayed_work_sync(&chg->work);
-@@ -1439,6 +1512,10 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+@@ -1435,6 +1508,10 @@ static int mt6375_chg_probe(struct platform_device *pdev)
  	if (ret)
  		return ret;
  

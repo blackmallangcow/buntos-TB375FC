@@ -49,22 +49,28 @@ unless the USB port says more, and is back there with VBUS gone. The
 charge current stays at 500 mA with charging off.
 
 The charge and input currents go back to 500 mA when the driver stops
-watching on unbind and shutdown, and CHG_EN stays as it is. In suspend
+watching on removal and shutdown, and CHG_EN stays as it is. In suspend
 charging stops once it is taken over, or if it should have already, where
 stock wakes every 10 seconds to look, and when that fails the system stays
 up with the work running. A kernel that hangs leaves them as they are, as
 with stock.
 
+There is no unbind through sysfs: a consumer of the boost like the TCPC
+would go on to use freed memory, as the regulator core only warns about
+it. rmmod is refused while one holds the regulator.
+
 While the boost runs the driver stays away from its parameters and the
-limits, and only inhibit-charge writes to CHG_EN. It goes by OTG_EN and
-not by the state of the chip, and puts the parameters back itself when
-turning the boost off failed half way.
+limits. Only inhibit-charge and suspend write to CHG_EN then: the boost can
+end with the system asleep, and the work turns charging on again after it.
+OTG_EN tells that the boost runs. The state of the chip lags behind it, so
+the work also waits while that still shows the boost. The driver puts the
+parameters back itself when starting or stopping the boost failed half way.
 ---
  drivers/power/supply/mt6375-charger.c | 1006 ++++++++++++++++++++++++-
- 1 file changed, 992 insertions(+), 14 deletions(-)
+ 1 file changed, 991 insertions(+), 15 deletions(-)
 
 diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
-index 8b2aa0b..ea2d939 100644
+index 8b2aa0b..2fed29f 100644
 --- a/drivers/power/supply/mt6375-charger.c
 +++ b/drivers/power/supply/mt6375-charger.c
 @@ -1,14 +1,23 @@
@@ -232,7 +238,7 @@ index 8b2aa0b..ea2d939 100644
 +	struct delayed_work work;
 +	struct mutex lock;		/* the fields below */
 +	bool taken_over;
-+	bool boost;			/* the chip has the boost parameters */
++	bool boost;			/* the boost parameters may be set */
 +	bool overvoltage;
 +	unsigned int ovp_clear;		/* low readings since then */
 +	bool pwr_rdy;
@@ -262,25 +268,33 @@ index 8b2aa0b..ea2d939 100644
  	unsigned int stat;
  	int ret;
  
-@@ -233,18 +347,47 @@ static int mt6375_otg_enable(struct regulator_dev *rdev)
+@@ -220,31 +334,55 @@ static int mt6375_otg_enable(struct regulator_dev *rdev)
+ 	if (ret)
+ 		return ret;
+ 
++	chg->boost = true;
+ 	ret = mt6375_chg_set_boost_params(chg, true);
+ 	if (ret)
+ 		return ret;
+ 
+ 	ret = regulator_enable_regmap(rdev);
+ 	if (ret) {
+-		mt6375_chg_set_boost_params(chg, false);
++		if (!mt6375_chg_set_boost_params(chg, false))
++			chg->boost = false;
+ 		regulator_disable_regmap(rdev);
+ 	}
+ 
  	return ret;
  }
  
-+/*
-+ * The chip shows the boost only some time after it starts. Until the flag falls
-+ * the work stays away from the parameters of the boost, one of which it changes
-+ * with VBUS.
-+ */
 +static int mt6375_otg_enable(struct regulator_dev *rdev)
 +{
 +	struct mt6375_chg *chg = rdev_get_drvdata(rdev);
 +	int ret;
 +
 +	mutex_lock(&chg->lock);
-+	chg->boost = true;
 +	ret = mt6375_otg_start(chg, rdev);
-+	if (ret)
-+		chg->boost = false;
 +	mutex_unlock(&chg->lock);
 +
 +	return ret;
@@ -292,6 +306,7 @@ index 8b2aa0b..ea2d939 100644
  	int ret;
  
 +	mutex_lock(&chg->lock);
++	chg->boost = true;
  	ret = mt6375_chg_set_boost_params(chg, false);
  	if (ret)
 -		return ret;
@@ -312,7 +327,7 @@ index 8b2aa0b..ea2d939 100644
  
  	return ret;
  }
-@@ -411,6 +554,48 @@ static int mt6375_chg_get_charge_type(struct mt6375_chg *chg, int *val)
+@@ -411,6 +549,48 @@ static int mt6375_chg_get_charge_type(struct mt6375_chg *chg, int *val)
  	return 0;
  }
  
@@ -361,7 +376,7 @@ index 8b2aa0b..ea2d939 100644
  static int mt6375_chg_get_property(struct power_supply *psy,
  				   enum power_supply_property psp,
  				   union power_supply_propval *val)
-@@ -426,6 +611,19 @@ static int mt6375_chg_get_property(struct power_supply *psy,
+@@ -426,6 +606,19 @@ static int mt6375_chg_get_property(struct power_supply *psy,
  		return mt6375_chg_get_status(chg, &val->intval);
  	case POWER_SUPPLY_PROP_CHARGE_TYPE:
  		return mt6375_chg_get_charge_type(chg, &val->intval);
@@ -381,15 +396,16 @@ index 8b2aa0b..ea2d939 100644
  	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
  		return mt6375_chg_get_limit(chg, F_CC, &val->intval);
  	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
-@@ -441,12 +639,197 @@ static int mt6375_chg_get_property(struct power_supply *psy,
+@@ -441,12 +634,198 @@ static int mt6375_chg_get_property(struct power_supply *psy,
  	}
  }
  
 +/*
-+ * Whether the chip sources VBUS, so that the work and the ways to stop stay
-+ * away: 1 or 0, or an error. OTG_EN says it, before the state of the chip does
-+ * and after. The flag then only tells that the chip still has the parameters of
-+ * the boost, as turning it off can fail half way. Called with the lock held.
++ * Whether the chip sources VBUS, so that the work and the limits stay away: 1
++ * or 0, or an error. OTG_EN says it, before the state of the chip does and
++ * after. The flag goes up before the parameters of the boost are written and
++ * falls once they are back, as either can fail half way, so this puts them
++ * back. Called with the lock held.
 + */
 +static int mt6375_chg_check_boost(struct mt6375_chg *chg)
 +{
@@ -579,7 +595,7 @@ index 8b2aa0b..ea2d939 100644
  	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
  	POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT,
  	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
-@@ -457,9 +840,478 @@ static const struct power_supply_desc mt6375_chg_psy_desc = {
+@@ -457,9 +836,478 @@ static const struct power_supply_desc mt6375_chg_psy_desc = {
  	.type = POWER_SUPPLY_TYPE_USB,
  	.properties = mt6375_chg_properties,
  	.num_properties = ARRAY_SIZE(mt6375_chg_properties),
@@ -1058,7 +1074,7 @@ index 8b2aa0b..ea2d939 100644
  /* What the bootloader left. It is the first thing to know about a new board */
  static void mt6375_chg_log_state(struct mt6375_chg *chg)
  {
-@@ -480,6 +1332,54 @@ static void mt6375_chg_log_state(struct mt6375_chg *chg)
+@@ -480,6 +1328,54 @@ static void mt6375_chg_log_state(struct mt6375_chg *chg)
  		 cv, ichg, aicr, en, buck, hz, wdt, bat_comp);
  }
  
@@ -1113,7 +1129,7 @@ index 8b2aa0b..ea2d939 100644
  static int mt6375_chg_probe(struct platform_device *pdev)
  {
  	struct device *dev = &pdev->dev;
-@@ -493,6 +1393,13 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+@@ -493,6 +1389,13 @@ static int mt6375_chg_probe(struct platform_device *pdev)
  		return -ENOMEM;
  
  	chg->dev = dev;
@@ -1127,7 +1143,7 @@ index 8b2aa0b..ea2d939 100644
  	chg->regmap = dev_get_regmap(dev->parent, NULL);
  	if (!chg->regmap)
  		return dev_err_probe(dev, -ENODEV, "Failed to get regmap\n");
-@@ -513,6 +1420,11 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+@@ -513,6 +1416,11 @@ static int mt6375_chg_probe(struct platform_device *pdev)
  		return dev_err_probe(dev, PTR_ERR(chg->rdev),
  				     "Failed to register the OTG regulator\n");
  
@@ -1139,7 +1155,7 @@ index 8b2aa0b..ea2d939 100644
  	psy_cfg.drv_data = chg;
  	psy_cfg.fwnode = dev_fwnode(dev);
  	chg->psy = devm_power_supply_register(dev, &mt6375_chg_psy_desc,
-@@ -523,6 +1435,13 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+@@ -523,6 +1431,13 @@ static int mt6375_chg_probe(struct platform_device *pdev)
  
  	platform_set_drvdata(pdev, chg);
  
@@ -1153,14 +1169,12 @@ index 8b2aa0b..ea2d939 100644
  	return 0;
  }
  
-@@ -530,11 +1449,69 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+@@ -530,11 +1445,69 @@ static int mt6375_chg_probe(struct platform_device *pdev)
  static void mt6375_chg_shutdown(struct platform_device *pdev)
  {
  	struct mt6375_chg *chg = platform_get_drvdata(pdev);
 +	int i, ret = 0;
- 
--	if (regulator_is_enabled_regmap(chg->rdev) > 0)
--		mt6375_otg_disable(chg->rdev);
++
 +	/* Nothing comes back to try again */
 +	for (i = 0; i < 2; i++) {
 +		ret = regulator_is_enabled_regmap(chg->rdev);
@@ -1181,9 +1195,10 @@ index 8b2aa0b..ea2d939 100644
 +/*
 + * The work does not run in suspend, so nothing would follow the temperature,
 + * and charging stops until resume once it is taken over. Stock wakes every 10
-+ * seconds to look instead. Before that it stops if it should have already. If
-+ * that fails the system must stay up, and no resume comes to start the work
-+ * again.
++ * seconds to look instead. Before that it stops if it should have already. The
++ * boost is no exception, as it can end with the system asleep: only CHG_EN
++ * changes, and the work turns that on again after the boost. If this fails the
++ * system must stay up, and no resume comes to start the work again.
 + */
 +static int mt6375_chg_suspend(struct device *dev)
 +{
@@ -1196,11 +1211,12 @@ index 8b2aa0b..ea2d939 100644
 +	mt6375_chg_stop_control(chg);
 +
 +	mutex_lock(&chg->lock);
-+	if (mt6375_chg_check_boost(chg) <= 0 &&
-+	    (chg->taken_over || mt6375_chg_must_stop(chg)))
++	if (chg->taken_over || mt6375_chg_must_stop(chg))
 +		ret = mt6375_chg_stop_charging(chg);
 +	mutex_unlock(&chg->lock);
-+
+ 
+-	if (regulator_is_enabled_regmap(chg->rdev) > 0)
+-		mt6375_otg_disable(chg->rdev);
 +	if (ret) {
 +		dev_err(dev, "Failed to stop charging: %d\n", ret);
 +		mt6375_chg_start_work(chg);
@@ -1225,11 +1241,13 @@ index 8b2aa0b..ea2d939 100644
  static const struct of_device_id mt6375_chg_of_match[] = {
  	{ .compatible = "mediatek,mt6375-charger" },
  	{ /* sentinel */ }
-@@ -547,6 +1524,7 @@ static struct platform_driver mt6375_chg_driver = {
+@@ -547,6 +1520,9 @@ static struct platform_driver mt6375_chg_driver = {
  	.driver = {
  		.name = "mt6375-charger",
  		.of_match_table = mt6375_chg_of_match,
 +		.pm = pm_sleep_ptr(&mt6375_chg_pm_ops),
++		/* A consumer of the boost would go on to use freed memory */
++		.suppress_bind_attrs = true,
  	},
  };
  module_platform_driver(mt6375_chg_driver);
