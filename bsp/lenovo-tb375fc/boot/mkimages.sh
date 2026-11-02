@@ -38,8 +38,8 @@ kernel_addr=0x40000000
 ramdisk_addr=0x66f00000
 tags_addr=0x47c80000
 dtb_addr=0x47c80000
-# 파티션 크기 (원래 이미지는 이 크기로 채워져 있다). dtbo 파티션 크기는 모른다
-declare -A part_size=([boot]=$((64 << 20)) [init_boot]=$((8 << 20)) [vendor_boot]=$((64 << 20)))
+# 파티션 크기 (원래 이미지는 이 크기로 채워져 있다. 기기의 fastboot getvar로도 같다)
+declare -A part_size=([boot]=$((64 << 20)) [init_boot]=$((8 << 20)) [vendor_boot]=$((64 << 20)) [dtbo]=$((8 << 20)))
 
 die() {
 	echo "mkimages: $*" >&2
@@ -119,7 +119,7 @@ mkbootimg --header_version 4 --pagesize "$pagesize" --base 0 \
 	--ramdisk_type recovery --ramdisk_name recovery --vendor_ramdisk_fragment "$work/recovery.cpio.lz4" \
 	--vendor_boot "$work/images/vendor_boot.img"
 
-for name in boot init_boot vendor_boot; do
+for name in boot init_boot vendor_boot dtbo; do
 	size=$(stat -c %s "$work/images/$name.img")
 	((size <= part_size[$name])) || die "$name.img($size바이트)가 파티션(${part_size[$name]}바이트)보다 크다"
 done
