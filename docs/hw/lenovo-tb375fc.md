@@ -155,12 +155,14 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 | 읽은 곳 | 값 | 뜻 |
 |---|---|---|
 | `primary_chg` `CONSTANT_CHARGE_VOLTAGE` | 4340 | MT6375의 CV 레지스터(mV). 실제 충전 전압이다 |
-| `battery`, `battery_mm8013` `CONSTANT_CHARGE_VOLTAGE` | 4310 | 게이지의 `REG_CHARGEVOLT`(0x30, mV). 게이지가 만충을 판단하는 값이다 |
+| `battery`, `battery_mm8013` `CONSTANT_CHARGE_VOLTAGE` | 4310 | 게이지의 `REG_CHARGEVOLT`(0x30, mV). 순정이 유지 관리 표의 게이지 값을 쓴다. 게이지가 만충 판단에 쓰는 것으로 보이나 자료가 없어 기기에서 확인한다 |
 | `VOLTAGE_NOW` | 4326 | 게이지가 잰 전압 |
-| `CHARGE_FULL_DESIGN` | 10200 | 설계 용량(mAh) |
+| `CHARGE_FULL_DESIGN` | 10200 | 순정 드라이버의 상수다(`10200000`). 게이지 레지스터가 아니다. 배터리 이름의 `10200mAh`와는 맞는다 |
 | `PRECHARGE_CURRENT` | 100 | 전류가 아니다. 순정이 이 칸으로 건강 %를 돌려준다 |
 | `primary_chg` `CALIBRATE` | 4375 | 칩 ADC의 VBAT. 게이지보다 49 mV 높다. 까닭은 기기에서 본다 |
 | `primary_chg` 입력·충전·MIVR·종료, `USB_TYPE` | 2000 mA, 3000 mA, 4600 mV, 300 mA, SDP | Android의 값이다. LK의 500 mA를 부정하지 않는다 |
+
+Android의 `CAPACITY`는 순정 커널이 매끄럽게 만든 값이다. 충전이 끝나면 게이지 RSOC와 차이가 5 미만인 동안 100을 붙든다. Linux의 `capacity`는 게이지 RSOC 그대로다
 
 `battery_maintenance_on=1`, `persist.sys.battery.battery_maintenance_v2.enabled=1`이다. 순정의 '배터리 유지 관리'는 충전 전압을 표로 정한다. 충전기/게이지 값은 v10이 사이클에 따라 150회 미만 4500/4530, 150~1019회 4480/4470, 1020~1049회 4430/4410, 1050회부터 4340/4310이고, v20은 사이클과 상관없이 4340/4310이다. 이 기기는 22회인데 4340/4310이므로 v20이다.
 

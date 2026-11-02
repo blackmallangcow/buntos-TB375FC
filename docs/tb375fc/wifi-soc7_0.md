@@ -134,7 +134,7 @@ OnePlus 공식 gen4m(MT6897 빌드)과 업스트림 mt76(7.3)을 대조했다(�
 | 그 앞 단계 | FWDL 모드, 시간 동기(INIT 0x09), PHY action(INIT 0x08) | 없다 | 새로 쓴다 |
 | 명령 머리 | `struct WIFI_CMD`(HW TXD 32바이트와 머리, 합계 64바이트) | `mt76_connac2_mcu_txd` | 같다(CONNAC2 레거시) |
 | uni cmd | soc7_0 빌드에 uni 지원 설정이 없다. BSS·STA·키·ROC·suspend를 레거시 명령으로 보낸다 | 여러 명령을 uni로 보낸다 | 모른다. gen4m은 MT7961도 레거시로 보내므로, 펌웨어가 uni를 못 받는다는 뜻은 아니다 |
-| 레거시 명령 번호 | CE 0x01·03·05·0a·0f·16·17·1b·1c·1d·33·5d·61·62·8a·a1·b0·c0·c5·ca·cd·d0과 EXT 0x05·08·21이 같은 뜻이다 | 같다 | 같다. CE 0x5c(CLC)와 EXT 0xbd(RF pin)는 없다. EXT 0x46(`MAC_INIT_CTRL`), 0x3e(`PROTECT_CTRL`)도 벤더 표에 없고, 0x4e(`SET_RX_PATH`)와 0x2c는 벤더 헤더에 다른 이름으로 있다(`EFUSE_BUFFER_RD`, `GET_SENSOR_RESULT`). 기기에서 본다 |
+| 레거시 명령 번호 | CE 0x01·03·05·0a·0f·16·17·1b·1c·1d·33·5d·61·62·8a·a1·b0·c0·c5·ca·cd·d0과 EXT 0x05·08·21이 같은 뜻이다 | 같다 | 같다. CE 0x5c(CLC)와 EXT 0xbd(RF pin)는 없다. EXT 0x46(`MAC_INIT_CTRL`), 0x3e(`PROTECT_CTRL`)도 벤더 표에 없고, 0x4e(`SET_RX_PATH`)와 0x2c는 벤더 헤더에 다른 이름으로 있다(`EFUSE_BUFFER_RD`, `GET_SENSOR_RESULT`). 기기에서 본다. 답을 기다리는 것 가운데 벤더 표에 없거나 이름이 다른 것: `PROTECT_CTRL`은 wlan0이 생기기 전(`mt7921_mac_init`), `MAC_INIT_CTRL`과 `SET_RX_PATH`는 `ip link up`(`__mt7921_start`)에서 간다. 체크리스트 5·7단계에 답이 없을 때의 줄을 적었다. |
 | 이벤트 | `WIFI_EVENT`(RXD 24바이트와 머리). 주요 EID가 같다 | `mt76_connac2_mcu_rxd` | 같다. RSSI 알림 번호만 다르다(0xa1, 업스트림 0x96) |
 | NIC 능력(0x8a) | 0x17은 P2P, 0x20은 MLR 능력 | 0x17은 WFDMA 재할당, 0x20은 칩 능력 | 뜻이 달라 따로 읽는다 |
 | 기능 플래그 | 펌웨어 파일이 없어 trailer의 feature_set을 읽을 수 없다 | `mt792x_get_offload_capability()`가 파일에서 읽는다 | CNM 여부를 다른 길로 정한다 |
@@ -150,6 +150,7 @@ OnePlus 공식 gen4m(MT6897 빌드)과 업스트림 mt76(7.3)을 대조했다(�
 
 ## 7. 남은 확인
 
+- **벤더 표에 없는 명령:** EXT 0x3e(wlan0 전), 0x46·0x4e(`ip link up`). 답이 없으면 그 자리에서 멈춘다. 넘어가게 할지는 답을 본 뒤에 정한다.
 - **uni cmd:** soc7_0 펌웨어가 uni cmd를 받는지. 드라이버가 INIT 0x42 뒤에 uni DEV_INFO 하나를 보내고, 답이 없으면 멈추고 그렇다고 남긴다.
 - **LK가 트리에 쓰는 값:** LK는 노드를 경로로 찾고 status를 보지 않는다(역어셈블). mainline 트리에 실제로 값을 쓰는지는 기기에서 본다. 차례는 [체크리스트](bringup-checklist.md) 9.1절이다.
 - **LK의 펌웨어 적재:** 기기에서 EMI+0xB00024의 manifest로 확인한다.

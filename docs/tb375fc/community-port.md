@@ -59,10 +59,10 @@
 | `aef9931` | 2a | `0xfc16f000`·stride 11776으로 fbcon이 보이고, 펭귄 여덟(CPU 8개)이 뜬다. LK가 RGU(`0x1c00a000`)를 켠 채 넘긴다. BL31(`0x48800000`, 2MB)을 예약하지 않으면 보조 CPU와 서스펜드가 멈춘다(○) | 그쪽은 커널에 넣은 장치 트리로 바꿔 끼우고, 12GiB 기기의 예약 메모리를 고정값으로 적는다. 우리는 LK가 vendor_boot 트리에 메모리와 예약을 채우게 한다 | 사실만 |
 | `aef9931` | 2b UFS·USB·SPMI | LK가 켜 둔 클럭으로 UFS가 돈다. USB 주변 장치 모드는 vusb33·vbus 없이 돈다. SPMI `chan` 레지스터는 버스 probe 전에 정해야 한다. rcs 인터럽트 없이 폴링한다(○) | 드라이버 쪽에서 클럭·레귤레이터를 없어도 되게 고친다 | 시험 상대 |
 | `aef9931`, `0f7d7c5` | 2c 터치 | SPI2 `0x11012000`, 리셋 GPIO60, IRQ GPIO9, 9.6 MHz(✔ 펌웨어). CS GPIO12, 1.8V GPIO63, 전원 GPIO186·187. probe 순서는 eng_reset, 리셋 해제, chip trim이다. SPI 클럭 자리값을 26 MHz로 둬서 실제 SCLK가 약 52 MHz였고, `spi-max-frequency`를 낮췄다(○) | 하류 nt36xxx 드라이버에서 레지스터를 직접 쓴다. EINT가 없어 폴링한다 | 높음. 양쪽 다 필요하고 그쪽에는 실기가 있다 |
-| `aef9931` | 2e 게이지 | mm8013 @0x55(i2c7 `0x11d02000`). SMBus word 읽기가 불안정해 바이트 단위로 읽는다(○) | 드라이버를 고친다 | 업스트림 수정 후보 |
+| `aef9931` | 2e 게이지 | mm8013 @0x55(i2c7 `0x11d02000`). SMBus word 읽기가 불안정해 바이트 단위로 읽는다(○) | 접근 간격과 재시도로 고친다(0079). 바이트 읽기는 따르지 않는다 | 업스트림 수정 후보 |
 | `4de7a0a`, `cbae621` | PMIC·충전 | MT6363 @4, MT6368 @5, MT6685 @9. connsys 레일은 VCN13, VRFIO18, VCN33_1·2, VANT18. MT6375 @0x34(i2c5 `0x11f01000`), INT GPIO7(○) | 하류 드라이버를 인터럽트 없이 쓴다 | 낮음 |
 | `c5c79f6` | 2b 전원 도메인 | SPM `0x1c001000`, 상태 레지스터 `0xFB0`·`0xFB4`. conn 도메인은 ctl `0xE04`, ifr `0x1002c000`에 버스 보호 항목 넷이 있다(○, 벤더 모듈에서 뽑음) | 그쪽은 옛 `soc/mediatek/mtk-scpsys`, 우리는 `mtk-pm-domains` | 사실만. OEM 소스와 대조 |
-| `a85293b`, `c5c79f6` | 2e GPU 전원 | mfgcfg `0x13fbf000`, GPUEB `0x13c00000`·`0x13c60000`·`0x13c62000`. GPUEB가 살아 있으면 `0x13c60618`이 `0x800f0000`이다. MFGPLL 약 265 MHz. gpusys를 켜면 SoC가 멈춘다(○) | 그쪽은 initcall에서 레지스터를 직접 쓴다. 우리는 `mtk-mfg-pmdomain` 변형 | 사실만 |
+| `a85293b`, `c5c79f6` | 2e GPU 전원 | mfgcfg `0x13fbf000`, GPUEB `0x13c00000`·`0x13c60000`·`0x13c62000`. GPUEB가 살아 있으면 `0x13c60618`이 `0x800f0000`이다. MFGPLL 약 265 MHz. gpusys를 켜면 SoC가 멈춘다(○). `0x13c60618`은 `GPUEB_CFGREG_WDT_CON`이다(OEM `gpueb_debug.c`). 살아 있음의 표시는 LK가 기다리는 GPR2(`0x13c2fd24`) = `0x55667788`이다. gpusys를 켜면 멈춘다는 보고는 벤더 구조와 맞는다: MFG1~14는 GPUEB 몫이고 벤더도 AP에서 만지지 않는다 | 그쪽은 initcall에서 레지스터를 직접 쓴다. 우리는 `mtk-mfg-pmdomain` 변형 | 사실만 |
 | `0ab6b6c`, `15a563c` | 2d Wi-Fi·BT | EMI: consys `0x8cc00000`(0xd00000), wfdma `0x8d900000`(0x1400000). SPM+`0xE04`가 `0xc200000d`이면 conn이 켜진 것이다. ROM 완료는 `0x18060A10` bit30. WF ROM은 아직 뜨지 않는다(○) | 그쪽은 벤더 gen4m과 conninfra(약 4만 줄), 우리는 mt76 | 사실만. OEM `soc7_0.c`와 대조 |
 | PR #2 | 2b 핀 | EINT `0x11ce0000` 외 블록 넷, SPI 309, 250핀(✔ 펌웨어) | pinconf가 없다 | 높음. 우리 `pinctrl-mt6897`이 그쪽 터치 IRQ를 풀어 준다 |
 

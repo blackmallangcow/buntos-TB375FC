@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.21
+# buntOS TB375FC 포팅 최종 설계안 v1.25
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -22,6 +22,10 @@
 - v1.19(2026-11-02): NT36532 패널 드라이버를 만들었다(패치 0080~0084). 업스트림 드라이버와 바인딩을 백포트하고(`47b823940e38`, `1c523f0a9301`, 드라이버가 쓰는 DSI 플래그 `ffa88de8ddb6`), 패널 셋(BOE, Tianma, Tianma 무광)과 144/120/60/30Hz를 더했다. 초기화 표·타이밍·DSC 값은 미러, 스톡 모듈, LK 표의 셋이 바이트까지 같다. 패널은 노드 하나에 GPIO184 스트랩으로 고른다(터치와 같은 줄, D2의 업스트림 꼴). LK가 찾는 `panel<n>` 경로는 두지 않는다: LK는 화면을 자기 트리로 켜고, 그 경로는 찾지 못해도 기록만 남긴다. 메모와 달랐던 것: "패널 고유 RC 표"는 없다(DSC 1.1 SCR 전 표 그대로이고 첫 줄 오프셋만 13이다). 돌 곳이 없어 기기 시험은 없고, 화면 파이프라인이 올 때 맞출 것을 보고에 적었다
 - v1.20(2026-11-02): connsys Wi-Fi(패치 0055~0060)와 Bluetooth(패치 0085·0086)를 더했다. 기기 시험은 없고 노드는 모두 꺼 둔다. LK는 connsys 노드를 compatible이 아니라 경로로 찾고 status를 보지 않으므로(역어셈블), `gps`·`connscp`를 2d까지 트리에서 빼 LK가 메모리를 나누지 않게 한다. uni cmd를 받는지는 기기에서 `DEV_INFO` 하나로 가른다. 레거시 명령 길은 그 답을 본 뒤에 쓰고 번호 0061~0069를 비워 둔다. DMA는 LK가 만든 `no-map` 칸 안에서 자기 `dma_map_ops`로 복사한다(업스트림 꼴은 아니다). FEM은 nofem으로 시작한다. connsys 전원의 첫 시험은 nvdata와 DMA 칸이 필요 없는 Bluetooth로 한다
 - v1.21(2026-11-02): MT6375 충전과 TCPC(패치 0090~0097)를 더했다. 노드는 모두 꺼 두었다. 드라이버가 없는 동안의 배터리를 코드로 판단했다: MediaTek LK2 코드 기준으로 LK는 입력과 충전을 500 mA로 두고 충전기 종류와 상관없이 그대로 넘기므로, 화면이 켜져 있으면 PC에 꽂아도 배터리가 줄어들 가능성이 크다(부하 전력은 추정, 기기에서 잰다). 충전은 배터리 설명과 게이지가 장치 트리에 있고 온도를 읽은 뒤에만 넘겨받는다. 값은 순정 트리에서만 왔고, 상한은 드라이버와 MFD 두 곳에서 막는다. 충전 전압 상한은 유지 관리 표에서 가장 낮은 4340 mV다(기기 실측과 같다). adb의 4310은 게이지 값이다. TCPC는 처음에 PD 없이 싱크로만 쓴다
+- v1.22(2026-11-02): 충전 드라이버의 독립 재검토 두 번을 반영했다(패치 0090~0097을 그대로의 번호로 고쳤다). 넘겨받기 전에도 말이 안 되는 게이지 값이 세 번 이어지면 충전을 끈다. `inhibit-charge`는 게이지와 상관없이 바로 듣고 실패를 돌려준다. 칩의 고장은 걸쇠로 남겨 새 입력에서만 푼다. 게이지 전압에 범위 검사를 두었다(2.5~5 V). 절전에서 충전을 끄지 못하면 잠들지 않는다. 게이지가 실패하는 동안에도 VBUS를 따라가고, 게이지는 잠금 밖에서 읽는다. 부스트 깃발은 칩과 맞춘다. 상한 값은 그대로다. `rmmod`는 멈추는 길이 아니다(체크리스트 9.3). Wi-Fi도 독립 재검토를 반영했다(패치 0057, 0059, 0060을 같은 번호로 고쳤다): 모듈을 내릴 때 남은 `mac_work`가 해제 뒤 접근을 내던 길을 막았고, `PROTECT_CTRL`(EXT 0x3e)은 실제로 답을 기다려 보낸다는 점을 문서에 바로잡았으며, 5845~5925 MHz와 6 GHz가 꺼지던 초기화를 고쳤고, 리셋이 끝없이 되풀이되지 않게 10분에 20번으로 막았다
+- v1.23(2026-11-02): 2e의 GPU 전원·열·게이지 패치 0070~0079를 더했다. 모두 꺼 둔 노드다. GPUEB는 "오프셋만 다른 변형"이 아니었다: LK가 띄우고 멈추지 않으며(GHPM·클럭·레귤레이터 없음), 공유 메모리는 LK가 `/soc/gpueb`에 적어 주고, OPP는 CMD_COMMIT이다. LVTS는 센서가 16개가 아니라 도메인 넷에 32개이고, 펌웨어가 켜 둔 것을 읽기만 하며, 보정값은 efuse 블록이 아니라 LK가 넘기는 devinfo에 있다.
+- v1.24(2026-11-02): 화면·MDP·코덱의 클럭 게이트를 만들었다(패치 0100~0104, 블록 열하나, 게이트 256). 표가 OEM 소스·스톡 모듈과 맞는다. 이 블록은 전원 도메인이 켜져 있을 때만 답하는데 클럭 노드에 `power-domains`를 달지 않는다: VEN·MDP 도메인은 자기 블록의 게이트를 써서 서로 기다리고, 나머지는 probe가 도메인을 켰다 끄면 MM_INFRA까지 꺼져 LK 화면이 꺼진다. 그래서 게이트에 `.is_enabled`를 두지 않아 클럭 코어가 블록을 읽지 않는다. HW voter 게이트는 벤더 순서로 투표하고, HW voter 한도를 30µs에서 5ms로 올렸다. 노드는 모두 꺼져 있다.
+- v1.25(2026-11-02): MT6685 RTC(패치 0110~0113)를 더했다. 노드는 꺼 두었다. 시간 읽기와 쓰기만 한다. 드라이버는 업스트림 v1을 그대로 쓰지 않고 벤더 판을 따라 새로 썼다: 연도 칸은 1968부터(업스트림 v1은 안드로이드의 2026을 2086으로 읽는다), 읽기에 BBPU 쓰기 없음(2025년 뒤 MediaTek 판), 게이트는 드라이버가 직접. 쓰기는 regmap이 게이트 둘·시간 칸 여섯·트리거로 막는다(칸은 벤더처럼 두 바이트로 쓴다). 알람은 뒤로 미뤘다: `spmi-mtk-pmif`가 SID 이벤트를 체인 처리기에서만 지우므로 직접 요청하면 EINT 248이 계속 울린다. 클럭 버퍼 드라이버는 만들지 않는다: 순정 트리에 소비자가 없고 벤더 `clkbuf`도 디버그용이며(프로브 쓰기 0번, `xo-cmd` 없음), 업스트림 "MT6685 클럭" 시리즈는 XO가 아니라 RTC의 SCK_TOP 게이트 다섯이다. 첫 소비자는 단계 3 오디오의 BBCK5다.
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -78,10 +82,10 @@
 | D1 | **mainline 커널.** 소스는 kernel.org 원본이고, 판은 buntOS 이미지의 Debian forky 커널과 같다(지금 7.2.12). 여기에 제출 대기 패치를 더한다. 개발 빌드는 arm64 defconfig에, 이미지용은 같은 시점 Debian forky 커널 설정에 보드 조각을 얹는다. Debian 소스 패키지의 패치는 쓰지 않고, 필요한 것만 골라 대기열에 넣는다. 벤더 GKI는 쓰지 않는다 | buntOS 설계안 4.2.2절. 필요한 업스트림 기능(6.16~7.0)이 7.2에 다 있다. 7.4 병합 창에 들어온 패널 드라이버와 SPMI 고침만 백포트한다. 원본 소스이면 개발 빌드와 이미지가 같은 트리이고, 시험한 기반이 업스트림과 같아 제출이 쉽다. Debian `linux 7.2.12-1`의 패치 77개(버그 고침 28, 기능 14, Debian 전용 35)에는 MediaTek 관련이 없고, 차이는 보안 기본값과 패키징이다. Debian 패키징으로 빌드하려면 forky 툴체인과 큰 디스크가 든다(디버그 패키지만 약 7.2GiB). 2026-11-01에 견줘 정했다 |
 | D2 | **업스트림 꼴로 짠다.** `mt6897.dtsi` + `mt6897-lenovo-tb375fc.dts`. 핀은 업스트림 `pinctrl-mt6878`을, clk·pmdomain·SPMI는 MT8196을 틀로 삼는다. MT6897 데이터는 OEM 공식 소스(OnePlus·OPPO·Motorola, GPL-2.0)에서 가져온다 | 제출할 수 있어야 유지할 수 있다. 커뮤니티 포트는 클럭·핀 드라이버 없이 fixed-clock과 부트로더 상태에 기대고, 장치 트리를 커널에 넣어 LK가 준 트리를 바꿔 끼우는 구조다. 그래서 사실 확인용과 협력 상대로 쓰고, 기반으로는 쓰지 않는다([분석](community-port.md)) |
 | D3 | **처음에는 LK가 직접 띄운다.** boot v4 + vendor_boot v4(DT 표) + 빈 dtbo, `fastboot boot`로 RAM에서. 2b부터는 U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다 | 파티션을 건드리지 않는 첫 부팅. EFI가 되면 원본 buntOS(데스크톱 라인)의 arm64 이미지 꼴과 같아진다. MT6878-mainline도 U-Boot를 권한다 |
-| D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`, `regulator_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 업스트림 시리즈를 따라 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다. `pd_ignore_unused`는 늦은 정리(`genpd_power_off_unused`)만 막고 sync_state는 막지 못한다. 화면 도메인을 지키는 것은 표의 기본 꺼짐과, 장치 트리에 화면 도메인을 적지 않는 것이다. MM_INFRA 아래 소비자(ISP, 카메라, VDE, VEN, MDP, DP)를 처음 붙이기 전에는 `simple-framebuffer`가 `power-domains`로 화면 도메인을 잡아야 한다. genpd는 MM_INFRA를 마지막 사용자와 함께 끈다. |
+| D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`, `regulator_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 업스트림 시리즈를 따라 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다. `pd_ignore_unused`는 늦은 정리(`genpd_power_off_unused`)만 막고 sync_state는 막지 못한다. 화면 도메인을 지키는 것은 표의 기본 꺼짐과, 장치 트리에 화면 도메인을 적지 않는 것이다. MM_INFRA 아래 소비자(ISP, 카메라, VDE, VEN, MDP, DP)를 처음 붙이기 전에는 `simple-framebuffer`가 `power-domains`로 화면 도메인을 잡아야 한다. genpd는 MM_INFRA를 마지막 사용자와 함께 끈다.. 화면·코덱 클럭 노드(패치 0100~0104)는 도메인의 소비자가 아니다. `power-domains`가 없고 probe가 블록과 도메인에 닿지 않으므로, 켜도 MM_INFRA 규칙에 걸리지 않는다. 그 게이트의 소비자가 규칙에 걸린다. `clk_ignore_unused`를 빼면 이 게이트는 그대로지만 topckgen 먹스가 닫힌다. `simple-framebuffer`가 화면 도메인을 잡으면 그 기본 클럭(`mminfra`, `disp0`, `disp1`, `ovl0`, `ovl1`)은 genpd가 잡아 남는다. |
 | D5 | **Wi-Fi는 mt76에 "MT7921의 SoC 변형"을 더한다.** 펌웨어는 LK가 실은 것을 쓰고, conninfra 전원은 TF-A SIP 호출로 켜고, nvdata 보정값은 NVRAM 명령으로 넘긴다. 그 전에는 USB 동글로 우회한다(USB 호스트는 MT6375 OTG가 먼저다). 코드는 패치 0055~0060이다. DMA는 맵 없는 LK 칸 안에서 자기 `dma_map_ops`로 복사한다(업스트림 꼴은 아니다, 6절) | 칩 ID와 구조가 MT7921과 같고, 명령 머리와 레거시 명령 번호도 같다. SoC Wi-Fi 선례(mt7915/soc.c)가 있다([설계](wifi-soc7_0.md)) |
 | D6 | **펌웨어는 설치할 때 기기에서 뽑는다.** Mali CSF만 linux-firmware에서 온다. GPUEB와 Wi-Fi·BT는 LK가 올리므로, 그 파티션(GPUEB, `connsys_wifi`, `connsys_bt`)을 지킨다 | 재배포할 수 있는지 모른다(buntOS ADR-012). 안드로이드 슬롯 하나를 남긴다 |
-| D7 | **GPU는 panthor + MT6897 GPUEB 변형이다.** 이미지에 Mesa 26.3 이상이 필요하다 | panthor·펌웨어·Mesa가 이미 G615를 안다. 전원은 MT8196 드라이버에 공유 메모리 오프셋만 다른 변형을 더한다 |
+| D7 | **GPU는 panthor + MT6897 GPUEB 변형이다.** 이미지에 Mesa 26.3 이상이 필요하다 | panthor·펌웨어·Mesa가 이미 G615를 안다. GPUEB는 LK가 띄우고 멈추지 않으며 전원·클럭·전압을 모두 맡는다. 커널은 메일박스로 켜고 끄기와 OPP만 요청한다. MFG1~14 도메인과 MFG PLL은 커널이 건드리지 않는다 |
 | D8 | **가상화는 2a에서 EL을 본 뒤 정한다.** GenieZone이 EL2를 차지하면 KVM을 포기하고, gzvm(미병합)을 나중에 검토한다. TEE를 고쳐 EL2를 빼앗는 실험(`mtk-mod-tee-nogz`)은 쓰지 않는다 | 서명 우회가 필요하고 벽돌 위험이 크다 |
 
 ## 2. 부팅 길
@@ -184,7 +188,7 @@
 | 2b 저장장치·디버그 | UFS(`ufs-rtff-mtcmos`, 처음에는 MCQ 끔), USB 주변 장치(mtu3·xsphy), 핀·EINT(mt6878 틀), 클럭 컨트롤러 여섯(`clk_ignore_unused`는 둔다), SPMI(MT8196 데이터, P 버스 끔), MT6319(DT만), MFD·MT6363, cpufreq-hw. PMIC 쪽은 핀(EINT) → SPMI → MT6319 → MFD·MT6363 순서다 | UFS의 Debian 루트, USB 가젯 SSH |
 | 2c 화면·입력 (1차) | simple-framebuffer로 buntOS 데스크톱, NT36532 SPI 터치(펌웨어 내려받기), 펜, 홀 센서(gpio-keys), 포고 키보드(serdev) | 2944×1840으로 buntOS 로그인 화면, 터치·펜 조작, 키보드 커버를 붙이면 포인터 모드 |
 | 2d 무선 | conninfra(SIP 호출, PMIC 전원, conn 전원 도메인), mt76 soc7_0(LK 적재본 기동), nvdata 보정값, FEM, Bluetooth(BEIF) | Wi-Fi 연결, Bluetooth 키보드·이어폰 |
-| 2e GPU·전원 | panthor + GPUEB 변형, Mesa 26.3, 클럭 드라이버 완성(`clk_ignore_unused` 빼기), LVTS 열, MT6375 충전·TCPC, MM8013, 서스펜드 | GLES로 컴포지터, 서스펜드·복귀 반복, 배터리·충전 표시 |
+| 2e GPU·전원 | panthor + GPUEB 변형, Mesa 26.3, 클럭 드라이버 완성(`clk_ignore_unused` 빼기. 화면·코덱 게이트는 패치 0100~0104에 있고 빼도 닫히지 않는다. 남은 것은 먹스(화면 먹스 다섯은 `framebuffer0`이 도메인을 잡으면 genpd가 쥔다), UFS 게이트, `mfgsc_ref`다. MFG PLL과 GPU 먹스는 만들지 않는다. EB 모드 벤더도 쓰지 않는다), LVTS 열, MT6375 충전·TCPC, MM8013, 서스펜드 | GLES로 컴포지터, 서스펜드·복귀 반복, 배터리·충전 표시 |
 | 2c 화면 (2차) | mediatek-drm의 MT6897 데이터, dual-DSI, DSC, NT36532 패널 셋(업스트림 드라이버 + compatible 셋) | 주사율·밝기 조절, 화면 끄고 켜기 |
 | 3 최적화 | 8절, 오디오, 외부 화면 | buntOS 설계안 9.3절 스모크 시험 |
 
@@ -225,7 +229,7 @@
   - `spmi-mtk-pmif` 고침 백포트(패치 0002·0003): FSM 멈춤 우회(`84c72fc05f73`, 7.4 병합 창), 클럭 참조 누수(`636c4c026f47`). 코드 대조에서 나온 결함 둘은 고침을 0007·0008로 얹었다. rcs 디먹스가 SID당 8비트를 7로 나눠 처리기가 끝나지 않을 수 있고, 채널 설정이 버스 등록 뒤에 있어 내장(=y) PMIC 드라이버가 채널 없이 버스를 쓸 수 있다. 기기에서 확인한 뒤 업스트림에 낸다
   - `pinctrl-mt6897`(EINT 포함, 패치 0004~0006: 바인딩, pinmux 매크로, 드라이버). GPIO가 없는 EINT 232~249는 업스트림 MT8196처럼 가상 핀이다
   - `clk-mt6897`(패치 0009~0013): 바인딩, HW voter syscon, FENC 없는 HW voter 먹스와 PLL HW voter(업스트림 틀에 더한 것), 2b 블록 일곱의 드라이버
-  - MFD `mtk-spmi-pmic`(패치 0014~0016): v12에 리뷰 지적과 인터럽트 고침(마스크 레지스터, 초기 마스크, RCS 완료, 깨우기)을 얹었다. 새 판이 나오면 따른다. MT6363 키(0017·0018)는 새로 썼다. MT6685는 범위 밖이다. MT6319는 MFD 없이 `mt6315-regulator`에 DT만 쓴다
+  - MFD `mtk-spmi-pmic`(패치 0014~0016): v12에 리뷰 지적과 인터럽트 고침(마스크 레지스터, 초기 마스크, RCS 완료, 깨우기)을 얹었다. 새 판이 나오면 따른다. MT6363 키(0017·0018)는 새로 썼다. MT6685는 패치 0112다: 인터럽트 그룹이 없어 regmap도 칩 읽기도 없이 자식만 띄운다(버스 접근 0번). MT6319는 MFD 없이 `mt6315-regulator`에 DT만 쓴다
   - UFS(패치 0019~0022): MT6897 호스트·M-PHY 바인딩과 드라이버. 클럭·리셋 이름과 OPP는 업스트림 MT8196 시리즈(v14, 병합 전) 꼴이고, 그 시리즈가 들어오면 그 위로 다시 쓴다
   - MT6363 regulator 고침(패치 0037~0041): 8비트 값 regmap, VEMC 전압, OC 처리, VSRAM 레지스터. 업스트림에 낸다
   - `mt6897` 전원 도메인(패치 0050~0054): 바인딩 둘, probe 실패 때 기본 꺼짐 도메인을 끄지 않는 고침, 한 제어기에 직접 제어와 HW voter, 표. 노드는 꺼 두었다
@@ -250,9 +254,9 @@
 | CPU 주파수 | `mediatek-cpufreq-hw` | DT(도메인 셋), 더미 `cpu-supply` | 작음 | 2b |
 | 핀 제어 | `pinctrl-mt6878`(틀) | `pinctrl-mt6897`(OEM 표: 핀 232, EINT 250). 벤더 전용 기능은 업스트림 mt6878처럼 `DRV_ADV`로 바꾸거나 뺀다. 패치 0004~0006과 pio 노드가 있다 | 중간 | 2b |
 | 전원 도메인 | `mtk-pm-domains`(MT8196) | MT6897 표(직접 제어 25, HW voter 7. 벤더의 33번째 APU는 레지스터가 없다)와 한 제어기에 두 종류를 두는 고침. 패치 0050~0054와 꺼 둔 노드(conn 하나)가 있다. UFS·USB에는 없다. GPU 12개는 GPU 전원 줄로 | 중간 | 2d·2c(2차) |
-| 클럭 | `clk-mt8196-*`(틀) | `clk-mt6897`(OEM 표). FENC 없는 HW voter 먹스와 PLL HW voter를 더한다. 2b 블록은 패치 0009~0013에 있다 | 큼 | 2b~2e |
+| 클럭 | `clk-mt8196-*`(틀) | `clk-mt6897`(OEM 표). FENC 없는 HW voter 먹스와 PLL HW voter를 더한다. 2b 블록은 패치 0009~0013, I2C 게이트는 0043·0044, 화면·MDP·코덱 게이트는 0100~0104에 있다. 카메라·ISP 블록 20개(게이트 136)와 오디오·SCP 블록은 없다 | 큼 | 2b~2e |
 | SPMI·MT6363·MT6319 | `spmi-mtk-pmif`, `mt6363-regulator`, `mt6315-regulator` | SPMI는 MT8196 대체 compatible(P 버스 끔)과 고침 넷(0002·0003·0007·0008), MT6319는 DT만, MT6363은 MFD·키 패치(0014~0018)와 regulator 고침(0037~0041). SPMI 노드, MT6363(키, 레일 23개), MT6319, UFS 공급은 장치 트리에 있다 | 작음~중간 | 2b |
-| MT6368·MT6685·MT6375 | 없음 | MT6368은 패치 0023~0026(regulator 바인딩·드라이버, MFD 데이터)과 보드 노드(펌웨어가 늘 켜 두는 레일 6개, USB `vusb33`). 진동(VIBR)·지문(VFP)·오디오(VAUD18) 레일은 소비자와 함께 3에서 노드를 넣는다. MT6685는 MT6895 포크 견본으로 새로. MT6375는 패치 0045~0047(OTG 부스트)과 0090~0097(충전, 인터럽트, TCPC): 프로브 쓰기 0번은 인터럽트 없는 기본 상태에서 그대로다. 게이지·ADC와 PD 고속 충전은 뒤 일이다 | 중간~큼 | 2b·2e·3 |
+| MT6368·MT6685·MT6375 | 없음 | MT6368은 패치 0023~0026(regulator 바인딩·드라이버, MFD 데이터)과 보드 노드(펌웨어가 늘 켜 두는 레일 6개, USB `vusb33`). 진동(VIBR)·지문(VFP)·오디오(VAUD18) 레일은 소비자와 함께 3에서 노드를 넣는다. MT6685는 패치 0110~0113(바인딩 둘, MFD는 자식만 띄움, RTC). 시간 읽기와 쓰기만, 쓰기는 게이트 둘·시간 칸 여섯·트리거로 막았다. 알람과 깨우기는 뒤다. 클럭 버퍼는 소비자가 없어 만들지 않는다. 단계 3 오디오의 BBCK5가 첫 소비자다. MT6375는 패치 0045~0047(OTG 부스트)과 0090~0097(충전, 인터럽트, TCPC): 프로브 쓰기 0번은 인터럽트 없는 기본 상태에서 그대로다. 게이지·ADC와 PD 고속 충전은 뒤 일이다 | 중간~큼 | 2b·2e·3 |
 | UFS | `ufs-mediatek`, `phy-mtk-ufs` | 패치 0019~0022: MT6897 compatible(호스트는 match data로 `rtff-mtcmos`·`broken-rtc`·`pmc-via-fastauto`·`tx-skew-fix`), 리셋 셋, M-PHY 새 판(클럭·전원 순서 없음). VCC·VCCQ는 보드. 클럭 스케일링과 MCQ(큐 인터럽트 여덟)는 뒤로 | 작음~중간 | 2b |
 | USB | `mtu3`, `xhci-mtk`, `phy-mtk-xsphy` | DT(펌웨어의 eye 값). 호스트 모드는 VBUS 드라이버(0045~0049, 꺼 둠) 뒤에 otg 모드로, 역할은 사용자 공간에서 바꾼다. 자동 전환은 TCPC 뒤. xsphy MT6897 꼴(U2 INTR_CAL 칸과 efuse, U3 CDR 값)과 깨우기 접점(벤더 판 103)은 드라이버 고침이 필요하다 | 작음~중간 | 2b·3 |
 | I2C | `i2c-mt65xx`(mt8188 데이터) | 바인딩 한 줄(0042), 게이트 블록 다섯(0043·0044), dtsi의 컨트롤러 14개(꺼 둠). 벤더 mt6897 데이터가 mt8188과 같다. 벤더의 FIFO 길은 업스트림이 안 쓴다 | 작음 | 2c·2e |
@@ -262,17 +266,17 @@
 | 홀 센서 | `gpio-keys` | 보드 노드(꺼 둠): GPIO1 = `SW_LID`(덮개 닫힘이 0). 펌웨어의 `hall_2`(GPIO26)는 키보드의 `plug-gpios`라 키보드 드라이버가 가진다 | 작음 | 2c |
 | 포고 키보드 | v6 시리즈(미병합, Qualcomm 기기용) | 패치 0032~0034: v6 백포트(리뷰 지적 반영, 서스펜드)에 레노버 판을 더한다. 스톡 모듈로 보면 같은 Tinno MCU의 옛 꼴이다: `55×8, 0x25, cmd, e(len), e(payload), e(합), 0x2C, 55×4`, e()는 무작위로 고른 표 여덟 가운데 하나로 니블마다 치환, 명령은 키 0x61·미디어 0x62·터치패드 0x63·매개변수 0x6A·동기 0x7B·일반 0x92. CRC는 없다. 붙음·뗌은 GPIO26, RX 핀은 뗀 동안 GPIO, 깨우기는 GPIO40 상승 에지다. UART3 패드 모드(pericfg_ao `0x50`)는 8250_mtk(패치 0035·0036) | 중간 | 2c |
 | Wi-Fi·BT | `mt7921`, `mt7915/soc.c`(선례) | soc7_0 버스, conninfra, 펌웨어, FEM, BT 전송 | 큼 | 2d |
-| GPU | panthor(G615), linux-firmware CSF | DT | 작음 | 2e |
-| GPU 전원 | `mtk-mfg-pmdomain`, `mtk-gpueb-mailbox`(MT8196) | 벤더 GPU_EB_RPC 12개는 GPUEB가 켠다(`gpueb-support`, `CMD_POWER_CONTROL`). 리눅스는 도메인 하나로 본다(패치 0050~0054 보고 4절). MT6897 변형(공유 메모리 오프셋, 메일박스 표) | 중간 | 2e |
-| 열 | `lvts_thermal` | MT6897 데이터(센서 16개) | 중간 | 2e |
-| 게이지 | `mm8013` | DT | 작음 | 2e |
+| GPU | panthor(G615), linux-firmware CSF | DT. compatible `mediatek,mt6897-mali`(바인딩만, 드라이버는 일반 compatible). ASN hash 없음 | 작음 | 2e |
+| GPU 전원 | `mtk-mfg-pmdomain`, `mtk-gpueb-mailbox`(MT8196) | 패치 0070~0073. MT6897 변형: LK가 띄운 GPUEB, 메일박스 11채널, 공유 메모리는 LK가 줌, 오프셋 셋, CMD_COMMIT, 절전 noirq 단계의 IPI(`IRQF_NO_SUSPEND`). MFG1~14는 GPUEB 몫 | 중간 | 2e |
+| 열 | `lvts_thermal` | 패치 0075~0078. 도메인 넷(AP·MCU·APU·GPU), 센서 32개, 읽기 전용, 센서별 계수, devinfo NVMEM 새 드라이버 | 중간 | 2e |
+| 게이지 | `mm8013` | 패치 0079(접근 전 4 ms, 읽기 재시도, 배터리 ID 0x0103), DT | 작음 | 2e |
 | 차지 펌프 | 없음 | 입력 FET 스위치만 패치 0048·0049(VBUS 경로라 먼저). 고속 충전은 새로 | 중간 | 3 |
 | 오디오 | MT8196·MT8189 AFE, MT6359 코덱, AW88395·AW88399·AW88166, FSA4480 | MT6897 AFE, MT6368 코덱·accdet, 앰프 칩 확인, ACF | 큼 | 3 |
 | SAR | `hx9023s` | HX9031AS를 hx9023s로 시도, HX9036 새로 | 작음/중간 | 3 |
 | 지문 센서 | 모름 | 칩과 연결을 장치 트리에서 확인한다(실기기에 센서가 있고, 입력 장치 `gf-keys`가 있다) | 모름 | 3 |
 | 센서 허브 | MT8183~MT8195 SCP만 | MT6897 SCP(nanohub) 길 조사 | 큼 | 3 |
 | 외부 화면 | `mtk_dp`(MT8195), PS5169/70 패치 | 화면·TCPC 뒤 | 큼 | 3 |
-| 비디오 코덱·카메라 | — | 범위 밖 | — | — |
+| 비디오 코덱·카메라 | — | 범위 밖. 코덱의 클럭 게이트만 있다(0104). 소비자가 오려면 VCP 드라이버와 펌웨어가 먼저다: `vdec` 먹스의 게이트는 스톡에서 VCP가 IPI로 여닫는다 | — | — |
 
 ## 6. Wi-Fi·Bluetooth
 
@@ -301,7 +305,7 @@
   - FEM 고르기
   - 펌웨어가 uni cmd를 받지 않으면 BSS·STA·키·ROC를 레거시 명령으로 보내는 길
   - Bluetooth: `drivers/bluetooth/btmtkbeif.c`(패치 0085·0086). H4 틀은 `h4_recv_buf`, WMT 구조체와 `btmtk_set_bdaddr`는 btmtk를 쓰고, WMT 동기 함수는 다른 btmtk 드라이버처럼 드라이버 안에 둔다
-  - DMA: LK가 만든 칸은 `no-map`이고 compatible이 `shared-dma-pool`로 정해져 있다. 그래서 restricted-dma-pool(선형 맵 필요, 자기 compatible 필요)도 swiotlb(선형 맵 필요)도 못 쓴다. 벤더의 복사 길과 같은 꼴을 `dma_map_ops`로 썼다. `ARCH_HAS_DMA_OPS`가 필요하다(arm64는 XEN일 때만 고른다. defconfig와 Debian 설정은 XEN=y다). 업스트림에 낼 때 다시 정해야 한다
+  - DMA: LK가 만든 칸은 `no-map`이고 compatible이 `shared-dma-pool`로 정해져 있다. 그래서 restricted-dma-pool(선형 맵 필요, 자기 compatible 필요)도 swiotlb(선형 맵 필요)도 못 쓴다. 벤더의 복사 길과 같은 꼴을 `dma_map_ops`로 썼다. `ARCH_HAS_DMA_OPS`가 필요하다(arm64는 XEN일 때만 고른다. defconfig와 Debian 설정은 XEN=y다). 업스트림에 낼 때 다시 정해야 한다. 소켓이 쥔 RX 페이지도 칸을 차지하므로 칸이 찰 수 있다. 칸이 차면 RX가 서지만 100 ms마다 다시 채워 되살아난다. 그 동안 명령도 실패할 수 있다. 압박이 있을 때 프레임을 복사해 칸을 비우는 길은 아직 없다.
   - uni cmd: 이미지와 벤더 코드로는 가릴 수 없다. 런타임에 uni `DEV_INFO`(active=0) 하나를 보내 보고, 답이 없으면 멈추고 그렇다고 남긴다. 레거시 길(CMD 0x07·0x11~0x14·0x1c)은 그 답을 본 뒤에 쓴다
 - 순서: 2b의 클럭·핀·PMIC가 먼저다.
 - 우회: 그 전에는 USB 동글(mt7921u)이나 USB 이더넷을 쓴다.
@@ -312,7 +316,7 @@
 | 펌웨어 | 어디서 | 누가 올리나 | 재배포 |
 |---|---|---|---|
 | Mali CSF(`arm/mali/arch11.8/mali_csffw.bin`) | linux-firmware | 커널(panthor) | 가능 |
-| GPUEB(`gpueb.img`) | 기기 파티션 | **LK**(벤더 커널에 request_firmware가 없다) | 해당 없음 |
+| GPUEB(`gpueb.img`) | 기기 파티션 | **LK**(벤더 커널에 request_firmware가 없다) | 해당 없음. LK는 부팅 중 `gpueb` 파티션을 읽어 올린다. 읽기에 실패하거나 MFG0이 꺼져 있으면 `app_load_gpueb(fdt, b_mode) == NO_ERROR` 단언에 걸려 LK가 멈춘다(LK 역어셈블). 그래서 이 파티션은 지우면 안 된다. |
 | 터치 NT36532(`novatek_ts_fw_boe.bin`, `novatek_ts_fw_tm.bin`) | 기기 vendor → `lenovo/tb375fc/` | 커널(터치를 열 때와 깨어날 때) | 미확인. 기기에서 뽑는다 |
 | Wi-Fi·BT soc7_0 | 기기 파티션(`connsys_wifi`, `connsys_bt`) | **LK**(conninfra EMI에 싣는다. 커널은 시작만 시킨다) | 해당 없음. 파티션을 지킨다 |
 | Wi-Fi 보정값·MAC | 기기 nvdata | 커널(NVRAM 명령으로 넘긴다. initramfs가 nvdata를 붙인다) | 기기마다 다르다 |
@@ -376,6 +380,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | MFD `mtk-spmi-pmic` 미병합 | PMIC가 늦어진다 | 패치 대기열에 넣고 업스트림 판을 따라간다. v12(2026-05) 뒤로 새 판이 없고, BayLibre가 이어받겠다고 했다(2026-10). v12의 인터럽트 결함(마스크가 늘 첫 그룹에 쓰인다)은 대기열에서 고쳤다. 업스트림에 알릴지는 정할 것이다. 병합된 MT6363 regulator(7.2.12)의 16비트 regmap, VEMC 전압, VSRAM 레지스터 결함은 대기열에서 고쳤고(0037·0038·0041) 업스트림에 낸다. 코드와 레지스터 모델로 확인했을 뿐 기기에서 돌려 보지 않았으니, 기기에서 전압을 읽어 보기 전에는 전압 한계를 주지 않는다 |
 | Mesa 26.3 의존 | GPU 가속이 늦어진다 | 이미지의 Mesa 판 확인, 그 전에는 CPU 렌더링(buntOS는 이미 llvmpipe에서 돈다) |
 | Wi-Fi 펌웨어가 uni cmd를 받지 않음 | 2d 지연 | 레거시 명령 경로(BSS·STA·키·ROC), USB 동글 우회 |
+| Wi-Fi 펌웨어가 벤더 표에 없는 명령(EXT 0x3e, 0x46)에 답하지 않음 | wlan0이 생기지 않거나 올라오지 않는다. 버스는 멈추지 않는다 | 체크리스트 9.1절 5·7단계의 줄로 안다. 그 명령만 건너뛰게 한다 |
 | LK가 mainline 트리의 connsys 노드에 `emi-addr`·`memory-region`을 써 주지 않음 | Wi-Fi·BT가 펌웨어를 찾지 못한다 | LK(`platform_load_connsys`)는 compatible이 아니라 경로 `/soc/consys`→`/consys`, `/soc/gps`→`/gps`, `/soc/wifi`→`/wifi`, `/soc/connscp`→`/connscp`로 찾는다(유닛 주소 무관, status 안 봄). 하나라도 없거나 크기가 0이면 -2로 돌아오고 아무것도 싣지 않는다. 복구(b_mode 2)와 전원 끈 충전(8)에서는 부르지 않는다. 그래서 mainline 트리가 이 이름과 크기를 그대로 두면 값을 써 준다고 본다(역어셈블). 실제 기기에서 확인한다. 2d 전까지는 `gps`·`connscp`를 트리에서 빼 두어 LK가 싣지 않게 한다 |
 | Bluetooth 첫 보정이 Wi-Fi에 기댐 | 벤더 주석: pre-cal 없이 BT를 먼저 켜면 보정이 실패하기 쉽다 | 2d에서 Wi-Fi 없이와 함께 켠 경우를 견준다. 차이가 크면 Wi-Fi 뒤에 켜거나 보정값 복원을 옮긴다 |
 | BT 대기 전력 | 열려 있는 동안 MCU를 깨워 둔다(driver own) | 수면 길은 2e에 넣는다 |
@@ -395,6 +400,13 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | MT6375 쓰기가 배터리를 해침 | 잘못된 CV·전류나 BATFET_DIS | MFD의 값 검사(4.34 V, 2 A, 2 A, BATFET_DIS 거절)와 드라이버의 상한, 배터리 설명 검증. 실제 커널 위에서 시험 |
 | 잠든 동안 충전되지 않음 | 지금은 절전에 들면 충전을 끈다. 순정은 10초마다 깨어 온도를 본다 | 서스펜드를 켤 때 정한다 |
 | TCPC가 VBUS를 끊음 | 가젯이 끊긴다. 시험한 적 없는 칩이다 | `self-powered` 없음, 싱크 먼저, PD 끔, VBUS 명령 안 보냄, 시간 제한 스크립트로 시험 |
+| 넘겨받기 전 게이지가 답하지 않음 | LK 값(CV 4.35 V로 추정)으로 감시 없이 충전이 계속된다. 온도를 볼 수 없다 | 로그를 한 번 남긴다. 체크리스트 B의 조건(사람이 곁에, 멈추는 길 먼저). 말이 안 되는 값이면 멈춘다 |
+| LVTS 보정을 잘못 읽으면 온도가 낮게 읽힌다 | 과열을 모른다 | 계수와 golden을 같은 조건으로 고르고, 말이 안 되는 보정과 측정하지 않는 컨트롤러는 프로브를 거절한다. 읽기 실패는 조용히 넘기지 않는다. 기기에서 안드로이드 값과 맞대 본 뒤 켠다 |
+| 펌웨어가 하드웨어 리셋을 켜 두었는지 모른다 | 소프트웨어 critical(115 °C)이 유일한 보호일 수 있고, 구역이 없으면 보호가 없다 | 벤더 표의 119 °C는 벤더 드라이버가 sysfs로 trip을 쓸 때만 하드웨어에 간다. LK에는 LVTS 주소가 없다. 프로브가 `PROTCTL`·`PROTTC`·`MONINT`를 기록하니 기기에서 본다. 꺼져 있으면 켜는 패치를 따로 정한다 |
+| GPU 첫 전원에서 SoC가 멈춘다(커뮤니티 보고) | 다시 부팅 | 켜는 차례를 넷으로 나눈다: 열, GPUEB(GPU 전원 없음), GPU. 무엇을 보내기 전에 읽기만으로 확인한다 |
+| 안드로이드가 남긴 MT6685 알람 | 전원 꺼짐 알람이 켜진 채 리눅스로 넘어오면, 그 시각에 SID 9의 RCS가 나고 `spmi-mtk-pmif`가 지우지 않아 EINT 248이 계속 울릴 수 있다(코드로 짐작) | 넘어가기 전에 알람을 끈다. PMIF가 처리기 없는 SID를 지우게 고치는 패치(0114)를 만들고 있다 |
+| RTC 읽기의 가정 | 게이트를 잠깐 여는 것으로 레지스터가 따라온다고 본다(2025년 뒤 MediaTek 판). 이 기기의 스톡 모듈은 옛 판이라 BBPU RELOAD를 쓴다 | 안 흐르면 체크리스트의 RELOAD 판으로 바꾼다. 해는 없다: 시간이 멈춰 보일 뿐이다 |
+| 리눅스 끄기 | 벤더는 종료마다 BBPU PWREN을 내리고 `TOP2_ELR1` bit 0을 올린다. 드라이버는 하지 않는다 | `poweroff`에서 본다. 필요하면 `.shutdown`에 넣는다 |
 | 포고 키보드 프로토콜을 스톡 모듈에서 읽음 | 다른 판 키보드에서 다르면 키가 안 든다 | 글로벌판(TB373FU) 모듈 기준이다. 중국판 모듈과 실제 프레임은 기기에서 `dyndbg`로 본다. 코드는 사실만 옮겨 새로 썼다(표 8×16은 통신 상수다) |
 | 포고 키보드 TX 게이트와 MCU 응답 지연 | 응답이 약 100~150 µs보다 빠르면(모델 값) 앞부분이 host TX와 부딪혀 다시 보낸다 | 스톡은 APDMA 완료 + 300 µs에 8250 콜백에서 닫는다. 이 드라이버는 PIO라 에코로 닫는다. 기기에서 `dyndbg`의 "gate shut after … reply after …"로 잰다. 모자라면 RX 콜백에서 닫고, 그래도 모자라면 8250 쪽 콜백을 정한다 |
 
@@ -433,9 +445,10 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
    - v1.19에 끝낸 것: NT36532 패널 드라이버(패치 0080~0084). 표 935항목이 미러·스톡 모듈·LK 표와 맞다. 화면 파이프라인이 없어 지금은 돌 곳이 없고, 기기 시험은 없다. 패널은 노드 하나에 GPIO184로 고른다. LK가 찾는 형제 노드(`panel1@0`~`panel3@2`)는 두지 않았고, 역어셈블로는 못 찾아도 기록만 남기므로 2a에서 LK 기록으로 확인한다
    - v1.20에 끝낸 것: connsys 전원과 mt76 SoC 변형(패치 0055~0060), Bluetooth 전송(패치 0085·0086). 노드를 켜기 전에는 돌지 않고 기기 시험은 없다. Wi-Fi 벤더 대조의 어긋남 넷은 벤더 표에 없는 MT7921 명령이고 코드 오류가 아니다(`MAC_INIT_CTRL`은 `ip link up`에서 처음 본다). Bluetooth는 벤더 코드와 같은 모델에서 레지스터 쓰기와 링 메모리의 어긋남이 0이다. 켜는 차례는 [체크리스트](bringup-checklist.md) 9.1절과 9.2절이다
    - v1.21에 끝낸 것: MT6375 충전과 TCPC(패치 0090~0097). 켜는 단계는 읽기, 충전, TCPC 싱크, DRP·호스트, PD 다섯이고 앞에서 멈출 수 있다([체크리스트](bringup-checklist.md) 9.3절). 충전 코드는 언락 전에 독립 검토를 한 번 더 받는다(고친 뒤 코드는 다시 검토받지 않았다). 사이클 표를 따라 상한을 올릴지, 절전 중 충전을 어떻게 할지는 기기를 본 뒤 정한다
+   - v1.22~v1.25에 끝낸 것: 충전과 Wi-Fi의 독립 재검토 반영(같은 번호), GPU 전원·열·게이지(0070~0079), 화면·MDP·코덱 클럭 게이트(0100~0104), MT6685 RTC(0110~0113). 모두 꺼 둔 노드이고 기기 시험은 없다. 켜는 차례는 [체크리스트](bringup-checklist.md) 6.10절(RTC), 9.3절(충전), 9.4절(GPU·열·게이지)이다. GPU 쪽 커널에 남은 것: `clk_ignore_unused`를 뺄 때 `mfgsc_ref`에도 `CLK_IGNORE_UNUSED`(0013은 `mfg_ref`에만 있다), GPU 쿨링 지도와 `dynamic-power-coefficient`, I/O 코히어런시. 게이지의 충전 전압(`0x30`)은 쓰지 않고 기기에서 읽은 뒤 정한다
 2. **다음(기기 없이, 이 차례로):**
-   1. 진행 중(세션): GPU 전원과 열·게이지(0070~0079)
-   2. 그다음: 나머지 클럭 블록, MT6685, 업스트림 제출 준비(MT6363의 확실한 패치 둘은 2026-11-02에 regulator 유지자와 메일링 리스트로 보냈다). 패널의 SGM37604A 둘과 SM5109 드라이버는 기기에서 본 뒤 정한다
+   1. 진행 중(세션): 처리기 없는 SID의 RCS를 지우는 PMIF 고침(0114)
+   2. 그다음: 화면 파이프라인(dual-DSI, DSC, MT6897 데이터), 업스트림 제출 준비(MT6363의 확실한 패치 둘은 2026-11-02에 regulator 유지자와 메일링 리스트로 보냈다). 패널의 SGM37604A 둘과 SM5109 드라이버는 기기에서 본 뒤 정한다
    3. 2c 전에: 안드로이드 파티션을 데스크톱에서 가린다. 전체 이미지에는 `udisks2`가 들어온다(`nautilus` → `gvfs`). 내부 디스크는 자동으로 붙지 않지만 파일 관리자에 보이고, 관리자 인증 뒤 쓰기 가능으로 붙을 수 있다. udev 규칙의 `UDISKS_IGNORE=1`로 가린다
    4. 출시 전에: 개발용 USB 길을 이미지에서 빼는 프로필, initramfs의 암호 없는 셸을 없애거나 막는 길, 공통 레시피의 `Autologin=yes`
    5. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)

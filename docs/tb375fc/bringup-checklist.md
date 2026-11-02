@@ -16,6 +16,16 @@
 - 시험 도구: 진짜 루트에는 보드 프로필의 `evtest`, `i2c-tools`, `gpiod`가 있다. 물리 주소는 `busybox devmem <주소> 32`로 읽는다. 이미지용 커널은 `CONFIG_IO_STRICT_DEVMEM=y`라 드라이버가 잡은 곳을 막으므로, 그런 주소를 읽을 때는 명령줄에 `iomem=relaxed`를 더한다. 개발용 커널은 이 값이 꺼져 있다.
 - 기본 커널 명령줄은 `console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused regulator_ignore_unused`다. 뒤의 셋은 소비자가 아직 없는 클럭·전원 도메인·레귤레이터를 늦은 정리에서 끄지 않게 한다. `pd_ignore_unused`는 늦은 정리만 막고 sync_state의 끄기는 막지 못한다(7.2.12). LK가 켠 도메인이 꺼지지 않는 것은 패치 0054의 표가 모두 기본 꺼짐이고 장치 트리에 conn만 있기 때문이다. 이 목록의 단계에서는 빼지 않는다(`clk_ignore_unused`를 빼는 일은 2e다).
 
+**어느 컴퓨터로 하나.** SP Flash Tool이 Windows 도구라서 아래 첫 줄만 Windows가 있어야 한다. 빌드 VM(Lima)은 USB를 받지 못하므로 기기에 닿는 명령은 맥에서 친다.
+
+| 일 | 컴퓨터 |
+|---|---|
+| 전체 백업(2.3절), 판 내리기(3절 1번), 백업 되돌리기(3절 "되돌리기") | Windows |
+| `adb`, `fastboot`(언락, LK 굽기, `fastboot boot`, 슬롯에 굽기), USB 가젯 셸 | 맥 |
+| 커널과 이미지 만들기 | 맥의 빌드 VM |
+
+맥의 `fastboot`가 이 기기에 닿는지는 아직 보지 않았다. 판을 내리기 전에 `adb reboot bootloader`, `fastboot devices`, `fastboot reboot`로 한 번 본다. 벽돌이 되면 되돌리는 데 Windows가 다시 필요하다.
+
 위험 표시는 `위험:`으로 찾을 수 있다. 표시 안에 먼저 둘 것과 되돌리는 길을 적었다.
 
 | 표시 | 뜻 |
@@ -73,6 +83,8 @@ root 없이 읽기만 한다.
     - 부품이 다른 기기가 있을 수 있다. 그래서 8절 1단계에서 `i2cdetect -r`로 다시 본다.
 3. [ ] `/vendor/firmware`는 이름만 볼 수 있다. adb 셸은 파일을 읽지 못한다(실측). 파일은 2.3절 백업이나 언락 뒤 root로 얻는다(4절 8번). 이름과 판 정보는 [pull-android.sh](../../bsp/lenovo-tb375fc/firmware/pull-android.sh)로 받을 수 있다.
 
+4. [ ] 안드로이드를 떠나기 전에 할 일이 둘 있다. 6.10절 1·2번(전원 꺼짐 알람을 끄고 RTC 시간을 읽는다), 9.4절 0번의 구역 온도다.
+
 ### 2.3 전체 백업 (go/no-go 1)
 
 mtkclient로는 안 된다(V6 DA에 DAA·SLA). 순정 펌웨어 묶음의 인증 DA·auth와 SP Flash Tool로 readback한다. 이 길은 포럼 보고로 보았고, 기기에서 확인해야 한다.
@@ -80,6 +92,7 @@ mtkclient로는 안 된다(V6 DA에 DAA·SLA). 순정 펌웨어 묶음의 인증
 > **위험: 데이터 손실.** nvdata·nvram 계열에는 Wi-Fi MAC과 보정값이 있다. 잃으면 되살릴 수 없다. 이 백업을 해시로 확인하기 전에는 아무것도 굽지 않는다. 뒤의 판 내리기, 언락, GPT 고침을 되돌리는 길이 모두 이 백업이다.
 
 1. [ ] SP Flash Tool을 준비한다. Windows 도구다. 인증 DA·auth는 그 기기 판의 레노버 펌웨어 묶음에 든 것을 쓴다. 우리가 본 중국판 묶음에는 인증 DA(`DA_BR.bin`), `da.auth`, SLA 파일이 있다.
+    - 공용 컴퓨터에서 한다면 도구, 드라이버, 펌웨어 묶음을 외장 SSD에 담아 가고, 백업은 그 컴퓨터의 디스크가 아니라 외장 SSD(빈 곳이 128GB 넘게)에 쓴다. 백업에 Wi-Fi MAC과 보정값이 들어 있다. 드라이버 설치가 막혔거나 재부팅하면 지워지는 컴퓨터일 수 있으니 미리 본다. 해시는 맥에서 다시 맞댄다. 일반적인 판단이고 해 본 적은 없다.
 2. [ ] scatter와 readback 설정을 기기 용량(128·256GB)에 맞춘다. 사용자 기기는 128GB다. XDA 원글 작성자가 이 기기용 scatter와 readback 설정을 만들었다(포럼 보고).
 3. [ ] 전체 파티션을 readback한다. 특히 `nvram`, `nvdata`, `nvcfg`, `protect1/2`, `persist` 계열을 본다([buntOS 설계안](../design/ARCHITECTURE.md) 4.2.3절).
 4. [ ] 다른 기기에 옮겨 해시로 확인한다.
@@ -332,7 +345,9 @@ fastboot flash init_boot <패치한 이미지>
 
     - OEM 분수에서 거꾸로 짐작한 값과 견준다: mainpll 2184 MHz, univpll 2496 MHz, tvdpll 약 594 MHz, ulposc 588 MHz.
     - 먹스의 부모가 LK가 정한 대로 읽히는지 본다: `uart`, `usb_top`, `ssusb_xhci`, `ufs`, `aes_ufsfde`, `vlp_spmi_m`, `vlp_pwrap_ulposc`.
-4. [ ] HW voter 시간을 본다. 먹스·게이트는 업스트림처럼 30µs 안에 DONE과 게이트 비트를 본다. OEM은 몇 초까지 기다리므로 짧을 수 있다. `-ETIMEDOUT`이 나면 늘린다. 2b에서 실제로 쓰는 HWV 클럭은 PLL이다. `i2c` 먹스(HWV CG 21)는 I2C 장치가 붙을 때 처음 쓴다(8절).
+    - 화면·코덱 게이트(패치 0100~0104)를 켠 뒤에는 그 줄의 `hardware enable`이 `?`다. 이 게이트는 레지스터를 읽지 않게 만들었다. 실제 상태는 해당 전원 도메인이 켜져 있는 것을 먼저 확인하고 레지스터로 읽는다.
+    - **`/sys/kernel/debug/regmap/dummy-clock-controller@0x00000000<주소>/registers`를 이 블록(`14000000`, `14200000`, `14400000`, `14600000`, `1600f000`, `1602f000`, `17000000`, `17800000`, `1e800000`, `1f000000`, `1f800000`)에서 읽지 않는다.** 도메인이 꺼져 있으면 버스가 멈출 수 있다. 이 블록을 클럭 코어가 스스로 읽는 길은 없고, 이 파일만 남는다.
+4. [ ] HW voter 시간을 본다. 먹스·게이트는 5 ms 안에 DONE과 게이트 비트를 본다(패치 0101. 업스트림은 30µs이고 OEM은 몇 초까지 기다린다). `-ETIMEDOUT`이 나면 늘린다. 2b에서 실제로 쓰는 HWV 클럭은 PLL이다. `i2c` 먹스(HWV CG 21)는 I2C 장치가 붙을 때 처음 쓴다(8절).
 5. [ ] UART 콘솔을 본다. 8250_mtk가 pericfg_ao 게이트를 기다리므로 probe가 pericfg_ao 뒤로 밀린다. earlycon이 그 사이를 메운다. 게이트를 켜도 부모 `uart` 먹스가 LK 상태(26M일 것)를 유지하는지 본다.
 6. [ ] USB는 `usb_top`·`ssusb_xhci` 게이트 먹스와 frmcnt 게이트를 켠다. 나머지는 LK 상태 그대로다. UFS 호스트의 클럭은 6.6절에서 본다.
 7. [ ] `clk32k`의 펌웨어 값 32000 Hz가 맞는지(26 MHz에서 나눈 32K인지, RTC 수정의 32768인지) 안드로이드나 커널 기록으로 본다. 2b 소비자에는 영향이 없다.
@@ -341,7 +356,7 @@ fastboot flash init_boot <패치한 이미지>
 
 고침은 패치 0002·0003(백포트)과 0007·0008이다.
 
-1. [ ] `pio`와 함께 SPMI를 `okay`로 바꾼다. PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다.
+1. [ ] `pio`와 함께 SPMI를 `okay`로 바꾼다. PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다. MT6685 @9는 6.10절에서 켠다.
 2. [ ] probe가 클럭 때문에 실패하지 않는지 본다. 업스트림은 자식마다 `rcs` 인터럽트(pio EINT 248)와 클럭 셋(`pmif_sys_ck`, `pmif_tmr_ck`, `spmimst_clk_mux`)을 요구하고, 없으면 probe가 실패한다. PMIF 클럭으로 `vlp_pwrap_ulposc`를 준 것은 추론이다. `vlp_pwrap_ulposc`·`vlp_spmi_m`은 게이트가 없어 켜기가 아무 일도 하지 않는다.
 3. [ ] 패치 0007을 확인한다. 고치기 전 rcs 디먹스는 `bank = bit / 7`이라 bit 7, 14–15, 21–23, 28–31에서 bank가 하나 커지고, 원래 비트가 남아 체인 IRQ 처리기가 끝나지 않을 수 있었다(코드로 짐작). 6.4절 3번과 6.5절 4번에서 인터럽트가 가만히 있는지 본다.
 4. [ ] 패치 0008을 확인한다. 고치기 전에는 채널 설정이 버스 등록 뒤에 있어, 내장(=y) PMIC 드라이버가 먼저 probe하면 SWINF 상태 대신 `PMIF_INIT_DONE`을 읽고 명령도 그 자리에 썼다(코드로 짐작). rcs 인터럽트나 클럭을 기다리다 PMIF probe가 미뤄지면 이 경우에 든다. MT6363, MT6368, MT6319의 probe가 되는지 본다.
@@ -523,6 +538,92 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 - U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다(설계안 D3).
 - EFI 길이 열리거나 LK의 벤더 램디스크 한도를 기기에서 재면 mkosi initrd를 vendor_boot에 넣는 길을 다시 볼 수 있다. 지금은 우리 initramfs다.
 - 기기에서 커널을 바꾸는 길은 남은 결정이다(LK 부트 이미지를 다시 만들어 쓴다).
+
+### 6.10 MT6685 RTC
+
+패치 0110~0113이다. 코드와 레지스터 모델로 확인했을 뿐 기기에서 돌려 보지 않았다. 모델도 벤더 자료로 만든 것이다. 2b의 USB 가젯 셸이 뜬 뒤에 한다. 안드로이드와 LK가 같은 칩을 쓰므로 읽기부터 한다.
+
+**넘어가기 전(안드로이드, adb, 잠긴 채로 된다):**
+
+1. [ ] 안드로이드의 전원 꺼짐 알람을 끄고 넘어간다. 알람 시계 앱의 알람을 모두 끄고 재부팅한다.
+
+    - 까닭: 벤더 드라이버는 전원 꺼짐 알람이 있으면 종료 때 `IRQ_EN.AL`을 켠 채 둔다. 그 시각이 리눅스에서 오면 칩이 SID 9로 RCS를 낸다. 지금 `spmi-mtk-pmif`는 처리기가 있는 SID 범위(4·5)의 레지스터만 읽으므로 그 이벤트는 지워지지 않는다. EINT 248이 계속 울릴 수 있다(코드로 짐작). PMIF가 처리기 없는 SID를 지우게 고치는 패치(0114)를 만들고 있다.
+
+2. [ ] 안드로이드에서 시간을 읽어 둔다(막히면 건너뛴다. 까닭: 레지스터가 UTC인지, 리눅스가 같은 값을 읽을지 맞대려는 것이다).
+
+    ```bash
+    adb shell 'date -u; cat /sys/class/rtc/rtc0/date /sys/class/rtc/rtc0/time /sys/class/rtc/rtc0/since_epoch'
+    ```
+
+**리눅스:**
+
+3. [ ] `pmic@9`만 `okay`로 바꾼다(`rtc@580`은 그대로). 이 드라이버 때문에 버스에 닿는 것이 없다(MFD는 자식만 띄운다).
+
+    ```bash
+    ls -l /sys/bus/spmi/devices/0-09/driver    # mtk-spmi-pmic
+    ls /sys/class/rtc                          # 비어 있다
+    ```
+
+4. [ ] `rtc@580`도 `okay`로 바꾼다. 부팅 로그를 본다.
+
+    ```bash
+    dmesg | grep -i -E 'rtc|mt6685'
+    cat /sys/class/rtc/rtc0/name /sys/class/rtc/rtc0/date /sys/class/rtc/rtc0/time /sys/class/rtc/rtc0/hctosys
+    ```
+
+    - `registered as rtc0`, 그리고 안드로이드에서 넘어온 뒤 날짜와 시각이 맞아야 한다(1~2번의 값). 처음부터 칩이 깨끗하면 2010년 근처일 수 있다.
+    - **연도가 2086이나 2094면** 연도 칸의 해석이 틀린 것이다. 여기서 멈추고 `hwclock -w`를 하지 않는다. 안드로이드로 돌아가면 그 값을 읽는다.
+    - 칩이 연도 칸 0·1(1968·1969)이나 틀린 날짜를 담고 있으면 `-EINVAL`이고 시스템 시간을 건드리지 않는다.
+
+5. [ ] 시간이 흐르는지 본다. **이것이 드라이버의 가장 큰 가정이다.** 레지스터가 클럭 게이트를 잠깐 여는 것만으로 카운터를 따라온다고 본다(OnePlus 커널과 2025년 뒤 MediaTek 판). 이 기기의 스톡 모듈은 더 옛 판이라 BBPU `RELOAD`를 쓴다.
+
+    ```bash
+    for i in 1 2 3; do cat /sys/class/rtc/rtc0/time /sys/class/rtc/rtc0/since_epoch; sleep 3; done
+    ```
+
+    - `since_epoch`가 3씩 늘어야 한다. 멈춰 있어도 드라이버는 알지 못하고 성공을 돌려준다. hctosys도 그 값을 넣는다.
+    - 안 흐르면 RELOAD 판이 필요한 것이다. `BBPU_L`에 `(읽은 값 & 0x0f) | 0x20`, `BBPU_H`에 `0x43`, `WRTGR`에 `1`을 게이트 사이에 넣는다(스톡 차례). 지금은 regmap이 막으므로 표도 함께 고친다. 이 쓰기는 PWREN·AUTO를 그대로 두고 명령 비트(CLRPKY 등)를 넣지 않는다.
+
+6. [ ] 쓴다.
+
+    ```bash
+    date -u -s "$(date -u '+%Y-%m-%d %H:%M:%S')"   # 또는 NTP로 맞춘 뒤
+    hwclock -w -u; echo $?
+    hwclock -r -u
+    dmesg | grep 'did not take the time'
+    cat /sys/kernel/debug/regmap/0-09-rtc/registers
+    ```
+
+    - `did not take the time`이면 `-EIO`다. 부트로더가 RTC를 잠갔거나 되읽기가 2 ms로 모자란 것이다. 벤더는 이 검사에 실패해도 경고만 하고 성공을 돌려주므로, 시간은 들어갔는데 오류가 날 수도 있다. `hwclock -r -u`로 값을 다시 본다. 벤더 커널은 잠금을 풀지 않으므로 잠금일 가능성은 낮다.
+    - `-ETIMEDOUT`이면 CBUSY(`BBPU` bit 6)가 내려오지 않은 것이다.
+    - debugfs 파일은 열 칸만 읽는다: `0x008` 칩 ID(벤더의 `HWID_MT6685`), `0x514` 게이트(끝나면 bit 4·5가 1), `0x588` BBPU(끝나면 `CBUSY` 없이 부팅 값 그대로), 시간 칸 여섯, `0x5d8`의 bit 7:6 잠금 상태(`SPAR_PROT_STAT`).
+
+7. [ ] NTP 뒤에 11분 동기화를 본다(`CONFIG_RTC_SYSTOHC`). `dmesg`에 오류가 없고 `hwclock -r -u`가 맞으면 된다. 되읽기가 실패하면 커널이 1~2초마다 다시 쓴다(로그는 제한된다). 그러면 6번으로 돌아간다.
+
+8. [ ] 재부팅을 본다.
+
+    - 리눅스 → LK → 리눅스: 시간이 흐른 만큼 맞다.
+    - 리눅스 → 안드로이드: `date -u`가 맞다. 안드로이드 알람이 울린다. 부팅 사유가 이상하지 않다. LK가 RTC를 다시 초기화하지 않는다(날짜가 2010 근처로 돌아가지 않는다).
+    - 안드로이드 → 리눅스: 다시 맞다.
+
+9. [ ] `poweroff`를 본다. **드라이버가 벤더의 종료 쓰기를 하지 않는다.** 벤더는 종료마다 BBPU의 PWREN을 내리고(`0x588`) `TOP2_ELR1`(`0x12f`) bit 0을 올린다("Normal sequence power off when PON falling"). LK의 종료 콜백도 `0x129`에 1을 쓰고 `0x12f` bit 0을 올린다(`RG_SEQ_OFF`).
+
+    - 정말 꺼지는가(전류가 떨어지는가, 전원 키로 다시 켜지는가). 다시 켠 뒤 LK가 이상한 부팅 사유를 말하지 않는가.
+    - 필요하면 그때 RTC나 MFD의 `.shutdown`에 넣는다. 지금은 넣지 않았다(이 칸은 시간과 알람이 아니다).
+
+10. [ ] `/proc/interrupts`의 `spmi_rcs`가 가만히 있는지 본다. 알람을 쓰지 않으므로 SID 9 줄은 없어야 한다.
+
+11. [ ] 맨 나중에, 위험: 남은 알람이 정말 인터럽트를 내는지 본다. 먼저 둘 것: 시리얼이나 pstore, 저장하지 않은 일이 없을 것. 되돌리는 길: 전원 키를 길게 눌러 리셋.
+
+    - 안드로이드 알람 시계에 10분 뒤 알람을 걸고 재부팅해 리눅스로 넘어간 뒤 그 시각을 넘긴다. `/proc/interrupts`와 콘솔을 본다.
+    - 멈추거나 `spmi_rcs` 수가 치솟으면 1번의 위험이 진짜다. 그러면 PMIF 고침(0114)이 먼저다.
+    - 가만히 있으면 `SCK_TOP_INT_CON0`이 재부팅을 넘어 남지 않거나 LK가 지우는 것이다.
+
+12. [ ] 알람은 이 뒤에 정한다. 인터럽트 길을 기기에서 본 다음이다.
+
+**첫 소비자 메모:** 오디오(단계 3)의 `mt6368` 코덱은 벤더에서 `mt6685_set_dcxo()`로 BBCK5(`DCXO_EXTBUF5_CW0` `0x79e`)를 켠다. 그때까지 XO에 쓰는 코드는 없다.
+
+**connsys 메모:** MFD가 칩을 읽지 않으므로 RTC를 켜지 않았다면 connsys의 DCXO 읽기가 이 칩의 첫 접근이다(0055 뒤로 늘 그랬다). `mt6363-regulator` 주석은 부트로더가 잠재운 PMIC의 첫 읽기가 실패할 수 있다고 적었다. 벤더의 MT6685 코드에는 그런 처리가 없다. `can't read the DCXO`가 첫 번에만 나오면 이것이다.
 
 ## 7. 2c 입력
 
@@ -736,18 +837,41 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 
 ## 9. 나머지 단계
 
-2d 무선의 차례는 9.1절과 9.2절에, 2e 충전과 TCPC의 차례는 9.3절에 있다. 2e GPU·전원, 2c 화면(2차), 3 최적화의 목록은 나중에 더한다. 그 일이 아직 진행 중이다(GPU 전원과 열·게이지 0070~0079).
+2d 무선의 차례는 9.1절과 9.2절에, 2e 충전과 TCPC는 9.3절에, 2e GPU·열·게이지는 9.4절에 있다. 2c 화면(2차)과 3 최적화의 목록은 나중에 더한다.
 
 이미 적힌 확인만 잃지 않게 옮겨 둔다.
 
 - 2d 전원 도메인:
     1. `&spm`만 켠다(`ifr_bus`·`vlpcfg_bus`는 켜지 않는다). `/sys/kernel/debug/pm_genpd/pm_genpd_summary`에 conn이 `off-0`인지 본다. 부팅 로그의 `A default off power domain has been ON`은 LK가 켠 도메인이다.
     2. `scpsys`가 뜬 뒤, 그리고 conn을 켜고 끈 뒤 fbcon이 그대로인지 본다. 꺼지면 EN과 PWR_CON을 먼저 읽는다. `위험: 부팅 불가`는 아니지만 화면 콘솔을 잃는다. USB 가젯 셸을 먼저 띄워 둔다.
-    3. conn을 켤 때 ACK가 오지 않으면 소비자의 전원 도메인 붙이기가 `-ETIMEDOUT`으로 실패한다. `0x1c001e04`의 bit 30·31을 본다.
+    3. conn을 켤 때 ACK가 오지 않으면 두 가지로 보인다. 프로브 전에 플랫폼 코어가 붙일 때의 실패는 `__genpd_dev_pm_attach`가 `-EPROBE_DEFER`로 바꾸므로 드라이버 메시지 없이 미뤄진다(`/sys/kernel/debug/devices_deferred`). 프로브 뒤 `pm_runtime_resume_and_get`의 실패는 `-ETIMEDOUT`이다(`can't power the CONN domain`). `0x1c001e04`의 bit 30·31을 본다.
     4. conn을 끌 때 버스 보호 SET이 시간 초과면 벤더의 EN 재시도와 되돌리기가 필요한지 본다(메인라인에 없다). 켜고 끄기를 몇 번 돌린다.
-- 2c 2차와 코덱·카메라 앞: MM_INFRA 아래 첫 소비자 전에 `simple-framebuffer`에 `power-domains`(DIS0, DIS1, OVL0, OVL1)를 건다.
+- 2c 2차와 코덱·카메라 앞: MM_INFRA 아래 첫 소비자 전에 화면·코덱 클럭(패치 0100~0104)과 전원 도메인을 이 차례로 켠다.
+    1. [ ] 켜기 전에 2a 셸에서 읽어 둔다. 순서를 지킨다. 도메인 비트가 선 블록만 읽는다.
+
+        ```bash
+        busybox devmem 0x10321410 32   # HWV EN. bit 0 MM_INFRA, 1 VDE0, 2 VDE1, 3 DIS0, 4 DIS1, 5 OVL0, 6 OVL1
+        busybox devmem 0x1c001e5c 32   # VEN0 PWR_CON (0xe60 VEN1, 0xe94 MDP0, 0xe98 MDP1)
+        busybox devmem 0x10000020 32   # CLK_CFG_1: disp0 bit 7, disp1 15, ovl0 23, ovl1 31이 0이면 열림
+        busybox devmem 0x10000030 32   # CLK_CFG_2: mdp0 bit 7, mdp1 15, mminfra 23
+        busybox devmem 0x100000d0 32   # CLK_CFG_12: venc bit 31
+        busybox devmem 0x100000e0 32   # CLK_CFG_13: vdec bit 7 (순정에서 VCP가 다룬다)
+        # EN의 해당 비트가 섰을 때만
+        busybox devmem 0x14000100 32   # dispsys0 CG0 (bit 3), 0x14000110 CG1, 0x140001a0 CG2
+        busybox devmem 0x14200100 32   # dispsys1 CG0 (bit 4), 0x14200110, 0x142001a0
+        busybox devmem 0x14400100 32   # ovlsys0 CG (bit 5)
+        busybox devmem 0x14600100 32   # ovlsys1 CG (bit 6)
+        busybox devmem 0x1e800100 32   # mminfra CG0 (bit 0), 0x1e800110 CG1
+        busybox devmem 0x10320018 32   # dispsys0 HWV 투표 0, 그다음 0x10320020, 0x10320028
+        busybox devmem 0x10321c0c 32   # dispsys0 HWV DONE 0
+        ```
+    2. [ ] `spm`을 켜고 MM_INFRA, DIS0, DIS1, OVL0, OVL1 도메인을 적는다. 기본 클럭만 적는다(`mm_infra`, `disp`, `disp1`, `ovl`, `ovl1`). 순정 트리의 `disp0-0`, `mm_infra-0` 같은 이름은 옮기지 않는다: 벤더 HW voter 길은 읽지 않고, 업스트림 드라이버는 켜려 든다.
+    3. [ ] `framebuffer0`에 `power-domains`(DIS0, DIS1, OVL0, OVL1)를 같은 변경에서 건다.
+    4. [ ] `dispsys0`, `dispsys1`, `ovlsys0`, `ovlsys1`, `mminfra`를 켠다. 화면이 그대로인지 본다. 레지스터 쓰기가 없어야 한다.
+    5. [ ] 코덱·MDP는 소비자와 함께: `vencsys`, `vencsys_c1`, `mdpsys0`, `mdpsys1`을 먼저 켜고, 도메인 노드(`ven0-0` 등 부분 클럭 포함)를 그 뒤에 또는 함께 적는다. 꺼 둔 채 도메인만 적으면 `scpsys` 전체가 지연된다.
+    6. [ ] `framebuffer0`에 이 블록의 게이트를 `clocks`로 적지 않는다. simpledrm은 클럭을 켠 뒤에 도메인을 잡아, LK가 화면을 켜지 않은 부팅에서 꺼진 블록에 쓴다.
 - 2d: `consys@18001000`(`mediatek,mt6897-consys`), `wifi@18000000`(`mediatek,mt6897-wifi`), `bluetooth@18800000`. 전원 도메인(위)이 먼저이고 차례는 9.1절과 9.2절이다. 진짜 루트에서 nvdata를 붙일 때는 initramfs처럼 `blockdev --setro`와 `ro,noload`로 붙인다.
-- 2e: 전원 키로 s2idle에서 깨는지, mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`, mtu3 깨우기 접점, 커넥터 과열 보호(`usb_board_ntc`, GPIO179).
+- 2e: 전원 키로 s2idle에서 깨는지, mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`, mtu3 깨우기 접점, 커넥터 과열 보호(`usb_board_ntc`, GPIO179). `clk_ignore_unused`를 뺄 때 `mfgsc_ref`에도 `CLK_IGNORE_UNUSED`를 준다(패치 0013은 `mfg_ref`에만 있다).
 - 2c 2차(화면 파이프라인이 온 뒤):
     1. 패널이 뜨는지(첫 prepare 깜빡임 포함), 144·120·60·30Hz 전환과 실제 주사율을 본다. 벤더 PHY 기준으로 계산한 값은 143.97, 119.57Hz다.
     2. DCS 0x51로 밝기가 도는지, 0에서 어두워지는지, 화면을 끌 때 LED가 꺼지는지(SGM37604A), 대기 전류를 본다.
@@ -810,8 +934,9 @@ gps {
 - `firmware region at …, 0xc00000 bytes` 한 줄과 바인드(`/sys/bus/platform/drivers/mtk-connsys`). `emi-addr`가 0이면 `the bootloader has not loaded the firmware`로 멈춘다
 - `no DCXO device`가 나오면 `pmic@9`가 안 잡힌 것이다. 레일을 기다리면 PMIC 드라이버 순서를 본다
 - `/sys/kernel/debug/regulator/regulator_summary`에 다섯 레일이 꺼진 채 있는가. 2.5 V 같은 낯선 전압이 없는가
+- `modprobe mtk-connsys`가 CONN 전원 도메인을 **처음 켜는 곳**이다. 드라이버가 아니라 플랫폼 코어가 프로브 앞에서 켜고, 프로브 뒤에 `genpd_dev_pm_sync`가 끈다. 레일은 꺼진 채이고 드라이버의 줄은 없다. `emi-addr`가 0인 부팅에서도 그렇다. `firmware region` 줄이 나오기 전에 멈추면 전원 도메인 쪽이다. 벤더도 같은 플랫폼 코어를 지난다(추정).
 
-이 단계에서 SIP 호출과 레일 켜기는 일어나지 않는다.
+이 단계에서 SIP 호출과 레일 켜기는 일어나지 않는다. 전원 도메인은 위처럼 한 번 켜졌다 꺼진다.
 
 #### 3. connsys 전원 켜기 (첫 SIP 호출)
 
@@ -832,7 +957,7 @@ install -D -m 0600 /mnt/vendor/nvdata/APCFG/APRDEB/WIFI /usr/lib/firmware/lenovo
 | `A-die clock: 26 MHz co-clock` | DCXO 읽기 | SPMI, MT6685 |
 | `SIP init_atf_data(0, 0)` | TF-A에 값을 넘김 | TF-A가 이 호출을 받지 않는다. SMC는 돌아와야 한다 |
 | `rail VRFIO18`, `rail VCN13` | MT6363 레일 | SW_OP_EN 쓰기, 레귤레이터 오류 메시지 |
-| `CONN power domain` | MTCMOS, 버스 보호 | 전원 도메인 표 |
+| `CONN power domain` | MTCMOS, 버스 보호. 도메인은 2단계에서 이미 한 번 켜졌다 꺼졌다. `can't power the CONN domain: -110`이면 ACK다 | 전원 도메인 표 |
 | `SIP polling_chipid(0, 0)` | D-die 응답 | 0이 아니면 `the D-die does not answer`로 돌아온다 |
 | `SIP a_die_cfg(0, 8)` | A-die SPI | `A-die version`이 0x6637 쪽 값인가 |
 | `SIP afe_wbg_cal`, `subsys_pll_initial` | 클럭·PLL | 레일 전압, 클럭 값 |
@@ -840,6 +965,8 @@ install -D -m 0600 /mnt/vendor/nvdata/APCFG/APRDEB/WIFI /usr/lib/firmware/lenovo
 | `radio 3 power on: 0, radios 0x8` | 공통부 완료 | |
 
 SIP 줄에 `returned N`이 붙으면 그 값을 적는다. 0이 아니어도 벤더처럼 계속 가는 호출이 있다.
+
+`SIP init_atf_data` 줄은 부팅에 한 번만 나온다(벤더와 같다). 그래서 이 호출 뒤로 `mtk_connsys` 모듈은 내려가지 않는다(`Module mtk_connsys is in use`). `rmmod mt7921soc`만으로 라디오 전원은 꺼진다.
 
 #### 4. WF MCU와 ROM
 
@@ -864,6 +991,17 @@ SIP 줄에 `returned N`이 붙으면 그 값을 적는다. 0이 아니어도 벤
 | `starting the firmware the bootloader loaded` → `firmware running` | `Message … timeout`이면 INIT 명령의 링이나 이벤트 링이 틀렸다. `/sys/kernel/debug/ieee80211/phy*/mt76/`의 queues, `MT_WFDMA0_HOST_INT_STA` |
 | `unified command probe: N` | **가장 중요한 답이다.** 0이나 다른 값이면 uni cmd를 받는다. `does not answer`면 레거시 길이 필요하다(아래 7) |
 
+uni 시험을 지난 뒤 답이 없을 때의 줄이다. 명령마다 답을 끊어 드라이버를 레지스터 모델 위에서 돌려 본 결과이고, 모델은 펌웨어가 어떻게 답하는지 말해 주지 않는다.
+
+| 줄 | 명령 | 뜻과 다음 |
+|---|---|---|
+| `Message 0004008a (seq N) timeout` 뒤 `hardware init failed` | CE `GET_NIC_CAPAB` 0x8a | 벤더 표에 있다(`GET_NIC_CAPABILITY_V2`). uni 시험을 지난 뒤라면 이벤트 꼴을 본다 |
+| `Message 00003eed (seq N) timeout` 뒤 `hardware init failed` | EXT `PROTECT_CTRL` 0x3e | **벤더 표에 없는 번호다.** 답을 기다리는 명령이라 wlan0이 생기지 않고, `hw_init_done` 전이라 리셋도 돌지 않는다. 버스는 멈추지 않고 `rmmod`로 내려간다. 이 명령만 건너뛰게 할지 그때 정한다 |
+| `Message 000500c0 (seq N) timeout`이 되풀이 | CE `REG_READ` 0xc0 | 벤더 표에 있다(`ACCESS_REG`). `SET_RATE_TX_POWER` 묶음마다 하나씩 기다리므로 3초씩 쌓인다. wlan0이 그만큼 늦게 생긴다(모델에서 68초). 멈춘 것이 아니다 |
+| `time sync failed: -110` | INIT 0x09 | 경고일 뿐이다. 다음 줄로 간다 |
+
+그 밖에 이 길의 CE 0xc5(`FW_LOG_2_HOST`), 0x48(`SET_NVRAM_SETTINGS`), 0x0f, 0x5d, 0xca는 답을 기다리지 않는다. 답이 없어도 줄이 나오지 않는다.
+
 #### 6. FEM 맞대기
 
 안드로이드 슬롯에서 connfem 기록을 받는다: `FemInfo, id:`. 순정 트리에는 `hwid`가 없어 0번(nofem/nofem)이 뽑히지만 `/vendor/firmware/connfem.cfg`가 바꿀 수 있다(adb로 못 읽었다).
@@ -885,21 +1023,31 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 
 `ip link set wlan0 up` → `iw dev wlan0 scan` → 연결. 여기서 처음 쓰는 명령 가운데 벤더 표에 없는 것이 있다.
 
-| 단계 | 명령 | 벤더 표 |
-|---|---|---|
-| up | EXT `MAC_INIT_CTRL` 0x46 | 없음. timeout이면 mt7921의 `__mt7921_start`가 실패하고 리셋이 돈다 |
-| up | EXT `SET_RX_PATH` 0x4e | 벤더 헤더에서 같은 번호가 `EFUSE_BUFFER_RD`다 |
-| up | CE `SET_CHAN_DOMAIN` 0x0f, `SET_RATE_TX_POWER` 0x5d | 있음 |
-| scan | CE `START_HW_SCAN` 0x03 | 있음(`SCAN_REQ_V2`) |
-| 연결 | uni `DEV_INFO`, `BSS_INFO`, `STA_REC` | 벤더는 쓰지 않는다. 5의 시험이 이 길을 가른다 |
+| 단계 | 명령 | 벤더 표 | 답이 없으면 |
+|---|---|---|---|
+| up | EXT `MAC_INIT_CTRL` 0x46 | 없음 | `Message 000046ed`, `ip`가 `Connection timed out`으로 실패한다. 그 뒤 리셋이 돈다 |
+| up | CE `SET_CHAN_DOMAIN` 0x0f | 있음 | 기다리지 않는다 |
+| up | EXT `SET_RX_PATH` 0x4e | 벤더 헤더에서 같은 번호가 `EFUSE_BUFFER_RD`다 | `Message 00004eed`, `ip`가 실패한다. 그 뒤 리셋이 돈다 |
+| up | CE `SET_RATE_TX_POWER` 0x5d, `REG_READ` 0xc0 | 있음 | 0x5d는 기다리지 않는다. 0xc0은 묶음마다 3초 기다리고, 시간 초과마다 리셋이 걸리므로 오래 걸린다(모델에서 203초) |
+| up | EXT `ID_RADIO_ON_OFF_CTRL` 0x05 | 있음 | 기다리지 않는다 |
+| up | uni `DEV_INFO`, `BSS_INFO` | 벤더는 쓰지 않는다. 5단계의 시험이 이 길을 가른다 | `Message 00020001` 또는 `00020002`, `ip`가 실패한다 |
+| up | CE `SET_EDCA_PARMS` 0x1d, `SET_RX_FILTER` 0x0a | 있음 | 기다리지 않는다 |
+| up | EXT `CHANNEL_SWITCH` 0x08 | 있음 | `Message 000008ed`. `ip`는 성공하고 mac80211의 `ieee80211_hw_conf_init` 경고가 한 번 나온다 |
+| scan | CE `START_HW_SCAN` 0x03 | 있음(`SCAN_REQ_V2`) | 기다리지 않는다. 끝 이벤트(0x0d)가 없으면 스캔이 끝나지 않는다 |
+| 연결 | uni `DEV_INFO`, `BSS_INFO`, `STA_REC` | 벤더는 쓰지 않는다 | 모델에서 돌리지 않았다(AP가 없다) |
 
-- `Message … timeout`이 나면 cmd와 함께 적는다. 그 뒤 `mt792x_reset`이 WF 전원을 다시 돌린다(10번까지). 멈추려면 `rmmod mt7921soc`.
+- `Message … timeout`이 나면 cmd와 함께 적는다. 그 뒤 `mt792x_reset`이 WF 전원을 다시 돌리고 보정을 다시 한다. 한 번의 리셋은 10번까지 시도한다. 켜지기는 하는데 펌웨어가 답하지 않으면 리셋이 다시 걸려 되풀이되는데, **10분 안에 20번**을 넘기면 `no more WF restarts: 20 in 10 minutes`로 멈춘다. WF는 꺼진 채 남고, 명령은 곧바로 거절된다(`-EIO`).
+- 멈추려면 `rmmod mt7921soc`. 지금 도는 시도(보정과 시간 초과로 13초쯤까지)만 기다리고 남은 시도는 건너뛴다. 다시 켜 보려면 `echo 1 > /sys/kernel/debug/ieee80211/phy*/mt76/chip_reset`이나 `modprobe`다. 20번을 넘긴 뒤의 `chip_reset`은 10분이 지나야 다시 돈다.
 - 다시 켜기가 실패하면 `WF restart failed`가 나오고, 그 뒤로 드라이버는 WF 쪽과 WFDMA를 건드리지 않는다(`… while the WF part is off`가 찍힌다). `rmmod`로 내려도 된다(링 레지스터는 그동안 메모리를 가리킨다). 다시 올려도 안 되면 재부팅으로 되돌린다.
+- 이 상태에서 `ip link set wlan0 up`은 `Input/output error`로 실패한다. `ip link set wlan0 down`과 `rmmod`는 된다.
+- `irq N: nobody cared`와 `Disabling IRQ #N`이 나오면 이 선을 WFDMA 말고 다른 것이 올리고 있다. 벤더는 이 선을 인터럽트 컨트롤러에서 막으므로 벤더 코드로는 없다고 말할 수 없다. 커널이 선을 끄고 100 ms마다 폴링하므로 명령은 느리게라도 돌 수 있고, 모듈을 다시 올려야 풀린다. `HOST_CSR_IRQ_EN`(`0x18001600`)의 `0x3ff`를 줄여 볼 자리다. `/proc/interrupts`도 본다.
+- `DMA window full` 줄은 20 MiB 칸이 찼다는 뜻이다. 소켓이 안 읽고 쥔 RX 페이지가 칸을 차지한다. 그 동안 RX가 서고 명령과 TX가 `-ENOMEM`으로 실패할 수 있다. 드라이버는 100 ms마다 다시 채운다. 소켓이 읽으면 되살아나야 한다. `/sys/kernel/debug/ieee80211/phy*/mt76/rx-queues`로 본다.
+- debugfs `runtime-pm`은 켜도 소유권을 내주지 않는다(하드웨어에 닿지 않는다). `deep-sleep`은 쓰지 않는다. 펌웨어의 `KeepFullPwr`를 내리는 명령이고 이 길은 시험한 적이 없다.
 - CNM: 기본은 꺼 둔 길이다. 스캔과 연결이 안 되면 `modprobe mt7921soc cnm=1`로 ROC 길을 본다. 펌웨어 파일이 없어 미리 읽을 수 없다.
 
 #### 끝날 때
 
-- 끄기: `rmmod mt7921soc mtk_connsys`. `WF:` 끄기 폴링 실패 줄이 없는가, 레일이 꺼졌는가(`regulator_summary`), 다시 올렸을 때 같은 줄이 나오는가.
+- 끄기: `rmmod mt7921soc`. `WF:` 끄기 폴링 실패 줄이 없는가, 레일이 꺼졌는가(`regulator_summary`), 다시 올렸을 때 같은 줄이 나오는가(`SIP init_atf_data`는 빼고). `mtk_connsys`는 내려가지 않는다. 시스템 절전은 시험하지 않는다(wowlan을 내놓지 않는다).
 - 2b의 USB 가젯 길: 이 드라이버는 USB를 건드리지 않는다. 레일과 전원 도메인은 connsys 것만 쓴다. 끊기면 보고한다.
 - 소비 전력: 레일을 켠 채 두므로 대기 전력이 순정보다 크다. 2e에서 잰다.
 
@@ -1015,21 +1163,23 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 
 모듈: `mt6375`, `mt6375-charger`. 결과: `/sys/class/power_supply/mt6375-charger`(쓰기 불가), dmesg에 LK가 남긴 값 한 줄. 충전은 LK 상태 그대로다.
 
-1. [ ] `modprobe mt6375 mt6375-charger`. dmesg 한 줄이 LK가 남긴 값이다: `CV .. ICHG .. AICR .. CHG_EN .. BUCK_EN .. HZ .. WDT_EN ..`.
+1. [ ] `modprobe mt6375 mt6375-charger`. dmesg 한 줄이 LK가 남긴 값이다: `CV .. ICHG .. AICR .. CHG_EN .. BUCK_EN .. HZ .. WDT_EN .. BAT_COMP ..`.
 2. [ ] 전후 레지스터가 같아야 한다.
 
     ```bash
     for r in 0x20 0x21 0x22 0x23 0x24 0x25 0x26 0x27 0x28 0x29 0x2a 0x33 0x34 0x50 0xe0 0xe1 0xe4; do echo "$r $(i2cget -f -y 5 0x34 $r)"; done
     ```
 
-3. [ ] 볼 값: AICR·ICHG가 0.5 A인가, CV가 얼마인가(4.35 V면 LK2와 같다. 넘겨받기 전에는 이 값으로 충전된다), `0x27` bit 7(타이머), `0x2a` bit 3(워치독). 워치독이 켜져 있으면 60초 뒤 값이 바뀌는지 본다. **이것이 칩 기본값을 알 유일한 기회다.**
+    `0x33`(IR 보상)은 dmesg의 `BAT_COMP`와 같아야 한다. bit 2:0이 32 mV 단위의 한계, bit 6:4가 16.7 mOhm 단위의 저항이고 순정은 둘 다 1이다(`0x11`). `값 & 0x77`이 `0x00`이나 `0x11`이면 된다(bit 7과 bit 3의 뜻은 자료에 없다). 더 크면 멈추고 알린다. 충전 전압이 CV 위로 전류에 따라 더 오른다(같은 계열 칩의 공식. 순정 값이면 2 A에서 32 mV, 500 mA에서 약 8 mV). 드라이버는 이 레지스터에 쓰지 않는다.
+
+3. [ ] 볼 값: AICR·ICHG가 0.5 A인가, CV가 얼마인가(4.35 V면 LK2와 같다. 넘겨받기 전에는 이 값으로 충전된다), `0x27` bit 7(타이머), `0x2a` bit 3(워치독)과 bit 1:0(주기: 0부터 8, 40, 80, 160초). 워치독이 켜져 있으면 곁에 있으면서 그 주기보다 오래 두고(모르면 160초가 넘게) 값이 바뀌는지 본다. 만료 때 값이 칩 기본값으로 바뀔 수 있고(같은 계열 칩의 자료, 추정) A에는 고칠 드라이버가 없다. **이것이 칩 기본값을 알 유일한 기회다.**
 4. [ ] I2C7을 켰으면 게이지의 만충 값을 읽는다: `i2cget -f -y 7 0x55 0x30 w`. Android를 거치고 재부팅한 뒤에도 4310(`0x10d6`)인지, 전원을 껐다 켜도 남는지 본다.
 5. [ ] `online`, `status`가 케이블에 따라 맞게 바뀌는지 본다. 쓰기 파일은 모두 읽기 전용이어야 한다.
 6. [ ] 부하 전력: PC에 꽂고 USB-C 전력계로 입력을 잰다. 500 mA에 붙어 있으면 배터리가 줄고 있다. 5.1절의 추정을 이 값으로 고친다.
 
 #### B. 충전 넘겨받기
 
-게이지(tb375fc-gpu-thermal의 0079와 `&i2c7`)가 기기에서 돈 뒤. 게이지 노드에 라벨 `fuel_gauge:`를 붙인다.
+게이지(패치 0079와 `&i2c7`, 9.4절 6번)가 기기에서 돈 뒤.
 
 ```dts
 &battery { status = "okay"; };
@@ -1043,17 +1193,26 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 
 결과: 온도를 따라 충전을 끄고 켠다. 입력과 충전 전류는 500 mA 그대로다(C 전에는 포트 정보가 없다). CV는 4.34 V가 된다(45도 위와 충전을 못 할 때는 4.24 V).
 
+**넘겨받기 전.** 게이지를 못 읽으면 dmesg에 `Cannot read the fuel gauge`가 한 번 찍히고 LK 상태 그대로다. 값이 말이 안 되면(−40도 밑, 100도 위, 2.5 V 밑, 5 V 위, 온도만 읽히고 전압을 못 읽음) 세 번째 폴링에 `Fuel gauge makes no sense`가 찍히고 `CHG_EN`만 0이 된다. 좋은 값이 오면 평소처럼 넘겨받는다. 넘겨받으면 `Took over charging`이 찍힌다. 넘겨받기 전에 잠들면 LK 상태로 충전이 계속된다. 다만 멈출 까닭이 있으면 끄고, 못 끄면 잠들지 않는다.
+
 **조건:** 게이지가 돌고 온도가 방 온도와 맞을 것, 전압이 Android 값과 맞을 것. 배터리 30~70%(CV 구간을 피한다). 전력계를 끼우고, 사람이 곁에 있고, 태블릿을 단단한 바닥에 둔다. 부스트는 꺼 둔다.
 
 **재는 것:** VBUS, IBUS(전력계), 배터리 전압·전류·온도(게이지), `status`, `health`, 레지스터. 뒷면 온도를 손으로 본다.
 
-**멈추는 길(먼저 시험한다):** `echo inhibit-charge > /sys/class/power_supply/mt6375-charger/charge_behaviour`. 전력계의 입력이 시스템 부하만큼으로 줄고 `status`가 `Not charging`이면 된다. 그다음 `auto`로 되돌린다. 다른 길: 케이블을 뽑는다, `rmmod mt6375-charger`(0.5 A로 되돌리고 감시를 끝낸다), 전원 키 길게.
+**멈추는 길(먼저 시험한다):** `echo inhibit-charge > /sys/class/power_supply/mt6375-charger/charge_behaviour`. 넘겨받기 전에도 바로 듣고, 쓰기가 실패하면 오류를 돌려준다. `echo`의 성공만 믿지 않는다. `status`가 `Not charging`인지, `i2cget -f -y 5 0x34 0x20`의 bit 0이 0인지, 전력계의 입력이 시스템 부하만큼으로 줄었는지 본다. 그다음 `auto`로 되돌린다. 넘겨받기 전이면 LK가 둔 값으로 돌아간다. 다른 길: 케이블을 뽑는다, 전원 키 길게. **`rmmod mt6375-charger`는 멈추는 길이 아니다.** 0.5 A로 내리고 감시만 끝나며, 충전은 LK 상태처럼 계속된다.
 
-1. [ ] 스크립트로 10분 뒤 `inhibit-charge`를 걸어 두고 시작한다.
-2. [ ] B를 더한 dtb로 부팅한다. 레지스터를 전후로 본다.
+1. [ ] B를 더한 dtb로 모듈을 막아 부팅한다. `mt6375-charger`는 장치 트리 별칭으로 저절로 올라오고 게이지는 내장이라, 막지 않으면 무엇을 걸기 전에 넘겨받는다. 커널 명령줄의 `modprobe.blacklist=mt6375_charger`나 `/etc/modprobe.d/`의 `blacklist mt6375_charger`로 막는다. 레지스터를 기록한다.
+2. [ ] 10분 뒤 멈추는 스크립트를 걸고 나서 모듈을 올린다. 넘겨받은 뒤 레지스터를 전후로 본다.
+
+    ```bash
+    P=/sys/class/power_supply/mt6375-charger
+    ( sleep 600; echo inhibit-charge > $P/charge_behaviour; echo "rc=$?"; cat $P/status; i2cget -f -y 5 0x34 0x20 ) > /var/log/b-stop.txt 2>&1 &
+    modprobe mt6375-charger
+    ```
+
 3. [ ] 전류가 500 mA 안에 머무는지 본다.
-4. [ ] 게이지를 멈추었을 때(`/sys/bus/i2c/drivers/mm8013/unbind`) 30초 안에 `CHG_EN`이 0이 되는지 본다. 다시 바인드하면 돌아와야 한다.
-5. [ ] 만충까지 한 번, 곁에서. 게이지 전압이 Android 실측(4326 mV)처럼 4340 mV 밑에서 멈추고 `Full`이 되는지, 4.41 V 멈춤이 잘못 걸리지 않는지 본다. 걸리면 임계값을 고친다. 그때 게이지 잔량이 100%인지도 본다(게이지 만충 값은 Android가 쓴 값이다).
+4. [ ] 게이지를 멈추었을 때(`/sys/bus/i2c/drivers/mm8013/unbind`) 40초 안에 `CHG_EN`이 0이 되는지 본다. 세 번째 실패까지 폴링 간격에 따라 30초가 걸린다. 다시 바인드하면 돌아와야 한다. 언바인드 순간에 전원 장치 코어의 경고가 한 번 보일 수 있다(폴링이 게이지를 읽는 사이의 틈, 창은 몇 ms). C.4의 `rmmod`도 같다.
+5. [ ] 10시간 타이머를 본다. 넘겨받을 때 이미 칩이 고장 상태여도 같은 걸쇠가 선다. 500 mA로는 만충까지 못 간다고 본다: 10,200 mAh라 30%에서 만충까지 부하 없이 14시간이 넘고, 부하 1 W면 70%에서 시작해도 10시간을 넘는다(2.5 W 입력, 효율 90%로 어림). AICR 구간에서 타이머가 절반 속도라면(같은 계열 칩의 자료) 20시간이다. 칩이 멈추면 dmesg에 `Charger fault, stopping until the source goes`, `status`는 `Not charging`, `health`는 `Unspecified failure`다. **고장이 아니라 기대 결과다.** `inhibit-charge` 뒤 `auto`, 온도 변화, 절전 복귀로 풀리지 않는지 본다. 케이블을 10초 넘게 뽑았다 꽂으면 다시 충전되어야 한다(C 전에는 폴링으로 보므로 10초보다 짧으면 못 본다). 만충 시험은 C.8로 옮겼다.
 
 #### C. 인터럽트와 TCPC, 싱크만
 
@@ -1076,8 +1235,9 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 3. [ ] 인터럽트를 켠 dtb로 부팅해 가젯이 그대로인지 본다(마스크만 쓴다). GPIO7 인터럽트 수가 멈춰 있어야 한다(`/proc/interrupts`).
 4. [ ] PC를 꽂은 채 시간 제한으로 올린다: `( sleep 20; modprobe tcpci_mt6375; sleep 60; rmmod tcpci_mt6375 ) &`. SSH가 끊기는지 본다.
 5. [ ] **케이블을 뒤집어 같은 시험을 한다.** TCPM이 잠깐 CC2를 연다. PC가 VBUS를 내리면 멈추고 보고한다.
-6. [ ] `/sys/class/typec/port0`, `typec-power-opmode`, 충전기의 입력 값. 1.5A·3A 충전기로 입력이 오르는지, 뽑으면 바로 0.5 A로 돌아오는지 전력계로 본다.
+6. [ ] **처음으로 2 A가 되는 단계다. B의 조건을 다시 갖춘다:** 전력계를 끼우고, 사람이 곁에 있고, 단단한 바닥에 두고, 뒷면 온도를 손으로 본다. USB 커넥터 둘레의 온도도 본다. 이 드라이버에는 커넥터 과열 보호가 없다(순정은 `usb_board_ntc`가 75도를 넘으면 GPIO179로 VBUS를 끊는다). 뜨거워지면 바로 멈추고 알린다. `/sys/class/typec/port0`, `typec-power-opmode`, 충전기의 입력 값. 1.5A·3A 충전기로 입력이 오르는지, 뽑으면 바로 0.5 A로 돌아오는지 전력계로 본다.
 7. [ ] `rmmod` 뒤 `0x1a`가 `0x0a`이고 가젯이 그대로인지, 재부팅 뒤 fastboot가 PC에 보이는지 본다.
+8. [ ] 만충까지 한 번, 곁에서(B.5에서 옮겼다). 6번의 조건으로 2 A 충전기를 쓴다. 게이지 전압이 Android 실측(4326 mV)처럼 4340 mV 밑에서 멈추고 `Full`이 되는지, 4.41 V 멈춤이 잘못 걸리지 않는지(dmesg `Battery at .. uV, stopping charging`) 본다. 걸리면 임계값을 고친다. 게이지가 범위 안의 틀린 값을 낸 것인지도 함께 본다(풀리려면 4.14 V 밑이 세 번 이어져야 한다). 그때 게이지 잔량이 100%인지도 본다(게이지 만충 값은 Android가 쓴 값이다).
 
 #### D. DRP와 호스트
 
@@ -1120,6 +1280,8 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 
 `&usb_vbus_output`은 꺼 둔다(두 소비자가 부스트를 켜지 않게). 부스트와 FET는 TCPM이 켠다. 8절 4단계를 TCPM 길로 한다. 차례: 가젯이 그대로인지 → 브레이크아웃으로 5 V와 뺀 뒤 0 V → 작은 USB 메모리 → 켠 채 재부팅(부스트 꺼짐, CC Rd). 켠 채 PC를 꽂으면 TCPM이 어떻게 하는지 본다(Try.SNK). VCONN은 Ra가 있는 케이블에서 처음 나간다. 커넥터 온도를 본다. 이 차례에서 처음으로 부트 직후 호스트 역할을 거칠 수 있다(otg 프로브 동작). `role-switch-default-mode`가 꼭 있어야 한다.
 
+부스트 중에 `inhibit-charge`를 걸어 VBUS가 그대로인지 본다. `CHG_EN`은 벤더의 부스트 값에 없어 영향이 없을 것으로 보지만, 확인한 적은 없다. 그다음 `auto`로 되돌린다. 부스트가 끝난 뒤 다음 폴링에 반영된다.
+
 #### E. PD
 
 `pd-disable`과 `typec-power-opmode`를 빼고 넣는다.
@@ -1133,6 +1295,102 @@ op-sink-microwatt = <10000000>;
 `dt-bindings/usb/pd.h`를 보드에 더한다. 5 V만 받으니 고속 충전이 아니다. 협상이 실패하면 하드 리셋으로 상대가 VBUS를 내리므로 D가 안정된 뒤에 한다. 전압을 올리는 일은 차지 펌프 충전과 함께 3단계에서 정한다.
 
 D가 안정된 뒤 5 V 충전기와 PC에서 한 번씩. 하드 리셋이 나는지 `tcpm` 로그를 본다.
+
+### 9.4 2e GPU·열·게이지
+
+패치 0070~0079다. 코드, 벤더 자료, 모의 시험으로 확인했고 기기에서 돌리지 않았다. 아래는 기기에서만 알 수 있는 것이다. 각 단계는 앞 단계가 맞을 때만 넘어간다. 노드를 켜는 차례 자체가 안전장치다. 첫 판단 거리는 하드웨어 열 리셋이 켜져 있는지다(1번). 게이지(6번)는 9.3절 B보다 먼저다.
+
+위험: 부팅 불가가 아니라 그 자리 멈춤이다. 커뮤니티 포트는 GPU 첫 전원 근처에서 SoC가 멈췄다는 보고가 있다(포럼 보고). 되돌리는 길은 전원 키 길게와 그 앞 단계의 dtb다.
+
+#### 0. 켜기 전, 읽기만
+
+언락 전 안드로이드에서 구역 온도를 적어 둔다(읽을 수 있으면).
+
+```bash
+adb shell 'for z in /sys/class/thermal/thermal_zone*; do echo $(cat $z/type) $(cat $z/temp); done'
+```
+
+언락 뒤 root나 첫 리눅스의 initramfs에서 `busybox devmem`으로, **이 차례대로** 읽는다.
+
+| 주소 | 무엇 | 기대 |
+|---|---|---|
+| `0x1c001f00` | `SPM_MFG0_PWR_CON` | [31:30]=3, bit 12=0, bit 13=1. **아니면 아래를 읽지 않는다** |
+| `0x13c2fd24` | GPR2(`GPUEB_INIT_FOOTPRINT`) | `0x55667788`. 벤더 커널이 읽지 않는 값이라 부팅 뒤에 바뀌었을 수 있다. 다르면 값을 적고, 프로브 검사를 고칠지 본다 |
+| `0x13c2fd50` | GPR13(IPI 매직) | 0이 아님. 벤더 안드로이드에서는 읽고 지워서 0일 수 있다. 리눅스에서는 값이 있어야 한다 |
+| `0x13c60618` | `GPUEB_CFGREG_WDT_CON` | 포럼 보고 `0x800f0000` |
+| `/proc/device-tree/soc/gpueb@*/gpueb_mem_addr`·`_size` | LK가 적은 공유 메모리 | 크기 `0x180000`, 주소가 `reserved-memory/mblock-*-me_GPUEB_SHARED`의 `reg`와 같다 |
+| `/proc/device-tree/chosen/atag,devinfo` | 퓨즈 사본 | 첫 낱말 320(0x500바이트). `0x310` 낱말의 [7:0]과 [15:8]이 보통 60, 170 근처 |
+
+`gpueb` 노드가 켜지지 않아도 위 속성은 있어야 한다(LK는 상태를 보지 않는다).
+
+#### 1. 열: `efuse`, `lvts_ap`, `lvts_mcu`
+
+쓰기가 없으니 가장 위험이 작다.
+
+- 기록: `controller at 0x…: normal calibration, golden N, MONCTL0 …, PROTCTL …, PROTTC …, MONINT …, ID …`. MCU는 고온 보정일 수 있다.
+- **이 기록으로 하드웨어 리셋을 판단한다.** `PROTCTL[19:16]`(전략과 센서)이 0이 아니고 `PROTTC`가 119도의 raw 근처이며 `MONINT` bit 31(`STAGE3_INT_EN`)이 서 있으면 켜져 있을 가능성이 높다. 모두 0이면 꺼진 것으로 본다. 그러면 폴링 1초의 소프트웨어 critical(115도, 우리 값이다)이 유일한 보호이고 쿨링 장치도 아직 없다. 여기서 멈추고, 그대로 둘지 커널이 `PROTTC`를 써서 켜는 패치를 낼지 정한다(벤더 `set_tc_hw_reboot_threshold`가 그 차례를 보여 준다). 값을 적어 둔다.
+- `Bad golden`, `Bad calibration count`, `is not clocked`, `does not measure this sensor`, `adds an offset` 중 하나로 도메인이 거절되면 **그 도메인은 보호가 없다. 부하를 걸지 말고** 값을 본다.
+- `fuse count … firmware has …`가 나오면 멈추고 본다. 펌웨어의 `LVTS_EDATA`가 퓨즈 count와 같으리라는 추정이 틀린 것이라 계수를 어느 쪽으로 만들지 다시 봐야 한다. 전부 같으면 이 경고를 `-ENODATA` 오류로 올린다. 퓨즈가 맞는 자리에서 왔다는 가장 좋은 증거다.
+- `… is not usable: …`가 나오면 `… is usable again`이 나올 때까지 그 센서의 보호가 없는 것이다. APU·GPU 도메인에서 전원에 따라 raw 0이 오가면 여기서 보인다.
+- `/sys/class/thermal/*/temp`가 실온 + 약간인지, 안드로이드에서 적은 값과 게이지 온도에 견주어 10도 안쪽인지 본다. 범위 안의 틀린 golden은 드라이버가 잡지 못한다.
+- **가열 시험:** `stress`나 `dd`로 CPU를 돌려 CPU 구역이 **오르는지**, 멈추면 내리는지 본다. 내리면 식이 뒤집힌 것이니 바로 끈다.
+- 디버그 파일(`/sys/kernel/debug/*thermal-sensor/controller*/registers`)에서 `LVTS_MSR*`의 bit 16과, 값이 시간에 따라 움직이는지(멈춰 있지 않은지) 본다.
+
+#### 2. `lvts_apu`, `lvts_gpu`
+
+버스가 멈추면 이 단계다. 벤더는 전원 상태를 보지 않고 두 도메인을 읽지만 `0x13ff0000`은 MFG, `0x19004000`은 APU 쪽이다. GPU가 꺼져 있을 때도 읽히는지 본다.
+
+#### 3. GPUEB: `gpueb_mbox`, `gpueb`
+
+GPU 전원은 요청하지 않는다. 기대 기록:
+
+```text
+shared memory at [mem …-…]
+GPUEB is running
+giving the shared memory to the GPUEB
+65 GPU OPPs, 0 stack OPPs, shader cores 0x…
+```
+
+- OPP 수와 코어 마스크가 벤더 표와 맞는가(65, `0x130013`). 레노버 변종이면 다를 수 있다. `Unexpected shader core mask`나 `EB did not initialise`면 배치가 다른 것이다.
+- `Dropped a message on channel …`이 나오면 그 채널을 적는다. 벤더 기준으로는 AP가 알리기 전까지 이벤트를 보내지 않는다(`GPUFDVFS_IPI_SET_GED_READY`). 자주 나오면 버리지 말고 받아야 할 메시지인지 본다.
+
+#### 4. GPU: `gpu`
+
+`panthor`는 모듈이니 자동으로 올리지 말고 손으로 올린다(`modprobe.blacklist=panthor` 뒤 `modprobe panthor`). 커뮤니티의 멈춤은 이 근처다.
+
+- 기대: `asking the GPUEB to power the GPU` → `the GPU is powered` → `mali-g615 id …` → CSF 펌웨어 로드.
+- 코어 전원 전이가 시간 초과면 PDCA를 의심한다. 벤더 Mali에 리셋 뒤 `0x13c620a8` bit 16을 기다리는 길이 있다(`gpufreq_pdca_polling_ack`, `CONFIG_MALI_MTK_MFG2_BACKDOOR_ACK`일 때). 이 SoC에서 켜져 있는지는 설정으로 확인하지 못했다.
+- `MFG0 is not on`으로 전원이 거절되면 그 값을 적는다. 드라이버는 IPI마다 보고, 걸리면 다음 부팅까지 GPU가 없다. 첫 켜기 뒤에 bit 13이 평소에도 내려가는 칩이면 확인을 줄여야 한다.
+- GPU 메모리 문제가 보이면 `dma-coherent`와 ASN hash를 본다.
+
+#### 5. Mesa
+
+26.3에서 GLES로 컴포지터.
+
+#### 6. 게이지: `i2c7`
+
+`/sys/class/power_supply/mm8013/`의 `voltage_now`, `capacity`, `temp`를 본다. 첫 부팅에서 드라이버는 게이지에 쓰지 않는다.
+
+- 전압을 스무 번 읽어 윗바이트가 0x00·0xFF로 튀는지 본다. 튀면 4 ms로 모자라거나 어댑터(`i2c-mt65xx` DMA)다. `current_now`의 부호도 충전기를 꽂아 본다. 배터리 ID가 셋 밖이면 `MM8013 not found`다.
+- `charge_full`, `charge_full_design`, `status`는 순정이 읽지 않던 레지스터에서 온다. 값이 말이 되는지 본다.
+- 게이지의 충전 전압: `i2cget -f -y 7 0x55 0x30 w`. Android를 거치고 재부팅한 뒤, 전원을 껐다 켠 뒤에도 4310(`0x10d6`)인지 본다(9.3절 A 4번).
+- 충전이 끝날 때까지 두고 읽는다: `0x2c`(RSOC), `0x0a`(FLAGS, bit 9가 FC), `0x0e`(FCC), `0x3c`(설계), `0x30`. RSOC가 100에 닿는지, 꽂아 둔 채 내려가는지 본다.
+- **쓰기 시험(사람이 확인한 뒤에만).** `0x30`에 순정 표의 다른 값 4530(`0x11b2`)을 쓰고 `0x2c`·`0x0e`가 움직이는지 본 뒤, 4310으로 되돌린다. 순정이 쓰는 값이지만 게이지 안에서 무엇이 바뀌는지는 모른다. 움직이지 않으면 게이지가 이 값을 만충 판단에 쓴다는 추정이 틀린 것이다. 이 값을 커널에서 쓸지는 그 뒤에 정한다.
+
+#### 7. 서스펜드
+
+QEMU에서 본 것은 드라이버의 차례뿐이다. 실제 SoC에서는 저전력 펌웨어(SPM)가 MFG0과 GPUEB를 어떻게 다루는지 모른다. GPU를 켠 채로 s2idle과 복귀를 본다.
+
+- `power_control failed`, `GPUEB did not answer`, `Giving up on the GPUEB`가 없어야 한다. 복귀가 늦으면(10초) 응답이 안 온 것이다.
+- `MFG0 is not on`이 나오는지, 복귀 뒤 GPU를 다시 쓸 수 있는지, LVTS 값이 움직이는지 본다.
+
+#### 멈췄을 때 볼 것
+
+- 마지막 `dev_info`가 단계다. 켠 뒤 멈추면 그 앞 단계의 노드만 켠다.
+- 살아 있으면 읽을 것(MFG0 확인 뒤): `0x13c2fd30` LOW_POWER_FOOTPRINT, `0x13c2fd60` GPUFREQ_FOOTPRINT, `0x13c2fd5c` DRAM_RES, `0x13c6071c`·`720`·`724` GPUEB PC·LR·SP, `0x13c62000` 메일박스 TX, `0x13c62078` RX, `0x13f91200` `MFG_RPC_PWR_CON_STATUS`.
+- 벤더의 `gpueb_dump_status()`가 보는 것과 같다. **`0x13fbf000`(MFG 설정)과 `0x13000000`(GPU)은 MFG1이 켜지기 전에 읽으면 안 된다.**
+- 리셋되어 다시 부팅되면 pstore와 LK의 `SYS_GPUEB_LAST_LOG`·`SYS_GPU_MFGSYS_LATCH_LOG`(expdb)를 본다.
+- `GPUEB did not answer`(10초)와 `Giving up on the GPUEB`면 GPUEB가 멈춘 것이다. 그 뒤로 드라이버는 말을 걸지 않으니 다음 부팅까지 GPU는 없다. `CMD_POWER_CONTROL` 뒤의 시간 초과는 전원 길이 문제이고, `GPUFREQ_FOOTPRINT` 값이 어디까지 갔는지 말해 준다(벤더 `__gpufreq_footprint_power_step`).
 
 ## 10. 아직 비어 있는 것
 

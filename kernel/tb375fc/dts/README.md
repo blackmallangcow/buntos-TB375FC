@@ -83,6 +83,13 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `dsi0`, `dsi1` | `0x1400d000` SPI 368, `0x1420d000` SPI 412 | 펌웨어 | `disabled`. compatible·클럭·PHY는 화면 파이프라인과 함께 더한다 |
 | `wifi`, `consys` | `wifi@18000000`(SPI 889, 둘째 `reg`는 PCCIF가 있는 `0x10001000`), `consys@18001000`(`cfg-on`, `iocfg-rt`, conn 도메인), LK가 읽는 크기 | 펌웨어, 벤더 | `disabled`(2d). LK는 경로 `/soc/consys`, `/soc/wifi`로 찾고 유닛 주소와 status를 보지 않는다. 유닛 주소가 겹치지 않게 consys를 `18001000`으로 뒀다 |
 | `bluetooth` | `bluetooth@18800000`(`bgf`, `conn`, SPI 614·891) | 펌웨어, 벤더 | `disabled`(2d). LK는 이 노드를 찾지 않는다. 트리의 892는 BEIF 빌드에서 쓰지 않는다 |
+| `efuse` | `mediatek,mt6897-devinfo`, 셀 `calib@310`(0x38)·`@2d4`(0x28)·`@364`(4)·`@2fc`(0x10) | 펌웨어 `mediatek,devinfo`, OEM `mtk-devinfo.c`, LK | `disabled`. `reg`가 없다: LK가 `/chosen`의 `atag,devinfo`로 넘긴다. 칸 순서가 값의 순서다(310, 2d4, 364, 2fc) |
+| `lvts_ap`·`lvts_mcu`·`lvts_apu`·`lvts_gpu` | `0x10315000`/SPI 264, `0x10316000`/265, `0x19004000`/635, `0x13ff0000`/592. 각 0x1000 | 펌웨어(`reg`·`interrupts` 차례가 벤더 도메인 차례다), OEM | `disabled`. 클럭·리셋 없음. 켜는 차례: AP·MCU 먼저, APU·GPU는 그다음 |
+| `thermal-zones` | 센서마다 하나, 32개. `polling-delay` 1000 ms, `critical` 115 °C, 쿨링 지도 없음 | 이름은 펌웨어 구역, 온도는 우리 값 | 펌웨어 구역의 119 °C(`soc_max`)보다 4 °C 낮다. 하드웨어 리셋이 켜져 있는지는 미확인이니 이 trip이 유일한 보호일 수 있다. 드라이버가 문턱을 쓰지 않으니 폴링이 있어야 한다 |
+| `gpu` | `0x13000000`(0x480000), job 586, mmu 585, gpu 584 | 펌웨어, MT8196 틀 | `disabled`. `dma-coherent` 없음 |
+| `gpueb` | `gpueb@13c2fd1c`: GPR `0x13c2fd1c`(0x64), MFG0 `0x1c001f00`(4) | 펌웨어, OEM, LK | `disabled`. 이름을 바꾸면 안 된다: LK가 `/soc/gpueb`를 찾아 공유 메모리를 적는다 |
+| `gpueb_mbox` | 데이터 `0x13c2fd80`(0x280), 제어 `0x13c62000`(0x7c), SPI 588 | 펌웨어 | `disabled` |
+| `dispsys0`·`dispsys1`, `ovlsys0`·`ovlsys1`, `mminfra`, `mdpsys0`·`mdpsys1`, `vdecsys`·`vdecsys_soc`, `vencsys`·`vencsys_c1` | 화면·MDP·코덱 클럭 게이트(패치 0100~0104) | 펌웨어, OEM | `disabled`. `power-domains`를 달지 않는다. VEN·MDP 도메인이 자기 블록의 게이트를 쓰고, 나머지는 probe가 도메인을 켰다 끄면 LK 화면이 꺼진다. 게이트에 `.is_enabled`가 없어 클럭 코어가 블록을 읽지 않는다 |
 | `spi0`~`spi7` | `0x11010000`~`0x11017000`(0x100), SPI 242~249, `mediatek,pad-select` 0(spi0~5)·1(spi6·7) | 펌웨어, OEM 드라이버 | `disabled`. compatible은 `mediatek,mt6897-spi` + 업스트림 `mediatek,mt6991-spi`(패치 0029). OEM `spi-mt65xx`의 `mt6985` 데이터와 업스트림 `mt6991` 데이터가 같은 기능이다. 클럭은 펌웨어처럼 `parent-clk` = topckgen `mainpll_d6_d2`(spi0~2)·`univpll_d6_d2`(spi3~7), `sel-clk` = spi 먹스, `spi-clk` = pericfg_ao 게이트다. 드라이버가 실제 클럭 값으로 분주를 계산한다(커뮤니티 포트는 26 MHz 자리값 때문에 SCLK가 약 52 MHz였다). OEM의 소프트웨어 CS는 업스트림이 쓰지 않는다 |
 | `watchdog` | `0x1c00a000`(0x100) | 펌웨어 | 7.2.12 `mtk_wdt`는 대체 compatible `mediatek,mt6589-wdt`로 붙고, 켜져 있으면 `WDOG_HW_RUNNING`으로 받아 커널이 쓰다듬는다. 펌웨어의 `syscon`·`simple-mfd`·reboot-mode는 뺐다 |
 | `performance` | `0x11bc10`·`0x11bd30`·`0x11be50`(각 0x120) | 펌웨어 | 노드 이름을 첫 `reg`에 맞췄다(펌웨어 `@11bc00`). mt8195와 같은 CSRAM 배치에 도메인이 하나 더 있다 |
@@ -127,7 +134,9 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `framebuffer0`의 `panel` | `&panel0` | 미러(셋 다 273615×171009µm) | simpledrm이 `width-mm`·`height-mm`를 읽는다. 파이프라인을 켤 때 뺀다 |
 | `conn_pins_off`, `conn_pins_on` | GPIO192~202 | 펌웨어, 벤더 | consys가 쓴다(2d) |
 | 레일 `mt6363_vcn13`, `mt6363_vrfio18`, `mt6368_vant18`, `mt6368_vcn33_1`, `mt6368_vcn33_2` | 1.35 V, 1.7 V(벤더가 쓰는 값), 나머지는 범위 없음 | 펌웨어, 벤더 | `disabled`(2d). of_regulator가 사용 가능한 자식만 보므로 리눅스가 건드리지 않는다 |
-| `pmic@9` MT6685 | `reg = <0x9 SPMI_USID>` | 펌웨어 | `disabled`(2d). 드라이버가 없고 connsys가 DCXO 레지스터 하나를 읽는다 |
+| `pmic@9` MT6685 | `reg = <0x9 SPMI_USID>` | 펌웨어 | `disabled`(RTC 또는 2d). MFD는 자식만 띄운다(버스 접근 0번). connsys가 DCXO 레지스터 하나를 읽는다 |
+| `rtc@580` | `reg = <0x580>`. 펌웨어의 알람 인터럽트는 뺐다(드라이버에 알람이 없다) | 펌웨어, 벤더 드라이버 | `disabled`(2b) |
+| `&i2c7` `fuel-gauge@55` | `mitsumi,mm8013`, I2C 400 kHz | 펌웨어 `ext_gauge` | i2c7이 꺼져 있어 동작하지 않는다 |
 | `battery` | `simple-battery`: CV 4.34 V, 충전 2 A, 종료 350 mA, 과전압 4.41 V, 0~50도 | 펌웨어(`maintenance-*`, `ichg`, `ieoc`, 온도 값) | `disabled`(2e). `battery-cv`의 4.5 V는 쓰지 않는다. 충전기에 `monitored-battery`와 게이지 참조가 있어야 드라이버가 넘겨받는다 |
 | `&i2c5` `pmic@34`의 `mt6375_tcpc` | `mediatek,mt6375-tcpc`, `usb-c-connector`: 싱크, 장치, 1.5A, `pd-disable` | 펌웨어(`pd,sink-pdo-data`, `tcpc,rp-level`) | `disabled`(2e). `self-powered`를 넣지 않는다(포트 리셋에서 CC를 열어 PC가 VBUS를 내린다). `usb_vbus_output`과 함께 켜지 않는다 |
 | `spi2` 터치 `touchscreen@0` | `novatek,nt36532-ts`, 9.6 MHz, IRQ = pio EINT9, 리셋 GPIO60, `iovcc-supply = <&vddio_1v8>`, `firmware-name` 둘(BOE, Tianma), `novatek,panel-id-gpios` = GPIO184, 크기 18401×29441, 171×273 mm, `touchscreen-swapped-x-y` | 펌웨어, OEM(프로토콜), 제3자 미러(패널 판별, 펌웨어 이름), 기기 실측(좌표 범위) | spi2와 함께 꺼져 있다. GPIO184가 0이면 BOE, 1이면 Tianma다. 컨트롤러 좌표는 픽셀의 10배이고 X가 짧은 쪽이다. 축 뒤집기는 기기에서 정한다 |
@@ -152,6 +161,10 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `cpufreq/cpufreq-mediatek-hw.yaml` | `reg` 최대 2개 → 3개 |
 
 UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(업스트림에서는 MT8196 시리즈 v14 위에 다시 낸다).
+
+### 2e 켜는 차례
+
+1. `efuse`, `lvts_ap`, `lvts_mcu`. 2. `lvts_apu`, `lvts_gpu`. 3. `gpueb_mbox`, `gpueb`(GPU 전원을 요청하지 않는다). 4. `gpu`(`panthor`를 손으로 올린다). 5. `i2c7`(게이지). 각 단계에서 볼 것은 체크리스트 9.4절이다.
 
 ## 할 일
 
