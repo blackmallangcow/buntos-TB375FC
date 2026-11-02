@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Desktop Entry]
+Type=Application
+Name=Package Manager
+Name[ko]=패키지 매니저
+Comment=Install downloaded apps (.deb, AppImage, Flatpak) and remove the apps you installed
+Comment[ko]=받은 앱(.deb, AppImage, Flatpak)을 설치하고 설치한 앱을 제거합니다
+Exec=bunt-packages %U
+Icon=org.buntos.PackageManager
+Terminal=false
+Categories=GTK;System;PackageManager;
+Keywords=Install;Uninstall;Remove;Package;Software;App;deb;AppImage;Flatpak;
+Keywords[ko]=설치;제거;삭제;패키지;소프트웨어;앱;설치 프로그램;마법사;deb;AppImage;Flatpak;
+MimeType=application/vnd.debian.binary-package;application/x-deb;application/vnd.appimage;application/x-iso9660-appimage;application/vnd.flatpak;application/vnd.flatpak.ref;application/vnd.flatpak.repo;application/x-rpm;application/vnd.snap;
+StartupNotify=true

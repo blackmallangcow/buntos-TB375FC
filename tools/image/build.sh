@@ -45,7 +45,7 @@ if [[ -n "${BUNTOS_TOOLS_TREE:-}" ]]; then
 	extra+=(--tools-tree="$BUNTOS_TOOLS_TREE")
 fi
 
-# 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, buntd-agent와 bunt, bunt-greeter와 bunt-lock)를 빌드해
+# 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, bunt-packages, buntd-agent와 bunt, bunt-greeter와 bunt-lock)를 빌드해
 # 이미지에 넣을 트리로 모은다.
 # 지금은 빌드 VM과 아키텍처가 같은 보드만 지원한다. 다른 아키텍처는 CI에서 빌드한다.
 stage_components() {
@@ -66,6 +66,7 @@ stage_components() {
 	install -D -m 0755 "$target/release/bunt-comp" "$out/stage/usr/bin/bunt-comp"
 	install -D -m 0755 "$target/release/bunt-shell" "$out/stage/usr/bin/bunt-shell"
 	install -D -m 0755 "$target/release/bunt-settings" "$out/stage/usr/bin/bunt-settings"
+	install -D -m 0755 "$target/release/bunt-packages" "$out/stage/usr/bin/bunt-packages"
 	install -D -m 0755 "$target/release/buntd-agent" "$out/stage/usr/bin/buntd-agent"
 	install -D -m 0755 "$target/release/bunt" "$out/stage/usr/bin/bunt"
 	local unit
@@ -88,6 +89,8 @@ stage_components() {
 	done
 	install -D -m 0644 "$repo/settings/data/org.buntos.Settings.desktop" \
 		"$out/stage/usr/share/applications/org.buntos.Settings.desktop"
+	install -D -m 0644 "$repo/packages/data/org.buntos.PackageManager.desktop" \
+		"$out/stage/usr/share/applications/org.buntos.PackageManager.desktop"
 	install -D -m 0644 "$repo/shell/data/org.buntos.shell.gschema.xml" \
 		"$out/stage/usr/share/glib-2.0/schemas/org.buntos.shell.gschema.xml"
 	# 앱 창에 입히는 모양(창 단추 신호등). 세션 스크립트가 사용자 CSS에서 읽게 한다
@@ -117,7 +120,8 @@ stage_components() {
 	install -d "$out/stage/usr/share/sounds/buntos/stereo"
 	install -m 0644 "$sounds"/stereo/*.wav "$out/stage/usr/share/sounds/buntos/stereo/"
 	local icon
-	for icon in "$repo"/shell/data/icons/*.svg "$repo/settings/data/org.buntos.Settings.svg"; do
+	for icon in "$repo"/shell/data/icons/*.svg "$repo/settings/data/org.buntos.Settings.svg" \
+		"$repo/packages/data/org.buntos.PackageManager.svg"; do
 		install -D -m 0644 "$icon" "$out/stage/usr/share/icons/hicolor/scalable/apps/$(basename "$icon")"
 	done
 }

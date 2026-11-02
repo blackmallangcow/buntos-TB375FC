@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 buntOS contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6cb8ff"/>
+      <stop offset="1" stop-color="#1668e3"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f2d3a4"/>
+      <stop offset="1" stop-color="#dcae74"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d9ac74"/>
+      <stop offset="1" stop-color="#bd8c54"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dbe9fb"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#background)"/>
+  <!-- 내려오는 화살표 -->
+  <path d="M56 18h16v22h12L64 62 44 40h12z" fill="url(#arrow)"/>
+  <!-- 열린 상자: 뒤 날개, 몸통, 앞 날개 -->
+  <path d="M30 60l34-10 34 10-34 10z" fill="#8f653a"/>
+  <path d="M30 60l34 10v38L30 96z" fill="url(#side)"/>
+  <path d="M98 60L64 70v38l34-12z" fill="url(#front)"/>
+  <path d="M30 60l34 10-10 13-34-11z" fill="#efcf9f"/>
+  <path d="M98 60L64 70l10 13 34-11z" fill="#f7e0bb"/>
+  <!-- 테이프 -->
+  <path d="M76 83.5l10-3.2V94l-10 3.6z" fill="#ffffff" fill-opacity="0.45"/>
+</svg>

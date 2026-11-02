@@ -1,0 +1,330 @@
+/*
+ * SPDX-FileCopyrightText: 2026 buntOS contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * 패키지 매니저의 모양. 설치 창은 macOS 설치 프로그램, 목록 창은 macOS 26 시스템 설정의 묶음 상자를 따른다. 색·모서리·
+ * 글자 크기는 theme/tokens.css의 변수만 쓴다. 어둡게를 고르면 창에 dark 클래스가 붙어 변수가 바뀐다 (디자인 스펙 16장)
+ */
+
+/* 창 */
+window.pm-window,
+window.pm-window.background,
+window.pm-sheet,
+window.pm-sheet.background {
+  background: var(--content-bg);
+  color: var(--label);
+  font-family: var(--font-family);
+  font-size: var(--text-body);
+}
+
+/* 창 모서리: macOS처럼 둥글다. 안의 칠한 막대도 같은 모서리를 깎는다 */
+window.pm-window,
+window.pm-sheet,
+window.pm-window > decoration,
+window.pm-sheet > decoration {
+  border-radius: var(--radius-lg);
+}
+
+/* 제목 막대: 신호등, 가운데 제목, 도구. 창 단추는 theme/gtk4-apps.css가 그린다 */
+.pm-titlebar {
+  min-height: 38px;
+  padding: 0 var(--space-2);
+  border-top-left-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-lg);
+  background: var(--content-bg);
+  border-bottom: 1px solid var(--separator);
+}
+
+.pm-window-title {
+  font-weight: 600;
+}
+
+.pm-window:backdrop .pm-window-title {
+  color: var(--label-secondary);
+}
+
+/* 단추: macOS의 둥근 사각형. 창 단추(신호등)는 theme/gtk4-apps.css가 그리므로 본문의 단추만 고른다 */
+.pm-main button,
+.pm-tools button,
+.pm-row button,
+.pm-empty button,
+.pm-sheet button {
+  min-height: 22px;
+  padding: 2px var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background-image: none;
+  background-color: var(--control-bg);
+  box-shadow: none;
+  color: var(--label);
+  text-shadow: none;
+}
+
+.pm-main button:hover,
+.pm-tools button:hover,
+.pm-row button:hover,
+.pm-empty button:hover,
+.pm-sheet button:hover {
+  background-color: color-mix(in srgb, var(--control-bg) 60%, var(--pressed));
+}
+
+.pm-main button:active,
+.pm-tools button:active,
+.pm-row button:active,
+.pm-empty button:active,
+.pm-sheet button:active {
+  background-color: var(--pressed);
+}
+
+.pm-main button.suggested-action,
+.pm-empty button.suggested-action,
+.pm-sheet button.suggested-action {
+  background-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.pm-main button.suggested-action:hover,
+.pm-empty button.suggested-action:hover,
+.pm-sheet button.suggested-action:hover {
+  background-color: color-mix(in srgb, var(--accent) 88%, black);
+}
+
+.pm-main button.suggested-action:disabled,
+.pm-sheet button.suggested-action:disabled {
+  opacity: 0.5;
+}
+
+.pm-main button.destructive-action,
+.pm-sheet button.destructive-action {
+  color: var(--red);
+}
+
+.pm-main button:disabled,
+.pm-row button:disabled,
+.pm-sheet button:disabled {
+  color: var(--label-tertiary);
+}
+
+/* 글자처럼 보이는 단추: 설치 파일을 휴지통으로 이동 */
+.pm-main button.pm-link {
+  background: none;
+  color: var(--accent);
+}
+
+.pm-main button.pm-link:hover {
+  background: var(--hover);
+}
+
+.pm-main button.pm-link:disabled {
+  color: var(--label-secondary);
+}
+
+/* 터치 모드: 누를 영역 44px (디자인 스펙 11장) */
+.touch .pm-main button,
+.touch .pm-tools button,
+.touch .pm-row button,
+.touch .pm-empty button,
+.touch.pm-sheet button {
+  min-height: 44px;
+  padding: 2px var(--space-4);
+}
+
+/* 설치 창 왼쪽의 단계 */
+.pm-steps {
+  padding: var(--space-5) var(--space-3) var(--space-5) var(--space-5);
+  border-bottom-left-radius: var(--radius-lg);
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--separator);
+}
+
+.pm-step {
+  min-height: 22px;
+  color: var(--label-secondary);
+}
+
+.pm-step-dot {
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: var(--radius-capsule);
+  background: var(--label-tertiary);
+}
+
+.pm-step.current {
+  color: var(--label);
+  font-weight: 600;
+}
+
+.pm-step.current .pm-step-dot {
+  background: var(--accent);
+}
+
+.pm-step.done .pm-step-dot {
+  background: var(--label-secondary);
+}
+
+/* 설치 창의 본문 */
+.pm-main {
+  padding: var(--space-5);
+}
+
+.pm-heading {
+  font-size: var(--text-title3);
+  font-weight: 600;
+}
+
+.pm-card {
+  border-radius: var(--radius-md);
+  background: var(--group-bg);
+  box-shadow: inset 0 0 0 1px var(--separator);
+}
+
+.pm-card-content {
+  padding: var(--space-4);
+}
+
+.pm-package-name {
+  font-size: var(--text-title3);
+  font-weight: 600;
+}
+
+.pm-secondary {
+  color: var(--label-secondary);
+}
+
+.pm-notice {
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--separator);
+  font-size: var(--text-callout);
+}
+
+.pm-fact-label {
+  color: var(--label-secondary);
+  font-size: var(--text-callout);
+}
+
+.pm-fact-value {
+  font-size: var(--text-callout);
+}
+
+/* 진행 막대: 강조색 */
+.pm-progress {
+  padding: 0 var(--space-8);
+}
+
+progressbar > trough {
+  min-height: 6px;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--control-bg);
+}
+
+progressbar > trough > progress {
+  min-height: 6px;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--accent);
+}
+
+/* 요약 */
+.pm-result {
+  padding: var(--space-5);
+}
+
+/* 큰 원 안의 흰 기호: 성공은 초록, 실패는 빨강 */
+.pm-result-icon {
+  padding: var(--space-3);
+  border-radius: var(--radius-capsule);
+  color: var(--accent-fg);
+}
+
+.pm-result-icon.good {
+  background: var(--green);
+}
+
+.pm-result-icon.bad {
+  background: var(--red);
+}
+
+.pm-result-title {
+  font-size: var(--text-title3);
+  font-weight: 600;
+}
+
+/* 시트 */
+.pm-sheet-body {
+  padding: var(--space-5);
+}
+
+.pm-sheet-title {
+  font-size: var(--text-body);
+  font-weight: 600;
+}
+
+/* 목록 창 */
+.pm-list-column {
+  padding: var(--space-4) var(--space-5) var(--space-5);
+}
+
+.pm-tools {
+  padding-right: var(--space-1);
+}
+
+entry.pm-search,
+searchbar entry,
+entry.search.pm-search {
+  min-height: 26px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  box-shadow: none;
+  color: var(--label);
+}
+
+list.pm-group {
+  border-radius: var(--radius-md);
+  background: var(--group-bg);
+}
+
+list.pm-group > row {
+  background: none;
+  padding: 0;
+  outline: none;
+}
+
+list.pm-group > row:not(:last-child) {
+  border-bottom: 1px solid var(--separator);
+}
+
+.pm-row {
+  padding: var(--space-2) var(--space-3);
+}
+
+.pm-row-title {
+  font-weight: 500;
+}
+
+.pm-row-subtitle {
+  color: var(--label-secondary);
+  font-size: var(--text-footnote);
+}
+
+.pm-no-match {
+  padding: var(--space-4);
+}
+
+.pm-footnote {
+  color: var(--label-secondary);
+  font-size: var(--text-footnote);
+}
+
+.pm-empty {
+  padding: var(--space-8);
+}
+
+.pm-notice-bar {
+  padding: var(--space-2) var(--space-5);
+  border-bottom-left-radius: var(--radius-lg);
+  border-bottom-right-radius: var(--radius-lg);
+  background: var(--group-bg);
+  border-top: 1px solid var(--separator);
+}
