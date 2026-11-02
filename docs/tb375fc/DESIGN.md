@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.28
+# buntOS TB375FC 포팅 최종 설계안 v1.29
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -29,6 +29,7 @@
 - v1.26(2026-11-02): UFS의 안드로이드 파티션을 데스크톱에서 가리는 udev 규칙을 만들었다(`bsp/lenovo-tb375fc/mkosi.extra/usr/lib/udev/rules.d/90-buntos-tb375fc-hide-ufs.rules`, 시험은 `bsp/lenovo-tb375fc/udev/test.sh`). 파티션 이름이 아니라 UFS 호스트(드라이버 `ufshcd*` 또는 플랫폼 장치 `*.ufshci`) 아래의 모든 LU와 파티션에 걸어, `fastboot getvar all` 전에도 빠지는 파티션이 없다. 이미지의 udisks2 2.11.2와 gvfs 1.62.0의 소스를 읽어 `UDISKS_IGNORE`가 숨김일 뿐임을 확인했다: gvfs가 그 볼륨을 만들지 않아 파일 관리자에서 사라지지만 udisksctl과 D-Bus의 붙이기는 막히지 않는다. 막으려면 polkit 규칙이 따로 필요한데 지금은 넣지 않았다(11절). `mkinitramfs.sh`가 가끔 SIGPIPE로 죽던 것도 함께 고쳤다. 진짜 커널과 이미지의 udev(systemd 262)로 QEMU에서 UFS(LU 둘)와 USB 메모리를 함께 달아 시험했다. 기기 시험은 없다
 - v1.27(2026-11-02): 충전 드라이버의 독립 검토 하나를 더 반영했다(패치 0093, 0097을 그대로의 번호로 고쳤다). 부스트 중에도 절전에 들 때 `CHG_EN`을 끈다. 부스트 값의 깃발은 값을 쓰기 직전에 세우고 되돌림이 성공했을 때만 내린다. sysfs 언바인드를 막았다(부스트의 소비자가 해제된 메모리를 쓰게 된다). 상한 값은 그대로다. Wi-Fi 독립 재검토를 하나 더 반영했다(패치 0060을 같은 번호로 고쳤다): 재시작 제한을 재시작 사이의 시간으로 바꾸어 느린 되풀이도 멈춘다. debugfs `runtime-pm`을 켠 채 `chip_reset`이 되고, `rmmod`가 타이머를 남기지 않는다.
 - v1.28(2026-11-02): 처리기 없는 SID의 RCS를 지우는 PMIF 고침(패치 0114)을 더했다. 체인 처리기가 칸 넷을 다 읽고, 켜지지 않은 SID의 이벤트를 지운 뒤 제한된 로그를 남긴다(벤더 `rcs_irq_handler`와 같은 뜻). SID 4·5의 버스 기록은 늘어난 읽기 둘 말고 그대로다. 안드로이드 알람을 끄고 넘어가라는 규칙은 기기에서 볼 때까지만 둔다: 칩이 이벤트를 곧바로 다시 내면 0114로 막지 못한다.
+- v1.29(2026-11-02): 화면 파이프라인을 만들었다(패치 0120~0139). 판은 7.2.12 위의 작은 패치들이다. 재구성 v2는 얹지 않고 DSC v9의 넷과 DSI 고침 둘만 백포트했다. MT6897의 컨트롤러 넷(dispsys, ovlsys 두 벌)을 mediatek-drm 하나에서 쓰고, 주 경로가 두 파이프를 갖는다(OVL_2L → DSC → DSI가 왼쪽과 오른쪽에 하나씩). 표는 벤더 코드를 그대로 돌린 값과 1061항목이 맞고, 실제 드라이버를 QEMU의 레지스터 모델 위에서 돌렸다(LK 화면을 넘겨받는 길 포함). 노드는 모두 꺼 두었고 기기 시험은 없다. 첫 켜기 전에 LK가 켠 레지스터를 읽어 지워야 할 값이 더 없는지 본다. PQ를 건너뛰는 경로는 첫 프레임이 확인이다.
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -85,7 +86,7 @@
 | D1 | **mainline 커널.** 소스는 kernel.org 원본이고, 판은 buntOS 이미지의 Debian forky 커널과 같다(지금 7.2.12). 여기에 제출 대기 패치를 더한다. 개발 빌드는 arm64 defconfig에, 이미지용은 같은 시점 Debian forky 커널 설정에 보드 조각을 얹는다. Debian 소스 패키지의 패치는 쓰지 않고, 필요한 것만 골라 대기열에 넣는다. 벤더 GKI는 쓰지 않는다 | buntOS 설계안 4.2.2절. 필요한 업스트림 기능(6.16~7.0)이 7.2에 다 있다. 7.4 병합 창에 들어온 패널 드라이버와 SPMI 고침만 백포트한다. 원본 소스이면 개발 빌드와 이미지가 같은 트리이고, 시험한 기반이 업스트림과 같아 제출이 쉽다. Debian `linux 7.2.12-1`의 패치 77개(버그 고침 28, 기능 14, Debian 전용 35)에는 MediaTek 관련이 없고, 차이는 보안 기본값과 패키징이다. Debian 패키징으로 빌드하려면 forky 툴체인과 큰 디스크가 든다(디버그 패키지만 약 7.2GiB). 2026-11-01에 견줘 정했다 |
 | D2 | **업스트림 꼴로 짠다.** `mt6897.dtsi` + `mt6897-lenovo-tb375fc.dts`. 핀은 업스트림 `pinctrl-mt6878`을, clk·pmdomain·SPMI는 MT8196을 틀로 삼는다. MT6897 데이터는 OEM 공식 소스(OnePlus·OPPO·Motorola, GPL-2.0)에서 가져온다 | 제출할 수 있어야 유지할 수 있다. 커뮤니티 포트는 클럭·핀 드라이버 없이 fixed-clock과 부트로더 상태에 기대고, 장치 트리를 커널에 넣어 LK가 준 트리를 바꿔 끼우는 구조다. 그래서 사실 확인용과 협력 상대로 쓰고, 기반으로는 쓰지 않는다([분석](community-port.md)) |
 | D3 | **처음에는 LK가 직접 띄운다.** boot v4 + vendor_boot v4(DT 표) + 빈 dtbo, `fastboot boot`로 RAM에서. 2b부터는 U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다 | 파티션을 건드리지 않는 첫 부팅. EFI가 되면 원본 buntOS(데스크톱 라인)의 arm64 이미지 꼴과 같아진다. MT6878-mainline도 U-Boot를 권한다 |
-| D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`, `regulator_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 업스트림 시리즈를 따라 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다. `pd_ignore_unused`는 늦은 정리(`genpd_power_off_unused`)만 막고 sync_state는 막지 못한다. 화면 도메인을 지키는 것은 표의 기본 꺼짐과, 장치 트리에 화면 도메인을 적지 않는 것이다. MM_INFRA 아래 소비자(ISP, 카메라, VDE, VEN, MDP, DP)를 처음 붙이기 전에는 `simple-framebuffer`가 `power-domains`로 화면 도메인을 잡아야 한다. genpd는 MM_INFRA를 마지막 사용자와 함께 끈다.. 화면·코덱 클럭 노드(패치 0100~0104)는 도메인의 소비자가 아니다. `power-domains`가 없고 probe가 블록과 도메인에 닿지 않으므로, 켜도 MM_INFRA 규칙에 걸리지 않는다. 그 게이트의 소비자가 규칙에 걸린다. `clk_ignore_unused`를 빼면 이 게이트는 그대로지만 topckgen 먹스가 닫힌다. `simple-framebuffer`가 화면 도메인을 잡으면 그 기본 클럭(`mminfra`, `disp0`, `disp1`, `ovl0`, `ovl1`)은 genpd가 잡아 남는다. |
+| D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`, `regulator_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 7.2.12 위의 작은 패치(0120~0139)로 만들어 두었고, 켜는 것은 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다. `pd_ignore_unused`는 늦은 정리(`genpd_power_off_unused`)만 막고 sync_state는 막지 못한다. 화면 도메인을 지키는 것은 표의 기본 꺼짐과, 장치 트리에 화면 도메인을 적지 않는 것이다. MM_INFRA 아래 소비자(ISP, 카메라, VDE, VEN, MDP, DP)를 처음 붙이기 전에는 `simple-framebuffer`가 `power-domains`로 화면 도메인을 잡아야 한다. genpd는 MM_INFRA를 마지막 사용자와 함께 끈다.. 화면·코덱 클럭 노드(패치 0100~0104)는 도메인의 소비자가 아니다. `power-domains`가 없고 probe가 블록과 도메인에 닿지 않으므로, 켜도 MM_INFRA 규칙에 걸리지 않는다. 그 게이트의 소비자가 규칙에 걸린다. `clk_ignore_unused`를 빼면 이 게이트는 그대로지만 topckgen 먹스가 닫힌다. `simple-framebuffer`가 화면 도메인을 잡으면 그 기본 클럭(`mminfra`, `disp0`, `disp1`, `ovl0`, `ovl1`)은 genpd가 잡아 남는다. |
 | D5 | **Wi-Fi는 mt76에 "MT7921의 SoC 변형"을 더한다.** 펌웨어는 LK가 실은 것을 쓰고, conninfra 전원은 TF-A SIP 호출로 켜고, nvdata 보정값은 NVRAM 명령으로 넘긴다. 그 전에는 USB 동글로 우회한다(USB 호스트는 MT6375 OTG가 먼저다). 코드는 패치 0055~0060이다. DMA는 맵 없는 LK 칸 안에서 자기 `dma_map_ops`로 복사한다(업스트림 꼴은 아니다, 6절) | 칩 ID와 구조가 MT7921과 같고, 명령 머리와 레거시 명령 번호도 같다. SoC Wi-Fi 선례(mt7915/soc.c)가 있다([설계](wifi-soc7_0.md)) |
 | D6 | **펌웨어는 설치할 때 기기에서 뽑는다.** Mali CSF만 linux-firmware에서 온다. GPUEB와 Wi-Fi·BT는 LK가 올리므로, 그 파티션(GPUEB, `connsys_wifi`, `connsys_bt`)을 지킨다 | 재배포할 수 있는지 모른다(buntOS ADR-012). 안드로이드 슬롯 하나를 남긴다 |
 | D7 | **GPU는 panthor + MT6897 GPUEB 변형이다.** 이미지에 Mesa 26.3 이상이 필요하다 | panthor·펌웨어·Mesa가 이미 G615를 안다. GPUEB는 LK가 띄우고 멈추지 않으며 전원·클럭·전압을 모두 맡는다. 커널은 메일박스로 켜고 끄기와 OPP만 요청한다. MFG1~14 도메인과 MFG PLL은 커널이 건드리지 않는다 |
@@ -195,7 +196,7 @@
 | 2c 화면 (2차) | mediatek-drm의 MT6897 데이터, dual-DSI, DSC, NT36532 패널 셋(업스트림 드라이버 + compatible 셋) | 주사율·밝기 조절, 화면 끄고 켜기 |
 | 3 최적화 | 8절, 오디오, 외부 화면 | buntOS 설계안 9.3절 스모크 시험 |
 
-- 화면 2차를 2e 뒤로 둔 것은 업스트림의 DSC·mediatek-drm 재구성 시리즈를 기다리기 위해서다(D4). 두 시리즈 모두 7.4 병합 창에 들어가지 않아 빨라야 7.5다(2026-11-01).
+- 화면 2차를 2e 뒤에 켜는 것은 첫 데스크톱이 simple-framebuffer로 돌기 때문이다(D4). 업스트림의 DSC·mediatek-drm 재구성 시리즈는 7.4 병합 창에 들어가지 않아 빨라야 7.5이므로(2026-11-02), 코드는 7.2.12 위의 작은 패치 0120~0139로 먼저 만들었다.
 - USB 호스트(xHCI, 저장장치·동글·키보드)는 2b에서 뺐다. 태블릿의 VBUS는 MT6375 OTG에서 나와 차지 펌프의 입력 FET를 지난다(4절). 드라이버는 패치 0042~0049에 있고 노드는 꺼 두었다. UFS 루트와 USB 가젯이 기기에서 된 뒤에 켠다. 2d의 USB 동글 우회도 이것을 기다린다.
 - 전원 도메인은 UFS·USB에 필요 없어 2b에서 뺐다. 드라이버와 표는 패치 0050~0054에 있고, 노드는 꺼져 있다. 장치 트리에는 소비자가 생길 때 그 도메인부터 더한다: 2d(conn), 2c 2차(화면). GPU는 `mtk-mfg-pmdomain`이다.
 
@@ -263,7 +264,7 @@
 | UFS | `ufs-mediatek`, `phy-mtk-ufs` | 패치 0019~0022: MT6897 compatible(호스트는 match data로 `rtff-mtcmos`·`broken-rtc`·`pmc-via-fastauto`·`tx-skew-fix`), 리셋 셋, M-PHY 새 판(클럭·전원 순서 없음). VCC·VCCQ는 보드. 클럭 스케일링과 MCQ(큐 인터럽트 여덟)는 뒤로 | 작음~중간 | 2b |
 | USB | `mtu3`, `xhci-mtk`, `phy-mtk-xsphy` | DT(펌웨어의 eye 값). 호스트 모드는 VBUS 드라이버(0045~0049, 꺼 둠) 뒤에 otg 모드로, 역할은 사용자 공간에서 바꾼다. 자동 전환은 TCPC 뒤. xsphy MT6897 꼴(U2 INTR_CAL 칸과 efuse, U3 CDR 값)과 깨우기 접점(벤더 판 103)은 드라이버 고침이 필요하다 | 작음~중간 | 2b·3 |
 | I2C | `i2c-mt65xx`(mt8188 데이터) | 바인딩 한 줄(0042), 게이트 블록 다섯(0043·0044), dtsi의 컨트롤러 14개(꺼 둠). 벤더 mt6897 데이터가 mt8188과 같다. 벤더의 FIFO 길은 업스트림이 안 쓴다 | 작음 | 2c·2e |
-| 화면 파이프라인 | MT8195·MT8188까지. DSC v9·재구성 v2 시리즈는 미병합, dual-DSI는 아무도 맡지 않았다 | MT6897 데이터, dual-DSI(포치 나누기, 두 링크 동시 명령, 링크 속도 998.137Mbps), DSC(패널이 채운 값을 그대로 쓰기. 시리즈 v9는 `DRM_DSC_1_2_444`로 덮어쓴다) | 큼 | 2c(2차) |
+| 화면 파이프라인 | MT8195·MT8188까지. DSC v9·재구성 v2 시리즈는 미병합, dual-DSI는 아무도 맡지 않았다 | 패치 0120~0139: MT6897 데이터, dual-DSI(포치 나누기, 두 링크 동시 명령, 링크 속도 998.137 Mbps, 영상 중 명령), DSC(패널이 채운 값을 그대로 쓴다). 기기 시험 전이다. 업스트림 시리즈가 들어오면 백포트 여섯을 빼고 경로·뮤텍스·컨트롤러 코드를 새 API로 옮긴다. 파이프 나누기와 두 링크 DSI는 남는다 | 큼 | 2c(2차) |
 | 패널 NT36532 | `panel-novatek-nt36532`(7.4 병합 창, 패치 0080~0082로 백포트). master와 next-20261030에 고침 없음 | 패치 0083·0084: `lenovo,tb375fc-nt36532` 하나에 GPIO184로 BOE·Tianma를 고른다. 모드 넷과 주사율 레지스터, DSC 1.1(첫 줄 오프셋 13), 편향 전원, DCS 밝기. 기기 시험 없음. SGM37604A 둘과 SM5109에는 드라이버가 없다 | 작음 | 2c(2차) |
 | 터치 NT36532 SPI + 펜 | I2C 드라이버뿐(SPI RFC 둘은 미병합) | 새 드라이버 `novatek-nvt-spi`(패치 0030·0031): 페이지 단위 SPI 접근, 열 때와 복귀 때 펌웨어 내려받기(ILM·DLM CRC 확인), 손가락 10점, 펜은 둘째 입력 장치(압력 4095, 기울기 ±60°, 단추 둘). 패널 ID GPIO184로 펌웨어를 고른다. SPI 컨트롤러 여덟은 dtsi, 터치 노드는 보드(꺼 둠) | 중간 | 2c |
 | 홀 센서 | `gpio-keys` | 보드 노드(꺼 둠): GPIO1 = `SW_LID`(덮개 닫힘이 0). 펌웨어의 `hall_2`(GPIO26)는 키보드의 `plug-gpios`라 키보드 드라이버가 가진다 | 작음 | 2c |
@@ -333,7 +334,7 @@
 | 항목 | 할 일 | buntOS에서 바꿀 곳 |
 |---|---|---|
 | 화면 배율 | 12.7″ 2944×1840은 약 273ppi다. buntOS 규칙(내장 화면은 논리 125ppi에 가깝게)이면 기본 배율은 **225%**(논리 1308×818)이고, 고를 수 있는 것은 100~275%다. DSI에는 EDID가 없으므로 패널(또는 simple-framebuffer 노드)이 실제 크기 약 273×171mm(벤더 값 273.615×171.009mm. 패널 드라이버는 273×171을 주고, simple-framebuffer 단계는 `framebuffer0`의 `panel` = `panel0`의 `width-mm`·`height-mm`로 simpledrm에 준다. 파이프라인을 켤 때 `panel`을 뺀다: fw_devlink가 패널이 붙을 때까지 simpledrm을 붙잡는다)를 알려야 이 규칙이 돈다 | 패널 드라이버의 `width_mm`·`height_mm`, simplefb DT의 물리 크기 |
-| 주사율 | simple-framebuffer 단계는 LK가 정한 모드 하나다. mediatek-drm 단계에서 144/120/60/30Hz를 열고, 움직임이 없으면 낮추는 적응형 주사율(macOS ProMotion처럼)을 둔다 | `comp`의 출력 모드와 프레임 일정 |
+| 주사율 | simple-framebuffer 단계는 LK가 정한 모드 하나다. mediatek-drm 단계에서 144/120/60/30Hz를 열고, 움직임이 없으면 낮추는 적응형 주사율(macOS ProMotion처럼)을 둔다. 주사율 전환은 지금 전체 모드 설정(패널 다시 켜기)이다. 깜빡임 없는 전환은 벤더의 `dyn_fps`처럼 포치만 바꾸는 길이 있어야 하고, 아직 없다 | `comp`의 출력 모드와 프레임 일정 |
 | 터치 | 10점을 그대로 받는다(컴포지터에 손가락 수 제한이 없다). 손바닥 거부와 가장자리 띠(위 24px, 아래 20px)를 실기기에서 맞춘다 | `comp/src/touch.rs` |
 | 펜 | NT36532 펜을 tablet-v2(압력·기울기·단추)로 앱에 보낸다. 컴포지터에 smithay tablet 틀이 있고, 펜 디지타이저는 입력 모드 계산에서 이미 뺀다 | `comp` tablet-v2, 시스템 설정 펜 페이지(나중) |
 | 키보드 커버 | 포고 키보드가 붙으면 포인터 모드, 떼면 터치 모드다(지금 규칙 그대로). 붙음은 GPIO26 홀 센서(펌웨어 `hall_2`이자 `plug-gpios`, 낮으면 붙음)로 알고, 드라이버는 그때만 키보드·터치패드 입력 장치를 만든다. 덮개 홀 센서(GPIO1)는 닫힘을 알린다. 뒤로 접음을 재는 센서는 태블릿에 없다. 키보드 MCU가 일반 응답(0x93, sub 3)으로 켬·끔을 밀어 보내고, 스톡은 이것을 `KEY_KB_ENABLE`·`KEY_KB_DISABLE`로 올린다. 이것이 뒤로 접음으로 판단해(접을 때 이 프레임이 오는지는 기기에서 본다) 드라이버가 `SW_TABLET_MODE`로 보낸다(꺼짐이나 키보드 없음이 1). 그때는 키보드·터치패드를 세지 않는 규칙을 더한다(iPad Magic Keyboard처럼). 잠든 사이 잃은 상태는 키나 손가락이 눌리면 `SW_TABLET_MODE`를 0으로 되돌린다. 잠든 사이 접은 것은 키보드가 다시 알려야 안다(기기에서 본다) | `comp/src/input_mode.rs`, 포고 키보드 드라이버 |
@@ -365,7 +366,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
     initramfs/                  첫 부팅용 initramfs (busybox, 루트로 넘기기, USB 가젯, nvdata), QEMU 시험
     udev/                       UFS 가리기 규칙의 시험 (규칙 검사, QEMU에서 UFS·USB)
     firmware/                   기기에서 펌웨어와 보정값을 뽑는 스크립트 (파일은 두지 않는다)
-  tools/hw/                     펌웨어 받기·풀기 도구
+  tools/hw/                     펌웨어 받기·풀기 도구, 화면 레지스터 읽기
 ```
 
 - 빌드 산출물은 저장소 밖(빌드 VM의 `~/buntos-build/tb375fc/`)에 둔다.
@@ -380,7 +381,10 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | 언락 길이 판에 묶임 | 받은 기기의 판에서 언락이 안 될 수 있다 | 받자마자 OTA를 끄고 판을 적는다. 그 판의 성공 보고를 확인한다. 안 되면 중국판 ZUI 16으로 내릴지 따로 정하고, 그래도 안 되면 buntOS ADR-011(기기 선택)을 다시 본다 |
 | 개발용 LK의 출처를 모름 | 남이 고친 부트로더를 굽는다 | 굽기 전에 순정 LK와 견준다(문자열, 서명 영역). 언락한 뒤에는 바로 순정 LK로 되돌린다 |
 | GenieZone의 EL2 점유 | KVM 불가 | 2a에서 판정(D8). "불가"면 buntOS ADR-011 재검토, gzvm은 미병합이라 나중 |
-| 화면: dual-DSI + DSC가 업스트림에 없음 | 주사율·밝기·화면 끄기가 늦어진다 | simple-framebuffer로 데스크톱(D4), 업스트림 DSC·재구성 시리즈를 따라가고 dual-DSI는 우리가 맡을 수도 있다 |
+| 화면 파이프라인을 기기에서 처음 켤 때 버스가 멈춤 | 기기가 멈추고 키로 다시 켜야 한다 | 체크리스트 9.5절의 차례대로 켠다. `modprobe.blacklist=mediatek_drm`으로 시작하고 손으로 올린다. 켜지 못해도 simple-framebuffer 길은 그대로다 |
+| PQ를 건너뛰는 경로가 이 기기에서 돈 적이 없다(오른쪽은 PANEL_COMP_OUT 크로스바 1을 왼쪽에서 유추) | 한쪽 절반이 검거나 프레임이 멈춘다. 레지스터 접근은 그대로라 버스 멈춤은 아닐 것이다 | LK와 스톡은 모두 PQ와 크로스바 0을 쓴다. 첫 프레임에서 절반씩 본다. 안 되면 PQ 길로 간다 |
+| IOMMU 없이 물리 주소로 스캔아웃한다 | 라브의 MMU 비트가 1이면 스캔아웃이 틀린 주소를 읽는다. 또 GPU 버퍼를 바로 스캔아웃하지 못한다 | 0단계에서 라브 비트를 읽는다(LK는 라브0·1을 지운다). 컴포지터는 KMS 쪽에서 버퍼를 받는다. IOMMU 드라이버는 나중 일이다 |
+| DVFS와 버스 QoS가 없다 | 144Hz에서 언더런이 날 수 있다 | 먹스는 LK 값 그대로다(`clk_ignore_unused`). 언더런이 나면 60Hz로 내리고, MMQoS와 HRT 일은 2e 뒤로 둔다 |
 | 센서 허브(SCP nanohub) | 자동 회전·조도 없음 | 수동 회전, SCP 길은 3단계에서 조사 |
 | MFD `mtk-spmi-pmic` 미병합 | PMIC가 늦어진다 | 패치 대기열에 넣고 업스트림 판을 따라간다. v12(2026-05) 뒤로 새 판이 없고, BayLibre가 이어받겠다고 했다(2026-10). v12의 인터럽트 결함(마스크가 늘 첫 그룹에 쓰인다)은 대기열에서 고쳤다. 업스트림에 알릴지는 정할 것이다. 병합된 MT6363 regulator(7.2.12)의 16비트 regmap, VEMC 전압, VSRAM 레지스터 결함은 대기열에서 고쳤고(0037·0038·0041) 업스트림에 낸다. 코드와 레지스터 모델로 확인했을 뿐 기기에서 돌려 보지 않았으니, 기기에서 전압을 읽어 보기 전에는 전압 한계를 주지 않는다 |
 | Mesa 26.3 의존 | GPU 가속이 늦어진다 | 이미지의 Mesa 판 확인, 그 전에는 CPU 렌더링(buntOS는 이미 llvmpipe에서 돈다) |
@@ -453,11 +457,11 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
    - v1.22~v1.25에 끝낸 것: 충전과 Wi-Fi의 독립 재검토 반영(같은 번호), GPU 전원·열·게이지(0070~0079), 화면·MDP·코덱 클럭 게이트(0100~0104), MT6685 RTC(0110~0113). 모두 꺼 둔 노드이고 기기 시험은 없다. 켜는 차례는 [체크리스트](bringup-checklist.md) 6.10절(RTC), 9.3절(충전), 9.4절(GPU·열·게이지)이다. GPU 쪽 커널에 남은 것: `clk_ignore_unused`를 뺄 때 `mfgsc_ref`에도 `CLK_IGNORE_UNUSED`(0013은 `mfg_ref`에만 있다), GPU 쿨링 지도와 `dynamic-power-coefficient`, I/O 코히어런시. 게이지의 충전 전압(`0x30`)은 쓰지 않고 기기에서 읽은 뒤 정한다
    - v1.26에 끝낸 것: UFS의 안드로이드 파티션 가리기. 전체 이미지에는 `udisks2`가 들어온다(`nautilus` → `gvfs`). 내부 디스크는 자동으로 붙지 않지만 파일 관리자에 보이고, 관리자 인증 뒤 쓰기 가능으로 붙을 수 있다. 규칙(`90-buntos-tb375fc-hide-ufs.rules`)이 UFS 호스트의 모든 블록 장치에 `UDISKS_IGNORE=1`(숨김), `UDISKS_SYSTEM=1`, `UDISKS_AUTO=0`(UFS의 LU가 이동식으로 보여도 인증을 받고 자동으로 붙지 않는다)을 준다. USB 저장장치와 SD 카드는 부모가 달라 걸리지 않는다. buntOS 루트도 같은 디스크라 함께 걸리는데, `/`에 붙은 루트는 gvfs가 어차피 내놓지 않아 잃는 것이 없다. **숨김일 뿐 막지는 않는다**: udisks2는 `UDISKS_IGNORE`를 `Block.HintIgnore` 속성으로 알릴 뿐 스스로 쓰지 않으므로(`udiskslinuxblock.c`), `udisksctl mount`나 D-Bus의 `Mount()`는 polkit 인증(`filesystem-mount-system`, 기본 `auth_admin_keep`)만 받으면 붙는다. 인증 뒤 붙이기까지 막는 polkit 규칙은 지금 넣지 않았다. 실수로 붙이는 길은 숨김으로 닫혔고, 일부러 붙이는 것까지 막을지는 뒤에 정한다(UFS는 늘 `-system` 동작을 고르므로 `org.freedesktop.udisks2.*-system`을 거부하면 되고, QEMU에서 UFS는 거부되고 USB 메모리는 붙었다. root는 polkit이 늘 허용해 못 막는다). `computer:///`에는 볼륨 없는 드라이브가 남는다(Nautilus 사이드바에는 이동식이 아닌 빈 드라이브가 나오지 않는다). 규칙이 기대는 이름(`ufshcd-mtk`, `112b0000.ufshci`)은 QEMU로 닿지 않으므로 기기에서 체크리스트 7.1절 1번으로 보기 전에는 끝난 것이 아니다
    - v1.27·v1.28에 끝낸 것: 충전과 Wi-Fi의 마지막 재검토 반영(패치 0060, 0093, 0097), PMIF 고침(0114). 기기 시험은 없다. 독립 재검토는 여기까지 하고, 다음 재검토는 기기 시험 뒤로 미룬다
+   - v1.29에 끝낸 것: 화면 파이프라인(패치 0120~0139). 노드를 켜기 전에는 돌지 않고 기기 시험은 없다. 켜는 차례는 [체크리스트](bringup-checklist.md) 9.5절이다
 2. **다음(기기 없이, 이 차례로):**
-   1. 진행 중(세션): 화면 파이프라인(dual-DSI, DSC, MT6897 데이터. 패치 0120~0138, 아직 대기열에 넣지 않았다)
-   2. 그다음: 업스트림 제출 준비(MT6363의 확실한 패치 둘은 2026-11-02에 regulator 유지자와 메일링 리스트로 보냈다). 패널의 SGM37604A 둘과 SM5109 드라이버는 기기에서 본 뒤 정한다
-   3. 출시 전에: 개발용 USB 길을 이미지에서 빼는 프로필, initramfs의 암호 없는 셸을 없애거나 막는 길, 공통 레시피의 `Autologin=yes`
-   4. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)
+   1. 그다음: 업스트림 제출 준비(MT6363의 확실한 패치 둘은 2026-11-02에 regulator 유지자와 메일링 리스트로 보냈다). 패널의 SGM37604A 둘과 SM5109 드라이버는 기기에서 본 뒤 정한다
+   2. 출시 전에: 개발용 USB 길을 이미지에서 빼는 프로필, initramfs의 암호 없는 셸을 없애거나 막는 길, 공통 레시피의 `Autologin=yes`
+   3. 기기에서 UFS·USB가 뜬 뒤: UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`), MCQ(공통 바인딩의 인터럽트 수, 큐 인터럽트 SPI 177~184), xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103)
       - USB 호스트: 사용자 기기의 차지 펌프는 UPM6720 @0x65다(2026-11-01 adb, `/sys/bus/i2c/drivers/upm6720/10-0065`. NU2115에는 붙은 장치가 없다). 부품이 다른 기기가 있을 수 있어 `i2cdetect -r`로 다시 본 뒤 그 노드를 켠다. 시험 차례는 [체크리스트](bringup-checklist.md) 8절
 3. **기기:** 차례와 명령은 [bring-up 체크리스트](bringup-checklist.md)에 모았다. 사용자의 TB375FC는 중국판 ZUXOS 1.5.10.044(Android 16)다(2026-11-01). 이 판에서 바로 언락한 보고는 없으니, 16.0.20.091로 내린 뒤 언락하는 길을 쓴다(2.1절). 예비 기기를 살 때는 ZUI 16 기기가 낫다.
 4. **언락 전(지금 할 수 있는 것):**
