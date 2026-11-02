@@ -20,8 +20,14 @@ This does not do everything the stock driver does:
 
 The bootloader writes the address of the firmware in the node of the
 device in the boot modes where it loads the firmware, and not in
-recovery or power-off charging. Without it the driver does not touch any
-hardware.
+recovery or power-off charging. Without it the driver stops there, with
+no rail on and no SIP call made. The platform code powers the CONN domain
+around the probe either way.
+
+The stock driver makes the first SIP call once per boot, and what a
+second one does in the secure firmware isn't known. A module can be
+loaded more than once in a boot, so this one stays loaded from that call
+on.
 
 Each step of a power on is logged, as a wrong step can hang the bus
 without a word and the last line says where. It stays that way until the
@@ -29,9 +35,9 @@ driver has seen real use.
 ---
  drivers/soc/mediatek/Kconfig             |  14 +
  drivers/soc/mediatek/Makefile            |   1 +
- drivers/soc/mediatek/mtk-connsys.c       | 638 +++++++++++++++++++++++
- include/linux/soc/mediatek/mtk-connsys.h |  27 +
- 4 files changed, 680 insertions(+)
+ drivers/soc/mediatek/mtk-connsys.c       | 655 +++++++++++++++++++++++
+ include/linux/soc/mediatek/mtk-connsys.h |  28 +
+ 4 files changed, 698 insertions(+)
 
 diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
 index d729397..488471c 100644
@@ -71,10 +77,10 @@ index 0665573..6f38c34 100644
  obj-$(CONFIG_MTK_INFRACFG) += mtk-infracfg.o
 diff --git a/drivers/soc/mediatek/mtk-connsys.c b/drivers/soc/mediatek/mtk-connsys.c
 new file mode 100644
-index 0000000..f2b18cf
+index 0000000..6f536c4
 --- /dev/null
 +++ b/drivers/soc/mediatek/mtk-connsys.c
-@@ -0,0 +1,638 @@
+@@ -0,0 +1,655 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * MediaTek connectivity subsystem (connsys) base power driver
@@ -175,12 +181,17 @@ index 0000000..f2b18cf
 +	phys_addr_t emi_addr;
 +	u32 emi_size;
 +	unsigned int radios;
-+	bool atf_data_sent;
 +};
 +
++/*
++ * Once per boot, as in the vendor driver: what a second call does in the secure
++ * firmware is unknown.
++ */
++static bool mtk_connsys_atf_data_sent;
++
 +static long mtk_connsys_sip(struct mtk_connsys *cs, const char *name,
-+			    unsigned long op, unsigned long a2, unsigned long a3,
-+			    unsigned long *a1)
++			    unsigned long op, unsigned long a2,
++			    unsigned long a3, unsigned long *a1)
 +{
 +	struct arm_smccc_res res;
 +
@@ -200,7 +211,8 @@ index 0000000..f2b18cf
 +	u8 val;
 +	int ret;
 +
-+	ret = spmi_ext_register_readl(cs->dcxo, MT6685_DCXO_DIGCLK_ELR, &val, 1);
++	ret = spmi_ext_register_readl(cs->dcxo, MT6685_DCXO_DIGCLK_ELR, &val,
++				      1);
 +	if (ret) {
 +		dev_err(cs->dev, "can't read the DCXO: %d\n", ret);
 +		return ret;
@@ -235,7 +247,7 @@ index 0000000..f2b18cf
 +		return ret;
 +	}
 +
-+	/* Not every LDO has a software mode to change, so this is only a wish */
++	/* Not every LDO has a software mode to change: this is only a wish */
 +	if (regulator_set_mode(reg, REGULATOR_MODE_NORMAL))
 +		dev_dbg(cs->dev, "can't set the mode of %s\n", name);
 +
@@ -253,7 +265,8 @@ index 0000000..f2b18cf
 +		return ret;
 +	}
 +
-+	ret = regulator_set_voltage(cs->vcn13, MT6897_VCN13_UV, MT6897_VCN13_UV);
++	ret = regulator_set_voltage(cs->vcn13, MT6897_VCN13_UV,
++				    MT6897_VCN13_UV);
 +	if (ret) {
 +		dev_err(cs->dev, "can't set VCN13: %d\n", ret);
 +		return ret;
@@ -346,10 +359,12 @@ index 0000000..f2b18cf
 +	if (clock < 0)
 +		return clock;
 +
-+	if (!cs->atf_data_sent) {
-+		mtk_connsys_sip(cs, "init_atf_data", CONNSYS_SIP_INIT_ATF_DATA, 0,
-+				clock, NULL);
-+		cs->atf_data_sent = true;
++	if (!mtk_connsys_atf_data_sent) {
++		mtk_connsys_sip(cs, "init_atf_data", CONNSYS_SIP_INIT_ATF_DATA,
++				0, clock, NULL);
++		mtk_connsys_atf_data_sent = true;
++		/* Each load of this module must not count as a boot */
++		__module_get(THIS_MODULE);
 +	}
 +
 +	ret = mtk_connsys_core_rails_on(cs);
@@ -379,10 +394,11 @@ index 0000000..f2b18cf
 +	mtk_connsys_sip(cs, "emi_set_remapping_reg",
 +			CONNSYS_SIP_EMI_SET_REMAPPING_REG, 0, 0, NULL);
 +	mtk_connsys_sip(cs, "d_die_cfg", CONNSYS_SIP_D_DIE_CFG, 0, 0, NULL);
-+	mtk_connsys_sip(cs, "spi_master_cfg", CONNSYS_SIP_SPI_MASTER_CFG, 0, next,
-+			NULL);
++	mtk_connsys_sip(cs, "spi_master_cfg", CONNSYS_SIP_SPI_MASTER_CFG, 0,
++			next, NULL);
 +
-+	ret = mtk_connsys_sip(cs, "a_die_cfg", CONNSYS_SIP_A_DIE_CFG, 0, next, &a1);
++	ret = mtk_connsys_sip(cs, "a_die_cfg", CONNSYS_SIP_A_DIE_CFG, 0, next,
++			      &a1);
 +	if (ret) {
 +		dev_err(cs->dev, "A-die configuration failed: %d\n", ret);
 +		ret = -EIO;
@@ -390,14 +406,15 @@ index 0000000..f2b18cf
 +	}
 +	dev_info(cs->dev, "A-die version %#lx\n", a1);
 +
-+	mtk_connsys_sip(cs, "afe_sw_patch", CONNSYS_SIP_AFE_SW_PATCH, 0, 0, NULL);
++	mtk_connsys_sip(cs, "afe_sw_patch", CONNSYS_SIP_AFE_SW_PATCH, 0, 0,
++			NULL);
 +	mtk_connsys_sip(cs, "afe_wbg_cal", CONNSYS_SIP_AFE_WBG_CAL, 0, 0, NULL);
-+	mtk_connsys_sip(cs, "subsys_pll_initial", CONNSYS_SIP_SUBSYS_PLL_INITIAL,
-+			0, 0, NULL);
++	mtk_connsys_sip(cs, "subsys_pll_initial",
++			CONNSYS_SIP_SUBSYS_PLL_INITIAL, 0, 0, NULL);
 +	mtk_connsys_sip(cs, "subsys_status_update",
 +			CONNSYS_SIP_SUBSYS_STATUS_UPDATE, 1, radio, NULL);
-+	mtk_connsys_sip(cs, "low_power_setting", CONNSYS_SIP_LOW_POWER_SETTING, 0,
-+			next, NULL);
++	mtk_connsys_sip(cs, "low_power_setting", CONNSYS_SIP_LOW_POWER_SETTING,
++			0, next, NULL);
 +
 +	ret = mtk_connsys_rf_rails_on(cs);
 +	if (ret)
@@ -416,26 +433,28 @@ index 0000000..f2b18cf
 +}
 +
 +static int mtk_connsys_add_radio(struct mtk_connsys *cs, unsigned int curr,
-+				 unsigned int next, enum mtk_connsys_radio radio)
++				 unsigned int next,
++				 enum mtk_connsys_radio radio)
 +{
 +	int ret;
 +
-+	ret = mtk_connsys_sip(cs, "conninfra_wakeup", CONNSYS_SIP_CONNINFRA_WAKEUP,
-+			      0, 0, NULL);
++	ret = mtk_connsys_sip(cs, "conninfra_wakeup",
++			      CONNSYS_SIP_CONNINFRA_WAKEUP, 0, 0, NULL);
 +	if (ret) {
 +		dev_err(cs->dev, "can't wake conninfra: %d\n", ret);
 +		return -EIO;
 +	}
 +
-+	mtk_connsys_sip(cs, "a_die_cfg", CONNSYS_SIP_A_DIE_CFG, curr, next, NULL);
++	mtk_connsys_sip(cs, "a_die_cfg", CONNSYS_SIP_A_DIE_CFG, curr, next,
++			NULL);
 +	mtk_connsys_sip(cs, "subsys_status_update",
 +			CONNSYS_SIP_SUBSYS_STATUS_UPDATE, 1, radio, NULL);
 +	mtk_connsys_sip(cs, "spi_master_cfg", CONNSYS_SIP_SPI_MASTER_CFG, curr,
 +			next, NULL);
 +	mtk_connsys_sip(cs, "low_power_setting", CONNSYS_SIP_LOW_POWER_SETTING,
 +			curr, next, NULL);
-+	mtk_connsys_sip(cs, "conninfra_sleep", CONNSYS_SIP_CONNINFRA_SLEEP, 0, 0,
-+			NULL);
++	mtk_connsys_sip(cs, "conninfra_sleep", CONNSYS_SIP_CONNINFRA_SLEEP, 0,
++			0, NULL);
 +
 +	return 0;
 +}
@@ -498,7 +517,8 @@ index 0000000..f2b18cf
 +	next = curr & ~BIT(radio);
 +	if (next) {
 +		if (!mtk_connsys_sip(cs, "conninfra_wakeup",
-+				     CONNSYS_SIP_CONNINFRA_WAKEUP, 0, 0, NULL)) {
++				     CONNSYS_SIP_CONNINFRA_WAKEUP, 0, 0,
++				     NULL)) {
 +			mtk_connsys_sip(cs, "subsys_status_update",
 +					CONNSYS_SIP_SUBSYS_STATUS_UPDATE, 0,
 +					radio, NULL);
@@ -506,10 +526,11 @@ index 0000000..f2b18cf
 +					CONNSYS_SIP_SPI_MASTER_CFG, curr, next,
 +					NULL);
 +			mtk_connsys_sip(cs, "low_power_setting",
-+					CONNSYS_SIP_LOW_POWER_SETTING, curr, next,
-+					NULL);
++					CONNSYS_SIP_LOW_POWER_SETTING, curr,
++					next, NULL);
 +			mtk_connsys_sip(cs, "conninfra_sleep",
-+					CONNSYS_SIP_CONNINFRA_SLEEP, 0, 0, NULL);
++					CONNSYS_SIP_CONNINFRA_SLEEP, 0, 0,
++					NULL);
 +		}
 +	} else {
 +		pm_runtime_put_sync(cs->dev);
@@ -598,7 +619,8 @@ index 0000000..f2b18cf
 +	if (!cs->dcxo)
 +		return dev_err_probe(dev, -EPROBE_DEFER, "no DCXO device\n");
 +
-+	return devm_add_action_or_reset(dev, mtk_connsys_put_dcxo, &cs->dcxo->dev);
++	return devm_add_action_or_reset(dev, mtk_connsys_put_dcxo,
++					&cs->dcxo->dev);
 +}
 +
 +static int mtk_connsys_probe(struct platform_device *pdev)
@@ -621,12 +643,13 @@ index 0000000..f2b18cf
 +	/*
 +	 * The bootloader writes the address in the tree when it has loaded the
 +	 * firmware, which it does not do in every boot mode. Nothing can run
-+	 * without it, so don't touch any hardware then.
++	 * without it, so nothing gets done then. The platform code has powered
++	 * the CONN domain before this, and takes the power away again.
 +	 */
 +	ret = of_property_read_u64(dev->of_node, "emi-addr", &emi_addr);
 +	if (ret || !emi_addr)
 +		return dev_err_probe(dev, -ENODEV,
-+				     "the bootloader has not loaded the firmware (emi-addr)\n");
++				     "the bootloader has not loaded the firmware\n");
 +
 +	ret = of_property_read_u32(dev->of_node, "emi-size", &cs->emi_size);
 +	if (ret)
@@ -715,10 +738,10 @@ index 0000000..f2b18cf
 +MODULE_LICENSE("GPL");
 diff --git a/include/linux/soc/mediatek/mtk-connsys.h b/include/linux/soc/mediatek/mtk-connsys.h
 new file mode 100644
-index 0000000..49b2220
+index 0000000..a302e7a
 --- /dev/null
 +++ b/include/linux/soc/mediatek/mtk-connsys.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * MediaTek connectivity subsystem (connsys) base power driver
@@ -742,7 +765,8 @@ index 0000000..49b2220
 +
 +struct mtk_connsys *devm_mtk_connsys_get(struct device *dev);
 +int mtk_connsys_power_on(struct mtk_connsys *cs, enum mtk_connsys_radio radio);
-+void mtk_connsys_power_off(struct mtk_connsys *cs, enum mtk_connsys_radio radio);
++void mtk_connsys_power_off(struct mtk_connsys *cs,
++			   enum mtk_connsys_radio radio);
 +void mtk_connsys_get_emi(struct mtk_connsys *cs, phys_addr_t *addr, u32 *size);
 +
 +#endif /* __SOC_MEDIATEK_MTK_CONNSYS_H */

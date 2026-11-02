@@ -9,7 +9,8 @@ the init retries to the PCIe, USB and SDIO chips in the places where the
 variant can't take part:
 
  - The firmware mode register is set for a download, and there is none.
- - The country tables are in the firmware file, and there is no file.
+ - The country tables are in the firmware file, and there is no file. The
+   channels stay as on a chip with the tables turned off.
  - Nothing is known yet of how the deep sleep of that firmware behaves.
  - A retry can't tell more than the first try, and its reset path takes
    minutes of a device that hangs.
@@ -24,11 +25,11 @@ a hif op they don't set.
 ---
  .../net/wireless/mediatek/mt76/mt7921/init.c  | 18 ++++---
  .../net/wireless/mediatek/mt76/mt7921/mac.c   | 49 +++++++++++++++++++
- .../net/wireless/mediatek/mt76/mt7921/mcu.c   | 21 ++++++--
+ .../net/wireless/mediatek/mt76/mt7921/mcu.c   | 16 ++++--
  .../wireless/mediatek/mt76/mt7921/pci_mac.c   | 48 ------------------
  drivers/net/wireless/mediatek/mt76/mt792x.h   |  4 ++
  .../net/wireless/mediatek/mt76/mt792x_dma.c   |  4 +-
- 6 files changed, 84 insertions(+), 60 deletions(-)
+ 6 files changed, 81 insertions(+), 58 deletions(-)
 
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/init.c b/drivers/net/wireless/mediatek/mt76/mt7921/init.c
 index 49be2fa..7ab464b 100644
@@ -140,21 +141,32 @@ index e699781..6841baf 100644
 +}
 +EXPORT_SYMBOL_GPL(mt7921e_tx_prepare_skb);
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
-index 4543965..a4728d0 100644
+index 4543965..c4a3462 100644
 --- a/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
-@@ -631,7 +631,9 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
+@@ -421,7 +421,8 @@ static int mt7921_load_clc(struct mt792x_dev *dev, const char *fw_name)
+ 
+ 	dev->phy.clc_chan_conf = 0xff;
+ 	dev->regd_user = false;
+-	if (!mt7921_regd_clc_supported(dev))
++	/* The tables are in the firmware file, and a variant may have none */
++	if (!mt7921_regd_clc_supported(dev) || dev->hif_ops->load_firmware)
+ 		return 0;
+ 
+ 	if (mt76_is_mmio(&dev->mt76)) {
+@@ -631,7 +632,10 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
  							     skb);
  			break;
  		case MT_NIC_CAP_CHIP_CAP:
 -			memcpy(&mphy->chip_cap, (void *)skb->data, sizeof(u64));
-+			/* The firmware of the SoC variant has other flags here */
++			/* A SoC variant's firmware has other flags here */
 +			if (!mphy->dev->hif_ops->load_firmware)
-+				memcpy(&mphy->chip_cap, (void *)skb->data, sizeof(u64));
++				memcpy(&mphy->chip_cap, (void *)skb->data,
++				       sizeof(u64));
  			break;
  		default:
  			break;
-@@ -661,7 +663,10 @@ int mt7921_run_firmware(struct mt792x_dev *dev)
+@@ -661,7 +665,10 @@ int mt7921_run_firmware(struct mt792x_dev *dev)
  {
  	int err;
  
@@ -166,23 +178,7 @@ index 4543965..a4728d0 100644
  	if (err)
  		return err;
  
-@@ -669,9 +674,12 @@ int mt7921_run_firmware(struct mt792x_dev *dev)
- 	if (err)
- 		return err;
- 
--	err = mt7921_load_clc(dev, mt792x_ram_name(dev));
--	if (err)
--		return err;
-+	/* The country tables are in the firmware file, and there is none */
-+	if (!dev->hif_ops->load_firmware) {
-+		err = mt7921_load_clc(dev, mt792x_ram_name(dev));
-+		if (err)
-+			return err;
-+	}
- 	set_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
- 
- 	return mt7921_mcu_fw_log_2_host(dev, 1);
-@@ -953,6 +961,9 @@ int mt7921_mcu_set_eeprom(struct mt792x_dev *dev)
+@@ -953,6 +960,9 @@ int mt7921_mcu_set_eeprom(struct mt792x_dev *dev)
  		.format = EE_FORMAT_WHOLE,
  	};
  
