@@ -1,0 +1,87 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: display: mediatek: add the MT6897 display blocks
+
+Add the OVL_2L, DSC and DSI of MT6897.
+
+The OVL does not get its iommus here: this SoC has no IOMMU driver for
+it yet, and it runs on contiguous memory until then. MT6897 is the only
+one that may leave them out.
+
+mediatek,dual-dsi-slave marks the second link of a panel on two links.
+It has the name of the stock device tree. The second link starts and
+stops with the first, which also sends all the commands for the panel.
+---
+ .../bindings/display/mediatek/mediatek,dsc.yaml     |  1 +
+ .../bindings/display/mediatek/mediatek,dsi.yaml     |  8 ++++++++
+ .../bindings/display/mediatek/mediatek,ovl-2l.yaml  | 13 ++++++++++++-
+ 3 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/display/mediatek/mediatek,dsc.yaml b/Documentation/devicetree/bindings/display/mediatek/mediatek,dsc.yaml
+index a5b88eb97e3b01f5539d17f75944fdd43220e7af..924057dd8270c3d410b5d76001bf657af39c3783 100644
+--- a/Documentation/devicetree/bindings/display/mediatek/mediatek,dsc.yaml
++++ b/Documentation/devicetree/bindings/display/mediatek/mediatek,dsc.yaml
+@@ -21,6 +21,7 @@ properties:
+   compatible:
+     oneOf:
+       - enum:
++          - mediatek,mt6897-disp-dsc
+           - mediatek,mt8195-disp-dsc
+       - items:
+           - const: mediatek,mt8188-disp-dsc
+diff --git a/Documentation/devicetree/bindings/display/mediatek/mediatek,dsi.yaml b/Documentation/devicetree/bindings/display/mediatek/mediatek,dsi.yaml
+index 27ffbccc2a082eb04ec4b4c8463e0e38e19c4ffb..fd7b4881e8280ccc7d08e747f8f66484db48dea7 100644
+--- a/Documentation/devicetree/bindings/display/mediatek/mediatek,dsi.yaml
++++ b/Documentation/devicetree/bindings/display/mediatek/mediatek,dsi.yaml
+@@ -24,6 +24,7 @@ properties:
+     oneOf:
+       - enum:
+           - mediatek,mt2701-dsi
++          - mediatek,mt6897-dsi
+           - mediatek,mt7623-dsi
+           - mediatek,mt8167-dsi
+           - mediatek,mt8173-dsi
+@@ -71,6 +72,13 @@ properties:
+     items:
+       - const: dphy
+ 
++  mediatek,dual-dsi-slave:
++    type: boolean
++    description:
++      This DSI is the second link of a panel on two links. It starts and stops
++      along with the first one, and the panel only sends its commands through
++      the first one.
++
+   port:
+     $ref: /schemas/graph.yaml#/properties/port
+     description:
+diff --git a/Documentation/devicetree/bindings/display/mediatek/mediatek,ovl-2l.yaml b/Documentation/devicetree/bindings/display/mediatek/mediatek,ovl-2l.yaml
+index ac0d924a451b48362b6c24d51cffd642f91a1566..b3b76c0081b851899c1599d96d3a822d4ea0d47b 100644
+--- a/Documentation/devicetree/bindings/display/mediatek/mediatek,ovl-2l.yaml
++++ b/Documentation/devicetree/bindings/display/mediatek/mediatek,ovl-2l.yaml
+@@ -22,6 +22,7 @@ properties:
+   compatible:
+     oneOf:
+       - enum:
++          - mediatek,mt6897-disp-ovl-2l
+           - mediatek,mt8183-disp-ovl-2l
+           - mediatek,mt8192-disp-ovl-2l
+       - items:
+@@ -84,7 +85,17 @@ required:
+   - interrupts
+   - power-domains
+   - clocks
+-  - iommus
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          not:
++            contains:
++              const: mediatek,mt6897-disp-ovl-2l
++    then:
++      required:
++        - iommus
+ 
+ additionalProperties: false
+ 

@@ -1,0 +1,36 @@
+From: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Subject: [PATCH] drm/mediatek: mtk_dsi: Enable PM Runtime on probe
+
+[ Not upstream yet: v9 11/13 from
+  https://lore.kernel.org/r/20260916110825.102631-12-angelogioacchino.delregno@collabora.com ]
+
+Enable PM Runtime at the end of mtk_dsi_probe() so that the
+mediatek-drm mtk_ddp_comp_power_on() function is able to do
+pm_runtime_resume_and_get() and, analogously, the function
+mtk_ddp_comp_power_off() to pm_runtime_put() for the DSI
+device.
+
+This makes sure that the power domains for the DSI IP are
+turned on and off when necessary.
+
+Reviewed-by: CK Hu <ck.hu@mediatek.com>
+Signed-off-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+---
+ drivers/gpu/drm/mediatek/mtk_dsi.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/gpu/drm/mediatek/mtk_dsi.c b/drivers/gpu/drm/mediatek/mtk_dsi.c
+index ea79260491b6e3a885258ae442840a3f01b071a0..9857a872622810efb52e7cd415629acc02859b68 100644
+--- a/drivers/gpu/drm/mediatek/mtk_dsi.c
++++ b/drivers/gpu/drm/mediatek/mtk_dsi.c
+@@ -1390,6 +1390,10 @@ static int mtk_dsi_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return dev_err_probe(&pdev->dev, ret, "Failed to request DSI irq\n");
+ 
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++
+ 	ret = mipi_dsi_host_register(&dsi->host);
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret, "Failed to register DSI host\n");

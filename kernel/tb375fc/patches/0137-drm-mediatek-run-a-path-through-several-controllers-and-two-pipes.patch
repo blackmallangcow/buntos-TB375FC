@@ -1,0 +1,1070 @@
+From: buntOS contributors
+Subject: [PATCH] drm/mediatek: run a path through several controllers and two pipes
+
+The display of MT6897 has four controllers, a dispsys and an ovlsys for
+each half of the screen, with their own routes, mutexes and power
+domains. Only the driver of dispsys0 exists, and its path has both
+halves.
+
+- Add a table with the controller of each component of a path. The
+  connections and the mutexes go to the controller of the component, and
+  a connection across controllers to both of them. Each mutex of a pipe
+  waits for the start of frame of its output. All the components power
+  on for themselves, as they are not all in one domain.
+- A path can have a second pipe. Each pipe takes half of the width. A
+  plane goes to the same layer of both overlays, with its part of the
+  screen: a plane in the middle shows in both, and the right part starts
+  where the left part ends in memory. Flipping a plane would have to
+  swap the parts, so it only supports no rotation.
+- The vblank comes from the first overlay, and only the first link of
+  the panel has an encoder. The CRTC does not wait for a vblank when it
+  turns off, since the DSI has stopped the video before its last
+  commands. What was pending goes away with it.
+- This CRTC holds its power domains from its creation to the first
+  commit. The bootloader's display runs on them, and removing the
+  framebuffer driver would take them away from under its DMA. The first
+  commit starts the outputs before anything else, so they stop at the
+  end of a frame and the resets find nothing in flight.
+
+Add the data of MT6897. There is no CMDQ driver for it yet, so the
+registers go out from the vblank interrupt with the CPU. That interrupt
+leaves a commit in the middle of its update for the next vblank, or its
+event would go out without its planes. It does not configure the
+components again: the hardware init had the same values, and a reset
+from the vblank of the first pipe could hit the second one in its frame.
+The aliases of the nodes tell the controllers apart.
+---
+ drivers/gpu/drm/mediatek/mtk_crtc.c    | 512 +++++++++++++++++++++----
+ drivers/gpu/drm/mediatek/mtk_drm_drv.c | 144 +++++++
+ drivers/gpu/drm/mediatek/mtk_drm_drv.h |  18 +
+ 3 files changed, 602 insertions(+), 72 deletions(-)
+
+diff --git a/drivers/gpu/drm/mediatek/mtk_crtc.c b/drivers/gpu/drm/mediatek/mtk_crtc.c
+index 5cdfdd9017603b8e57e11f79a26527ce361ec23c..34362414d5d901e75badb9704bbf80b1310c5b19 100644
+--- a/drivers/gpu/drm/mediatek/mtk_crtc.c
++++ b/drivers/gpu/drm/mediatek/mtk_crtc.c
+@@ -16,6 +16,7 @@
+ 
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
++#include <drm/drm_framebuffer.h>
+ #include <drm/drm_print.h>
+ #include <drm/drm_probe_helper.h>
+ #include <drm/drm_vblank.h>
+@@ -34,6 +35,15 @@
+  * @pending_planes: whether any plane has pending changes to be applied
+  * @mmsys_dev: pointer to the mmsys device for configuration registers
+  * @mutex: handle to one of the ten disp_mutex streams
++ * @controllers: for a path through more than one display controller, the display
++ *               controller of each component of ddp_comp, or NULL otherwise
++ * @num_controllers: number of display controllers
++ * @controller_mmsys: the mmsys device of each display controller
++ * @controller_mutex: the mutex of each display controller, @mutex is the first
++ * @second_pipe: first component of the second pipe in ddp_comp, or 0 if none
++ * @pipe_width: width of the screen that each pipe has, with a second pipe
++ * @boot_power: this holds the power domains of the bootloader's display, which still
++ *              runs until the first commit
+  * @ddp_comp_nr: number of components in ddp_comp
+  * @ddp_comp: array of pointers the mtk_ddp_comp structures used by this crtc
+  *
+@@ -62,6 +72,13 @@ struct mtk_crtc {
+ 	struct device			*mmsys_dev;
+ 	struct device			*dma_dev;
+ 	struct mtk_mutex		*mutex;
++	const u8			*controllers;
++	unsigned int			num_controllers;
++	struct device			*controller_mmsys[MTK_DRM_MAX_CONTROLLERS];
++	struct mtk_mutex		*controller_mutex[MTK_DRM_MAX_CONTROLLERS];
++	unsigned int			second_pipe;
++	unsigned int			pipe_width;
++	bool				boot_power;
+ 	unsigned int			ddp_comp_nr;
+ 	unsigned int			num_conn_routes;
+ 	const struct mtk_drm_route	*conn_routes;
+@@ -127,12 +144,47 @@ static void mtk_drm_finish_page_flip(struct mtk_crtc *mtk_crtc)
+ 	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+ }
+ 
++/* Only a path through more controllers has its components in other power domains */
++static unsigned int mtk_crtc_num_power_comps(struct mtk_crtc *mtk_crtc)
++{
++	return mtk_crtc->num_controllers ? mtk_crtc->ddp_comp_nr : 1;
++}
++
++static void mtk_crtc_power_off(struct mtk_crtc *mtk_crtc, int num)
++{
++	while (--num >= 0)
++		mtk_ddp_comp_power_off(mtk_crtc->ddp_comp[num]);
++}
++
++static int mtk_crtc_power_on(struct mtk_crtc *mtk_crtc)
++{
++	int i, ret;
++
++	for (i = 0; i < mtk_crtc_num_power_comps(mtk_crtc); i++) {
++		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
++
++		ret = mtk_ddp_comp_power_on(comp);
++		if (ret < 0) {
++			DRM_DEV_ERROR(comp->dev, "Failed to enable power domain: %d\n", ret);
++			mtk_crtc_power_off(mtk_crtc, i);
++			return ret;
++		}
++	}
++
++	return 0;
++}
++
+ static void mtk_crtc_destroy(struct drm_crtc *crtc)
+ {
+ 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
+ 	int i;
+ 
++	if (mtk_crtc->boot_power)
++		mtk_crtc_power_off(mtk_crtc, mtk_crtc_num_power_comps(mtk_crtc));
++
+ 	mtk_mutex_put(mtk_crtc->mutex);
++	for (i = 1; i < mtk_crtc->num_controllers; i++)
++		mtk_mutex_put(mtk_crtc->controller_mutex[i]);
+ #if IS_REACHABLE(CONFIG_MTK_CMDQ)
+ 	if (mtk_crtc->cmdq_client.chan) {
+ 		cmdq_pkt_destroy(&mtk_crtc->cmdq_client, &mtk_crtc->cmdq_handle);
+@@ -339,14 +391,222 @@ ddp_cmdq_cb_out:
+ }
+ #endif
+ 
++/* Width of the part of the screen each pipe makes */
++static unsigned int mtk_crtc_pipe_width(struct mtk_crtc *mtk_crtc, unsigned int width)
++{
++	return mtk_crtc->second_pipe ? width / 2 : width;
++}
++
++/*
++ * With two pipes a layer goes to the same layer of both overlays, each one with
++ * its part of the screen. The address is the one of the top left pixel the layer
++ * shows, so it only has to move for the pipe that starts somewhere inside.
++ */
++static void mtk_crtc_layer_config(struct mtk_crtc *mtk_crtc, struct mtk_ddp_comp *comp,
++				  unsigned int local_layer,
++				  struct mtk_plane_state *state,
++				  struct cmdq_pkt *cmdq_handle)
++{
++	struct mtk_plane_pending_state *pending = &state->pending;
++	struct mtk_plane_state part = *state;
++	const struct drm_format_info *info;
++	unsigned int mid, right_x, cpp;
++	int left_w, right_w;
++	bool enable;
++
++	if (!mtk_crtc->second_pipe) {
++		mtk_ddp_comp_layer_config(comp, local_layer, state, cmdq_handle);
++		return;
++	}
++
++	mid = mtk_crtc->pipe_width;
++	right_x = max_t(unsigned int, pending->x, mid);
++	left_w = min_t(int, pending->width, (int)mid - (int)pending->x);
++	right_w = (int)(pending->x + pending->width) - (int)right_x;
++	/* An async update can leave a plane outside of the screen */
++	enable = pending->enable && (int)pending->width > 0 && (int)pending->height > 0;
++	info = enable ? drm_format_info(pending->format) : NULL;
++	cpp = info ? info->cpp[0] : 0;
++
++	part.pending.enable = enable && left_w > 0;
++	part.pending.width = max(left_w, 0);
++	mtk_ddp_comp_layer_config(comp, local_layer, &part, cmdq_handle);
++
++	part.pending.enable = enable && right_w > 0;
++	part.pending.width = max(right_w, 0);
++	part.pending.x = right_x - mid;
++	part.pending.addr = pending->addr + (right_x - pending->x) * cpp;
++	mtk_ddp_comp_layer_config(mtk_crtc->ddp_comp[mtk_crtc->second_pipe],
++				  local_layer, &part, cmdq_handle);
++}
++
++static int mtk_crtc_mutex_prepare(struct mtk_crtc *mtk_crtc)
++{
++	int i, ret;
++
++	if (!mtk_crtc->num_controllers)
++		return mtk_mutex_prepare(mtk_crtc->mutex);
++
++	for (i = 0; i < mtk_crtc->num_controllers; i++) {
++		ret = mtk_mutex_prepare(mtk_crtc->controller_mutex[i]);
++		if (ret < 0)
++			goto err_unprepare;
++	}
++
++	return 0;
++
++err_unprepare:
++	while (--i >= 0)
++		mtk_mutex_unprepare(mtk_crtc->controller_mutex[i]);
++
++	return ret;
++}
++
++static void mtk_crtc_mutex_unprepare(struct mtk_crtc *mtk_crtc)
++{
++	int i;
++
++	if (!mtk_crtc->num_controllers) {
++		mtk_mutex_unprepare(mtk_crtc->mutex);
++		return;
++	}
++
++	for (i = mtk_crtc->num_controllers - 1; i >= 0; i--)
++		mtk_mutex_unprepare(mtk_crtc->controller_mutex[i]);
++}
++
++/* The index of the last component of the pipe that holds a component */
++static unsigned int mtk_crtc_pipe_end(struct mtk_crtc *mtk_crtc, unsigned int i)
++{
++	if (mtk_crtc->second_pipe && i < mtk_crtc->second_pipe)
++		return mtk_crtc->second_pipe - 1;
++
++	return mtk_crtc->ddp_comp_nr - 1;
++}
++
++/*
++ * A connection between two controllers has a part in the routes of each. All the
++ * mutexes of a pipe wait for the start of frame of its output, even if the output
++ * is in a controller of its own.
++ */
++static void mtk_crtc_controllers_connect(struct mtk_crtc *mtk_crtc)
++{
++	const u8 *controllers = mtk_crtc->controllers;
++	unsigned int i;
++
++	for (i = 0; i < mtk_crtc->num_controllers; i++)
++		mtk_mutex_clear(mtk_crtc->controller_mutex[i]);
++
++	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
++		unsigned int id = mtk_crtc->ddp_comp[i]->id;
++		unsigned int end = mtk_crtc_pipe_end(mtk_crtc, i);
++		unsigned int ctrl = controllers[i];
++
++		mtk_mutex_add_comp(mtk_crtc->controller_mutex[ctrl], id);
++
++		if (i == end) {
++			unsigned int j;
++
++			for (j = 0; j < i; j++) {
++				unsigned int other = controllers[j];
++				struct mtk_mutex *mutex = mtk_crtc->controller_mutex[other];
++
++				if (mtk_crtc_pipe_end(mtk_crtc, j) == end && other != ctrl)
++					mtk_mutex_add_comp(mutex, id);
++			}
++			continue;
++		}
++
++		mtk_mmsys_ddp_connect(mtk_crtc->controller_mmsys[ctrl], id,
++				      mtk_crtc->ddp_comp[i + 1]->id);
++		if (controllers[i + 1] != ctrl)
++			mtk_mmsys_ddp_connect(mtk_crtc->controller_mmsys[controllers[i + 1]],
++					      id, mtk_crtc->ddp_comp[i + 1]->id);
++	}
++
++	for (i = 0; i < mtk_crtc->num_controllers; i++)
++		mtk_mutex_enable(mtk_crtc->controller_mutex[i]);
++}
++
++static void mtk_crtc_controllers_disconnect(struct mtk_crtc *mtk_crtc)
++{
++	const u8 *controllers = mtk_crtc->controllers;
++	unsigned int i;
++
++	for (i = 0; i < mtk_crtc->num_controllers; i++)
++		mtk_mutex_disable(mtk_crtc->controller_mutex[i]);
++
++	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
++		unsigned int id = mtk_crtc->ddp_comp[i]->id;
++		unsigned int end = mtk_crtc_pipe_end(mtk_crtc, i);
++		unsigned int ctrl = controllers[i];
++
++		mtk_mutex_remove_comp(mtk_crtc->controller_mutex[ctrl], id);
++
++		if (i == end) {
++			unsigned int j;
++
++			for (j = 0; j < i; j++) {
++				unsigned int other = controllers[j];
++				struct mtk_mutex *mutex = mtk_crtc->controller_mutex[other];
++
++				if (mtk_crtc_pipe_end(mtk_crtc, j) == end && other != ctrl)
++					mtk_mutex_remove_comp(mutex, id);
++			}
++			continue;
++		}
++
++		mtk_mmsys_ddp_disconnect(mtk_crtc->controller_mmsys[ctrl], id,
++					 mtk_crtc->ddp_comp[i + 1]->id);
++		if (controllers[i + 1] != ctrl)
++			mtk_mmsys_ddp_disconnect(mtk_crtc->controller_mmsys[controllers[i + 1]],
++						 id, mtk_crtc->ddp_comp[i + 1]->id);
++	}
++}
++
++static bool mtk_crtc_comp_is_dsi(struct mtk_ddp_comp *comp)
++{
++	return comp->id >= DDP_COMPONENT_DSI0 && comp->id <= DDP_COMPONENT_DSI3;
++}
++
++/* Set up the DSC of each pipe, with the config coming from the DSI of that pipe */
++static void mtk_crtc_dsc_setup(struct mtk_crtc *mtk_crtc)
++{
++	struct mtk_ddp_comp *comp_dsi = NULL, *comp_dsc = NULL;
++	struct drm_dsc_config *dsc_cfg;
++	int i;
++
++	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
++		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
++
++		if (i && i == mtk_crtc->second_pipe) {
++			comp_dsi = NULL;
++			comp_dsc = NULL;
++		}
++
++		if (mtk_crtc_comp_is_dsi(comp))
++			if (!comp_dsi)
++				comp_dsi = comp;
++
++		if (comp->id == DDP_COMPONENT_DSC0 ||
++		    comp->id == DDP_COMPONENT_DSC1)
++			if (!comp_dsc)
++				comp_dsc = comp;
++
++		if (i == mtk_crtc_pipe_end(mtk_crtc, i) && comp_dsc && comp_dsi) {
++			dsc_cfg = mtk_dsi_get_dsc_config(comp_dsi->dev);
++			if (dsc_cfg)
++				mtk_ddp_comp_dsc_setup(comp_dsc, dsc_cfg);
++		}
++	}
++}
++
+ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
+ {
+ 	struct drm_crtc *crtc = &mtk_crtc->base;
+ 	struct drm_connector *connector;
+ 	struct drm_encoder *encoder;
+ 	struct drm_connector_list_iter conn_iter;
+-	struct mtk_ddp_comp *comp_dsi = NULL, *comp_dsc = NULL;
+-	struct drm_dsc_config *dsc_cfg;
+ 	struct drm_device *dev = mtk_crtc->base.dev;
+ 	unsigned int width, height, vrefresh, bpc = MTK_MAX_BPC;
+ 	int ret;
+@@ -355,7 +615,7 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
+ 	if (WARN_ON(!crtc->state))
+ 		return -EINVAL;
+ 
+-	width = crtc->state->adjusted_mode.hdisplay;
++	width = mtk_crtc_pipe_width(mtk_crtc, crtc->state->adjusted_mode.hdisplay);
+ 	height = crtc->state->adjusted_mode.vdisplay;
+ 	vrefresh = drm_mode_vrefresh(&crtc->state->adjusted_mode);
+ 
+@@ -380,7 +640,7 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
+ 		return ret;
+ 	}
+ 
+-	ret = mtk_mutex_prepare(mtk_crtc->mutex);
++	ret = mtk_crtc_mutex_prepare(mtk_crtc);
+ 	if (ret < 0) {
+ 		drm_err(dev, "Failed to enable mutex clock: %d\n", ret);
+ 		goto err_pm_runtime_put;
+@@ -392,47 +652,46 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
+ 		goto err_mutex_unprepare;
+ 	}
+ 
+-	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
+-		if (!mtk_ddp_comp_connect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
+-					  mtk_crtc->ddp_comp[i + 1]->id))
+-			mtk_mmsys_ddp_connect(mtk_crtc->mmsys_dev,
+-					      mtk_crtc->ddp_comp[i]->id,
+-					      mtk_crtc->ddp_comp[i + 1]->id);
++	mtk_crtc->pipe_width = width;
++
++	/*
++	 * What the bootloader left running can still be running, so the outputs go
++	 * first. They stop at the end of a frame, and the resets below find nothing
++	 * in flight.
++	 */
++	if (mtk_crtc->num_controllers) {
++		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
++			if (mtk_crtc_comp_is_dsi(mtk_crtc->ddp_comp[i]))
++				mtk_ddp_comp_start(mtk_crtc->ddp_comp[i]);
++		mtk_crtc_controllers_connect(mtk_crtc);
++	} else {
++		for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
++			if (!mtk_ddp_comp_connect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
++						  mtk_crtc->ddp_comp[i + 1]->id))
++				mtk_mmsys_ddp_connect(mtk_crtc->mmsys_dev,
++						      mtk_crtc->ddp_comp[i]->id,
++						      mtk_crtc->ddp_comp[i + 1]->id);
++			if (!mtk_ddp_comp_add(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
++				mtk_mutex_add_comp(mtk_crtc->mutex,
++						   mtk_crtc->ddp_comp[i]->id);
++		}
+ 		if (!mtk_ddp_comp_add(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
+-			mtk_mutex_add_comp(mtk_crtc->mutex,
+-					   mtk_crtc->ddp_comp[i]->id);
++			mtk_mutex_add_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
++		mtk_mutex_enable(mtk_crtc->mutex);
+ 	}
+-	if (!mtk_ddp_comp_add(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
+-		mtk_mutex_add_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
+-	mtk_mutex_enable(mtk_crtc->mutex);
+ 
+ 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
+ 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
+ 
+-		/* For now, only single DSI is supported */
+-		if (comp->id >= DDP_COMPONENT_DSI0 &&
+-		    comp->id <= DDP_COMPONENT_DSI3)
+-			if (!comp_dsi)
+-				comp_dsi = mtk_crtc->ddp_comp[i];
+-
+-		if (comp->id == DDP_COMPONENT_DSC0 ||
+-		    comp->id == DDP_COMPONENT_DSC1)
+-			if (!comp_dsc)
+-				comp_dsc = comp;
+-
+ 		if (i == 1)
+ 			mtk_ddp_comp_bgclr_in_on(comp);
+ 
+ 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
+-		mtk_ddp_comp_start(comp);
++		if (!mtk_crtc->num_controllers || !mtk_crtc_comp_is_dsi(comp))
++			mtk_ddp_comp_start(comp);
+ 	}
+ 
+-	/* Setup the DSC if present, with the config coming from DSI */
+-	if (comp_dsc && comp_dsi) {
+-		dsc_cfg = mtk_dsi_get_dsc_config(comp_dsi->dev);
+-		if (dsc_cfg)
+-			mtk_ddp_comp_dsc_setup(comp_dsc, dsc_cfg);
+-	}
++	mtk_crtc_dsc_setup(mtk_crtc);
+ 
+ 	/* Initially configure all planes */
+ 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
+@@ -447,14 +706,14 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
+ 		plane_state->pending.enable = false;
+ 		comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
+ 		if (comp)
+-			mtk_ddp_comp_layer_config(comp, local_layer,
+-						  plane_state, NULL);
++			mtk_crtc_layer_config(mtk_crtc, comp, local_layer,
++					      plane_state, NULL);
+ 	}
+ 
+ 	return 0;
+ 
+ err_mutex_unprepare:
+-	mtk_mutex_unprepare(mtk_crtc->mutex);
++	mtk_crtc_mutex_unprepare(mtk_crtc);
+ err_pm_runtime_put:
+ 	pm_runtime_put(crtc->dev->dev);
+ 	return ret;
+@@ -473,25 +732,29 @@ static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
+ 			mtk_ddp_comp_bgclr_in_off(mtk_crtc->ddp_comp[i]);
+ 	}
+ 
+-	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+-		if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
+-			mtk_mutex_remove_comp(mtk_crtc->mutex,
+-					      mtk_crtc->ddp_comp[i]->id);
+-	mtk_mutex_disable(mtk_crtc->mutex);
+-	for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
+-		if (!mtk_ddp_comp_disconnect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
+-					     mtk_crtc->ddp_comp[i + 1]->id))
+-			mtk_mmsys_ddp_disconnect(mtk_crtc->mmsys_dev,
+-						 mtk_crtc->ddp_comp[i]->id,
+-						 mtk_crtc->ddp_comp[i + 1]->id);
++	if (mtk_crtc->num_controllers) {
++		mtk_crtc_controllers_disconnect(mtk_crtc);
++	} else {
++		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
++			if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
++				mtk_mutex_remove_comp(mtk_crtc->mutex,
++						      mtk_crtc->ddp_comp[i]->id);
++		mtk_mutex_disable(mtk_crtc->mutex);
++		for (i = 0; i < mtk_crtc->ddp_comp_nr - 1; i++) {
++			if (!mtk_ddp_comp_disconnect(mtk_crtc->ddp_comp[i], mtk_crtc->mmsys_dev,
++						     mtk_crtc->ddp_comp[i + 1]->id))
++				mtk_mmsys_ddp_disconnect(mtk_crtc->mmsys_dev,
++							 mtk_crtc->ddp_comp[i]->id,
++							 mtk_crtc->ddp_comp[i + 1]->id);
++			if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
++				mtk_mutex_remove_comp(mtk_crtc->mutex,
++						      mtk_crtc->ddp_comp[i]->id);
++		}
+ 		if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
+-			mtk_mutex_remove_comp(mtk_crtc->mutex,
+-					      mtk_crtc->ddp_comp[i]->id);
++			mtk_mutex_remove_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
+ 	}
+-	if (!mtk_ddp_comp_remove(mtk_crtc->ddp_comp[i], mtk_crtc->mutex))
+-		mtk_mutex_remove_comp(mtk_crtc->mutex, mtk_crtc->ddp_comp[i]->id);
+ 	mtk_crtc_ddp_clk_disable(mtk_crtc);
+-	mtk_mutex_unprepare(mtk_crtc->mutex);
++	mtk_crtc_mutex_unprepare(mtk_crtc);
+ 
+ 	pm_runtime_put(drm->dev);
+ 
+@@ -518,10 +781,15 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
+ 	 * queue update module registers on vblank.
+ 	 */
+ 	if (state->pending_config) {
+-		mtk_ddp_comp_config(comp, state->pending_width,
+-				    state->pending_height,
+-				    state->pending_vrefresh, 0,
+-				    cmdq_handle);
++		/*
++		 * The hardware init had the same values. This comes from the vblank
++		 * of the first pipe, and would reset the other one in its frame.
++		 */
++		if (!mtk_crtc->second_pipe)
++			mtk_ddp_comp_config(comp, state->pending_width,
++					    state->pending_height,
++					    state->pending_vrefresh, 0,
++					    cmdq_handle);
+ 
+ 		if (!cmdq_handle)
+ 			state->pending_config = false;
+@@ -540,9 +808,8 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
+ 			comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
+ 
+ 			if (comp)
+-				mtk_ddp_comp_layer_config(comp, local_layer,
+-							  plane_state,
+-							  cmdq_handle);
++				mtk_crtc_layer_config(mtk_crtc, comp, local_layer,
++						      plane_state, cmdq_handle);
+ 			if (!cmdq_handle)
+ 				plane_state->pending.config = false;
+ 		}
+@@ -564,9 +831,8 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
+ 			comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
+ 
+ 			if (comp)
+-				mtk_ddp_comp_layer_config(comp, local_layer,
+-							  plane_state,
+-							  cmdq_handle);
++				mtk_crtc_layer_config(mtk_crtc, comp, local_layer,
++						      plane_state, cmdq_handle);
+ 			if (!cmdq_handle)
+ 				plane_state->pending.async_config = false;
+ 		}
+@@ -664,12 +930,39 @@ update_config_out:
+ 	mutex_unlock(&mtk_crtc->hw_lock);
+ }
+ 
++/*
++ * Two pipes have no CMDQ, and the registers only go out from here. A commit in
++ * the middle of its update waits for the next vblank, or its planes would stay
++ * behind while its event goes out.
++ */
++static void mtk_crtc_two_pipes_irq(struct mtk_crtc *mtk_crtc)
++{
++	struct drm_crtc *crtc = &mtk_crtc->base;
++
++	drm_crtc_handle_vblank(crtc);
++
++	spin_lock(&mtk_crtc->config_lock);
++	if (!mtk_crtc->config_updating) {
++		mtk_crtc_ddp_config(crtc, NULL);
++		if (mtk_crtc->pending_needs_vblank) {
++			mtk_crtc_finish_page_flip(mtk_crtc);
++			mtk_crtc->pending_needs_vblank = false;
++		}
++	}
++	spin_unlock(&mtk_crtc->config_lock);
++}
++
+ static void mtk_crtc_ddp_irq(void *data)
+ {
+ 	struct drm_crtc *crtc = data;
+ 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
+ 	struct mtk_drm_private *priv = crtc->dev->dev_private;
+ 
++	if (mtk_crtc->second_pipe) {
++		mtk_crtc_two_pipes_irq(mtk_crtc);
++		return;
++	}
++
+ #if IS_REACHABLE(CONFIG_MTK_CMDQ)
+ 	struct drm_device *dev = mtk_crtc->base.dev;
+ 	if (!priv->data->shadow_register && !mtk_crtc->cmdq_client.chan)
+@@ -793,29 +1086,38 @@ void mtk_crtc_async_update(struct drm_crtc *crtc, struct drm_plane *plane,
+ 		return;
+ 
+ 	mtk_crtc_update_config(mtk_crtc, false);
++
++	/*
++	 * With two pipes the registers go out from the vblank interrupt, which is
++	 * off when nothing asked for a vblank in a while. This turns it on, and it
++	 * stays on until the delay of the vblank code has passed.
++	 */
++	if (mtk_crtc->second_pipe && !drm_crtc_vblank_get(crtc))
++		drm_crtc_vblank_put(crtc);
+ }
+ 
+ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
+ 				   struct drm_atomic_commit *state)
+ {
+ 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
+-	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
+ 	struct drm_device *dev = mtk_crtc->base.dev;
+ 	int ret;
+ 
+ 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
+ 
+-	ret = mtk_ddp_comp_power_on(comp);
+-	if (ret < 0) {
+-		DRM_DEV_ERROR(comp->dev, "Failed to enable power domain: %d\n", ret);
+-		return;
++	if (mtk_crtc->boot_power) {
++		mtk_crtc->boot_power = false;
++	} else {
++		ret = mtk_crtc_power_on(mtk_crtc);
++		if (ret < 0)
++			return;
+ 	}
+ 
+ 	mtk_crtc_update_output(crtc, state);
+ 
+ 	ret = mtk_crtc_ddp_hw_init(mtk_crtc);
+ 	if (ret) {
+-		mtk_ddp_comp_power_off(comp);
++		mtk_crtc_power_off(mtk_crtc, mtk_crtc_num_power_comps(mtk_crtc));
+ 		return;
+ 	}
+ 
+@@ -823,11 +1125,32 @@ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
+ 	mtk_crtc->enabled = true;
+ }
+ 
++static void mtk_crtc_forget_pending(struct mtk_crtc *mtk_crtc)
++{
++	unsigned long flags;
++	int i;
++
++	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
++	for (i = 0; i < mtk_crtc->layer_nr; i++) {
++		struct mtk_plane_state *plane_state;
++
++		plane_state = to_mtk_plane_state(mtk_crtc->planes[i].state);
++		plane_state->pending.config = false;
++		plane_state->pending.async_config = false;
++	}
++	mtk_crtc->pending_planes = false;
++	mtk_crtc->pending_async_planes = false;
++
++	/* A flip that lost its vblanks would go out with the next commit otherwise */
++	mtk_crtc_finish_page_flip(mtk_crtc);
++	mtk_crtc->pending_needs_vblank = false;
++	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
++}
++
+ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
+ 				    struct drm_atomic_commit *state)
+ {
+ 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
+-	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[0];
+ 	struct drm_device *dev = mtk_crtc->base.dev;
+ 	int i;
+ 
+@@ -854,12 +1177,21 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
+ 				   mtk_crtc->cmdq_vblank_cnt == 0,
+ 				   msecs_to_jiffies(500));
+ #endif
+-	/* Wait for planes to be disabled */
+-	drm_crtc_wait_one_vblank(crtc);
++	/*
++	 * Wait for planes to be disabled. With two pipes the DSI has stopped the
++	 * video already, for the last commands of the panel: no more vblanks, and
++	 * what is still pending would go out with the next commit.
++	 */
++	if (!mtk_crtc->second_pipe)
++		drm_crtc_wait_one_vblank(crtc);
+ 
+ 	drm_crtc_vblank_off(crtc);
++
++	if (mtk_crtc->second_pipe)
++		mtk_crtc_forget_pending(mtk_crtc);
++
+ 	mtk_crtc_ddp_hw_fini(mtk_crtc);
+-	mtk_ddp_comp_power_off(comp);
++	mtk_crtc_power_off(mtk_crtc, mtk_crtc_num_power_comps(mtk_crtc));
+ 
+ 	mtk_crtc->enabled = false;
+ }
+@@ -995,6 +1327,8 @@ static int mtk_crtc_init_comp_planes(struct drm_device *drm_dev,
+ 				&mtk_crtc->planes[mtk_crtc->layer_nr],
+ 				BIT(pipe),
+ 				mtk_crtc_plane_type(mtk_crtc->layer_nr, num_planes),
++				/* A flip would swap the two parts of the screen */
++				mtk_crtc->second_pipe ? DRM_MODE_ROTATE_0 :
+ 				mtk_ddp_comp_supported_rotations(comp),
+ 				mtk_ddp_comp_get_blend_modes(comp),
+ 				mtk_ddp_comp_get_formats(comp),
+@@ -1086,6 +1420,28 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
+ 		return ret;
+ 	}
+ 
++	if (path == priv->data->main_path && priv->data->num_controllers) {
++		mtk_crtc->controllers = priv->data->main_controllers;
++		mtk_crtc->second_pipe = priv->data->second_pipe;
++		mtk_crtc->controller_mutex[0] = mtk_crtc->mutex;
++
++		for (i = 0; i < priv->data->num_controllers; i++) {
++			mtk_crtc->controller_mmsys[i] = priv->controller_mmsys_dev[i];
++
++			if (i)
++				mtk_crtc->controller_mutex[i] =
++					mtk_mutex_get(priv->controller_mutex_dev[i]);
++			if (IS_ERR(mtk_crtc->controller_mutex[i])) {
++				ret = PTR_ERR(mtk_crtc->controller_mutex[i]);
++				dev_err(dev, "Failed to get mutex %d: %d\n", i, ret);
++				while (--i >= 0)
++					mtk_mutex_put(mtk_crtc->controller_mutex[i]);
++				return ret;
++			}
++		}
++		mtk_crtc->num_controllers = priv->data->num_controllers;
++	}
++
+ 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
+ 		unsigned int comp_id = path[i];
+ 		struct mtk_ddp_comp *comp;
+@@ -1109,6 +1465,10 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
+ 						&mtk_crtc->base);
+ 	}
+ 
++	if (mtk_crtc->second_pipe)
++		mtk_dsi_set_second_link(mtk_crtc->ddp_comp[mtk_crtc->second_pipe - 1]->dev,
++					mtk_crtc->ddp_comp[mtk_crtc->ddp_comp_nr - 1]->dev);
++
+ 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+ 		num_comp_planes += mtk_crtc_num_comp_planes(mtk_crtc, i);
+ 
+@@ -1134,6 +1494,14 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
+ 	if (ret < 0)
+ 		return ret;
+ 
++	/*
++	 * The bootloader's display keeps running on these domains, and a framebuffer
++	 * driver that goes away would take them away from under its DMA. Nothing stops
++	 * it before the first commit.
++	 */
++	if (mtk_crtc->num_controllers && !mtk_crtc_power_on(mtk_crtc))
++		mtk_crtc->boot_power = true;
++
+ 	if (gamma_lut_size)
+ 		drm_mode_crtc_set_gamma_size(&mtk_crtc->base, gamma_lut_size);
+ 	drm_crtc_enable_color_mgmt(&mtk_crtc->base, 0, has_ctm, gamma_lut_size);
+diff --git a/drivers/gpu/drm/mediatek/mtk_drm_drv.c b/drivers/gpu/drm/mediatek/mtk_drm_drv.c
+index f39acc073c141c0a10f3ea105ba72970db9f48c0..09683d07090e91e3e03fbbaf344e9e47fb4af89a 100644
+--- a/drivers/gpu/drm/mediatek/mtk_drm_drv.c
++++ b/drivers/gpu/drm/mediatek/mtk_drm_drv.c
+@@ -231,6 +231,36 @@ static const unsigned int mt8195_mtk_ddp_ext[] = {
+ 	DDP_COMPONENT_DP_INTF1,
+ };
+ 
++/*
++ * Each pipe goes from its ovlsys to its dispsys. The DSC is on the path for this
++ * SoC's only panel, and the picture quality blocks are left out for now.
++ */
++static const unsigned int mt6897_mtk_ddp_main[] = {
++	DDP_COMPONENT_OVL_2L0,
++	DDP_COMPONENT_DSC0,
++	DDP_COMPONENT_DSI0,
++	DDP_COMPONENT_OVL_2L1,
++	DDP_COMPONENT_DSC1,
++	DDP_COMPONENT_DSI1,
++};
++
++enum {
++	MT6897_DISPSYS0,
++	MT6897_DISPSYS1,
++	MT6897_OVLSYS0,
++	MT6897_OVLSYS1,
++	MT6897_NUM_CONTROLLERS,
++};
++
++static const u8 mt6897_main_controllers[] = {
++	MT6897_OVLSYS0,
++	MT6897_DISPSYS0,
++	MT6897_DISPSYS0,
++	MT6897_OVLSYS1,
++	MT6897_DISPSYS1,
++	MT6897_DISPSYS1,
++};
++
+ static const struct mtk_mmsys_driver_data mt2701_mmsys_driver_data = {
+ 	.main_path = mt2701_mtk_ddp_main,
+ 	.main_len = ARRAY_SIZE(mt2701_mtk_ddp_main),
+@@ -259,6 +289,15 @@ static const struct mtk_mmsys_driver_data mt2712_mmsys_driver_data = {
+ 	.mmsys_dev_num = 1,
+ };
+ 
++static const struct mtk_mmsys_driver_data mt6897_mmsys_driver_data = {
++	.main_path = mt6897_mtk_ddp_main,
++	.main_len = ARRAY_SIZE(mt6897_mtk_ddp_main),
++	.main_controllers = mt6897_main_controllers,
++	.num_controllers = MT6897_NUM_CONTROLLERS,
++	.second_pipe = 3,
++	.mmsys_dev_num = 1,
++};
++
+ static const struct mtk_mmsys_driver_data mt8167_mmsys_driver_data = {
+ 	.main_path = mt8167_mtk_ddp_main,
+ 	.main_len = ARRAY_SIZE(mt8167_mtk_ddp_main),
+@@ -338,6 +377,8 @@ static const struct of_device_id mtk_drm_of_ids[] = {
+ 	  .data = &mt7623_mmsys_driver_data},
+ 	{ .compatible = "mediatek,mt2712-mmsys",
+ 	  .data = &mt2712_mmsys_driver_data},
++	{ .compatible = "mediatek,mt6897-dispsys0",
++	  .data = &mt6897_mmsys_driver_data},
+ 	{ .compatible = "mediatek,mt8167-mmsys",
+ 	  .data = &mt8167_mmsys_driver_data},
+ 	{ .compatible = "mediatek,mt8173-mmsys",
+@@ -619,6 +660,72 @@ static int compare_dev(struct device *dev, void *data)
+ 	return dev == (struct device *)data;
+ }
+ 
++/*
++ * The other display controllers of a path have no display driver, but their
++ * routes and mutexes are in use. Their devices can be here without their driver.
++ */
++static struct device *mtk_drm_get_controller_dev(struct device_node *node)
++{
++	struct platform_device *pdev;
++
++	pdev = of_find_device_by_node(node);
++	if (!pdev)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	if (!platform_get_drvdata(pdev)) {
++		put_device(&pdev->dev);
++		return ERR_PTR(-EPROBE_DEFER);
++	}
++
++	return &pdev->dev;
++}
++
++static void mtk_drm_put_controllers(struct mtk_drm_private *private)
++{
++	int i;
++
++	for (i = 0; i < private->data->num_controllers; i++) {
++		if (private->controller_mutex_dev[i])
++			put_device(private->controller_mutex_dev[i]);
++		if (private->controller_mmsys_dev[i])
++			put_device(private->controller_mmsys_dev[i]);
++		private->controller_mutex_dev[i] = NULL;
++		private->controller_mmsys_dev[i] = NULL;
++	}
++}
++
++static int mtk_drm_get_controllers(struct device *dev)
++{
++	struct mtk_drm_private *private = dev_get_drvdata(dev);
++	struct device *mutex_dev, *mmsys_dev;
++	int i;
++
++	for (i = 0; i < private->data->num_controllers; i++) {
++		if (!private->controller_mutex_node[i] ||
++		    !private->controller_mmsys_node[i]) {
++			dev_err(dev, "Missing display controller %d\n", i);
++			mtk_drm_put_controllers(private);
++			return -ENODEV;
++		}
++
++		mutex_dev = mtk_drm_get_controller_dev(private->controller_mutex_node[i]);
++		if (IS_ERR(mutex_dev)) {
++			mtk_drm_put_controllers(private);
++			return PTR_ERR(mutex_dev);
++		}
++		private->controller_mutex_dev[i] = mutex_dev;
++
++		mmsys_dev = mtk_drm_get_controller_dev(private->controller_mmsys_node[i]);
++		if (IS_ERR(mmsys_dev)) {
++			mtk_drm_put_controllers(private);
++			return PTR_ERR(mmsys_dev);
++		}
++		private->controller_mmsys_dev[i] = mmsys_dev;
++	}
++
++	return 0;
++}
++
+ static int mtk_drm_bind(struct device *dev)
+ {
+ 	struct mtk_drm_private *private = dev_get_drvdata(dev);
+@@ -626,11 +733,16 @@ static int mtk_drm_bind(struct device *dev)
+ 	struct drm_device *drm;
+ 	int ret, i;
+ 
++	ret = mtk_drm_get_controllers(dev);
++	if (ret)
++		return ret;
++
+ 	pdev = of_find_device_by_node(private->mutex_node);
+ 	if (!pdev) {
+ 		dev_err(dev, "Waiting for disp-mutex device %pOF\n",
+ 			private->mutex_node);
+ 		of_node_put(private->mutex_node);
++		mtk_drm_put_controllers(private);
+ 		return -EPROBE_DEFER;
+ 	}
+ 
+@@ -640,6 +752,7 @@ static int mtk_drm_bind(struct device *dev)
+ 
+ 	if (!mtk_drm_get_all_drm_priv(dev)) {
+ 		put_device(private->mutex_dev);
++		mtk_drm_put_controllers(private);
+ 		return 0;
+ 	}
+ 
+@@ -679,6 +792,7 @@ err_free:
+ 		private->all_drm_private[i]->drm = NULL;
+ err_put_dev:
+ 	put_device(private->mutex_dev);
++	mtk_drm_put_controllers(private);
+ 	return ret;
+ }
+ 
+@@ -692,6 +806,7 @@ static void mtk_drm_unbind(struct device *dev)
+ 		mtk_drm_kms_deinit(private->drm);
+ 		drm_dev_put(private->drm);
+ 		put_device(private->mutex_dev);
++		mtk_drm_put_controllers(private);
+ 	}
+ 	private->mtk_drm_bound = false;
+ 	private->drm_master = false;
+@@ -728,6 +843,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
+ 	  .data = (void *)MTK_DISP_DITHER },
+ 	{ .compatible = "mediatek,mt8183-disp-dither",
+ 	  .data = (void *)MTK_DISP_DITHER },
++	{ .compatible = "mediatek,mt6897-disp-dsc",
++	  .data = (void *)MTK_DISP_DSC },
+ 	{ .compatible = "mediatek,mt8195-disp-dsc",
+ 	  .data = (void *)MTK_DISP_DSC },
+ 	{ .compatible = "mediatek,mt8167-disp-gamma",
+@@ -744,6 +861,10 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
+ 	  .data = (void *)MTK_DISP_MUTEX },
+ 	{ .compatible = "mediatek,mt2712-disp-mutex",
+ 	  .data = (void *)MTK_DISP_MUTEX },
++	{ .compatible = "mediatek,mt6897-disp-mutex",
++	  .data = (void *)MTK_DISP_MUTEX },
++	{ .compatible = "mediatek,mt6897-ovlsys-mutex",
++	  .data = (void *)MTK_DISP_MUTEX },
+ 	{ .compatible = "mediatek,mt8167-disp-mutex",
+ 	  .data = (void *)MTK_DISP_MUTEX },
+ 	{ .compatible = "mediatek,mt8173-disp-mutex",
+@@ -774,6 +895,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
+ 	  .data = (void *)MTK_DISP_OVL },
+ 	{ .compatible = "mediatek,mt8195-disp-ovl",
+ 	  .data = (void *)MTK_DISP_OVL },
++	{ .compatible = "mediatek,mt6897-disp-ovl-2l",
++	  .data = (void *)MTK_DISP_OVL_2L },
+ 	{ .compatible = "mediatek,mt8183-disp-ovl-2l",
+ 	  .data = (void *)MTK_DISP_OVL_2L },
+ 	{ .compatible = "mediatek,mt8192-disp-ovl-2l",
+@@ -820,6 +943,8 @@ static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
+ 	  .data = (void *)MTK_DPI },
+ 	{ .compatible = "mediatek,mt2701-dsi",
+ 	  .data = (void *)MTK_DSI },
++	{ .compatible = "mediatek,mt6897-dsi",
++	  .data = (void *)MTK_DSI },
+ 	{ .compatible = "mediatek,mt8173-dsi",
+ 	  .data = (void *)MTK_DSI },
+ 	{ .compatible = "mediatek,mt8183-dsi",
+@@ -1128,6 +1253,14 @@ static int mtk_drm_probe(struct platform_device *pdev)
+ 		enum mtk_ddp_comp_type comp_type;
+ 		int comp_id;
+ 
++		if (private->data->num_controllers) {
++			int id = of_alias_get_id(node, "mmsys");
++
++			if (id >= 0 && id < private->data->num_controllers &&
++			    of_device_is_available(node))
++				private->controller_mmsys_node[id] = of_node_get(node);
++		}
++
+ 		ret = mtk_drm_of_get_ddp_comp_type(node, &comp_type);
+ 		if (ret)
+ 			continue;
+@@ -1142,6 +1275,9 @@ static int mtk_drm_probe(struct platform_device *pdev)
+ 			int id;
+ 
+ 			id = of_alias_get_id(node, "mutex");
++			if (id >= 0 && id < private->data->num_controllers)
++				private->controller_mutex_node[id] = of_node_get(node);
++
+ 			if (id < 0 || id == private->data->mmsys_id) {
+ 				private->mutex_node = of_node_get(node);
+ 				dev_dbg(dev, "get mutex for mmsys %d", private->data->mmsys_id);
+@@ -1216,6 +1352,10 @@ err_node:
+ 	of_node_put(private->mutex_node);
+ 	for (i = 0; i < DDP_COMPONENT_DRM_ID_MAX; i++)
+ 		of_node_put(private->comp_node[i]);
++	for (i = 0; i < MTK_DRM_MAX_CONTROLLERS; i++) {
++		of_node_put(private->controller_mutex_node[i]);
++		of_node_put(private->controller_mmsys_node[i]);
++	}
+ 	return ret;
+ }
+ 
+@@ -1235,6 +1375,10 @@ static void mtk_drm_remove(struct platform_device *pdev)
+ 	of_node_put(private->mutex_node);
+ 	for (i = 0; i < DDP_COMPONENT_DRM_ID_MAX; i++)
+ 		of_node_put(private->comp_node[i]);
++	for (i = 0; i < MTK_DRM_MAX_CONTROLLERS; i++) {
++		of_node_put(private->controller_mutex_node[i]);
++		of_node_put(private->controller_mmsys_node[i]);
++	}
+ }
+ 
+ static void mtk_drm_shutdown(struct platform_device *pdev)
+diff --git a/drivers/gpu/drm/mediatek/mtk_drm_drv.h b/drivers/gpu/drm/mediatek/mtk_drm_drv.h
+index 43aac2d956e7793e620b6ce463fdf3accd3ca0ae..f20d1bb7ace114ac00875bbe0b56be964fb21b8a 100644
+--- a/drivers/gpu/drm/mediatek/mtk_drm_drv.h
++++ b/drivers/gpu/drm/mediatek/mtk_drm_drv.h
+@@ -33,9 +33,23 @@ struct mtk_drm_route {
+ 	const unsigned int route_ddp;
+ };
+ 
++/* A path that goes through more than one display controller */
++#define MTK_DRM_MAX_CONTROLLERS 4
++
+ struct mtk_mmsys_driver_data {
+ 	const unsigned int *main_path;
+ 	unsigned int main_len;
++	/*
++	 * The "mmsys" and "mutex" alias of the controller of each component of
++	 * the main path, and how many there are.
++	 */
++	const u8 *main_controllers;
++	unsigned int num_controllers;
++	/*
++	 * The first component of the second pipe of the main path, which takes
++	 * the right half of the screen to a second link of the same panel.
++	 */
++	unsigned int second_pipe;
+ 	const unsigned int *ext_path;
+ 	unsigned int ext_len;
+ 	const unsigned int *third_path;
+@@ -60,6 +74,10 @@ struct mtk_drm_private {
+ 	struct device_node *mutex_node;
+ 	struct device *mutex_dev;
+ 	struct device *mmsys_dev;
++	struct device_node *controller_mutex_node[MTK_DRM_MAX_CONTROLLERS];
++	struct device_node *controller_mmsys_node[MTK_DRM_MAX_CONTROLLERS];
++	struct device *controller_mutex_dev[MTK_DRM_MAX_CONTROLLERS];
++	struct device *controller_mmsys_dev[MTK_DRM_MAX_CONTROLLERS];
+ 	struct device_node *comp_node[DDP_COMPONENT_DRM_ID_MAX];
+ 	struct mtk_ddp_comp ddp_comp[DDP_COMPONENT_DRM_ID_MAX];
+ 	struct mtk_mmsys_driver_data *data;

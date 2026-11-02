@@ -1,0 +1,55 @@
+From: Ryan Brue <ryanbrue.dev@gmail.com>
+Subject: [PATCH] drm/mediatek: dsi: force command mode in mtk_dsi_poweron()
+
+[ Not upstream yet: RESEND v1 from
+  https://lore.kernel.org/r/20261004-rbrue-suez-upstreaming-mtk-dsi-cmd-mode-v1-1-53a4f46ca489@gmail.com ]
+
+mtk_dsi_reset_engine() does not touch DSI_MODE_CTRL, so whatever the
+bootloader left there survives power-on. On boards where the bootloader
+lights the panel for a boot logo and hands the DSI over still running, the
+leftover value is a video mode, and the first mtk_dsi_host_transfer() then
+takes the "already streaming" path: it stops the stream and waits for
+VM_DONE, which never arrives, because the engine reset has already stopped
+the stream. The panel's very first command fails and it is never
+initialised:
+
+  [drm] Wait DSI IRQ(0x00000008) Timeout
+  *ERROR* failed to switch cmd mode
+  sending dcs data 8f a5 failed: -62
+
+Set command mode right after the engine reset, so DSI_MODE_CTRL describes
+the state the reset leaves the engine in. The video mode is programmed by
+mtk_dsi_set_mode() when the stream is actually started, exactly as today.
+
+Seen on the Amazon Fire HD 10 (2017), whose LK bootloader draws its logo
+over DSI in video mode and never stops the stream before jumping to the
+kernel.
+
+Reviewed-by: CK Hu <ck.hu@mediatek.com>
+Acked-by: Roman Vivchar <rva333@protonmail.com>
+Assisted-by: LLM
+Signed-off-by: Ryan Brue <ryanbrue.dev@gmail.com>
+---
+ drivers/gpu/drm/mediatek/mtk_dsi.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/gpu/drm/mediatek/mtk_dsi.c b/drivers/gpu/drm/mediatek/mtk_dsi.c
+index 9857a872622810efb52e7cd415629acc02859b68..add53af83bd2c5284c122decfde6edcbb3a3efc5 100644
+--- a/drivers/gpu/drm/mediatek/mtk_dsi.c
++++ b/drivers/gpu/drm/mediatek/mtk_dsi.c
+@@ -824,6 +824,15 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
+ 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
+ 
+ 	mtk_dsi_reset_engine(dsi);
++
++	/*
++	 * mtk_dsi_reset_engine() leaves DSI_MODE_CTRL alone, so a video mode
++	 * left there by a bootloader that handed the panel over still running
++	 * would make the first command wait for a VM_DONE that never arrives.
++	 * mtk_dsi_set_mode() programs the real mode when the stream starts.
++	 */
++	mtk_dsi_set_cmd_mode(dsi);
++
+ 	mtk_dsi_phy_timconfig(dsi);
+ 
+ 	mtk_dsi_ps_control(dsi, true);

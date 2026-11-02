@@ -1,0 +1,1274 @@
+From: buntOS contributors
+Subject: [PATCH] drm/mediatek: mtk_dsi: add MT6897 and its two links
+
+Add the DSI of MT6897, with what its host needs that the others do not:
+
+- It computes the D-PHY timing and the marks of its TX buffer from the
+  nominal rate of the panel, the same as the vendor, so a separate
+  value.
+- The horizontal porches are in whole words, and the sync pulse of the
+  front porch has its own field, from mtk_dsi_calc_vdo_timing().
+- Its TX buffer has marks for the bus priority (mtk_dsi_tx_buf_rw()).
+  The high SODI mark depends on the rate of the engine clock.
+- It sends a command in the vertical front porch without stopping the
+  video, which dimming the panel uses. A command that does not fit, or a
+  read, stops the video. The last commands before a panel goes off go
+  without video.
+
+This host polls like the vendor's does: for BUSY after a command, and
+for the end of a frame and then BUSY to stop the video. Its interrupt
+stays off. The interrupt handler spins on BUSY, which stays set with the
+video running, so a completion in that time would never return.
+
+A panel on two links has one host for each half of the screen, as this
+SoC has no DSC for two links at once. The panel attaches to both. The
+CRTC tells the first one which one its second link is, because it has
+both in its path. From there the first link runs both of them:
+
+- The second link starts along with the first through DSI_DUAL_EN.
+- The commands go out on both links at the same time, and a read on the
+  first link only. The second link refuses a transfer. The panel driver
+  sends everything to the first.
+- The porches and the widths are for one link, and the data rate is what
+  the panel asks for (dsi->hs_rate). Other hosts keep their own rate.
+
+The registers only answer while the block has power and clocks, and an
+access otherwise stops the bus. So this host takes its own power domain
+when it powers on, as the CRTC may have failed to get it. A transfer
+without both links on fails: the backlight of the panel comes here too,
+even with the display going off, so a lock keeps it apart from the links
+going on and off.
+
+A host that the bootloader left running stops at the end of a frame
+before anything else changes. The other hosts are as they were.
+
+This is not tested on a device. The order and the values are from the
+vendor driver, and a register model in QEMU has been through it.
+---
+ drivers/gpu/drm/mediatek/mtk_disp_drv.h |   1 +
+ drivers/gpu/drm/mediatek/mtk_dsi.c      | 775 ++++++++++++++++++++++--
+ 2 files changed, 720 insertions(+), 56 deletions(-)
+
+diff --git a/drivers/gpu/drm/mediatek/mtk_disp_drv.h b/drivers/gpu/drm/mediatek/mtk_disp_drv.h
+index 5a823de07cdef3eedf2ebaf4597f3d944630b199..7f6f42d7ce64fc028b6dbaf0c129b95c3ed66847 100644
+--- a/drivers/gpu/drm/mediatek/mtk_disp_drv.h
++++ b/drivers/gpu/drm/mediatek/mtk_disp_drv.h
+@@ -58,6 +58,7 @@ void mtk_dsi_ddp_start(struct device *dev);
+ void mtk_dsi_ddp_stop(struct device *dev);
+ unsigned int mtk_dsi_encoder_index(struct device *dev);
+ struct drm_dsc_config *mtk_dsi_get_dsc_config(struct device *dev);
++void mtk_dsi_set_second_link(struct device *dev, struct device *second);
+ 
+ int mtk_gamma_clk_enable(struct device *dev);
+ void mtk_gamma_clk_disable(struct device *dev);
+diff --git a/drivers/gpu/drm/mediatek/mtk_dsi.c b/drivers/gpu/drm/mediatek/mtk_dsi.c
+index 61cbd45a092b0747782eb6ec0f4dad1ec42ee53c..1041e8d4a74db0272328e16e6c90218247baf785 100644
+--- a/drivers/gpu/drm/mediatek/mtk_dsi.c
++++ b/drivers/gpu/drm/mediatek/mtk_dsi.c
+@@ -12,6 +12,7 @@
+ #include <linux/of_platform.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
+ #include <linux/reset.h>
+ #include <linux/units.h>
+ 
+@@ -35,6 +36,7 @@
+ #include "mtk_drm_drv.h"
+ 
+ #define DSI_START		0x00
++#define VM_CMD_START			BIT(16)
+ 
+ #define DSI_INTEN		0x08
+ 
+@@ -44,12 +46,15 @@
+ #define TE_RDY_INT_FLAG			BIT(2)
+ #define VM_DONE_INT_FLAG		BIT(3)
+ #define EXT_TE_RDY_INT_FLAG		BIT(4)
++#define FRAME_DONE_INT_FLAG		BIT(4)
++#define VM_CMD_DONE_INT_FLAG		BIT(5)
+ #define DSI_BUSY			BIT(31)
+ 
+ #define DSI_CON_CTRL		0x10
+ #define DSI_RESET			BIT(0)
+ #define DSI_EN				BIT(1)
+ #define DPHY_RESET			BIT(2)
++#define DSI_DUAL_EN			BIT(4)
+ 
+ #define DSI_MODE_CTRL		0x14
+ #define MODE				(3)
+@@ -109,6 +114,9 @@
+ #define DSI_RACK		0x84
+ #define RACK				BIT(0)
+ 
++#define DSI_PHY_LCPAT		0x100
++#define LC_PAT_DPHY			0x55
++
+ #define DSI_PHY_LCCON		0x104
+ #define LC_HS_TX_EN			BIT(0)
+ #define LC_ULPM_EN			BIT(1)
+@@ -142,9 +150,38 @@
+ #define CLK_HS_POST			GENMASK(15, 8)
+ #define CLK_HS_EXIT			GENMASK(23, 16)
+ 
++#define DSI_RESERVED		0xf0
++#define VDE_BLOCK_ULTRA			BIT(29)
++
++#define DSI_DEBUG_SEL		0x170
++#define MM_RST_SEL			BIT(10)
++
++#define DSI_BUF_CON0		0x400
++#define BUF_BUF_EN			BIT(0)
++#define DSI_BUF_CON1		0x404
++#define BUF_OUT_VALID_THRESH		GENMASK(14, 0)
++#define DSI_TX_BUF_RW_TIMES	0x410
++#define DSI_BUF_SODI_HIGH	0x414
++#define DSI_BUF_SODI_LOW	0x418
++#define DSI_BUF_PREULTRA_HIGH	0x424
++#define DSI_BUF_PREULTRA_LOW	0x428
++#define DSI_BUF_ULTRA_HIGH	0x42c
++#define DSI_BUF_ULTRA_LOW	0x430
++#define DSI_BUF_URGENT_HIGH	0x434
++#define DSI_BUF_URGENT_LOW	0x438
++#define BUF_THRESHOLD			GENMASK(19, 0)
++
+ /* DSI_VM_CMD_CON */
+ #define VM_CMD_EN			BIT(0)
++#define VM_LONG_PACKET			BIT(1)
+ #define TS_VFP_EN			BIT(5)
++#define VM_CMD_DATA_ID			GENMASK(15, 8)
++#define VM_CMD_DATA_0			GENMASK(23, 16)
++#define VM_CMD_DATA_1			GENMASK(31, 24)
++
++/* From the start of DSI_VM_CMD_CON, for a long packet */
++#define DSI_VM_CMD_DATA		0x8
++#define VM_CMD_MAX_LEN		64
+ 
+ /* DSI_SHADOW_DEBUG */
+ #define FORCE_COMMIT			BIT(0)
+@@ -189,6 +226,24 @@ struct mtk_phy_timing {
+ 
+ struct phy;
+ 
++/**
++ * struct mtk_dsi_tx_buf_data - The TX buffer of the newer DSI hosts
++ * @sram_lines:  Size of the SRAM of the buffer
++ * @sram_unit:   Bytes in a line of the SRAM
++ * @buffer_unit: Bytes the thresholds count in
++ * @read_width:  Bytes the host reads from the buffer at a time
++ * @urgent_lo_us: Time left in the buffer when the low urgent signal goes off
++ * @urgent_hi_us: The same for the high urgent signal
++ */
++struct mtk_dsi_tx_buf_data {
++	u16 sram_lines;
++	u8 sram_unit;
++	u8 buffer_unit;
++	u8 read_width;
++	u8 urgent_lo_us;
++	u8 urgent_hi_us;
++};
++
+ struct mtk_dsi_driver_data {
+ 	const u32 reg_cmdq_off;
+ 	const u32 reg_vm_cmd_off;
+@@ -197,6 +252,22 @@ struct mtk_dsi_driver_data {
+ 	bool has_size_ctl;
+ 	bool cmdq_long_packet_ctl;
+ 	bool support_per_frame_lp;
++	/* Round the horizontal porches up to whole words of four bytes */
++	bool word_aligned_porches;
++	/*
++	 * Poll for the end of everything like the vendor does, and leave the interrupt
++	 * off: it can come with the video running, when BUSY stays set, and a bootloader
++	 * can leave it pending. The registers only answer while the host is on, so
++	 * nothing may touch them before.
++	 */
++	bool polled;
++	/* Send commands in the vertical front porch instead of stopping the video */
++	bool video_mode_cmds;
++	/* Compute the D-PHY timing and the buffer marks from this rate, not the real one */
++	u16 nominal_rate_mhz;
++	/* Leave the shadow registers in use, whatever the bootloader did */
++	bool keep_shadow;
++	const struct mtk_dsi_tx_buf_data *tx_buf;
+ };
+ 
+ struct mtk_dsi {
+@@ -209,6 +280,11 @@ struct mtk_dsi {
+ 	struct drm_dsc_config *dsc;
+ 	struct phy *phy;
+ 
++	/* The second link of a dual-link panel, set on the first link */
++	struct mtk_dsi *second_link;
++	/* This is the second link: the first one runs it, and has the encoder */
++	bool is_second_link;
++
+ 	void __iomem *regs;
+ 
+ 	struct clk *engine_clk;
+@@ -216,6 +292,8 @@ struct mtk_dsi {
+ 	struct clk *hs_clk;
+ 
+ 	u32 data_rate;
++	/* Lane rate the panel asks for */
++	unsigned long hs_rate;
+ 
+ 	unsigned long mode_flags;
+ 	enum mipi_dsi_pixel_format format;
+@@ -225,6 +303,8 @@ struct mtk_dsi {
+ 	int refcount;
+ 	bool enabled;
+ 	bool lanes_ready;
++	/* The bridge has both links on: it only turns them off then */
++	bool links_up;
+ 	int irq;
+ 	u32 irq_data;
+ 	wait_queue_head_t irq_wait_queue;
+@@ -248,11 +328,59 @@ static void mtk_dsi_mask(struct mtk_dsi *dsi, u32 offset, u32 mask, u32 data)
+ 	writel((temp & ~mask) | (data & mask), dsi->regs + offset);
+ }
+ 
++/*
++ * The way the vendor gets the timing of the N4 and N5 hosts. It takes the rate
++ * its panel asks for, 1004 Mbps, not the one the PLL gets, so this has the cycle
++ * of that rate instead of the real one. The upper limit of hs_prep is then off
++ * by 5 ns, and the panel is known to work with these values.
++ */
++static void mtk_dsi_phy_timconfig_nominal(struct mtk_dsi *dsi)
++{
++	struct mtk_phy_timing *timing = &dsi->phy_timing;
++	u32 rate_mhz = dsi->driver_data->nominal_rate_mhz;
++	u32 ui = max_t(u32, 1000 / rate_mhz, 1);
++	u32 cycle = 8000 / rate_mhz;
++	u32 clk_prep = NS_TO_CYCLE(64, cycle);
++	u32 clk_zero = NS_TO_CYCLE(350, cycle);
++	u32 hs_prep = NS_TO_CYCLE(64 + 5 * ui, cycle) + 1;
++	u32 hs_zero = NS_TO_CYCLE(200 + 10 * ui, cycle);
++	u32 lpx = NS_TO_CYCLE(75, cycle) + 1;
++
++	timing->lpx = lpx + lpx % 2;
++	timing->da_hs_prepare = max(hs_prep + hs_prep % 2, 6U);
++	/* Before the rounding up of hs_prep */
++	timing->da_hs_zero = hs_zero > hs_prep ? hs_zero - hs_prep : hs_zero;
++	timing->da_hs_trail = max(NS_TO_CYCLE(9 * ui, cycle),
++				  NS_TO_CYCLE(80 + 5 * ui, cycle));
++
++	/* Before the rounding up of lpx */
++	timing->ta_go = 4 * lpx;
++	timing->ta_sure = 3 * lpx / 2;
++	timing->ta_get = 5 * lpx;
++	timing->da_hs_exit = (NS_TO_CYCLE(125, cycle) + 1) | 1;
++
++	timing->clk_hs_prepare = clk_prep;
++	timing->clk_hs_zero = clk_zero > clk_prep ? clk_zero - clk_prep : clk_zero;
++	timing->clk_hs_trail = NS_TO_CYCLE(80, cycle);
++	timing->clk_hs_exit = NS_TO_CYCLE(125, cycle) + 1;
++	timing->clk_hs_post = NS_TO_CYCLE(90 + 52 * ui, cycle);
++
++	/* The pattern of the clock lane: the vendor always writes it for these hosts */
++	writel(LC_PAT_DPHY, dsi->regs + DSI_PHY_LCPAT);
++}
++
+ static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
+ {
+ 	u32 timcon0, timcon1, timcon2, timcon3;
+ 	u32 data_rate_mhz = DIV_ROUND_UP(dsi->data_rate, HZ_PER_MHZ);
+ 	struct mtk_phy_timing *timing = &dsi->phy_timing;
++	u32 cont_det = 0;
++
++	if (dsi->driver_data->nominal_rate_mhz) {
++		mtk_dsi_phy_timconfig_nominal(dsi);
++		cont_det = 3;
++		goto write_timing;
++	}
+ 
+ 	timing->lpx = (60 * data_rate_mhz / (8 * 1000)) + 1;
+ 	timing->da_hs_prepare = (80 * data_rate_mhz + 4 * 1000) / 8000;
+@@ -271,6 +399,7 @@ static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
+ 	timing->clk_hs_zero = timing->clk_hs_trail * 4;
+ 	timing->clk_hs_exit = 2 * timing->clk_hs_trail;
+ 
++write_timing:
+ 	timcon0 = FIELD_PREP(LPX, timing->lpx) |
+ 		  FIELD_PREP(HS_PREP, timing->da_hs_prepare) |
+ 		  FIELD_PREP(HS_ZERO, timing->da_hs_zero) |
+@@ -281,7 +410,8 @@ static void mtk_dsi_phy_timconfig(struct mtk_dsi *dsi)
+ 		  FIELD_PREP(TA_GET, timing->ta_get) |
+ 		  FIELD_PREP(DA_HS_EXIT, timing->da_hs_exit);
+ 
+-	timcon2 = FIELD_PREP(DA_HS_SYNC, 1) |
++	timcon2 = FIELD_PREP(CONT_DET, cont_det) |
++		  FIELD_PREP(DA_HS_SYNC, 1) |
+ 		  FIELD_PREP(CLK_ZERO, timing->clk_hs_zero) |
+ 		  FIELD_PREP(CLK_TRAIL, timing->clk_hs_trail);
+ 
+@@ -317,6 +447,12 @@ static void mtk_dsi_reset_dphy(struct mtk_dsi *dsi)
+ 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DPHY_RESET, 0);
+ }
+ 
++/* The second link starts and stops along with the first one */
++static void mtk_dsi_dual_enable(struct mtk_dsi *dsi, bool enable)
++{
++	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_DUAL_EN, enable ? DSI_DUAL_EN : 0);
++}
++
+ static void mtk_dsi_clk_ulp_mode_enter(struct mtk_dsi *dsi)
+ {
+ 	mtk_dsi_mask(dsi, DSI_PHY_LCCON, LC_HS_TX_EN, 0);
+@@ -497,7 +633,10 @@ static void mtk_dsi_config_vdo_timing_per_frame_lp(struct mtk_dsi *dsi)
+ 		dsi_tmp_buf_bpp = 3;
+ 
+ 	da_hs_trail = dsi->phy_timing.da_hs_trail;
+-	ps_wc = vm->hactive * dsi_tmp_buf_bpp;
++	if (dsi->dsc)
++		ps_wc = dsi->dsc->slice_count * dsi->dsc->slice_chunk_size;
++	else
++		ps_wc = vm->hactive * dsi_tmp_buf_bpp;
+ 
+ 	if (dsi->mode_flags & MIPI_DSI_MODE_VIDEO_SYNC_PULSE) {
+ 		horizontal_sync_active_byte =
+@@ -545,6 +684,42 @@ static void mtk_dsi_config_vdo_timing_per_frame_lp(struct mtk_dsi *dsi)
+ 	writel(horizontal_frontporch_byte, dsi->regs + DSI_HFP_WC);
+ }
+ 
++/* The horizontal timing of the vendor's N4 and N5 hosts, in whole words */
++static void mtk_dsi_config_vdo_timing_aligned(struct mtk_dsi *dsi)
++{
++	struct mtk_phy_timing *timing = &dsi->phy_timing;
++	struct videomode *vm = &dsi->vm;
++	u32 hsa_byte, hbp_byte, hfp_byte;
++	u32 ps_wc, hs_vb_ps_wc;
++	u32 bpp;
++
++	bpp = dsi->format == MIPI_DSI_FMT_RGB565 ? 2 : 3;
++
++	if (dsi->mode_flags & MIPI_DSI_MODE_VIDEO_SYNC_PULSE) {
++		hsa_byte = ALIGN(vm->hsync_len * bpp - 10, 4);
++		hbp_byte = ALIGN(vm->hback_porch * bpp - 10, 4);
++	} else {
++		hsa_byte = ALIGN(vm->hsync_len * bpp - 4, 4);
++		hbp_byte = ALIGN((vm->hback_porch + vm->hsync_len) * bpp - 10, 4);
++	}
++	hfp_byte = ALIGN(vm->hfront_porch * bpp - 12, 4);
++
++	if (dsi->dsc)
++		ps_wc = dsi->dsc->slice_count * dsi->dsc->slice_chunk_size;
++	else
++		ps_wc = vm->hactive * bpp;
++
++	hs_vb_ps_wc = ps_wc - (timing->lpx + timing->da_hs_exit +
++			       timing->da_hs_prepare + timing->da_hs_zero + 2) *
++			      dsi->lanes;
++
++	writel(hsa_byte, dsi->regs + DSI_HSA_WC);
++	writel(hbp_byte, dsi->regs + DSI_HBP_WC);
++	writel(hfp_byte | FIELD_PREP(HFP_HS_EN, 1) |
++	       FIELD_PREP(HFP_HS_VB_PS_WC, hs_vb_ps_wc),
++	       dsi->regs + DSI_HFP_WC);
++}
++
+ static void mtk_dsi_config_vdo_timing_per_line_lp(struct mtk_dsi *dsi)
+ {
+ 	u32 horizontal_sync_active_byte;
+@@ -616,6 +791,13 @@ static int mtk_dsi_set_dsc_params(struct mtk_dsi *dsi)
+ 	struct device *dev = dsi->host.dev;
+ 	int ret;
+ 
++	/*
++	 * A panel can have filled in everything itself, when it does not expect
++	 * the values of the helpers.
++	 */
++	if (dsc->rc_model_size && dsc->slice_chunk_size)
++		return 0;
++
+ 	if (dsc->bits_per_pixel & GENMASK(3, 0)) {
+ 		dev_err(dev, "Fractional bits_per_pixel not supported\n");
+ 		return -EINVAL;
+@@ -651,29 +833,82 @@ static int mtk_dsi_config_vdo_timing(struct mtk_dsi *dsi)
+ 	struct videomode *vm = &dsi->vm;
+ 	int ret;
+ 
++	if (dsi->dsc) {
++		ret = mtk_dsi_set_dsc_params(dsi);
++		if (ret)
++			return ret;
++	}
++
+ 	writel(vm->vsync_len, dsi->regs + DSI_VSA_NL);
+ 	writel(vm->vback_porch, dsi->regs + DSI_VBP_NL);
+ 	writel(vm->vfront_porch, dsi->regs + DSI_VFP_NL);
+ 	writel(vm->vactive, dsi->regs + DSI_VACT_NL);
+ 
+-	if (dsi->driver_data->support_per_frame_lp)
++	if (dsi->driver_data->word_aligned_porches)
++		mtk_dsi_config_vdo_timing_aligned(dsi);
++	else if (dsi->driver_data->support_per_frame_lp)
+ 		mtk_dsi_config_vdo_timing_per_frame_lp(dsi);
+ 	else
+ 		mtk_dsi_config_vdo_timing_per_line_lp(dsi);
+ 
+-	if (dsi->dsc) {
+-		ret = mtk_dsi_set_dsc_params(dsi);
+-		if (ret)
+-			return ret;
+-
+-		mtk_dsi_ps_control(dsi, true);
+-	} else {
+-		mtk_dsi_ps_control(dsi, false);
+-	}
++	mtk_dsi_ps_control(dsi, !!dsi->dsc);
+ 
+ 	return 0;
+ }
+ 
++/*
++ * The buffer between the display path and the lanes, with the marks for the bus
++ * priority. In video mode the host starts from the frame timing, so it needs no
++ * mark of its own to send data.
++ */
++static void mtk_dsi_config_tx_buf(struct mtk_dsi *dsi)
++{
++	const struct mtk_dsi_tx_buf_data *buf = dsi->driver_data->tx_buf;
++	u32 data_rate_mhz = dsi->driver_data->nominal_rate_mhz;
++	u32 clk_mhz = clk_get_rate(dsi->engine_clk) / HZ_PER_MHZ;
++	u32 ps_wc, bpp, size, fill_rate, drain_rate, rw_lines;
++
++	bpp = dsi->format == MIPI_DSI_FMT_RGB565 ? 2 : 3;
++
++	if (dsi->dsc)
++		ps_wc = dsi->dsc->slice_count * dsi->dsc->slice_chunk_size;
++	else
++		ps_wc = dsi->vm.hactive * bpp;
++	rw_lines = ps_wc * dsi->vm.vactive;
++
++#define DSI_TX_BUF_MARK(us)	((us) * data_rate_mhz * dsi->lanes / 8 / buf->buffer_unit)
++	size = buf->sram_lines * buf->sram_unit / buf->buffer_unit;
++	fill_rate = clk_mhz * bpp / buf->buffer_unit;
++	drain_rate = data_rate_mhz * dsi->lanes / 8 / buf->buffer_unit;
++	fill_rate = max(fill_rate, drain_rate);
++
++	mtk_dsi_mask(dsi, DSI_BUF_CON1, BUF_OUT_VALID_THRESH, 0);
++	mtk_dsi_mask(dsi, DSI_DEBUG_SEL, MM_RST_SEL, 0);
++	mtk_dsi_mask(dsi, DSI_RESERVED, VDE_BLOCK_ULTRA, 0);
++
++	writel(FIELD_PREP(BUF_THRESHOLD, size - 12 * (fill_rate - drain_rate) / 10),
++	       dsi->regs + DSI_BUF_SODI_HIGH);
++	writel(FIELD_PREP(BUF_THRESHOLD, DSI_TX_BUF_MARK(23 + 5)),
++	       dsi->regs + DSI_BUF_SODI_LOW);
++	writel(FIELD_PREP(BUF_THRESHOLD, DSI_TX_BUF_MARK(26)),
++	       dsi->regs + DSI_BUF_PREULTRA_HIGH);
++	writel(FIELD_PREP(BUF_THRESHOLD, DSI_TX_BUF_MARK(25)),
++	       dsi->regs + DSI_BUF_PREULTRA_LOW);
++	writel(FIELD_PREP(BUF_THRESHOLD, DSI_TX_BUF_MARK(25)),
++	       dsi->regs + DSI_BUF_ULTRA_HIGH);
++	writel(FIELD_PREP(BUF_THRESHOLD, DSI_TX_BUF_MARK(23)),
++	       dsi->regs + DSI_BUF_ULTRA_LOW);
++	writel(FIELD_PREP(BUF_THRESHOLD, DSI_TX_BUF_MARK(buf->urgent_hi_us)),
++	       dsi->regs + DSI_BUF_URGENT_HIGH);
++	writel(FIELD_PREP(BUF_THRESHOLD, DSI_TX_BUF_MARK(buf->urgent_lo_us)),
++	       dsi->regs + DSI_BUF_URGENT_LOW);
++#undef DSI_TX_BUF_MARK
++
++	writel(DIV_ROUND_UP(rw_lines, buf->read_width),
++	       dsi->regs + DSI_TX_BUF_RW_TIMES);
++	mtk_dsi_mask(dsi, DSI_BUF_CON0, BUF_BUF_EN, BUF_BUF_EN);
++}
++
+ static void mtk_dsi_start(struct mtk_dsi *dsi)
+ {
+ 	writel(0, dsi->regs + DSI_START);
+@@ -694,6 +929,11 @@ static void mtk_dsi_set_interrupt_enable(struct mtk_dsi *dsi)
+ {
+ 	u32 inten = LPRX_RD_RDY_INT_FLAG | CMD_DONE_INT_FLAG | VM_DONE_INT_FLAG;
+ 
++	if (dsi->driver_data->polled) {
++		inten = 0;
++		writel(0, dsi->regs + DSI_INTSTA);
++	}
++
+ 	writel(inten, dsi->regs + DSI_INTEN);
+ }
+ 
+@@ -778,6 +1018,134 @@ static void mtk_dsi_lane_ready(struct mtk_dsi *dsi)
+ 	}
+ }
+ 
++static void mtk_dsi_lanes_ready(struct mtk_dsi *dsi)
++{
++	mtk_dsi_lane_ready(dsi);
++	if (dsi->second_link)
++		mtk_dsi_lane_ready(dsi->second_link);
++}
++
++/*
++ * The backlight of a panel sends commands whenever it wants to, also while the links
++ * of its host go on or off.
++ */
++static DEFINE_MUTEX(mtk_dsi_link_lock);
++
++static bool mtk_dsi_links_on(struct mtk_dsi *dsi)
++{
++	return dsi->refcount && (!dsi->second_link || dsi->second_link->refcount);
++}
++
++/* Only the hosts that compute everything from a nominal rate run at the panel's */
++static unsigned long mtk_dsi_panel_rate(struct mtk_dsi *dsi)
++{
++	return dsi->driver_data->nominal_rate_mhz ? dsi->hs_rate : 0;
++}
++
++static int mtk_dsi_poll_idle(struct mtk_dsi *dsi)
++{
++	u32 val;
++	int ret;
++
++	ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val, !(val & DSI_BUSY),
++				 4, 100 * USEC_PER_MSEC);
++	if (ret)
++		dev_warn(dsi->host.dev, "Still busy\n");
++
++	return ret;
++}
++
++/*
++ * Stop the video at the end of a frame, like the vendor, so nothing is in flight
++ * behind the host. If no frame ends in the time of two frames at the lowest rate,
++ * stopping now only costs that frame.
++ */
++static int mtk_dsi_stop_links(struct mtk_dsi *dsi, struct mtk_dsi *second)
++{
++	int ret, ret2 = 0;
++	u32 val;
++
++	mtk_dsi_mask(dsi, DSI_INTSTA, FRAME_DONE_INT_FLAG, 0);
++	readl_poll_timeout(dsi->regs + DSI_INTSTA, val, val & FRAME_DONE_INT_FLAG,
++			   100, 70 * USEC_PER_MSEC);
++
++	mtk_dsi_set_cmd_mode(dsi);
++	if (second)
++		mtk_dsi_set_cmd_mode(second);
++
++	writel(0, dsi->regs + DSI_START);
++	if (second)
++		writel(0, second->regs + DSI_START);
++
++	ret = mtk_dsi_poll_idle(dsi);
++	if (second) {
++		ret2 = mtk_dsi_poll_idle(second);
++		mtk_dsi_dual_enable(second, false);
++	}
++
++	return ret ?: ret2;
++}
++
++/* Stop the video on all links of the panel, and leave them in command mode */
++static s32 mtk_dsi_stop_video(struct mtk_dsi *dsi, u32 timeout)
++{
++	if (!dsi->driver_data->polled) {
++		mtk_dsi_stop(dsi);
++		return mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, timeout);
++	}
++
++	/* This came first, before the panel got its last commands */
++	if (!(readl(dsi->regs + DSI_MODE_CTRL) & MODE))
++		return 0;
++
++	return mtk_dsi_stop_links(dsi, dsi->second_link);
++}
++
++/*
++ * The bootloader can leave the video running, if the power domain stays on through
++ * the handover. It has to stop before anything in its way changes, the PHY first.
++ */
++static int mtk_dsi_stop_bootloader_video(struct mtk_dsi *dsi)
++{
++	int ret;
++
++	ret = clk_prepare_enable(dsi->engine_clk);
++	if (ret)
++		return ret;
++
++	ret = clk_prepare_enable(dsi->digital_clk);
++	if (!ret) {
++		if (readl(dsi->regs + DSI_MODE_CTRL) & MODE) {
++			mtk_dsi_stop_links(dsi, NULL);
++			if (dsi->is_second_link)
++				mtk_dsi_dual_enable(dsi, false);
++		}
++		clk_disable_unprepare(dsi->digital_clk);
++	}
++	clk_disable_unprepare(dsi->engine_clk);
++
++	return ret;
++}
++
++/* Start the video on all links of the panel, from the first one */
++static void mtk_dsi_start_video(struct mtk_dsi *dsi)
++{
++	struct mtk_dsi *second = dsi->second_link;
++
++	if (second)
++		mtk_dsi_dual_enable(second, true);
++
++	mtk_dsi_set_mode(dsi);
++	mtk_dsi_clk_hs_mode(dsi, 1);
++
++	if (second) {
++		mtk_dsi_set_mode(second);
++		mtk_dsi_clk_hs_mode(second, 1);
++	}
++
++	mtk_dsi_start(dsi);
++}
++
+ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
+ {
+ 	struct device *dev = dsi->host.dev;
+@@ -787,20 +1155,38 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
+ 	if (++dsi->refcount != 1)
+ 		return 0;
+ 
++	/* The CRTC may have failed to get the domain, and an access would stop the bus */
++	if (dsi->driver_data->polled) {
++		ret = pm_runtime_resume_and_get(dev);
++		if (ret < 0) {
++			dev_err(dev, "Failed to power up: %d\n", ret);
++			goto err_refcount;
++		}
++
++		ret = mtk_dsi_stop_bootloader_video(dsi);
++		if (ret < 0) {
++			dev_err(dev, "Failed to enable clocks: %d\n", ret);
++			goto err_put;
++		}
++	}
++
+ 	ret = mipi_dsi_pixel_format_to_bpp(dsi->format);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Unknown MIPI DSI format %d\n", dsi->format);
+-		return ret;
++		goto err_put;
+ 	}
+ 	bit_per_pixel = ret;
+ 
+-	dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock * bit_per_pixel,
+-					  dsi->lanes);
++	if (mtk_dsi_panel_rate(dsi))
++		dsi->data_rate = mtk_dsi_panel_rate(dsi);
++	else
++		dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock * bit_per_pixel,
++						  dsi->lanes);
+ 
+ 	ret = clk_set_rate(dsi->hs_clk, dsi->data_rate);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to set data rate: %d\n", ret);
+-		goto err_refcount;
++		goto err_put;
+ 	}
+ 
+ 	phy_power_on(dsi->phy);
+@@ -822,6 +1208,9 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
+ 	if (dsi->driver_data->has_shadow_ctl)
+ 		writel(FORCE_COMMIT | BYPASS_SHADOW,
+ 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
++	else if (dsi->driver_data->keep_shadow)
++		mtk_dsi_mask(dsi, dsi->driver_data->reg_shadow_dbg_off,
++			     BYPASS_SHADOW, 0);
+ 
+ 	mtk_dsi_reset_engine(dsi);
+ 
+@@ -835,6 +1224,9 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
+ 
+ 	mtk_dsi_phy_timconfig(dsi);
+ 
++	if (dsi->driver_data->tx_buf)
++		mtk_dsi_config_tx_buf(dsi);
++
+ 	mtk_dsi_ps_control(dsi, true);
+ 	mtk_dsi_set_vm_cmd(dsi);
+ 	ret = mtk_dsi_config_vdo_timing(dsi);
+@@ -852,6 +1244,9 @@ err_disable_engine_clk:
+ 	clk_disable_unprepare(dsi->engine_clk);
+ err_phy_power_off:
+ 	phy_power_off(dsi->phy);
++err_put:
++	if (dsi->driver_data->polled)
++		pm_runtime_put(dev);
+ err_refcount:
+ 	dsi->refcount--;
+ 	return ret;
+@@ -859,6 +1254,10 @@ err_refcount:
+ 
+ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
+ {
++	/* It stays off when it could not get its power domain */
++	if (dsi->driver_data->polled && !dsi->refcount)
++		return;
++
+ 	if (WARN_ON(dsi->refcount == 0))
+ 		return;
+ 
+@@ -872,9 +1271,12 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
+ 	 * mtk_dsi_start() needs to be called in mtk_output_dsi_enable(),
+ 	 * after dsi is fully set.
+ 	 */
+-	mtk_dsi_stop(dsi);
++	/* The first link has stopped the second one along with itself */
++	if (!dsi->is_second_link)
++		mtk_dsi_stop_video(dsi, 500);
++	else
++		mtk_dsi_dual_enable(dsi, false);
+ 
+-	mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+ 	mtk_dsi_reset_engine(dsi);
+ 	mtk_dsi_lane0_ulp_mode_enter(dsi);
+ 	mtk_dsi_clk_ulp_mode_enter(dsi);
+@@ -888,6 +1290,9 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
+ 
+ 	phy_power_off(dsi->phy);
+ 
++	if (dsi->driver_data->polled)
++		pm_runtime_put(dsi->host.dev);
++
+ 	dsi->lanes_ready = false;
+ }
+ 
+@@ -896,9 +1301,7 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
+ 	if (dsi->enabled)
+ 		return;
+ 
+-	mtk_dsi_set_mode(dsi);
+-	mtk_dsi_clk_hs_mode(dsi, 1);
+-	mtk_dsi_start(dsi);
++	mtk_dsi_start_video(dsi);
+ 
+ 	dsi->enabled = true;
+ }
+@@ -908,6 +1311,14 @@ static void mtk_output_dsi_disable(struct mtk_dsi *dsi)
+ 	if (!dsi->enabled)
+ 		return;
+ 
++	/*
++	 * Commands would go out in the front porch otherwise, and the last ones
++	 * for the panel have to go out without video, like the vendor does. The
++	 * CRTC does not wait for a vblank when this host stops first.
++	 */
++	if (dsi->driver_data->video_mode_cmds)
++		mtk_dsi_stop_video(dsi, 500);
++
+ 	dsi->enabled = false;
+ }
+ 
+@@ -929,6 +1340,17 @@ static void mtk_dsi_bridge_mode_set(struct drm_bridge *bridge,
+ 	struct mtk_dsi *dsi = bridge_to_dsi(bridge);
+ 
+ 	drm_display_mode_to_videomode(adjusted, &dsi->vm);
++
++	/* The mode is the one of the panel, and each link has half of it */
++	if (dsi->second_link) {
++		dsi->vm.pixelclock /= 2;
++		dsi->vm.hactive /= 2;
++		dsi->vm.hfront_porch /= 2;
++		dsi->vm.hback_porch /= 2;
++		dsi->vm.hsync_len /= 2;
++
++		dsi->second_link->vm = dsi->vm;
++	}
+ }
+ 
+ static void mtk_dsi_bridge_atomic_disable(struct drm_bridge *bridge,
+@@ -936,7 +1358,9 @@ static void mtk_dsi_bridge_atomic_disable(struct drm_bridge *bridge,
+ {
+ 	struct mtk_dsi *dsi = bridge_to_dsi(bridge);
+ 
++	mutex_lock(&mtk_dsi_link_lock);
+ 	mtk_output_dsi_disable(dsi);
++	mutex_unlock(&mtk_dsi_link_lock);
+ }
+ 
+ static void mtk_dsi_bridge_atomic_enable(struct drm_bridge *bridge,
+@@ -944,10 +1368,10 @@ static void mtk_dsi_bridge_atomic_enable(struct drm_bridge *bridge,
+ {
+ 	struct mtk_dsi *dsi = bridge_to_dsi(bridge);
+ 
+-	if (dsi->refcount == 0)
+-		return;
+-
+-	mtk_output_dsi_enable(dsi);
++	mutex_lock(&mtk_dsi_link_lock);
++	if (mtk_dsi_links_on(dsi))
++		mtk_output_dsi_enable(dsi);
++	mutex_unlock(&mtk_dsi_link_lock);
+ }
+ 
+ static void mtk_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
+@@ -957,13 +1381,35 @@ static void mtk_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
+ 	struct drm_device *drm = bridge->dev;
+ 	int ret;
+ 
++	mutex_lock(&mtk_dsi_link_lock);
++
+ 	ret = mtk_dsi_poweron(dsi);
+-	if (ret < 0)
++	if (ret < 0) {
+ 		drm_err(drm, "failed to power on dsi\n");
++		if (dsi->driver_data->polled)
++			goto out;
++	}
+ 
+-	mtk_dsi_lane_ready(dsi);
+-	if (!(dsi->mode_flags & MIPI_DSI_MODE_LPM))
++	if (dsi->second_link) {
++		ret = mtk_dsi_poweron(dsi->second_link);
++		if (ret < 0) {
++			drm_err(drm, "failed to power on the second dsi link\n");
++			mtk_dsi_poweroff(dsi);
++			goto out;
++		}
++	}
++
++	dsi->links_up = true;
++
++	mtk_dsi_lanes_ready(dsi);
++	if (!(dsi->mode_flags & MIPI_DSI_MODE_LPM)) {
+ 		mtk_dsi_clk_hs_mode(dsi, 1);
++		if (dsi->second_link)
++			mtk_dsi_clk_hs_mode(dsi->second_link, 1);
++	}
++
++out:
++	mutex_unlock(&mtk_dsi_link_lock);
+ }
+ 
+ static void mtk_dsi_bridge_atomic_post_disable(struct drm_bridge *bridge,
+@@ -971,7 +1417,17 @@ static void mtk_dsi_bridge_atomic_post_disable(struct drm_bridge *bridge,
+ {
+ 	struct mtk_dsi *dsi = bridge_to_dsi(bridge);
+ 
+-	mtk_dsi_poweroff(dsi);
++	mutex_lock(&mtk_dsi_link_lock);
++
++	/* It did not come up if it could not get its power domain */
++	if (!dsi->driver_data->polled || dsi->links_up) {
++		mtk_dsi_poweroff(dsi);
++		if (dsi->second_link)
++			mtk_dsi_poweroff(dsi->second_link);
++	}
++	dsi->links_up = false;
++
++	mutex_unlock(&mtk_dsi_link_lock);
+ }
+ 
+ static enum drm_mode_status
+@@ -980,14 +1436,23 @@ mtk_dsi_bridge_mode_valid(struct drm_bridge *bridge,
+ 			  const struct drm_display_mode *mode)
+ {
+ 	struct mtk_dsi *dsi = bridge_to_dsi(bridge);
++	int hdisplay = mode->hdisplay;
+ 	int bpp;
+ 
+ 	bpp = mipi_dsi_pixel_format_to_bpp(dsi->format);
+ 	if (bpp < 0)
+ 		return MODE_ERROR;
+ 
+-	if (mode->clock * bpp / dsi->lanes > 1500000)
++	if (dsi->second_link)
++		hdisplay /= 2;
++
++	if (mtk_dsi_panel_rate(dsi)) {
++		/* The panel knows the rate it wants, whatever the mode says */
++		if (mtk_dsi_panel_rate(dsi) > 1500000000)
++			return MODE_CLOCK_HIGH;
++	} else if (mode->clock * bpp / dsi->lanes > 1500000) {
+ 		return MODE_CLOCK_HIGH;
++	}
+ 
+ 	if (dsi->dsc) {
+ 		if (dsi->dsc->slice_width == 0 || dsi->dsc->slice_height == 0) {
+@@ -997,10 +1462,10 @@ mtk_dsi_bridge_mode_valid(struct drm_bridge *bridge,
+ 			return MODE_BAD;
+ 		}
+ 
+-		if (mode->hdisplay % dsi->dsc->slice_width) {
++		if (hdisplay % dsi->dsc->slice_width) {
+ 			dev_dbg(dsi->host.dev,
+ 				"DSC: hdisplay %u is not a multiple of slice width %u\n",
+-				dsi->dsc->slice_width, mode->hdisplay);
++				hdisplay, dsi->dsc->slice_width);
+ 			return MODE_H_ILLEGAL;
+ 		}
+ 		if (mode->vdisplay % dsi->dsc->slice_height) {
+@@ -1031,14 +1496,18 @@ void mtk_dsi_ddp_start(struct device *dev)
+ {
+ 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+ 
++	mutex_lock(&mtk_dsi_link_lock);
+ 	mtk_dsi_poweron(dsi);
++	mutex_unlock(&mtk_dsi_link_lock);
+ }
+ 
+ void mtk_dsi_ddp_stop(struct device *dev)
+ {
+ 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+ 
++	mutex_lock(&mtk_dsi_link_lock);
+ 	mtk_dsi_poweroff(dsi);
++	mutex_unlock(&mtk_dsi_link_lock);
+ }
+ 
+ struct drm_dsc_config *mtk_dsi_get_dsc_config(struct device *dev)
+@@ -1048,6 +1517,21 @@ struct drm_dsc_config *mtk_dsi_get_dsc_config(struct device *dev)
+ 	return dsi->dsc;
+ }
+ 
++/**
++ * mtk_dsi_set_second_link() - Make a host the second link of another one
++ * @dev:    The first link, with the encoder and the commands of the panel
++ * @second: The second link
++ *
++ * The panel knows that it has two links, and the path of the CRTC knows which is
++ * which. From here on the first link runs both of them.
++ */
++void mtk_dsi_set_second_link(struct device *dev, struct device *second)
++{
++	struct mtk_dsi *dsi = dev_get_drvdata(dev);
++
++	dsi->second_link = dev_get_drvdata(second);
++}
++
+ static int mtk_dsi_encoder_init(struct drm_device *drm, struct mtk_dsi *dsi)
+ {
+ 	int ret;
+@@ -1098,17 +1582,21 @@ static int mtk_dsi_bind(struct device *dev, struct device *master, void *data)
+ 	struct drm_device *drm = data;
+ 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+ 
+-	ret = mtk_dsi_encoder_init(drm, dsi);
+-	if (ret)
+-		return ret;
++	if (!dsi->is_second_link) {
++		ret = mtk_dsi_encoder_init(drm, dsi);
++		if (ret)
++			return ret;
++	}
+ 
+ 	ret = device_reset_optional(dev);
+ 	if (ret) {
+-		drm_encoder_cleanup(&dsi->encoder);
++		if (!dsi->is_second_link)
++			drm_encoder_cleanup(&dsi->encoder);
+ 		return ret;
+ 	}
+ 
+-	enable_irq(dsi->irq);
++	if (!dsi->driver_data->polled)
++		enable_irq(dsi->irq);
+ 
+ 	return 0;
+ }
+@@ -1118,9 +1606,11 @@ static void mtk_dsi_unbind(struct device *dev, struct device *master,
+ {
+ 	struct mtk_dsi *dsi = dev_get_drvdata(dev);
+ 
+-	disable_irq(dsi->irq);
++	if (!dsi->driver_data->polled)
++		disable_irq(dsi->irq);
+ 
+-	drm_encoder_cleanup(&dsi->encoder);
++	if (!dsi->is_second_link)
++		drm_encoder_cleanup(&dsi->encoder);
+ }
+ 
+ static const struct component_ops mtk_dsi_component_ops = {
+@@ -1139,6 +1629,15 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
+ 	dsi->lanes = device->lanes;
+ 	dsi->format = device->format;
+ 	dsi->mode_flags = device->mode_flags;
++	dsi->hs_rate = device->hs_rate;
++
++	if (device->dsc)
++		dsi->dsc = device->dsc;
++
++	/* The panel behind the first link is all the encoder needs */
++	if (dsi->is_second_link)
++		goto add_component;
++
+ 	dsi->next_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 1, 0);
+ 	if (IS_ERR(dsi->next_bridge)) {
+ 		ret = PTR_ERR(dsi->next_bridge);
+@@ -1151,15 +1650,14 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
+ 			return PTR_ERR(dsi->next_bridge);
+ 	}
+ 
+-	if (device->dsc)
+-		dsi->dsc = device->dsc;
+-
+ 	drm_bridge_add(&dsi->bridge);
+ 
++add_component:
+ 	ret = component_add(host->dev, &mtk_dsi_component_ops);
+ 	if (ret) {
+ 		drm_err(drm, "failed to add dsi_host component: %d\n", ret);
+-		drm_bridge_remove(&dsi->bridge);
++		if (!dsi->is_second_link)
++			drm_bridge_remove(&dsi->bridge);
+ 		dsi->dsc = NULL;
+ 		return ret;
+ 	}
+@@ -1173,7 +1671,8 @@ static int mtk_dsi_host_detach(struct mipi_dsi_host *host,
+ 	struct mtk_dsi *dsi = host_to_dsi(host);
+ 
+ 	component_del(host->dev, &mtk_dsi_component_ops);
+-	drm_bridge_remove(&dsi->bridge);
++	if (!dsi->is_second_link)
++		drm_bridge_remove(&dsi->bridge);
+ 	dsi->dsc = NULL;
+ 
+ 	return 0;
+@@ -1258,6 +1757,116 @@ static void mtk_dsi_cmdq(struct mtk_dsi *dsi, const struct mipi_dsi_msg *msg)
+ 	}
+ }
+ 
++static void mtk_dsi_vm_cmdq(struct mtk_dsi *dsi, const struct mipi_dsi_msg *msg)
++{
++	u32 reg_vm_cmd = dsi->driver_data->reg_vm_cmd_off;
++	const u8 *tx_buf = msg->tx_buf;
++	u32 con = FIELD_PREP(VM_CMD_DATA_ID, msg->type) | VM_CMD_EN | TS_VFP_EN;
++	u32 i, j;
++
++	if (msg->tx_len > 2) {
++		for (i = 0; i < msg->tx_len; i += 4) {
++			u32 val = 0;
++
++			for (j = 0; j < 4 && i + j < msg->tx_len; j++)
++				val |= tx_buf[i + j] << (j * 8);
++
++			writel(val, dsi->regs + reg_vm_cmd + DSI_VM_CMD_DATA + i);
++		}
++
++		con |= (msg->tx_len << 16) | VM_LONG_PACKET;
++	} else {
++		if (msg->tx_len > 0)
++			con |= FIELD_PREP(VM_CMD_DATA_0, tx_buf[0]);
++		if (msg->tx_len > 1)
++			con |= FIELD_PREP(VM_CMD_DATA_1, tx_buf[1]);
++	}
++
++	writel(con, dsi->regs + reg_vm_cmd);
++	mtk_dsi_mask(dsi, DSI_INTSTA, VM_CMD_DONE_INT_FLAG, 0);
++	mtk_dsi_mask(dsi, DSI_START, VM_CMD_START, 0);
++}
++
++/*
++ * Send a command in the vertical front porch of the running video, on all links
++ * of the panel at once. The vendor waits for this by polling too, and two frames
++ * of the lowest rate are the longest it can take.
++ */
++static ssize_t mtk_dsi_host_send_vm_cmd(struct mtk_dsi *dsi,
++					const struct mipi_dsi_msg *msg)
++{
++	struct mtk_dsi *second = dsi->second_link;
++	u32 val;
++	int ret;
++
++	mtk_dsi_vm_cmdq(dsi, msg);
++	if (second)
++		mtk_dsi_vm_cmdq(second, msg);
++
++	mtk_dsi_mask(dsi, DSI_START, VM_CMD_START, VM_CMD_START);
++	if (second)
++		mtk_dsi_mask(second, DSI_START, VM_CMD_START, VM_CMD_START);
++
++	ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val,
++				 val & VM_CMD_DONE_INT_FLAG, 100, 70000);
++	if (!ret && second)
++		ret = readl_poll_timeout(second->regs + DSI_INTSTA, val,
++					 val & VM_CMD_DONE_INT_FLAG, 100, 70000);
++
++	mtk_dsi_mask(dsi, DSI_INTSTA, VM_CMD_DONE_INT_FLAG, 0);
++	mtk_dsi_mask(dsi, DSI_START, VM_CMD_START, 0);
++	if (second) {
++		mtk_dsi_mask(second, DSI_INTSTA, VM_CMD_DONE_INT_FLAG, 0);
++		mtk_dsi_mask(second, DSI_START, VM_CMD_START, 0);
++	}
++
++	return ret;
++}
++
++/*
++ * Send a command, on both links at once if it is not a read: that only comes back
++ * on the link that asked. The second link takes its start from the first one, like
++ * the video does.
++ */
++static ssize_t mtk_dsi_host_send_cmd_polled(struct mtk_dsi *dsi,
++					    const struct mipi_dsi_msg *msg)
++{
++	bool is_read = MTK_DSI_HOST_IS_READ(msg->type);
++	struct mtk_dsi *second = is_read ? NULL : dsi->second_link;
++	int ret, ret2 = 0;
++	u32 val;
++
++	mtk_dsi_wait_for_idle(dsi);
++	mtk_dsi_cmdq(dsi, msg);
++
++	if (second) {
++		mtk_dsi_wait_for_idle(second);
++		mtk_dsi_cmdq(second, msg);
++		mtk_dsi_dual_enable(second, true);
++	}
++
++	mtk_dsi_start(dsi);
++	/* Clear the start right away, as it holds both of them */
++	writel(0, dsi->regs + DSI_START);
++
++	if (is_read) {
++		ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val,
++					 val & LPRX_RD_RDY_INT_FLAG, 100, USEC_PER_SEC);
++		mtk_dsi_mask(dsi, DSI_INTSTA, LPRX_RD_RDY_INT_FLAG, 0);
++		mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
++		if (ret)
++			return ret;
++	}
++
++	ret = mtk_dsi_poll_idle(dsi);
++	if (second) {
++		ret2 = mtk_dsi_poll_idle(second);
++		mtk_dsi_dual_enable(second, false);
++	}
++
++	return ret ?: ret2;
++}
++
+ static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
+ 				     const struct mipi_dsi_msg *msg, u8 flag)
+ {
+@@ -1272,32 +1881,41 @@ static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
+ 		return 0;
+ }
+ 
+-static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
+-				     const struct mipi_dsi_msg *msg)
++static ssize_t mtk_dsi_do_transfer(struct mtk_dsi *dsi, const struct mipi_dsi_msg *msg)
+ {
+-	struct mtk_dsi *dsi = host_to_dsi(host);
+ 	struct drm_device *drm = dsi->bridge.dev;
+ 	ssize_t recv_cnt;
+ 	u8 read_data[16];
+ 	void *src_addr;
+ 	u8 irq_flag = CMD_DONE_INT_FLAG;
++	bool is_read = MTK_DSI_HOST_IS_READ(msg->type);
+ 	u32 dsi_mode;
+ 	int ret, i;
+ 
+ 	dsi_mode = readl(dsi->regs + DSI_MODE_CTRL);
++
++	/* Dimming should not stop the picture */
++	if ((dsi_mode & MODE) && !is_read &&
++	    dsi->driver_data->video_mode_cmds && msg->tx_len <= VM_CMD_MAX_LEN) {
++		ret = mtk_dsi_host_send_vm_cmd(dsi, msg);
++		return ret < 0 ? ret : 0;
++	}
++
+ 	if (dsi_mode & MODE) {
+-		mtk_dsi_stop(dsi);
+-		ret = mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
++		ret = mtk_dsi_stop_video(dsi, 500);
+ 		if (ret)
+ 			goto restore_dsi_mode;
+ 	}
+ 
+-	if (MTK_DSI_HOST_IS_READ(msg->type))
++	if (is_read)
+ 		irq_flag |= LPRX_RD_RDY_INT_FLAG;
+ 
+-	mtk_dsi_lane_ready(dsi);
++	mtk_dsi_lanes_ready(dsi);
+ 
+-	ret = mtk_dsi_host_send_cmd(dsi, msg, irq_flag);
++	if (dsi->driver_data->polled)
++		ret = mtk_dsi_host_send_cmd_polled(dsi, msg);
++	else
++		ret = mtk_dsi_host_send_cmd(dsi, msg, irq_flag);
+ 	if (ret)
+ 		goto restore_dsi_mode;
+ 
+@@ -1335,14 +1953,32 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
+ 		 recv_cnt, *((u8 *)(msg->tx_buf)));
+ 
+ restore_dsi_mode:
+-	if (dsi_mode & MODE) {
+-		mtk_dsi_set_mode(dsi);
+-		mtk_dsi_start(dsi);
+-	}
++	if (dsi_mode & MODE)
++		mtk_dsi_start_video(dsi);
+ 
+ 	return ret < 0 ? ret : recv_cnt;
+ }
+ 
++static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
++				     const struct mipi_dsi_msg *msg)
++{
++	struct mtk_dsi *dsi = host_to_dsi(host);
++	ssize_t ret;
++
++	if (!dsi->driver_data->polled)
++		return mtk_dsi_do_transfer(dsi, msg);
++
++	/* The first link sends everything the panel gets */
++	if (dsi->is_second_link)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&mtk_dsi_link_lock);
++	ret = mtk_dsi_links_on(dsi) ? mtk_dsi_do_transfer(dsi, msg) : -ENODEV;
++	mutex_unlock(&mtk_dsi_link_lock);
++
++	return ret;
++}
++
+ static const struct mipi_dsi_host_ops mtk_dsi_ops = {
+ 	.attach = mtk_dsi_host_attach,
+ 	.detach = mtk_dsi_host_detach,
+@@ -1361,6 +1997,8 @@ static int mtk_dsi_probe(struct platform_device *pdev)
+ 		return PTR_ERR(dsi);
+ 
+ 	dsi->driver_data = of_device_get_match_data(dev);
++	dsi->is_second_link = of_property_read_bool(dev->of_node,
++						    "mediatek,dual-dsi-slave");
+ 
+ 	dsi->engine_clk = devm_clk_get(dev, "engine");
+ 	if (IS_ERR(dsi->engine_clk))
+@@ -1461,8 +2099,33 @@ static const struct mtk_dsi_driver_data mt8188_dsi_driver_data = {
+ 	.support_per_frame_lp = true,
+ };
+ 
++static const struct mtk_dsi_tx_buf_data mt6897_dsi_tx_buf = {
++	.sram_lines = 2426,
++	.sram_unit = 18,
++	.buffer_unit = 32,
++	.read_width = 9,
++	.urgent_lo_us = 14,
++	.urgent_hi_us = 15,
++};
++
++static const struct mtk_dsi_driver_data mt6897_dsi_driver_data = {
++	.reg_cmdq_off = 0xd00,
++	.reg_vm_cmd_off = 0x200,
++	.reg_shadow_dbg_off = 0xc00,
++	.has_size_ctl = true,
++	.cmdq_long_packet_ctl = true,
++	.support_per_frame_lp = true,
++	.word_aligned_porches = true,
++	.polled = true,
++	.video_mode_cmds = true,
++	.nominal_rate_mhz = 1004,
++	.keep_shadow = true,
++	.tx_buf = &mt6897_dsi_tx_buf,
++};
++
+ static const struct of_device_id mtk_dsi_of_match[] = {
+ 	{ .compatible = "mediatek,mt2701-dsi", .data = &mt2701_dsi_driver_data },
++	{ .compatible = "mediatek,mt6897-dsi", .data = &mt6897_dsi_driver_data },
+ 	{ .compatible = "mediatek,mt8167-dsi", .data = &mt2701_dsi_driver_data },
+ 	{ .compatible = "mediatek,mt8173-dsi", .data = &mt8173_dsi_driver_data },
+ 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },

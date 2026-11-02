@@ -1,0 +1,74 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: soc: mediatek: mutex: add MT6897
+
+Each of the four display controllers of MT6897 has a mutex at the same
+offset, and they all have to fire together for one frame. A dispsys and
+an ovlsys do not have the same modules, so there are two compatibles.
+
+The relays between the controllers have no driver of their own, and
+their clocks have to stay on while the mutex runs, so the mutex lists
+all the clocks of its controller that no component owns. That is at
+least 13.
+---
+ .../bindings/soc/mediatek/mediatek,mutex.yaml | 27 +++++++++++++++++--
+ 1 file changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
+index 5267cfe92572dd8b12bac089068c944471ef9026..6183dabbb67168c2e2b95232b9587380893494ad 100644
+--- a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
++++ b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
+@@ -27,6 +27,8 @@ properties:
+       - mediatek,mt2701-disp-mutex
+       - mediatek,mt2712-disp-mutex
+       - mediatek,mt6795-disp-mutex
++      - mediatek,mt6897-disp-mutex
++      - mediatek,mt6897-ovlsys-mutex
+       - mediatek,mt8167-disp-mutex
+       - mediatek,mt8173-disp-mutex
+       - mediatek,mt8183-disp-mutex
+@@ -51,8 +53,12 @@ properties:
+       Documentation/devicetree/bindings/power/power-domain.yaml for details.
+ 
+   clocks:
+-    items:
+-      - description: MUTEX Clock
++    minItems: 1
++    maxItems: 17
++    description:
++      MUTEX Clock. On MT6897 the bootloader leaves the clocks of the blocks of the
++      display controller on, and the block has to keep them on for its registers
++      to answer, so they all go here.
+ 
+   mediatek,gce-events:
+     description:
+@@ -82,6 +88,8 @@ allOf:
+               - mediatek,mt2701-disp-mutex
+               - mediatek,mt2712-disp-mutex
+               - mediatek,mt6795-disp-mutex
++              - mediatek,mt6897-disp-mutex
++              - mediatek,mt6897-ovlsys-mutex
+               - mediatek,mt8173-disp-mutex
+               - mediatek,mt8186-disp-mutex
+               - mediatek,mt8186-mdp3-mutex
+@@ -90,6 +98,21 @@ allOf:
+     then:
+       required:
+         - clocks
++  - if:
++      properties:
++        compatible:
++          contains:
++            enum:
++              - mediatek,mt6897-disp-mutex
++              - mediatek,mt6897-ovlsys-mutex
++    then:
++      properties:
++        clocks:
++          minItems: 13
++    else:
++      properties:
++        clocks:
++          maxItems: 1
+ 
+ required:
+   - compatible

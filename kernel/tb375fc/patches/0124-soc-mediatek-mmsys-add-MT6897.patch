@@ -1,0 +1,311 @@
+From: buntOS contributors
+Subject: [PATCH] soc: mediatek: mmsys: add MT6897
+
+MT6897 has two dispsys and two ovlsys blocks, with the same registers in
+both of each. A pipe starts in an ovlsys, crosses over a relay to its
+dispsys and leaves for a DSI link. Add the routes for the path from an
+OVL_2L through a DSC to a DSI, which skips the picture quality blocks.
+
+The registers and values come from the MediaTek driver in the OnePlus
+MT6897 kernel (mtk_drm_ddp.c, with DRM_BYPASS_PQ), which the same module
+of the stock firmware of the Lenovo TB375FC matches. The vendor writes
+the lane order to dispsys0 only.
+
+One thing is not from there. The vendor's right pipe only goes through
+the PANEL_COMP_OUT crossbar 0, as it has picture quality blocks on the
+way. Crossbar 1, which does not, has the same registers on the left and
+the signal names say the same. The bootloader uses crossbar 0 on both
+sides, so nothing on a running device shows crossbar 1 at work: the
+first frame on the right half is what confirms it.
+
+The routes also write what the vendor writes each time the blocks get
+clocks: no merged interrupts (mtk_ddp_disable_merge_irq()) and the low
+power requests (mt6985_mtk_sodi_config()).
+
+The power domains can stay on through the handover from the bootloader,
+so these routes have to clear its own path as well. The values of that
+path are in its image: three OVLs in a chain and the picture quality
+blocks, through crossbar 0.
+
+Only dispsys0 starts mediatek-drm. The display driver uses the other
+three for their routes, so they say no_drm. They still register the
+clock drivers.
+---
+ drivers/soc/mediatek/mt6897-mmsys.h | 179 ++++++++++++++++++++++++++++
+ drivers/soc/mediatek/mtk-mmsys.c    |  35 +++++-
+ drivers/soc/mediatek/mtk-mmsys.h    |   3 +
+ 3 files changed, 216 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/soc/mediatek/mt6897-mmsys.h b/drivers/soc/mediatek/mt6897-mmsys.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b22e2a90b00e743fbfb2651169aea28d3e231bcd
+--- /dev/null
++++ b/drivers/soc/mediatek/mt6897-mmsys.h
+@@ -0,0 +1,179 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef __SOC_MEDIATEK_MT6897_MMSYS_H
++#define __SOC_MEDIATEK_MT6897_MMSYS_H
++
++/*
++ * MT6897 has two sets of two display controllers. A pipe takes its layers from
++ * an ovlsys, crosses over a relay to its dispsys and leaves there for a DSI
++ * link. The registers of both sets are at the same offsets.
++ *
++ * The routes skip the picture quality blocks: nothing uses them yet.
++ */
++
++/* ovlsys0 and ovlsys1 */
++#define MT6897_OVLSYS_INTMERGE			0x008
++#define MT6897_OVLSYS_MISC			0x0f0
++#define MT6897_OVLSYS_BYPASS_MUX_SHADOW		0xf00
++#define MT6897_OVLSYS_OVL_CON			0xf08
++#define MT6897_OVL_BG_CROSSBAR0_MOUT_EN		0xf10
++#define MT6897_OVL_BG_CROSSBAR1_MOUT_EN		0xf14
++#define MT6897_OVL_BG_CROSSBAR2_MOUT_EN		0xf18
++#define MT6897_OVL_BG_CROSSBAR3_MOUT_EN		0xf1c
++#define MT6897_OVL_BG_CROSSBAR4_MOUT_EN		0xf20
++#define MT6897_OVL_BLEND_CROSSBAR0_MOUT_EN	0xf38
++#define MT6897_OVL_BLEND_CROSSBAR1_MOUT_EN	0xf3c
++#define MT6897_OVL_BLEND_CROSSBAR2_MOUT_EN	0xf40
++#define MT6897_OVL_BLEND_CROSSBAR3_MOUT_EN	0xf44
++
++#define MT6897_OVLSYS_MISC_SODI			GENMASK(17, 2)
++#define MT6897_OVLSYS0_MISC_SODI_VAL		0x28000
++#define MT6897_OVL_CON_CROSSBARS		GENMASK(7, 0)
++#define MT6897_OVL0_2L_TO_BLEND_CROSSBAR0	BIT(0)
++#define MT6897_OVL0_2L_TO_DLO_RELAY3		BIT(0)
++
++/* dispsys0 and dispsys1 */
++#define MT6897_DISP_INTMERGE			0x008
++#define MT6897_DISP_PQ_PATH_SEL			0x034
++#define MT6897_DISP_SODI_REQ_MASK		0x0f4
++#define MT6897_DISP_EMI_REQ_CTL			0x0f8
++#define MT6897_DSI_SEL_CONFIG_0_LSB		0x170
++#define MT6897_DSI_SEL_CONFIG_0_MSB		0x174
++#define MT6897_DISP_BYPASS_MUX_SHADOW		0xc30
++#define MT6897_COMP_OUT_CROSSBAR1_MOUT_EN	0xea4
++#define MT6897_COMP_OUT_CROSSBAR3_MOUT_EN	0xeac
++#define MT6897_MERGE_OUT_CROSSBAR0_MOUT_EN	0xf0c
++#define MT6897_PANEL_COMP_OUT_CROSSBAR0_MOUT_EN	0xf48
++#define MT6897_PANEL_COMP_OUT_CROSSBAR1_MOUT_EN	0xf4c
++#define MT6897_PANEL_COMP_OUT_CROSSBAR1_SEL_IN	0xf60
++#define MT6897_PANEL_COMP_OUT_CROSSBAR3_SEL_IN	0xf68
++#define MT6897_PQ_IN_CROSSBAR0_MOUT_EN		0xf74
++#define MT6897_PQ_OUT_CROSSBAR0_MOUT_EN		0xf98
++#define MT6897_PQ_OUT_CROSSBAR3_MOUT_EN		0xfa4
++
++#define MT6897_BYPASS_MUX_SHADOW		0xff0001
++#define MT6897_SODI_REQ_VAL			0x13f6c0
++#define MT6897_DLI_RELAY0_TO_PQ_OUT_CROSSBAR3	BIT(2)
++#define MT6897_PQ_IN_TO_PANEL_COMP_OUT_CROSSBAR1 BIT(1)
++#define MT6897_PQ_OUT_CROSSBAR1_TO_DSC_0	BIT(1)
++#define MT6897_DSC_0_SEL_IN_CROSSBAR1		BIT(0)
++#define MT6897_DSC_0_TO_MERGE_OUT_CROSSBAR0	BIT(0)
++#define MT6897_COMP_OUT_CROSSBAR0_TO_DSI0	BIT(0)
++#define MT6897_DPHY_LANES_IN_ORDER		0x00a43210
++
++/*
++ * The part of the path that crosses the controllers is in the tables of both.
++ *
++ * The bootloader leaves its own path set when the power domains stay on through
++ * the handover: three OVLs in a chain, through the picture quality blocks and
++ * crossbar 0. A crossbar output that also feeds this path, and the ones in front
++ * of the blocks this path leaves out, have to go to 0 for that. The other values
++ * of 0 are what the vendor writes, to get the interrupts of the blocks on their
++ * own lines and to set up the low power requests.
++ */
++static const struct mtk_mmsys_routes mt6897_dispsys0_routing_table[] = {
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_DISP_BYPASS_MUX_SHADOW,
++		    MT6897_BYPASS_MUX_SHADOW, MT6897_BYPASS_MUX_SHADOW),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_DISP_INTMERGE, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_DISP_SODI_REQ_MASK,
++		    GENMASK(31, 0), MT6897_SODI_REQ_VAL),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_DISP_EMI_REQ_CTL, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_DISP_PQ_PATH_SEL, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_PQ_IN_CROSSBAR0_MOUT_EN,
++		    GENMASK(31, 0), MT6897_DLI_RELAY0_TO_PQ_OUT_CROSSBAR3),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_PQ_OUT_CROSSBAR0_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_PQ_OUT_CROSSBAR3_MOUT_EN,
++		    GENMASK(31, 0), MT6897_PQ_IN_TO_PANEL_COMP_OUT_CROSSBAR1),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_PANEL_COMP_OUT_CROSSBAR0_MOUT_EN,
++		    GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_PANEL_COMP_OUT_CROSSBAR1_MOUT_EN,
++		    GENMASK(31, 0), MT6897_PQ_OUT_CROSSBAR1_TO_DSC_0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_PANEL_COMP_OUT_CROSSBAR1_SEL_IN,
++		    GENMASK(31, 0), MT6897_DSC_0_SEL_IN_CROSSBAR1),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_PANEL_COMP_OUT_CROSSBAR3_SEL_IN,
++		    GENMASK(31, 0), 0),
++	MMSYS_ROUTE(DSC0, DSI0, MT6897_COMP_OUT_CROSSBAR3_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(DSC0, DSI0, MT6897_COMP_OUT_CROSSBAR1_MOUT_EN,
++		    GENMASK(31, 0), MT6897_DSC_0_TO_MERGE_OUT_CROSSBAR0),
++	MMSYS_ROUTE(DSC0, DSI0, MT6897_MERGE_OUT_CROSSBAR0_MOUT_EN,
++		    GENMASK(31, 0), MT6897_COMP_OUT_CROSSBAR0_TO_DSI0),
++	/* The vendor writes these to dispsys0 only, for both DSI links */
++	MMSYS_ROUTE(DSC0, DSI0, MT6897_DSI_SEL_CONFIG_0_MSB, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(DSC0, DSI0, MT6897_DSI_SEL_CONFIG_0_LSB, GENMASK(31, 0),
++		    MT6897_DPHY_LANES_IN_ORDER),
++};
++
++static const struct mtk_mmsys_routes mt6897_dispsys1_routing_table[] = {
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_DISP_BYPASS_MUX_SHADOW,
++		    MT6897_BYPASS_MUX_SHADOW, MT6897_BYPASS_MUX_SHADOW),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_DISP_INTMERGE, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_DISP_SODI_REQ_MASK,
++		    GENMASK(31, 0), MT6897_SODI_REQ_VAL),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_DISP_EMI_REQ_CTL, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_DISP_PQ_PATH_SEL, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_PQ_IN_CROSSBAR0_MOUT_EN,
++		    GENMASK(31, 0), MT6897_DLI_RELAY0_TO_PQ_OUT_CROSSBAR3),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_PQ_OUT_CROSSBAR0_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_PQ_OUT_CROSSBAR3_MOUT_EN,
++		    GENMASK(31, 0), MT6897_PQ_IN_TO_PANEL_COMP_OUT_CROSSBAR1),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_PANEL_COMP_OUT_CROSSBAR0_MOUT_EN,
++		    GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_PANEL_COMP_OUT_CROSSBAR1_MOUT_EN,
++		    GENMASK(31, 0), MT6897_PQ_OUT_CROSSBAR1_TO_DSC_0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_PANEL_COMP_OUT_CROSSBAR1_SEL_IN,
++		    GENMASK(31, 0), MT6897_DSC_0_SEL_IN_CROSSBAR1),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_PANEL_COMP_OUT_CROSSBAR3_SEL_IN,
++		    GENMASK(31, 0), 0),
++	MMSYS_ROUTE(DSC1, DSI1, MT6897_COMP_OUT_CROSSBAR3_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(DSC1, DSI1, MT6897_COMP_OUT_CROSSBAR1_MOUT_EN,
++		    GENMASK(31, 0), MT6897_DSC_0_TO_MERGE_OUT_CROSSBAR0),
++	MMSYS_ROUTE(DSC1, DSI1, MT6897_MERGE_OUT_CROSSBAR0_MOUT_EN,
++		    GENMASK(31, 0), MT6897_COMP_OUT_CROSSBAR0_TO_DSI0),
++};
++
++static const struct mtk_mmsys_routes mt6897_ovlsys0_routing_table[] = {
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVLSYS_BYPASS_MUX_SHADOW,
++		    MT6897_BYPASS_MUX_SHADOW, MT6897_BYPASS_MUX_SHADOW),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVLSYS_INTMERGE, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVLSYS_MISC,
++		    MT6897_OVLSYS_MISC_SODI, MT6897_OVLSYS0_MISC_SODI_VAL),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVLSYS_OVL_CON,
++		    MT6897_OVL_CON_CROSSBARS, MT6897_OVL0_2L_TO_BLEND_CROSSBAR0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BG_CROSSBAR0_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BG_CROSSBAR1_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BG_CROSSBAR2_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BG_CROSSBAR3_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BG_CROSSBAR4_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BLEND_CROSSBAR0_MOUT_EN,
++		    GENMASK(31, 0), MT6897_OVL0_2L_TO_DLO_RELAY3),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BLEND_CROSSBAR1_MOUT_EN,
++		    GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BLEND_CROSSBAR2_MOUT_EN,
++		    GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L0, DSC0, MT6897_OVL_BLEND_CROSSBAR3_MOUT_EN,
++		    GENMASK(31, 0), 0),
++};
++
++static const struct mtk_mmsys_routes mt6897_ovlsys1_routing_table[] = {
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVLSYS_BYPASS_MUX_SHADOW,
++		    MT6897_BYPASS_MUX_SHADOW, MT6897_BYPASS_MUX_SHADOW),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVLSYS_INTMERGE, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVLSYS_MISC, MT6897_OVLSYS_MISC_SODI, 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVLSYS_OVL_CON,
++		    MT6897_OVL_CON_CROSSBARS, MT6897_OVL0_2L_TO_BLEND_CROSSBAR0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BG_CROSSBAR0_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BG_CROSSBAR1_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BG_CROSSBAR2_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BG_CROSSBAR3_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BG_CROSSBAR4_MOUT_EN, GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BLEND_CROSSBAR0_MOUT_EN,
++		    GENMASK(31, 0), MT6897_OVL0_2L_TO_DLO_RELAY3),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BLEND_CROSSBAR1_MOUT_EN,
++		    GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BLEND_CROSSBAR2_MOUT_EN,
++		    GENMASK(31, 0), 0),
++	MMSYS_ROUTE(OVL_2L1, DSC1, MT6897_OVL_BLEND_CROSSBAR3_MOUT_EN,
++		    GENMASK(31, 0), 0),
++};
++
++#endif /* __SOC_MEDIATEK_MT6897_MMSYS_H */
+diff --git a/drivers/soc/mediatek/mtk-mmsys.c b/drivers/soc/mediatek/mtk-mmsys.c
+index 2f3e0778bb175e93b4d0d8cac009b0ddffbce7a5..7f3eae9ca7d3b3408041fc4134d7bf7db6d6b291 100644
+--- a/drivers/soc/mediatek/mtk-mmsys.c
++++ b/drivers/soc/mediatek/mtk-mmsys.c
+@@ -14,6 +14,7 @@
+ #include <linux/soc/mediatek/mtk-mmsys.h>
+ 
+ #include "mtk-mmsys.h"
++#include "mt6897-mmsys.h"
+ #include "mt8167-mmsys.h"
+ #include "mt8173-mmsys.h"
+ #include "mt8183-mmsys.h"
+@@ -53,6 +54,34 @@ static const struct mtk_mmsys_driver_data mt6797_mmsys_driver_data = {
+ 	.clk_driver = "clk-mt6797-mm",
+ };
+ 
++static const struct mtk_mmsys_driver_data mt6897_dispsys0_driver_data = {
++	.clk_driver = "clk-mt6897-dispsys0",
++	.routes = mt6897_dispsys0_routing_table,
++	.num_routes = ARRAY_SIZE(mt6897_dispsys0_routing_table),
++};
++
++/* The display driver sits on dispsys0, and uses the other three for routing */
++static const struct mtk_mmsys_driver_data mt6897_dispsys1_driver_data = {
++	.clk_driver = "clk-mt6897-dispsys1",
++	.routes = mt6897_dispsys1_routing_table,
++	.num_routes = ARRAY_SIZE(mt6897_dispsys1_routing_table),
++	.no_drm = true,
++};
++
++static const struct mtk_mmsys_driver_data mt6897_ovlsys0_driver_data = {
++	.clk_driver = "clk-mt6897-ovlsys0",
++	.routes = mt6897_ovlsys0_routing_table,
++	.num_routes = ARRAY_SIZE(mt6897_ovlsys0_routing_table),
++	.no_drm = true,
++};
++
++static const struct mtk_mmsys_driver_data mt6897_ovlsys1_driver_data = {
++	.clk_driver = "clk-mt6897-ovlsys1",
++	.routes = mt6897_ovlsys1_routing_table,
++	.num_routes = ARRAY_SIZE(mt6897_ovlsys1_routing_table),
++	.no_drm = true,
++};
++
+ static const struct mtk_mmsys_driver_data mt8167_mmsys_driver_data = {
+ 	.clk_driver = "clk-mt8167-mm",
+ 	.routes = mt8167_mmsys_routing_table,
+@@ -434,7 +463,7 @@ static int mtk_mmsys_probe(struct platform_device *pdev)
+ 		return PTR_ERR(clks);
+ 	mmsys->clks_pdev = clks;
+ 
+-	if (mmsys->data->is_vppsys)
++	if (mmsys->data->is_vppsys || mmsys->data->no_drm)
+ 		goto out_probe_done;
+ 
+ 	drm = platform_device_register_data(&pdev->dev, "mediatek-drm",
+@@ -463,6 +492,10 @@ static const struct of_device_id of_match_mtk_mmsys[] = {
+ 	{ .compatible = "mediatek,mt6779-mmsys", .data = &mt6779_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6795-mmsys", .data = &mt6795_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6797-mmsys", .data = &mt6797_mmsys_driver_data },
++	{ .compatible = "mediatek,mt6897-dispsys0", .data = &mt6897_dispsys0_driver_data },
++	{ .compatible = "mediatek,mt6897-dispsys1", .data = &mt6897_dispsys1_driver_data },
++	{ .compatible = "mediatek,mt6897-ovlsys0", .data = &mt6897_ovlsys0_driver_data },
++	{ .compatible = "mediatek,mt6897-ovlsys1", .data = &mt6897_ovlsys1_driver_data },
+ 	{ .compatible = "mediatek,mt8167-mmsys", .data = &mt8167_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt8173-mmsys", .data = &mt8173_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt8183-mmsys", .data = &mt8183_mmsys_driver_data },
+diff --git a/drivers/soc/mediatek/mtk-mmsys.h b/drivers/soc/mediatek/mtk-mmsys.h
+index fe628d5f5198618f905d6af3c293e3f79cd479d9..bd1ad0dbe44701c51f5926095a733e699eaab5ff 100644
+--- a/drivers/soc/mediatek/mtk-mmsys.h
++++ b/drivers/soc/mediatek/mtk-mmsys.h
+@@ -113,6 +113,8 @@ struct mtk_mmsys_routes {
+  * @num_resets: Number of reset bits that are defined
+  * @is_vppsys: Whether the mmsys is VPPSYS (Video Processing Pipe)
+  *             or VDOSYS (Video). Only VDOSYS needs to be added to drm driver.
++ * @no_drm: This display controller has no display driver of its own, as the
++ *          driver of another controller uses its routes.
+  * @vsync_len: VSYNC length of the MIXER.
+  *             VSYNC is usually triggered by the connector, so its length is a
+  *             fixed value when the frame rate is decided, but ETHDR and
+@@ -138,6 +140,7 @@ struct mtk_mmsys_driver_data {
+ 	const u8 *rst_tb;
+ 	const u32 num_resets;
+ 	const bool is_vppsys;
++	const bool no_drm;
+ 	const u8 vsync_len;
+ };
+ 

@@ -1,0 +1,52 @@
+From: Roman Vivchar <rva333@protonmail.com>
+Subject: [PATCH] drm/mediatek: mtk_dsi: do not enable HS clock in pre-enable for LPM panels
+
+[ Not upstream yet: v1 from
+  https://lore.kernel.org/r/20261019-6768-dsi-fix-v1-1-3e5616b45a67@protonmail.com ]
+
+Commit 76255024cadb ("drm/mediatek: mtk_dsi: enable hs clock during
+pre-enable") moved HS clock enablement from the mtk_output_dsi_enable()
+to mtk_dsi_poweron(). Later, the commit 3e191eddbdcb ("drm/mediatek:
+mtk_dsi: Enable HS clock only at pre-enable") moved the call to the
+mtk_dsi_bridge_atomic_pre_enable().
+
+However, mtk_dsi_lane_ready() explicitly sets mtk_dsi_clk_hs_mode(dsi, 0)
+so that DSI panels with MIPI_DSI_MODE_LPM can transmit initialization
+commands in Low-Power mode during their prepare() callback. Enabling the
+HS clock unconditionally in mtk_dsi_bridge_atomic_pre_enable() overrides
+this before panel prepare() runs, causing command transmission to fail.
+
+Only enable the HS clock in mtk_dsi_bridge_atomic_pre_enable(), when
+MIPI_DSI_MODE_LPM is not set, and restore mtk_dsi_clk_hs_mode(dsi, 1) in
+mtk_output_dsi_enable(). This is no-op for non-LPM bridges.
+
+Fixes: 76255024cadb ("drm/mediatek: mtk_dsi: enable hs clock during pre-enable")
+Fixes: 3e191eddbdcb ("drm/mediatek: mtk_dsi: Enable HS clock only at pre-enable")
+Cc: stable@vger.kernel.org
+Signed-off-by: Roman Vivchar <rva333@protonmail.com>
+---
+ drivers/gpu/drm/mediatek/mtk_dsi.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/mediatek/mtk_dsi.c b/drivers/gpu/drm/mediatek/mtk_dsi.c
+index add53af83bd2c5284c122decfde6edcbb3a3efc5..61cbd45a092b0747782eb6ec0f4dad1ec42ee53c 100644
+--- a/drivers/gpu/drm/mediatek/mtk_dsi.c
++++ b/drivers/gpu/drm/mediatek/mtk_dsi.c
+@@ -897,6 +897,7 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
+ 		return;
+ 
+ 	mtk_dsi_set_mode(dsi);
++	mtk_dsi_clk_hs_mode(dsi, 1);
+ 	mtk_dsi_start(dsi);
+ 
+ 	dsi->enabled = true;
+@@ -961,7 +962,8 @@ static void mtk_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
+ 		drm_err(drm, "failed to power on dsi\n");
+ 
+ 	mtk_dsi_lane_ready(dsi);
+-	mtk_dsi_clk_hs_mode(dsi, 1);
++	if (!(dsi->mode_flags & MIPI_DSI_MODE_LPM))
++		mtk_dsi_clk_hs_mode(dsi, 1);
+ }
+ 
+ static void mtk_dsi_bridge_atomic_post_disable(struct drm_bridge *bridge,

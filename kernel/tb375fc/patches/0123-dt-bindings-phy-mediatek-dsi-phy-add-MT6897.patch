@@ -1,0 +1,21 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: phy: mediatek: dsi-phy: add MT6897
+
+The D-PHY of MT6897 is not compatible with the older ones: it has other
+register offsets and its lanes are in another order.
+---
+ Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml b/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
+index c6d0bbdbe0e2277190fb05374c09383d655ea411..958297fa2617cc10a0d289719fa1c3f79af05747 100644
+--- a/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
+@@ -37,6 +37,7 @@ properties:
+               - mediatek,mt8365-mipi-tx
+           - const: mediatek,mt8183-mipi-tx
+       - const: mediatek,mt2701-mipi-tx
++      - const: mediatek,mt6897-mipi-tx
+       - const: mediatek,mt8173-mipi-tx
+       - const: mediatek,mt8183-mipi-tx
+ 

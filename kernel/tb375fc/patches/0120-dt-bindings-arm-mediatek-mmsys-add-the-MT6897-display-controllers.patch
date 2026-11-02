@@ -1,0 +1,137 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: arm: mediatek: mmsys: add the MT6897 display controllers
+
+MT6897 has two sets of a dispsys and an ovlsys, one set for each half of
+the screen. These blocks have the clock gates of the display, and they
+do its routing too, so they belong in the mmsys binding and not among
+the clock controllers. The clock driver stays, as a device that
+mtk-mmsys registers like on other SoCs.
+
+They keep their phandle to the hardware voter, which opens and closes
+some of the gates.
+---
+ .../bindings/arm/mediatek/mediatek,mmsys.yaml | 28 +++++++++++++++++++
+ .../bindings/clock/mediatek,mt6897-clock.yaml | 25 +++++++----------
+ 2 files changed, 38 insertions(+), 15 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+index 3f4262e93c789c849a94f4a9e52f21edb3142d58..da03c4e4b5475aa947d25ede6b984e845f8543c0 100644
+--- a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+@@ -27,6 +27,10 @@ properties:
+               - mediatek,mt6779-mmsys
+               - mediatek,mt6795-mmsys
+               - mediatek,mt6797-mmsys
++              - mediatek,mt6897-dispsys0
++              - mediatek,mt6897-dispsys1
++              - mediatek,mt6897-ovlsys0
++              - mediatek,mt6897-ovlsys1
+               - mediatek,mt8167-mmsys
+               - mediatek,mt8173-mmsys
+               - mediatek,mt8183-mmsys
+@@ -93,6 +97,13 @@ properties:
+   '#reset-cells':
+     const: 1
+ 
++  mediatek,hardware-voter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      Phandle to the hardware voter (HWV) register block, which opens and closes
++      some of the clock gates of this block. See
++      Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
++
+   port:
+     $ref: /schemas/graph.yaml#/properties/port
+     description:
+@@ -126,6 +137,23 @@ required:
+   - reg
+   - "#clock-cells"
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            enum:
++              - mediatek,mt6897-dispsys0
++              - mediatek,mt6897-dispsys1
++              - mediatek,mt6897-ovlsys0
++              - mediatek,mt6897-ovlsys1
++    then:
++      required:
++        - mediatek,hardware-voter
++    else:
++      properties:
++        mediatek,hardware-voter: false
++
+ additionalProperties: false
+ 
+ examples:
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+index 2d0bc678187a7d77e36dd55927bf4b7eb6b0a956..2db4978f793982aee3b22db3541a2ba9b343a5ce 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+@@ -21,6 +21,9 @@ description: |
+   two UFS blocks also provide the reset lines of the UFS M-PHY, UniPro,
+   inline crypto engine and host controller.
+ 
++  The display blocks are in Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
++  as they do the routing of the display too.
++
+   The display, MDP and video codec blocks only answer while their power domain
+   is on, and they have no power-domains property. The VEN and MDP power domains
+   need gates of these blocks to come up, so the two would wait for each other.
+@@ -37,8 +40,6 @@ properties:
+   compatible:
+     items:
+       - enum:
+-          - mediatek,mt6897-dispsys0
+-          - mediatek,mt6897-dispsys1
+           - mediatek,mt6897-imp-iic-wrap-c
+           - mediatek,mt6897-imp-iic-wrap-en
+           - mediatek,mt6897-imp-iic-wrap-es
+@@ -47,8 +48,6 @@ properties:
+           - mediatek,mt6897-mdpsys0
+           - mediatek,mt6897-mdpsys1
+           - mediatek,mt6897-mminfra
+-          - mediatek,mt6897-ovlsys0
+-          - mediatek,mt6897-ovlsys1
+           - mediatek,mt6897-pericfg-ao
+           - mediatek,mt6897-ufscfg-ao
+           - mediatek,mt6897-ufscfg-pdn
+@@ -86,11 +85,7 @@ allOf:
+         compatible:
+           contains:
+             enum:
+-              - mediatek,mt6897-dispsys0
+-              - mediatek,mt6897-dispsys1
+               - mediatek,mt6897-mminfra
+-              - mediatek,mt6897-ovlsys0
+-              - mediatek,mt6897-ovlsys1
+               - mediatek,mt6897-pericfg-ao
+     then:
+       required:
+@@ -135,16 +130,16 @@ examples:
+         reg = <0x11f02000 0x1000>;
+         #clock-cells = <1>;
+     };
+-  - |
+-    clock-controller@14000000 {
+-        compatible = "mediatek,mt6897-dispsys0", "syscon";
+-        reg = <0x14000000 0x1000>;
+-        mediatek,hardware-voter = <&hwv>;
+-        #clock-cells = <1>;
+-    };
+   - |
+     clock-controller@17000000 {
+         compatible = "mediatek,mt6897-vencsys", "syscon";
+         reg = <0x17000000 0x1000>;
+         #clock-cells = <1>;
+     };
++  - |
++    clock-controller@1e800000 {
++        compatible = "mediatek,mt6897-mminfra", "syscon";
++        reg = <0x1e800000 0x1000>;
++        mediatek,hardware-voter = <&hwv>;
++        #clock-cells = <1>;
++    };

@@ -1,0 +1,22 @@
+From: buntOS contributors
+Subject: [PATCH] drm/panel: novatek-nt36532: use low power mode on the TB375FC panels
+
+The stock host does not set HSTX for a command, so they go out in low
+power mode. With the host of the Lenovo TB375FC, MIPI_DSI_MODE_LPM says
+the same.
+---
+ drivers/gpu/drm/panel/panel-novatek-nt36532.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index cbd2df23627f862c8b54cb50dcd5f29a8e966000..c01d78280cf45985e6535adf5eaf77c8626ad940 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -895,6 +895,7 @@ static const struct panel_info csot_panel_info = {
+ 		.format = MIPI_DSI_FMT_RGB888,					\
+ 		.mode_flags = MIPI_DSI_MODE_VIDEO |				\
+ 			      MIPI_DSI_MODE_VIDEO_SYNC_PULSE |			\
++			      MIPI_DSI_MODE_LPM |				\
+ 			      MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT,		\
+ 		.hs_rate = 998137000,						\
+ 		.modes = tb375fc_modes,						\

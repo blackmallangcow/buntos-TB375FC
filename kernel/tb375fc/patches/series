@@ -150,6 +150,30 @@
 # 0114: spmi: mtk-pmif 고침(업스트림에 없음). 처리기 없는 SID의 RCS 이벤트를 지운다. 벤더 rcs_irq_handler처럼 칸 넷을 다 읽는다. 안드로이드가 남긴 MT6685 알람이 리눅스에서
 # 울려도 EINT 248이 계속 울리지 않는다. 칩이 같은 이벤트를 곧바로 다시 내면 막지 못한다. 0007·0008 위에 얹힌다. 기기에서 확인한 뒤 업스트림에 낸다
 0114-spmi-mtk-pmif-clear-the-RCS-events-of-SIDs-without-a-handler.patch
+# 0120~0139: 2c 2차 화면 파이프라인. MT6897 데이터, dual-DSI, DSC. 모두 꺼 둔 노드이고 기기 시험은 없다. 판은 7.2.12 + 이 작은 패치들이다(재구성 v2는 얹지 않았다).
+# 0120~0123 바인딩. 0124 mmsys 경로 넷(LK 경로를 지우고 머지 IRQ·SODI를 쓴다. 오른쪽 파이프의 PANEL_COMP_OUT 크로스바 1은 왼쪽에서 유추. LK도 이 길을 쓰지 않아 첫 프레임이 확인이다). 0125 뮤텍스 넷(릴레이와 DSI 비트, DSI1 SOF, 제어기 클럭·전원).
+# 0126 클럭 드라이버를 mtk-mmsys 아래로. 0127 D-PHY(트림을 저장해 되돌리고, 켜져 있으면 그대로 둔다). 0128~0131은 DSC v9의 2, 4, 5, 11번 백포트(미병합. 새 판이 나오면 바꾼다), 0132 Ryan Brue, 0133 Roman Vivchar(둘 다 미병합).
+# 0134 DSC MT6897. 0135 DSI MT6897과 두 링크(벤더처럼 폴링, 인터럽트 없음). 0136 OVL_2L. 0137 CRTC·DRM 데이터: 컨트롤러 표, 둘째 파이프, 첫 커밋까지 전원을 잡고 LK를 먼저 멈춘다. 0138 패널의 LPM. 0139 패널이 둘째 호스트보다 먼저 풀린다(모듈을 내릴 때 use-after-free). 표는 벤더 코드를 그대로 돌린 값과 맞췄고 QEMU 레지스터 모델로 돌렸다
+0120-dt-bindings-arm-mediatek-mmsys-add-the-MT6897-display-controllers.patch
+0121-dt-bindings-soc-mediatek-mutex-add-MT6897.patch
+0122-dt-bindings-display-mediatek-add-the-MT6897-display-blocks.patch
+0123-dt-bindings-phy-mediatek-dsi-phy-add-MT6897.patch
+0124-soc-mediatek-mmsys-add-MT6897.patch
+0125-soc-mediatek-mutex-add-MT6897.patch
+0126-clk-mediatek-mt6897-mmsys-let-mtk-mmsys-register-the-display-controllers.patch
+0127-phy-mediatek-mipi-dsi-add-MT6897.patch
+0128-drm-mediatek-Implement-Display-Stream-Compression-support.patch
+0129-drm-mediatek-mtk_dsi-Cleanup-encoder-if-reset-fails-during-bind.patch
+0130-drm-mediatek-mtk_dsi-Enable-interrupt-at-component-bind-time.patch
+0131-drm-mediatek-mtk_dsi-Enable-PM-Runtime-on-probe.patch
+0132-drm-mediatek-dsi-force-command-mode-in-mtk_dsi_poweron.patch
+0133-drm-mediatek-mtk_dsi-do-not-enable-HS-clock-in-pre-enable-for-LPM-panels.patch
+0134-drm-mediatek-mtk_disp_dsc-add-MT6897.patch
+0135-drm-mediatek-mtk_dsi-add-MT6897-and-its-two-links.patch
+0136-drm-mediatek-mtk_disp_ovl-add-the-OVL_2L-of-MT6897.patch
+0137-drm-mediatek-run-a-path-through-several-controllers-and-two-pipes.patch
+0138-drm-panel-novatek-nt36532-use-low-power-mode-on-the-TB375FC-panels.patch
+0139-drm-panel-novatek-nt36532-unbind-before-the-host-of-the-second-link.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 RTC까지 0110~0113에 있다):
 #  - wifi: mt76: mt7921 SoC의 레거시 명령 길(기기에서 uni cmd를 받지 않을 때)
 #  - spmi: mtk-pmif: 처리기가 있는 SID도 처리기 앞에서 지운다(벤더와 스톡의 순서). 지금은 EOI가 칩의 RCS 완료 쓰기 뒤에 와서, 그 사이 새 RCS가 지워지면 그 PMIC의 인터럽트가 재부팅까지 멈출 수 있다(창은 좁다. 코드로 본 것이다). 처리기를 뗀 SID와 직접 요청한 SID도 함께 풀린다

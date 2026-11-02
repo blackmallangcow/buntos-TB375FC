@@ -177,6 +177,7 @@
  * TODO(2c display): enable with the display pipeline, and take the panel
  * property off framebuffer0 at the same time: fw_devlink would hold simpledrm
  * back until the panel binds. Until then the display runs on simple-framebuffer.
+ * The two links make one panel: dsi1 only follows dsi0.
  * The two LED drivers (SGM37604A at 0x36 on i2c13 and i2c3) have no driver yet.
  */
 &dsi0 {
@@ -218,6 +219,10 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
+		port@0 {
+			reg = <0>;
+		};
+
 		port@1 {
 			reg = <1>;
 
@@ -229,9 +234,15 @@
 };
 
 &dsi1 {
+	mediatek,dual-dsi-slave;
+
 	ports {
 		#address-cells = <1>;
 		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+		};
 
 		port@1 {
 			reg = <1>;

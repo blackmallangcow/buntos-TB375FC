@@ -1,0 +1,106 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: mt6897-mmsys: let mtk-mmsys register the display controllers
+
+These four blocks do the routing of the display too, so mtk-mmsys binds
+to their nodes and registers these clock drivers with the parent's node,
+like on the other SoCs. mminfra stays as it was. The driver still
+touches neither the blocks nor their power domains at probe.
+
+The common remove function does not find the description of a driver
+that came from an id table, as the probe function does, and dereferences
+NULL when mtk-mmsys goes away. Make it find it the same way.
+---
+ drivers/clk/mediatek/clk-mt6897-mmsys.c | 51 ++++++++++++++++++++-----
+ drivers/clk/mediatek/clk-mtk.c          |  7 ++++
+ 2 files changed, 49 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/clk/mediatek/clk-mt6897-mmsys.c b/drivers/clk/mediatek/clk-mt6897-mmsys.c
+index fc1a9988f49731c89eb79f591bf40d4288cf564e..804dc9cf809620bd76511385b949b108190d9860 100644
+--- a/drivers/clk/mediatek/clk-mt6897-mmsys.c
++++ b/drivers/clk/mediatek/clk-mt6897-mmsys.c
+@@ -371,25 +371,58 @@ static const struct mtk_clk_desc mminfra_mcd = {
+ 	.num_clks = ARRAY_SIZE(mminfra_clks),
+ };
+ 
+-static const struct of_device_id of_match_clk_mt6897_mmsys[] = {
+-	{ .compatible = "mediatek,mt6897-dispsys0", .data = &disp0_mcd },
+-	{ .compatible = "mediatek,mt6897-dispsys1", .data = &disp1_mcd },
+-	{ .compatible = "mediatek,mt6897-ovlsys0", .data = &ovl0_mcd },
+-	{ .compatible = "mediatek,mt6897-ovlsys1", .data = &ovl1_mcd },
++static const struct of_device_id of_match_clk_mt6897_mminfra[] = {
+ 	{ .compatible = "mediatek,mt6897-mminfra", .data = &mminfra_mcd },
+ 	{ /* sentinel */ }
+ };
+-MODULE_DEVICE_TABLE(of, of_match_clk_mt6897_mmsys);
++MODULE_DEVICE_TABLE(of, of_match_clk_mt6897_mminfra);
+ 
+-static struct platform_driver clk_mt6897_mmsys_drv = {
++static struct platform_driver clk_mt6897_mminfra_drv = {
+ 	.probe = mtk_clk_simple_probe,
+ 	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "clk-mt6897-mminfra",
++		.of_match_table = of_match_clk_mt6897_mminfra,
++	},
++};
++
++/* These are children of mtk-mmsys, as the blocks are display controllers too */
++static const struct platform_device_id clk_mt6897_mmsys_id_table[] = {
++	{ .name = "clk-mt6897-dispsys0", .driver_data = (kernel_ulong_t)&disp0_mcd },
++	{ .name = "clk-mt6897-dispsys1", .driver_data = (kernel_ulong_t)&disp1_mcd },
++	{ .name = "clk-mt6897-ovlsys0", .driver_data = (kernel_ulong_t)&ovl0_mcd },
++	{ .name = "clk-mt6897-ovlsys1", .driver_data = (kernel_ulong_t)&ovl1_mcd },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(platform, clk_mt6897_mmsys_id_table);
++
++static struct platform_driver clk_mt6897_mmsys_drv = {
++	.probe = mtk_clk_pdev_probe,
++	.remove = mtk_clk_pdev_remove,
+ 	.driver = {
+ 		.name = "clk-mt6897-mmsys",
+-		.of_match_table = of_match_clk_mt6897_mmsys,
+ 	},
++	.id_table = clk_mt6897_mmsys_id_table,
+ };
+-module_platform_driver(clk_mt6897_mmsys_drv);
++
++static struct platform_driver * const clk_mt6897_mmsys_drivers[] = {
++	&clk_mt6897_mminfra_drv,
++	&clk_mt6897_mmsys_drv,
++};
++
++static int __init clk_mt6897_mmsys_init(void)
++{
++	return platform_register_drivers(clk_mt6897_mmsys_drivers,
++					 ARRAY_SIZE(clk_mt6897_mmsys_drivers));
++}
++module_init(clk_mt6897_mmsys_init);
++
++static void __exit clk_mt6897_mmsys_exit(void)
++{
++	platform_unregister_drivers(clk_mt6897_mmsys_drivers,
++				    ARRAY_SIZE(clk_mt6897_mmsys_drivers));
++}
++module_exit(clk_mt6897_mmsys_exit);
+ 
+ MODULE_DESCRIPTION("MediaTek MT6897 mmsys clocks driver");
+ MODULE_LICENSE("GPL");
+diff --git a/drivers/clk/mediatek/clk-mtk.c b/drivers/clk/mediatek/clk-mtk.c
+index 3dfdd3a422f8021a6dc99192ad398c7a74293f84..763ac1eb31e484a94f7fd61a001935298f745a0b 100644
+--- a/drivers/clk/mediatek/clk-mtk.c
++++ b/drivers/clk/mediatek/clk-mtk.c
+@@ -634,6 +634,13 @@ static void __mtk_clk_simple_remove(struct platform_device *pdev,
+ 	struct clk_hw_onecell_data *clk_data = platform_get_drvdata(pdev);
+ 	const struct mtk_clk_desc *mcd = device_get_match_data(&pdev->dev);
+ 
++	if (!mcd) {
++		/* Clock driver wasn't registered from devicetree */
++		const struct platform_device_id *id = platform_get_device_id(pdev);
++
++		mcd = (const struct mtk_clk_desc *)id->driver_data;
++	}
++
+ 	of_clk_del_provider(node);
+ 	if (mcd->clks)
+ 		mtk_clk_unregister_gates(mcd->clks, mcd->num_clks, clk_data);

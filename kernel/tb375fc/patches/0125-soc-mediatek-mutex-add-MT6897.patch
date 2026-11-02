@@ -1,0 +1,350 @@
+From: buntOS contributors
+Subject: [PATCH] soc: mediatek: mutex: add MT6897
+
+Each display controller of MT6897 has its own mutex, with the bits of
+the modules that its controller has. The relay between the controllers
+has to be in the mutex with the component next to it, and has no driver
+or component of its own, so mutex_mod_relay adds it along with that
+component. The DSI host is a module as well on this SoC, next to its
+start of frame, as its registers go through the shadow.
+
+The ovlsys mutex tells the DSI links apart for the start of frame, and
+DSI1 is not the same number as on the dispsys side. Each dispsys counts
+its own link as DSI0. This is how mtk_disp_mutex_src_set() of the vendor
+driver sets them for a panel on two ports.
+
+The display controllers have clocks that no component owns, and a power
+domain. The mutex takes those, so it needs a device of its own for
+runtime PM and all the clocks of the node.
+
+Add mtk_mutex_clear() for what a bootloader left: when the power domain
+stays on through the handover the mutex still has the modules it had. It
+also writes MUTEX_CFG like the vendor and the bootloader do.
+---
+ drivers/soc/mediatek/mtk-mutex.c       | 174 ++++++++++++++++++++++++-
+ include/linux/soc/mediatek/mtk-mutex.h |   1 +
+ 2 files changed, 170 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/soc/mediatek/mtk-mutex.c b/drivers/soc/mediatek/mtk-mutex.c
+index eb5d381ff5aff6a0e8fc080e9dc474115f5d2d87..24a257030e283f1e813a0649b5203bdec92ced3c 100644
+--- a/drivers/soc/mediatek/mtk-mutex.c
++++ b/drivers/soc/mediatek/mtk-mutex.c
+@@ -4,10 +4,12 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/delay.h>
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+ #include <linux/soc/mediatek/mtk-mmsys.h>
+ #include <linux/soc/mediatek/mtk-mutex.h>
+@@ -23,6 +25,7 @@
+ #define MT8183_MUTEX0_MOD1			0x34
+ #define MT8183_MUTEX0_SOF0			0x2c
+ 
++#define DISP_REG_MUTEX_CFG			0x8
+ #define DISP_REG_MUTEX_EN(n)			(0x20 + 0x20 * (n))
+ #define DISP_REG_MUTEX(n)			(0x24 + 0x20 * (n))
+ #define DISP_REG_MUTEX_RST(n)			(0x28 + 0x20 * (n))
+@@ -60,6 +63,13 @@
+ #define MT8186_MUTEX_MOD_DISP_DITHER0		10
+ #define MT8186_MUTEX_MOD_DISP_RDMA1		17
+ 
++#define MT6897_MUTEX_MOD_DISP_OVL0_2L		0
++#define MT6897_MUTEX_MOD_OVLSYS_DLO_ASYNC3	15
++
++#define MT6897_MUTEX_MOD_DISP_DLI_ASYNC0	9
++#define MT6897_MUTEX_MOD_DISP_DSC0		18
++#define MT6897_MUTEX_MOD_DISP_DSI0		20
++
+ #define MT8186_MUTEX_SOF_SINGLE_MODE		0
+ #define MT8186_MUTEX_SOF_DSI0			1
+ #define MT8186_MUTEX_SOF_DPI0			2
+@@ -317,6 +327,13 @@
+ #define MT8195_MUTEX_SOF_DPI0			6 /* for HDMI_TX */
+ #define MT8195_MUTEX_SOF_DPI1			5 /* for digital video out */
+ 
++#define MT6897_MUTEX_SOF_DSI0			1
++#define MT6897_MUTEX_EOF_DSI0			(MT6897_MUTEX_SOF_DSI0 << 6)
++#define MT6897_OVLSYS_MUTEX_SOF_DSI0		1
++#define MT6897_OVLSYS_MUTEX_EOF_DSI0		(MT6897_OVLSYS_MUTEX_SOF_DSI0 << 6)
++#define MT6897_OVLSYS_MUTEX_SOF_DSI1		2
++#define MT6897_OVLSYS_MUTEX_EOF_DSI1		(MT6897_OVLSYS_MUTEX_SOF_DSI1 << 6)
++
+ #define MT8183_MUTEX_EOF_DSI0			(MT8183_MUTEX_SOF_DSI0 << 6)
+ #define MT8183_MUTEX_EOF_DPI0			(MT8183_MUTEX_SOF_DPI0 << 6)
+ #define MT8188_MUTEX_EOF_DSI0			(MT8188_MUTEX_SOF_DSI0 << 7)
+@@ -350,17 +367,30 @@ enum mtk_mutex_sof_id {
+ 
+ struct mtk_mutex_data {
+ 	const u8 *mutex_mod;
++	/* A relay to set along with a component, for the path to the next controller */
++	const u8 *mutex_mod_relay;
++	/* The DSI host of this controller is one of the modules as well */
++	const u8 mutex_mod_dsi;
+ 	const u8 *mutex_table_mod;
+ 	const u16 *mutex_sof;
+ 	const u16 mutex_mod_reg;
+ 	const u16 mutex_mod1_reg;
+ 	const u16 mutex_sof_reg;
+ 	const bool no_clk;
++	/* DSI1 has its own start of frame, not the one of DSI0 */
++	const bool dsi1_sof;
++	/*
++	 * The display controller has clocks and a power domain that no component
++	 * owns: this mutex takes all of them for its controller.
++	 */
++	const bool controller_power;
+ };
+ 
+ struct mtk_mutex_ctx {
+ 	struct device			*dev;
+ 	struct clk			*clk;
++	struct clk_bulk_data		*controller_clks;
++	int				num_controller_clks;
+ 	void __iomem			*regs;
+ 	struct mtk_mutex		mutex[MTK_MUTEX_MAX_HANDLES];
+ 	const struct mtk_mutex_data	*data;
+@@ -397,6 +427,26 @@ static const u8 mt2712_mutex_mod[DDP_COMPONENT_ID_MAX] = {
+ 	[DDP_COMPONENT_WDMA1] = MT2712_MUTEX_MOD_DISP_WDMA1,
+ };
+ 
++static const u8 mt6897_dispsys_mutex_mod[DDP_COMPONENT_ID_MAX] = {
++	[DDP_COMPONENT_DSC0] = MT6897_MUTEX_MOD_DISP_DSC0,
++	[DDP_COMPONENT_DSC1] = MT6897_MUTEX_MOD_DISP_DSC0,
++};
++
++static const u8 mt6897_dispsys_mutex_mod_relay[DDP_COMPONENT_ID_MAX] = {
++	[DDP_COMPONENT_DSC0] = MT6897_MUTEX_MOD_DISP_DLI_ASYNC0,
++	[DDP_COMPONENT_DSC1] = MT6897_MUTEX_MOD_DISP_DLI_ASYNC0,
++};
++
++static const u8 mt6897_ovlsys_mutex_mod[DDP_COMPONENT_ID_MAX] = {
++	[DDP_COMPONENT_OVL_2L0] = MT6897_MUTEX_MOD_DISP_OVL0_2L,
++	[DDP_COMPONENT_OVL_2L1] = MT6897_MUTEX_MOD_DISP_OVL0_2L,
++};
++
++static const u8 mt6897_ovlsys_mutex_mod_relay[DDP_COMPONENT_ID_MAX] = {
++	[DDP_COMPONENT_OVL_2L0] = MT6897_MUTEX_MOD_OVLSYS_DLO_ASYNC3,
++	[DDP_COMPONENT_OVL_2L1] = MT6897_MUTEX_MOD_OVLSYS_DLO_ASYNC3,
++};
++
+ static const u8 mt8167_mutex_mod[DDP_COMPONENT_ID_MAX] = {
+ 	[DDP_COMPONENT_AAL0] = MT8167_MUTEX_MOD_DISP_AAL,
+ 	[DDP_COMPONENT_CCORR] = MT8167_MUTEX_MOD_DISP_CCORR,
+@@ -678,6 +728,17 @@ static const u16 mt6795_mutex_sof[DDP_MUTEX_SOF_MAX] = {
+ 	[MUTEX_SOF_DPI0] = MUTEX_SOF_DPI0,
+ };
+ 
++static const u16 mt6897_dispsys_mutex_sof[DDP_MUTEX_SOF_MAX] = {
++	[MUTEX_SOF_SINGLE_MODE] = MUTEX_SOF_SINGLE_MODE,
++	[MUTEX_SOF_DSI0] = MT6897_MUTEX_SOF_DSI0 | MT6897_MUTEX_EOF_DSI0,
++};
++
++static const u16 mt6897_ovlsys_mutex_sof[DDP_MUTEX_SOF_MAX] = {
++	[MUTEX_SOF_SINGLE_MODE] = MUTEX_SOF_SINGLE_MODE,
++	[MUTEX_SOF_DSI0] = MT6897_OVLSYS_MUTEX_SOF_DSI0 | MT6897_OVLSYS_MUTEX_EOF_DSI0,
++	[MUTEX_SOF_DSI1] = MT6897_OVLSYS_MUTEX_SOF_DSI1 | MT6897_OVLSYS_MUTEX_EOF_DSI1,
++};
++
+ static const u16 mt8167_mutex_sof[DDP_MUTEX_SOF_MAX] = {
+ 	[MUTEX_SOF_SINGLE_MODE] = MUTEX_SOF_SINGLE_MODE,
+ 	[MUTEX_SOF_DSI0] = MUTEX_SOF_DSI0,
+@@ -754,6 +815,32 @@ static const struct mtk_mutex_data mt6795_mutex_driver_data = {
+ 	.mutex_sof_reg = MT2701_MUTEX0_SOF0,
+ };
+ 
++/*
++ * A dispsys counts its own DSI link as DSI0. An ovlsys tells them apart, and
++ * follows the link of its pipe.
++ */
++static const struct mtk_mutex_data mt6897_dispsys_mutex_driver_data = {
++	.mutex_mod = mt6897_dispsys_mutex_mod,
++	.mutex_mod_relay = mt6897_dispsys_mutex_mod_relay,
++	.mutex_mod_dsi = MT6897_MUTEX_MOD_DISP_DSI0,
++	.mutex_sof = mt6897_dispsys_mutex_sof,
++	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
++	.mutex_mod1_reg = MT8183_MUTEX0_MOD1,
++	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
++	.controller_power = true,
++};
++
++static const struct mtk_mutex_data mt6897_ovlsys_mutex_driver_data = {
++	.mutex_mod = mt6897_ovlsys_mutex_mod,
++	.mutex_mod_relay = mt6897_ovlsys_mutex_mod_relay,
++	.mutex_sof = mt6897_ovlsys_mutex_sof,
++	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
++	.mutex_mod1_reg = MT8183_MUTEX0_MOD1,
++	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
++	.dsi1_sof = true,
++	.controller_power = true,
++};
++
+ static const struct mtk_mutex_data mt8167_mutex_driver_data = {
+ 	.mutex_mod = mt8167_mutex_mod,
+ 	.mutex_sof = mt8167_mutex_sof,
+@@ -875,7 +962,21 @@ int mtk_mutex_prepare(struct mtk_mutex *mutex)
+ {
+ 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+ 						 mutex[mutex->id]);
+-	return clk_prepare_enable(mtx->clk);
++	int ret;
++
++	if (!mtx->data->controller_power)
++		return clk_prepare_enable(mtx->clk);
++
++	ret = pm_runtime_resume_and_get(mtx->dev);
++	if (ret < 0)
++		return ret;
++
++	ret = clk_bulk_prepare_enable(mtx->num_controller_clks,
++				      mtx->controller_clks);
++	if (ret)
++		pm_runtime_put(mtx->dev);
++
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mtk_mutex_prepare);
+ 
+@@ -883,10 +984,43 @@ void mtk_mutex_unprepare(struct mtk_mutex *mutex)
+ {
+ 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+ 						 mutex[mutex->id]);
+-	clk_disable_unprepare(mtx->clk);
++
++	if (!mtx->data->controller_power) {
++		clk_disable_unprepare(mtx->clk);
++		return;
++	}
++
++	clk_bulk_disable_unprepare(mtx->num_controller_clks,
++				   mtx->controller_clks);
++	pm_runtime_put(mtx->dev);
+ }
+ EXPORT_SYMBOL_GPL(mtk_mutex_unprepare);
+ 
++/*
++ * Forget what a bootloader left in this mutex. It can still be running when the
++ * power domain was not cycled, and the add and remove functions only change the
++ * bits of their own components.
++ */
++void mtk_mutex_clear(struct mtk_mutex *mutex)
++{
++	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
++						 mutex[mutex->id]);
++	const struct mtk_mutex_data *data = mtx->data;
++
++	writel(0, mtx->regs + DISP_REG_MUTEX_CFG);
++	writel(0, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
++	writel(0, mtx->regs + data->mutex_mod_reg + 0x20 * mutex->id);
++	writel(0, mtx->regs + data->mutex_mod1_reg + 0x20 * mutex->id);
++	writel(MUTEX_SOF_SINGLE_MODE,
++	       mtx->regs + DISP_REG_MUTEX_SOF(data->mutex_sof_reg, mutex->id));
++
++	/* With no modules left in it, this only resets the mutex */
++	writel(1, mtx->regs + DISP_REG_MUTEX_RST(mutex->id));
++	udelay(1);
++	writel(0, mtx->regs + DISP_REG_MUTEX_RST(mutex->id));
++}
++EXPORT_SYMBOL_GPL(mtk_mutex_clear);
++
+ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
+ 			enum mtk_ddp_comp_id id)
+ {
+@@ -903,7 +1037,7 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
+ 		sof_id = MUTEX_SOF_DSI0;
+ 		break;
+ 	case DDP_COMPONENT_DSI1:
+-		sof_id = MUTEX_SOF_DSI0;
++		sof_id = mtx->data->dsi1_sof ? MUTEX_SOF_DSI1 : MUTEX_SOF_DSI0;
+ 		break;
+ 	case DDP_COMPONENT_DSI2:
+ 		sof_id = MUTEX_SOF_DSI2;
+@@ -928,10 +1062,19 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
+ 		mod_id = mtx->data->mutex_mod[id] % 32;
+ 		reg = readl_relaxed(mtx->regs + offset);
+ 		reg |= BIT(mod_id);
++		if (mtx->data->mutex_mod_relay)
++			reg |= BIT(mtx->data->mutex_mod_relay[id] % 32);
+ 		writel_relaxed(reg, mtx->regs + offset);
+ 		return;
+ 	}
+ 
++	if (mtx->data->mutex_mod_dsi && (id == DDP_COMPONENT_DSI0 || id == DDP_COMPONENT_DSI1)) {
++		offset = DISP_REG_MUTEX_MOD(mtx, mtx->data->mutex_mod_dsi, mutex->id);
++		reg = readl_relaxed(mtx->regs + offset);
++		reg |= BIT(mtx->data->mutex_mod_dsi % 32);
++		writel_relaxed(reg, mtx->regs + offset);
++	}
++
+ 	writel_relaxed(mtx->data->mutex_sof[sof_id],
+ 		       mtx->regs +
+ 		       DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id));
+@@ -962,12 +1105,21 @@ void mtk_mutex_remove_comp(struct mtk_mutex *mutex,
+ 			       mtx->regs +
+ 			       DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg,
+ 						  mutex->id));
++		if (mtx->data->mutex_mod_dsi &&
++		    (id == DDP_COMPONENT_DSI0 || id == DDP_COMPONENT_DSI1)) {
++			offset = DISP_REG_MUTEX_MOD(mtx, mtx->data->mutex_mod_dsi, mutex->id);
++			reg = readl_relaxed(mtx->regs + offset);
++			reg &= ~BIT(mtx->data->mutex_mod_dsi % 32);
++			writel_relaxed(reg, mtx->regs + offset);
++		}
+ 		break;
+ 	default:
+ 		offset = DISP_REG_MUTEX_MOD(mtx, mtx->data->mutex_mod[id], mutex->id);
+ 		mod_id = mtx->data->mutex_mod[id] % 32;
+ 		reg = readl_relaxed(mtx->regs + offset);
+ 		reg &= ~BIT(mod_id);
++		if (mtx->data->mutex_mod_relay)
++			reg &= ~BIT(mtx->data->mutex_mod_relay[id] % 32);
+ 		writel_relaxed(reg, mtx->regs + offset);
+ 		break;
+ 	}
+@@ -1106,8 +1258,18 @@ static int mtk_mutex_probe(struct platform_device *pdev)
+ 		mtx->mutex[i].id = i;
+ 
+ 	mtx->data = of_device_get_match_data(dev);
+-
+-	if (!mtx->data->no_clk) {
++	mtx->dev = dev;
++
++	if (mtx->data->controller_power) {
++		mtx->num_controller_clks = devm_clk_bulk_get_all(dev, &mtx->controller_clks);
++		if (mtx->num_controller_clks < 0)
++			return dev_err_probe(dev, mtx->num_controller_clks,
++					     "Failed to get clocks\n");
++
++		ret = devm_pm_runtime_enable(dev);
++		if (ret)
++			return ret;
++	} else if (!mtx->data->no_clk) {
+ 		mtx->clk = devm_clk_get(dev, NULL);
+ 		if (IS_ERR(mtx->clk))
+ 			return dev_err_probe(dev, PTR_ERR(mtx->clk), "Failed to get clock\n");
+@@ -1134,6 +1296,8 @@ static const struct of_device_id mutex_driver_dt_match[] = {
+ 	{ .compatible = "mediatek,mt2701-disp-mutex", .data = &mt2701_mutex_driver_data },
+ 	{ .compatible = "mediatek,mt2712-disp-mutex", .data = &mt2712_mutex_driver_data },
+ 	{ .compatible = "mediatek,mt6795-disp-mutex", .data = &mt6795_mutex_driver_data },
++	{ .compatible = "mediatek,mt6897-disp-mutex", .data = &mt6897_dispsys_mutex_driver_data },
++	{ .compatible = "mediatek,mt6897-ovlsys-mutex", .data = &mt6897_ovlsys_mutex_driver_data },
+ 	{ .compatible = "mediatek,mt8167-disp-mutex", .data = &mt8167_mutex_driver_data },
+ 	{ .compatible = "mediatek,mt8173-disp-mutex", .data = &mt8173_mutex_driver_data },
+ 	{ .compatible = "mediatek,mt8183-disp-mutex", .data = &mt8183_mutex_driver_data },
+diff --git a/include/linux/soc/mediatek/mtk-mutex.h b/include/linux/soc/mediatek/mtk-mutex.h
+index 635218e3ac68a268f5b04fb7ad8e4d2d6eb51484..1d6d4bea7704390428f3355ed7bee41819190632 100644
+--- a/include/linux/soc/mediatek/mtk-mutex.h
++++ b/include/linux/soc/mediatek/mtk-mutex.h
+@@ -69,6 +69,7 @@ enum mtk_mutex_sof_index {
+ 
+ struct mtk_mutex *mtk_mutex_get(struct device *dev);
+ int mtk_mutex_prepare(struct mtk_mutex *mutex);
++void mtk_mutex_clear(struct mtk_mutex *mutex);
+ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
+ 			enum mtk_ddp_comp_id id);
+ void mtk_mutex_enable(struct mtk_mutex *mutex);

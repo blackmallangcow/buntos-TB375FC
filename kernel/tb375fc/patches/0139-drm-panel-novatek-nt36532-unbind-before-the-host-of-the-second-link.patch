@@ -1,0 +1,35 @@
+From: buntOS contributors
+Subject: [PATCH] drm/panel: novatek-nt36532: unbind before the host of the second link
+
+The panel registers its device on the second DSI host itself, as a child
+of that host. If the host goes first, as it does when the module of the
+host driver goes away, it takes that device along. The panel driver then
+detaches and unregisters a device that is gone, and KASAN sees a
+use-after-free before the oops.
+
+Make the panel a consumer of that host, so that it unbinds first. It
+still comes back the same way, as the host registers a new device.
+
+Found with a register model in QEMU, by unloading the module.
+---
+ drivers/gpu/drm/panel/panel-novatek-nt36532.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index c01d78280cf45985e6535adf5eaf77c8626ad940..b45217dcbc61fac4eef770b8dd3f980f6d0d6afd 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -822,6 +822,13 @@ static int nt36532_probe(struct mipi_dsi_device *dsi)
+ 			return dev_err_probe(dev, -EPROBE_DEFER,
+ 					     "cannot get secondary DSI host\n");
+ 
++		/*
++		 * The device below is a child of that host, and this driver lets go of
++		 * it when it unbinds. So it has to unbind before that host can go.
++		 */
++		if (!device_link_add(dev, dsi1_host->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
++			dev_warn(dev, "cannot link to secondary DSI host\n");
++
+ 		ctx->dsi[1] = devm_mipi_dsi_device_register_full(dev, dsi1_host,
+ 								 &dsi_info);
+ 		if (IS_ERR(ctx->dsi[1])) {
