@@ -1,0 +1,183 @@
+From: buntOS contributors
+Subject: [PATCH] nvmem: add MediaTek device information driver
+
+Add a read-only NVMEM provider for the copy of the fuses that the boot
+firmware of the MT6897 leaves in /chosen. The format is a little endian
+count of 32-bit words, followed by the words. The boot firmware writes
+it with a fixed size of 0x504 bytes, and the vendor kernel has the same
+kind of driver.
+
+The sensors and PHYs need this for their calibration data, and
+mediatek,efuse can't provide it because the offsets are different.
+
+The whole copy is only readable by root. It also has things like the
+serial number of the chip.
+
+Reads are checked against the size the boot firmware gave. The core
+doesn't check the cells of a device tree against it, and a short copy
+must not turn into calibration read from what is behind it.
+---
+ drivers/nvmem/Kconfig       |  12 ++++
+ drivers/nvmem/Makefile      |   2 +
+ drivers/nvmem/mtk-devinfo.c | 117 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 131 insertions(+)
+
+diff --git a/drivers/nvmem/Kconfig b/drivers/nvmem/Kconfig
+index 74ddbd0..bcf69eb 100644
+--- a/drivers/nvmem/Kconfig
++++ b/drivers/nvmem/Kconfig
+@@ -216,6 +216,18 @@ config NVMEM_MICROCHIP_OTPC
+ 	  This driver enable the OTP controller available on Microchip SAMA7G5
+ 	  SoCs. It controls the access to the OTP memory connected to it.
+ 
++config NVMEM_MTK_DEVINFO
++	tristate "MediaTek device information from the boot firmware"
++	depends on ARCH_MEDIATEK || COMPILE_TEST
++	depends on OF
++	help
++	  This is a driver to read the fuses that the boot firmware of some
++	  MediaTek SoCs, such as the MT6897, passes to the kernel in the device
++	  tree. They hold sensor calibration and similar data.
++
++	  This driver can also be built as a module. If so, the module
++	  will be called nvmem_mtk-devinfo.
++
+ config NVMEM_MTK_EFUSE
+ 	tristate "Mediatek SoCs EFUSE support"
+ 	depends on ARCH_MEDIATEK || COMPILE_TEST
+diff --git a/drivers/nvmem/Makefile b/drivers/nvmem/Makefile
+index 7252b8e..32b7574 100644
+--- a/drivers/nvmem/Makefile
++++ b/drivers/nvmem/Makefile
+@@ -46,6 +46,8 @@ obj-$(CONFIG_NVMEM_MESON_MX_EFUSE)	+= nvmem_meson_mx_efuse.o
+ nvmem_meson_mx_efuse-y			:= meson-mx-efuse.o
+ obj-$(CONFIG_NVMEM_MICROCHIP_OTPC)	+= nvmem-microchip-otpc.o
+ nvmem-microchip-otpc-y			:= microchip-otpc.o
++obj-$(CONFIG_NVMEM_MTK_DEVINFO)		+= nvmem_mtk-devinfo.o
++nvmem_mtk-devinfo-y			:= mtk-devinfo.o
+ obj-$(CONFIG_NVMEM_MTK_EFUSE)		+= nvmem_mtk-efuse.o
+ nvmem_mtk-efuse-y			:= mtk-efuse.o
+ obj-$(CONFIG_NVMEM_MXS_OCOTP)		+= nvmem-mxs-ocotp.o
+diff --git a/drivers/nvmem/mtk-devinfo.c b/drivers/nvmem/mtk-devinfo.c
+new file mode 100644
+index 0000000..7ef9bc9
+--- /dev/null
++++ b/drivers/nvmem/mtk-devinfo.c
+@@ -0,0 +1,117 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek device information from the boot firmware
++ *
++ * Copyright (c) 2026 buntOS contributors
++ *
++ * On some MediaTek SoCs the fuses that the kernel may see are not read from
++ * the efuse block. The boot firmware copies them to the "atag,devinfo" property
++ * of /chosen, as a little endian count of 32-bit words followed by the words,
++ * and the offsets of the calibration data are offsets into that copy. They have
++ * nothing to do with the registers of the efuse block.
++ */
++
++#include <linux/device.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/nvmem-provider.h>
++#include <linux/of.h>
++#include <linux/overflow.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/unaligned.h>
++
++#define DEVINFO_HEADER_SIZE	sizeof(u32)
++
++struct mtk_devinfo {
++	size_t size;
++	u8 data[] __counted_by(size);
++};
++
++static int mtk_devinfo_read(void *priv, unsigned int offset, void *val, size_t bytes)
++{
++	const struct mtk_devinfo *info = priv;
++
++	/* The core doesn't check the cells of a device tree against the size */
++	if (offset > info->size || bytes > info->size - offset)
++		return -EINVAL;
++
++	memcpy(val, info->data + offset, bytes);
++
++	return 0;
++}
++
++static int mtk_devinfo_probe(struct platform_device *pdev)
++{
++	struct nvmem_config config = {};
++	struct device *dev = &pdev->dev;
++	struct nvmem_device *nvmem;
++	struct device_node *chosen;
++	struct mtk_devinfo *info;
++	const void *prop;
++	size_t size;
++	int len;
++
++	chosen = of_find_node_by_path("/chosen");
++	if (!chosen)
++		return dev_err_probe(dev, -ENODEV, "No /chosen node\n");
++
++	prop = of_get_property(chosen, "atag,devinfo", &len);
++	if (!prop || len < DEVINFO_HEADER_SIZE) {
++		of_node_put(chosen);
++		return dev_err_probe(dev, -ENODEV,
++				     "The boot firmware gave no device information\n");
++	}
++
++	size = (size_t)get_unaligned_le32(prop) * sizeof(u32);
++	if (!size || size > len - DEVINFO_HEADER_SIZE) {
++		of_node_put(chosen);
++		return dev_err_probe(dev, -EINVAL,
++				     "Bad device information: %zu bytes in %d\n", size, len);
++	}
++
++	info = devm_kzalloc(dev, struct_size(info, data, size), GFP_KERNEL);
++	if (!info) {
++		of_node_put(chosen);
++		return -ENOMEM;
++	}
++
++	info->size = size;
++	memcpy(info->data, prop + DEVINFO_HEADER_SIZE, size);
++	of_node_put(chosen);
++
++	config.dev = dev;
++	config.name = "mtk-devinfo";
++	config.id = NVMEM_DEVID_NONE;
++	config.owner = THIS_MODULE;
++	config.read_only = true;
++	config.root_only = true;
++	config.stride = sizeof(u32);
++	config.word_size = sizeof(u32);
++	config.size = size;
++	config.reg_read = mtk_devinfo_read;
++	config.priv = info;
++
++	nvmem = devm_nvmem_register(dev, &config);
++
++	return PTR_ERR_OR_ZERO(nvmem);
++}
++
++static const struct of_device_id mtk_devinfo_of_match[] = {
++	{ .compatible = "mediatek,mt6897-devinfo" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mtk_devinfo_of_match);
++
++static struct platform_driver mtk_devinfo_driver = {
++	.probe = mtk_devinfo_probe,
++	.driver = {
++		.name = "mtk-devinfo",
++		.of_match_table = mtk_devinfo_of_match,
++	},
++};
++module_platform_driver(mtk_devinfo_driver);
++
++MODULE_DESCRIPTION("MediaTek device information from the boot firmware");
++MODULE_LICENSE("GPL");

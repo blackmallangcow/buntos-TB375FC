@@ -1,0 +1,65 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: nvmem: add MediaTek device information
+
+The calibration data of the MT6897 is not read from the efuse block. The
+boot firmware passes a copy of the fuses in the atag,devinfo property of
+/chosen, and the offsets used for the calibration data are offsets into
+that copy. They don't match the efuse block: the vendor kernel reads
+some GPU fuses from it at offsets beyond the end of the copy.
+---
+ .../nvmem/mediatek,mt6897-devinfo.yaml        | 47 +++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/nvmem/mediatek,mt6897-devinfo.yaml b/Documentation/devicetree/bindings/nvmem/mediatek,mt6897-devinfo.yaml
+new file mode 100644
+index 0000000..e694096
+--- /dev/null
++++ b/Documentation/devicetree/bindings/nvmem/mediatek,mt6897-devinfo.yaml
+@@ -0,0 +1,47 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/nvmem/mediatek,mt6897-devinfo.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek device information from the boot firmware
++
++description:
++  The fuses that hold the calibration data of the MT6897 are not read through
++  the efuse block. The boot firmware copies them to the atag,devinfo property
++  of /chosen, as a count of 32-bit words followed by the words. The offsets of
++  the NVMEM cells are offsets into those words.
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++allOf:
++  - $ref: nvmem.yaml#
++
++properties:
++  $nodename:
++    const: efuse
++
++  compatible:
++    const: mediatek,mt6897-devinfo
++
++required:
++  - compatible
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    efuse {
++        compatible = "mediatek,mt6897-devinfo";
++
++        nvmem-layout {
++            compatible = "fixed-layout";
++            #address-cells = <1>;
++            #size-cells = <1>;
++
++            calib@310 {
++                reg = <0x310 0x38>;
++            };
++        };
++    };

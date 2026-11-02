@@ -1,0 +1,55 @@
+From: buntOS contributors
+Subject: [PATCH] mfd: mtk-spmi-pmic: add MediaTek MT6685
+
+The MT6685 holds the RTC and the clock buffer of the MT6897 boards. It has
+no interrupt groups like the other PMICs here, so there is no variant, and
+its sub-devices are all it needs from this driver.
+
+Without a variant, probing only populates the children. It makes no
+regmap, as that would give debugfs a way to read the whole chip, including
+the RTC registers that clear when read. It doesn't read the chip ID either:
+the register holding it for the other PMICs here isn't in what is known of
+this one, and the MediaTek driver for this chip doesn't read anything
+either. So nothing on the bus happens because of this driver.
+
+Without children it binds and does nothing, which is what the connectivity
+subsystem needs: that only looks up the device of this node and reads a
+register through the SPMI bus.
+---
+ drivers/mfd/mtk-spmi-pmic.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/mfd/mtk-spmi-pmic.c b/drivers/mfd/mtk-spmi-pmic.c
+index 33b469b..5828fab 100644
+--- a/drivers/mfd/mtk-spmi-pmic.c
++++ b/drivers/mfd/mtk-spmi-pmic.c
+@@ -454,6 +454,11 @@ static int mtk_spmi_pmic_probe(struct spmi_device *sdev)
+ 	unsigned int chip_id;
+ 	int ret;
+ 
++	/* Without interrupts, the sub-devices need nothing from here */
++	variant = device_get_match_data(dev);
++	if (!variant)
++		return devm_of_platform_populate(dev);
++
+ 	regmap = devm_regmap_init_spmi_ext(sdev, &mtk_spmi_regmap_config);
+ 	if (IS_ERR(regmap))
+ 		return PTR_ERR(regmap);
+@@ -465,8 +470,7 @@ static int mtk_spmi_pmic_probe(struct spmi_device *sdev)
+ 	 */
+ 	regmap_read(regmap, MTK_SPMI_PMIC_REG_CHIP_ID, &chip_id);
+ 
+-	variant = device_get_match_data(dev);
+-	if (variant && variant->num_groups) {
++	if (variant->num_groups) {
+ 		ret = mtk_spmi_pmic_irq_init(dev, regmap, variant);
+ 		if (ret)
+ 			return ret;
+@@ -479,6 +483,7 @@ static const struct of_device_id mtk_pmic_spmi_id_table[] = {
+ 	{ .compatible = "mediatek,mt6363", .data = &mt6363_variant },
+ 	{ .compatible = "mediatek,mt6368", .data = &mt6368_variant },
+ 	{ .compatible = "mediatek,mt6373", .data = &mt6373_variant },
++	{ .compatible = "mediatek,mt6685" },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, mtk_pmic_spmi_id_table);

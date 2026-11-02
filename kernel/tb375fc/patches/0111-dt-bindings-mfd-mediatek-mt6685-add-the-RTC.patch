@@ -1,0 +1,49 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: mfd: mediatek,mt6685: add the RTC
+
+The RTC of the MT6685 has a driver now. It is a child node at the address
+of its registers on the SPMI bus.
+---
+ .../bindings/mfd/mediatek,mt6685.yaml         | 20 +++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
+index 74ecfcb..63dd27c 100644
+--- a/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
+@@ -21,9 +21,22 @@ properties:
+   reg:
+     maxItems: 1
+ 
++  '#address-cells':
++    const: 1
++
++  '#size-cells':
++    const: 0
++
++patternProperties:
++  "^rtc@[0-9a-f]+$":
++    type: object
++    $ref: /schemas/rtc/mediatek,mt6685-rtc.yaml#
++
+ required:
+   - compatible
+   - reg
++  - '#address-cells'
++  - '#size-cells'
+ 
+ additionalProperties: false
+ 
+@@ -38,5 +51,12 @@ examples:
+         pmic@9 {
+             compatible = "mediatek,mt6685";
+             reg = <0x9 SPMI_USID>;
++            #address-cells = <1>;
++            #size-cells = <0>;
++
++            rtc@580 {
++                compatible = "mediatek,mt6685-rtc";
++                reg = <0x580>;
++            };
+         };
+     };

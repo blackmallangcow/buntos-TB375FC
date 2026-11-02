@@ -1,0 +1,164 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: gate: add ops that do not read the gate status
+
+The .is_enabled of the gate ops reads the status register of the block.
+The clock core calls it for every unused gate at the end of boot and for
+every gate in the debugfs clock summary, whether the block is powered or
+not. On a block that only answers while its power domain is on, such a
+read can stop the bus.
+
+Runtime PM with a power domain makes this safe: the clock core resumes
+the device, and with it the domain, before it reads. That cannot work
+when the power domain needs gates of the same block to come up, as the
+VEN and MDP domains of MT6897 do. The power controller then waits for the
+clock controller, which would wait for the power controller to attach it.
+
+Add ops without .is_enabled for such blocks. The clock core then goes by
+the use count of the clock: it does not read the block, and it leaves a
+gate alone that nobody has enabled.
+
+The ops for voter gates also follow the order of the MediaTek driver,
+which mtk_cg_hwv_set_en() does not. Done may still read as set from the
+request before, so that a gate can look open before the voter has taken
+the vote. They wait for the vote to show in the vote register first, and
+do the read the MediaTek driver does before clearing a vote. Unlike the
+MediaTek driver they do not go on to read the block. mtk_cg_hwv_set_en()
+stays for now: MT8196 and the three pericfg_ao gates of MT6897 still use
+it.
+
+Raise MTK_WAIT_HWV_DONE_US from 30 us to 5 ms, as the MediaTek driver
+waits for up to 5 s. Nothing changes while the voter finishes within the
+old limit. When it takes longer, the display gets it worst: a late mux
+of a display power domain fails the power-up, and genpd then powers
+mminfra down, under the running display.
+
+---
+ drivers/clk/mediatek/clk-gate.c | 72 ++++++++++++++++++++++++++++++++++++++-
+ drivers/clk/mediatek/clk-gate.h |  3 ++
+ drivers/clk/mediatek/clk-mtk.h  |  2 +-
+ 3 files changed, 75 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/clk/mediatek/clk-gate.c b/drivers/clk/mediatek/clk-gate.c
+index bd2fcd489..e381dba0b 100644
+--- a/drivers/clk/mediatek/clk-gate.c
++++ b/drivers/clk/mediatek/clk-gate.c
+@@ -128,6 +128,50 @@ static void mtk_cg_hwv_disable(struct clk_hw *hw)
+ 	mtk_cg_hwv_set_en(hw, false);
+ }
+ 
++/*
++ * Right after a vote, done may still read as set from the request before it.
++ * So wait for the vote to show in the vote register first, as the MediaTek
++ * driver does. The read before clearing a vote is theirs too: it clears the
++ * idle signal of the voter bus. The block itself is not read.
++ */
++static int mtk_cg_hwv_vote(struct clk_hw *hw, bool enable)
++{
++	struct mtk_clk_gate *cg = to_mtk_clk_gate(hw);
++	const struct mtk_gate_regs *hwv = cg->gate->hwv_regs;
++	u32 bit = BIT(cg->gate->shift);
++	u32 val;
++	int ret;
++
++	if (!enable)
++		regmap_read(cg->regmap_hwv, hwv->clr_ofs, &val);
++
++	regmap_write(cg->regmap_hwv, enable ? hwv->set_ofs : hwv->clr_ofs, bit);
++
++	ret = regmap_read_poll_timeout_atomic(cg->regmap_hwv, hwv->set_ofs, val,
++					      !!(val & bit) == enable, 1,
++					      MTK_WAIT_HWV_DONE_US);
++	if (!ret)
++		ret = regmap_read_poll_timeout_atomic(cg->regmap_hwv,
++						      hwv->sta_ofs, val,
++						      val & bit, 1,
++						      MTK_WAIT_HWV_DONE_US);
++	if (ret)
++		pr_warn_ratelimited("%s: hardware voter did not finish the vote: %d\n",
++				    clk_hw_get_name(hw), ret);
++
++	return ret;
++}
++
++static int mtk_cg_hwv_vote_enable(struct clk_hw *hw)
++{
++	return mtk_cg_hwv_vote(hw, true);
++}
++
++static void mtk_cg_hwv_vote_disable(struct clk_hw *hw)
++{
++	mtk_cg_hwv_vote(hw, false);
++}
++
+ static int mtk_cg_enable_no_setclr(struct clk_hw *hw)
+ {
+ 	mtk_cg_clr_bit_no_setclr(hw);
+@@ -155,7 +199,8 @@ static void mtk_cg_disable_inv_no_setclr(struct clk_hw *hw)
+ static bool mtk_cg_uses_hwv(const struct clk_ops *ops)
+ {
+ 	if (ops == &mtk_clk_gate_hwv_ops_setclr ||
+-	    ops == &mtk_clk_gate_hwv_ops_setclr_inv)
++	    ops == &mtk_clk_gate_hwv_ops_setclr_inv ||
++	    ops == &mtk_clk_gate_hwv_ops_setclr_no_status)
+ 		return true;
+ 
+ 	return false;
+@@ -189,6 +234,31 @@ const struct clk_ops mtk_clk_gate_hwv_ops_setclr_inv = {
+ };
+ EXPORT_SYMBOL_GPL(mtk_clk_gate_hwv_ops_setclr_inv);
+ 
++/*
++ * For gates in a block that only answers while its power domain is on, where
++ * runtime PM is no option: the power domain needs the gate to come up, or
++ * powering the domain up and down at probe would disturb the display. Without
++ * .is_enabled the clock core goes by the use count: it never reads the block
++ * on its own, and it leaves a gate alone that nobody has enabled.
++ */
++const struct clk_ops mtk_clk_gate_ops_setclr_no_status = {
++	.enable		= mtk_cg_enable,
++	.disable	= mtk_cg_disable,
++};
++EXPORT_SYMBOL_GPL(mtk_clk_gate_ops_setclr_no_status);
++
++const struct clk_ops mtk_clk_gate_ops_setclr_inv_no_status = {
++	.enable		= mtk_cg_enable_inv,
++	.disable	= mtk_cg_disable_inv,
++};
++EXPORT_SYMBOL_GPL(mtk_clk_gate_ops_setclr_inv_no_status);
++
++const struct clk_ops mtk_clk_gate_hwv_ops_setclr_no_status = {
++	.enable		= mtk_cg_hwv_vote_enable,
++	.disable	= mtk_cg_hwv_vote_disable,
++};
++EXPORT_SYMBOL_GPL(mtk_clk_gate_hwv_ops_setclr_no_status);
++
+ const struct clk_ops mtk_clk_gate_ops_no_setclr = {
+ 	.is_enabled	= mtk_cg_bit_is_cleared,
+ 	.enable		= mtk_cg_enable_no_setclr,
+diff --git a/drivers/clk/mediatek/clk-gate.h b/drivers/clk/mediatek/clk-gate.h
+index 4f05b9855..360e7d5cc 100644
+--- a/drivers/clk/mediatek/clk-gate.h
++++ b/drivers/clk/mediatek/clk-gate.h
+@@ -21,6 +21,9 @@ extern const struct clk_ops mtk_clk_gate_ops_no_setclr;
+ extern const struct clk_ops mtk_clk_gate_ops_no_setclr_inv;
+ extern const struct clk_ops mtk_clk_gate_hwv_ops_setclr;
+ extern const struct clk_ops mtk_clk_gate_hwv_ops_setclr_inv;
++extern const struct clk_ops mtk_clk_gate_ops_setclr_no_status;
++extern const struct clk_ops mtk_clk_gate_ops_setclr_inv_no_status;
++extern const struct clk_ops mtk_clk_gate_hwv_ops_setclr_no_status;
+ 
+ struct mtk_gate_regs {
+ 	u32 sta_ofs;
+diff --git a/drivers/clk/mediatek/clk-mtk.h b/drivers/clk/mediatek/clk-mtk.h
+index 5417b9264..d82dfaf41 100644
+--- a/drivers/clk/mediatek/clk-mtk.h
++++ b/drivers/clk/mediatek/clk-mtk.h
+@@ -20,7 +20,7 @@
+ 
+ #define MHZ (1000 * 1000)
+ 
+-#define MTK_WAIT_HWV_DONE_US	30
++#define MTK_WAIT_HWV_DONE_US	5000
+ 
+ struct platform_device;
+ 

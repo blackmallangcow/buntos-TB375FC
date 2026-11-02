@@ -94,6 +94,21 @@
 0058-dt-bindings-net-wireless-mt76-add-the-MT6897-Wi-Fi.patch
 0059-wifi-mt76-mt7921-let-a-variant-start-firmware-it-did-not-download.patch
 0060-wifi-mt76-mt7921-add-the-MT6897-SoC-bus-variant.patch
+# 0070~0079: 2e GPU 전원·열·게이지. 모두 꺼 둔 노드이고 기기에서 확인한 뒤 낸다. 0070·0071 GPUEB 메일박스 MT6897(채널 11개, 받는 쪽이 0xd8부터, 클럭 없음).
+# 0072·0073 mtk-mfg MT6897: GPUEB는 LK가 띄우고 멈추지 않는다(GHPM·클럭·레귤레이터 없음), 공유 메모리는 LK가 /soc/gpueb 노드에 적어 준 것, 오프셋이 다르고,
+# OPP는 CMD_COMMIT이다. 무엇을 보내기 전에 읽기만으로 MFG0·GPR을 확인한다. 0074 panthor 바인딩(드라이버는 그대로, ASN hash 없음). 0075·0076 devinfo NVMEM(LK가
+# /chosen에 넘기는 퓨즈. efuse 블록과 오프셋이 다르다). 0077·0078 LVTS MT6897(도메인 넷, 센서 32개, 읽기 전용, 센서별 계수, HT/NT 보정, 틀린 보정은 거절).
+# 0079 mm8013: 접근 전 4 ms와 읽기 재시도(벤더와 같다), 배터리 ID 0x0103
+0070-dt-bindings-mailbox-mediatek-mt8196-gpueb-mbox-add-MT6897.patch
+0071-mailbox-mtk-gpueb-add-MT6897.patch
+0072-dt-bindings-power-mediatek-mt8196-gpufreq-add-MT6897.patch
+0073-pmdomain-mediatek-mtk-mfg-add-MT6897.patch
+0074-dt-bindings-gpu-mali-valhall-csf-add-MT6897.patch
+0075-dt-bindings-nvmem-add-MediaTek-device-information.patch
+0076-nvmem-add-MediaTek-device-information-driver.patch
+0077-dt-bindings-thermal-mediatek-lvts-thermal-add-MT6897.patch
+0078-thermal-drivers-mediatek-lvts-add-MT6897.patch
+0079-power-supply-mm8013-pace-accesses-add-a-battery-ID.patch
 # 0080~0084: NT36532 패널. 0080~0082는 업스트림 백포트다(ffa88de8ddb6은 7.3, 1c523f0a9301·47b823940e38은 7.4 병합 창. 더 새 커널로 가면
 # 뺀다). 드라이버를 쓰는 DSI 호스트가 대기열에 없어 지금은 돌 곳이 없다. 0083·0084는 이 기기의 패널 셋(BOE, Tianma, Tianma 무광)이다: 모드
 # 넷과 주사율 레지스터, DSC 1.1, 편향 전원, DCS 밝기, GPIO184로 고르기. 표는 벤더 드라이버에서 옮겨 순정 모듈·LK 표와 맞댔다. 기기에서 확인한 뒤 낸다
@@ -117,6 +132,20 @@
 0095-mfd-mt6375-add-the-interrupts-and-the-TCPC.patch
 0096-usb-typec-tcpci_mt6375-add-MediaTek-MT6375.patch
 0097-power-supply-mt6375-charger-use-the-interrupts.patch
-# 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 드라이버가 없다):
-#  - pmdomain: mediatek: mtk-mfg MT6897 GPUEB 변형
+# 0100~0104: MT6897 화면(dispsys, ovlsys, mminfra), MDP, 코덱(vdec, venc)의 클럭 게이트. 0100은 바인딩과 번호다. 0101은 상태를 읽지 않는 게이트 ops와 벤더 순서의 투표, HW voter 한도 5ms다: 이 블록은 전원 도메인이
+# 켜져 있을 때만 답하는데, VEN·MDP 도메인이 자기 블록의 게이트를 써서 런타임 PM을 쓸 수 없다(MT8196과 다른 점). 0102~0104가 표다(OnePlus 공식 MT6897 커널과 순정 모듈에 맞댔다).
+# 0102의 화면 블록은 mtk-mmsys에 MT6897 데이터가 들어오면 그 자식으로 옮긴다. 모두 꺼 둔 노드이고, 기기에서 확인한 뒤 낸다
+0100-dt-bindings-clock-mediatek-add-the-MT6897-display-and-codec-clock-gates.patch
+0101-clk-mediatek-gate-add-ops-that-do-not-read-the-gate-status.patch
+0102-clk-mediatek-add-the-MT6897-display-clock-gates.patch
+0103-clk-mediatek-add-the-MT6897-MDP-clock-gates.patch
+0104-clk-mediatek-add-the-MT6897-video-codec-clock-gates.patch
+# 0110~0113: MT6685 RTC. 0110은 업스트림 v1 1/2 백포트(미병합. interrupts를 필수에서 뺐다. 새 판이 나오면 바꾼다), 0111은 0055의 바인딩에 자식 노드, 0112는 MFD에 compatible과 자식만 띄우는 길(버스 접근 0번), 0113은
+# RTC 드라이버(새로 씀, 시간 읽기와 쓰기만). 연도 칸은 벤더처럼 1968부터이고 업스트림 v1과 다르다. 쓰기는 regmap이 게이트·시간·트리거로 막는다. 알람은 인터럽트 길이 정해진 뒤에 넣는다. 레지스터 표는
+# OnePlus 공식 MT6897 커널과 스톡 모듈에서 옮겼다. 7.4로 옮길 때 SPMI 하위 장치를 devm_spmi_subdevice_alloc_and_add로 바꾼다. 기기에서 확인한 뒤 낸다
+0110-dt-bindings-rtc-Add-MediaTek-MT6685-PM-Clock-IC-Real-Time-Clock.patch
+0111-dt-bindings-mfd-mediatek-mt6685-add-the-RTC.patch
+0112-mfd-mtk-spmi-pmic-add-MediaTek-MT6685.patch
+0113-rtc-add-MediaTek-MT6685-RTC.patch
+# 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 RTC까지 0110~0113에 있다):
 #  - wifi: mt76: mt7921 SoC의 레거시 명령 길(기기에서 uni cmd를 받지 않을 때)

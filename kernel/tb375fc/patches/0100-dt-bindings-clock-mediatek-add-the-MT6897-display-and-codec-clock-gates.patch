@@ -1,0 +1,398 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: clock: mediatek: add the MT6897 display and codec clock gates
+
+Add the clock gate blocks of the MediaTek MT6897 display, MDP and video
+codec hardware: dispsys0, dispsys1, ovlsys0, ovlsys1, mminfra, mdpsys0,
+mdpsys1, vdecsys, vdecsys-soc, vencsys and vencsys-c1, with their clock
+identifiers. The identifiers follow the tables of the MediaTek vendor
+driver (OnePlus Pad GPL release).
+
+The display blocks switch part of their gates through the hardware voter
+and mminfra all of them, like part of pericfg_ao.
+
+The blocks only answer while their power domain is on, but they carry no
+power-domains property. The VEN and MDP power domains need gates of the
+blocks they power to come up, so a power domain and its clock controller
+would wait for each other. For the other blocks, runtime PM would power
+the domain up and down at probe and mminfra with it, which turns off the
+display the bootloader left running. A consumer powers the domain with
+its own power-domains property before it enables a gate.
+
+---
+ .../bindings/clock/mediatek,mt6897-clock.yaml     |  42 ++-
+ include/dt-bindings/clock/mediatek,mt6897-clock.h | 278 ++++++++++++++++++++
+ 2 files changed, 318 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+index fd3ad4e59..2d0bc6781 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+@@ -21,6 +21,14 @@ description: |
+   two UFS blocks also provide the reset lines of the UFS M-PHY, UniPro,
+   inline crypto engine and host controller.
+ 
++  The display, MDP and video codec blocks only answer while their power domain
++  is on, and they have no power-domains property. The VEN and MDP power domains
++  need gates of these blocks to come up, so the two would wait for each other.
++  For the other blocks, runtime PM would power the domain up and down at probe
++  and mminfra with it, which turns off the display the bootloader left running.
++  A consumer powers the domain up with its own power-domains property before it
++  enables a gate.
++
+   The identifiers of the clocks are in
+   include/dt-bindings/clock/mediatek,mt6897-clock.h and those of the resets
+   in include/dt-bindings/reset/mediatek,mt6897-resets.h.
+@@ -29,14 +37,25 @@ properties:
+   compatible:
+     items:
+       - enum:
++          - mediatek,mt6897-dispsys0
++          - mediatek,mt6897-dispsys1
+           - mediatek,mt6897-imp-iic-wrap-c
+           - mediatek,mt6897-imp-iic-wrap-en
+           - mediatek,mt6897-imp-iic-wrap-es
+           - mediatek,mt6897-imp-iic-wrap-n
+           - mediatek,mt6897-imp-iic-wrap-s
++          - mediatek,mt6897-mdpsys0
++          - mediatek,mt6897-mdpsys1
++          - mediatek,mt6897-mminfra
++          - mediatek,mt6897-ovlsys0
++          - mediatek,mt6897-ovlsys1
+           - mediatek,mt6897-pericfg-ao
+           - mediatek,mt6897-ufscfg-ao
+           - mediatek,mt6897-ufscfg-pdn
++          - mediatek,mt6897-vdecsys
++          - mediatek,mt6897-vdecsys-soc
++          - mediatek,mt6897-vencsys
++          - mediatek,mt6897-vencsys-c1
+       - const: syscon
+ 
+   reg:
+@@ -54,7 +73,7 @@ properties:
+       Phandle to the hardware voter (HWV) register block. The HWV is a
+       SoC-internal MCU that collects clock votes from the application
+       processor and the remote processors. On MT6897 it opens and closes
+-      some of the pericfg_ao gates.
++      some of the pericfg_ao, display and mminfra gates.
+ 
+ required:
+   - compatible
+@@ -66,7 +85,13 @@ allOf:
+       properties:
+         compatible:
+           contains:
+-            const: mediatek,mt6897-pericfg-ao
++            enum:
++              - mediatek,mt6897-dispsys0
++              - mediatek,mt6897-dispsys1
++              - mediatek,mt6897-mminfra
++              - mediatek,mt6897-ovlsys0
++              - mediatek,mt6897-ovlsys1
++              - mediatek,mt6897-pericfg-ao
+     then:
+       required:
+         - mediatek,hardware-voter
+@@ -110,3 +135,16 @@ examples:
+         reg = <0x11f02000 0x1000>;
+         #clock-cells = <1>;
+     };
++  - |
++    clock-controller@14000000 {
++        compatible = "mediatek,mt6897-dispsys0", "syscon";
++        reg = <0x14000000 0x1000>;
++        mediatek,hardware-voter = <&hwv>;
++        #clock-cells = <1>;
++    };
++  - |
++    clock-controller@17000000 {
++        compatible = "mediatek,mt6897-vencsys", "syscon";
++        reg = <0x17000000 0x1000>;
++        #clock-cells = <1>;
++    };
+diff --git a/include/dt-bindings/clock/mediatek,mt6897-clock.h b/include/dt-bindings/clock/mediatek,mt6897-clock.h
+index e7daf902e..e69935329 100644
+--- a/include/dt-bindings/clock/mediatek,mt6897-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6897-clock.h
+@@ -295,4 +295,282 @@
+ #define CLK_IMPS_I2C1			1
+ #define CLK_IMPS_I2C7			2
+ 
++/* DISPSYS0 */
++#define CLK_DISPSYS0_DISPSYS_CONFIG	0
++#define CLK_DISPSYS0_DISP_MUTEX0	1
++#define CLK_DISPSYS0_DISP_AAL0		2
++#define CLK_DISPSYS0_DISP_C3D0		3
++#define CLK_DISPSYS0_DISP_CCORR0	4
++#define CLK_DISPSYS0_DISP_CCORR1	5
++#define CLK_DISPSYS0_DISP_CHIST0	6
++#define CLK_DISPSYS0_DISP_CHIST1	7
++#define CLK_DISPSYS0_DISP_COLOR0	8
++#define CLK_DISPSYS0_DISP_DITHER0	9
++#define CLK_DISPSYS0_DISP_DITHER1	10
++#define CLK_DISPSYS0_DISP_DLI_ASYNC0	11
++#define CLK_DISPSYS0_DISP_DLI_ASYNC1	12
++#define CLK_DISPSYS0_DISP_DLI_ASYNC2	13
++#define CLK_DISPSYS0_DISP_DLI_ASYNC3	14
++#define CLK_DISPSYS0_DISP_DLI_ASYNC4	15
++#define CLK_DISPSYS0_DISP_DLI_ASYNC5	16
++#define CLK_DISPSYS0_DISP_DLO_ASYNC0	17
++#define CLK_DISPSYS0_DISP_DLO_ASYNC1	18
++#define CLK_DISPSYS0_DISP_DP_INTF0	19
++#define CLK_DISPSYS0_DISP_DSC_WRAP0	20
++#define CLK_DISPSYS0_DISP_DSI0		21
++#define CLK_DISPSYS0_DISP_GAMMA0	22
++#define CLK_DISPSYS0_MDP_AAL0		23
++#define CLK_DISPSYS0_MDP_RDMA0		24
++#define CLK_DISPSYS0_DISP_MERGE0	25
++#define CLK_DISPSYS0_DISP_MERGE1	26
++#define CLK_DISPSYS0_DISP_ODDMR0	27
++#define CLK_DISPSYS0_DISP_POSTALIGN0	28
++#define CLK_DISPSYS0_DISP_POSTMASK0	29
++#define CLK_DISPSYS0_DISP_RELAY0	30
++#define CLK_DISPSYS0_DISP_RSZ0		31
++#define CLK_DISPSYS0_DISP_SPR0		32
++#define CLK_DISPSYS0_DISP_TDSHP0	33
++#define CLK_DISPSYS0_DISP_TDSHP1	34
++#define CLK_DISPSYS0_DISP_UFBC_WDMA1	35
++#define CLK_DISPSYS0_DISP_VDCM0		36
++#define CLK_DISPSYS0_DISP_WDMA1		37
++#define CLK_DISPSYS0_SMI_SUB_COMM0	38
++#define CLK_DISPSYS0_DISP_Y2R0		39
++#define CLK_DISPSYS0_DISP_CCORR2	40
++#define CLK_DISPSYS0_DISP_CCORR3	41
++#define CLK_DISPSYS0_DISP_GAMMA1	42
++#define CLK_DISPSYS0_DSI_CLK		43
++#define CLK_DISPSYS0_DP_CLK		44
++#define CLK_DISPSYS0_26M_CLK		45
++
++/* DISPSYS1 */
++#define CLK_DISPSYS1_DISPSYS_CONFIG	0
++#define CLK_DISPSYS1_DISP_MUTEX0	1
++#define CLK_DISPSYS1_DISP_AAL0		2
++#define CLK_DISPSYS1_DISP_C3D0		3
++#define CLK_DISPSYS1_DISP_CCORR0	4
++#define CLK_DISPSYS1_DISP_CCORR1	5
++#define CLK_DISPSYS1_DISP_CHIST0	6
++#define CLK_DISPSYS1_DISP_CHIST1	7
++#define CLK_DISPSYS1_DISP_COLOR0	8
++#define CLK_DISPSYS1_DISP_DITHER0	9
++#define CLK_DISPSYS1_DISP_DITHER1	10
++#define CLK_DISPSYS1_DISP_DLI_ASYNC0	11
++#define CLK_DISPSYS1_DISP_DLI_ASYNC1	12
++#define CLK_DISPSYS1_DISP_DLI_ASYNC2	13
++#define CLK_DISPSYS1_DISP_DLI_ASYNC3	14
++#define CLK_DISPSYS1_DISP_DLI_ASYNC4	15
++#define CLK_DISPSYS1_DISP_DLI_ASYNC5	16
++#define CLK_DISPSYS1_DISP_DLO_ASYNC0	17
++#define CLK_DISPSYS1_DISP_DLO_ASYNC1	18
++#define CLK_DISPSYS1_DISP_DP_INTF0	19
++#define CLK_DISPSYS1_DISP_DSC_WRAP0	20
++#define CLK_DISPSYS1_DISP_DSI0		21
++#define CLK_DISPSYS1_DISP_GAMMA0	22
++#define CLK_DISPSYS1_MDP_AAL0		23
++#define CLK_DISPSYS1_MDP_RDMA0		24
++#define CLK_DISPSYS1_DISP_MERGE0	25
++#define CLK_DISPSYS1_DISP_MERGE1	26
++#define CLK_DISPSYS1_DISP_ODDMR0	27
++#define CLK_DISPSYS1_DISP_POSTALIGN0	28
++#define CLK_DISPSYS1_DISP_POSTMASK0	29
++#define CLK_DISPSYS1_DISP_RELAY0	30
++#define CLK_DISPSYS1_DISP_RSZ0		31
++#define CLK_DISPSYS1_DISP_SPR0		32
++#define CLK_DISPSYS1_DISP_TDSHP0	33
++#define CLK_DISPSYS1_DISP_TDSHP1	34
++#define CLK_DISPSYS1_DISP_UFBC_WDMA1	35
++#define CLK_DISPSYS1_DISP_VDCM0		36
++#define CLK_DISPSYS1_DISP_WDMA1		37
++#define CLK_DISPSYS1_SMI_SUB_COMM0	38
++#define CLK_DISPSYS1_DISP_Y2R0		39
++#define CLK_DISPSYS1_DISP_CCORR2	40
++#define CLK_DISPSYS1_DISP_CCORR3	41
++#define CLK_DISPSYS1_DISP_GAMMA1	42
++#define CLK_DISPSYS1_DSI_CLK		43
++#define CLK_DISPSYS1_DP_CLK		44
++#define CLK_DISPSYS1_26M_CLK		45
++
++/* OVLSYS0 */
++#define CLK_OVLSYS0_CONFIG		0
++#define CLK_OVLSYS0_DISP_FAKE_ENG0	1
++#define CLK_OVLSYS0_DISP_FAKE_ENG1	2
++#define CLK_OVLSYS0_DISP_MUTEX0		3
++#define CLK_OVLSYS0_OVL0_2L		4
++#define CLK_OVLSYS0_OVL1_2L		5
++#define CLK_OVLSYS0_OVL2_2L		6
++#define CLK_OVLSYS0_OVL3_2L		7
++#define CLK_OVLSYS0_DISP_RSZ1		8
++#define CLK_OVLSYS0_MDP_RSZ0		9
++#define CLK_OVLSYS0_DISP_WDMA0		10
++#define CLK_OVLSYS0_DISP_UFBC_WDMA0	11
++#define CLK_OVLSYS0_DISP_WDMA2		12
++#define CLK_OVLSYS0_DISP_DLI_ASYNC0	13
++#define CLK_OVLSYS0_DISP_DLI_ASYNC1	14
++#define CLK_OVLSYS0_DISP_DLI_ASYNC2	15
++#define CLK_OVLSYS0_DISP_DLO_ASYNC0	16
++#define CLK_OVLSYS0_DISP_DLO_ASYNC1	17
++#define CLK_OVLSYS0_DISP_DLO_ASYNC2	18
++#define CLK_OVLSYS0_DISP_DLO_ASYNC3	19
++#define CLK_OVLSYS0_DISP_DLO_ASYNC4	20
++#define CLK_OVLSYS0_DISP_DLO_ASYNC5	21
++#define CLK_OVLSYS0_DISP_DLO_ASYNC6	22
++#define CLK_OVLSYS0_INLINEROT		23
++#define CLK_OVLSYS0_SMI_SUB_COMMON0	24
++#define CLK_OVLSYS0_DISP_Y2R0		25
++#define CLK_OVLSYS0_DISP_Y2R1		26
++
++/* OVLSYS1 */
++#define CLK_OVLSYS1_CONFIG		0
++#define CLK_OVLSYS1_DISP_FAKE_ENG0	1
++#define CLK_OVLSYS1_DISP_FAKE_ENG1	2
++#define CLK_OVLSYS1_DISP_MUTEX0		3
++#define CLK_OVLSYS1_OVL0_2L		4
++#define CLK_OVLSYS1_OVL1_2L		5
++#define CLK_OVLSYS1_OVL2_2L		6
++#define CLK_OVLSYS1_OVL3_2L		7
++#define CLK_OVLSYS1_DISP_RSZ1		8
++#define CLK_OVLSYS1_MDP_RSZ0		9
++#define CLK_OVLSYS1_DISP_WDMA0		10
++#define CLK_OVLSYS1_DISP_UFBC_WDMA0	11
++#define CLK_OVLSYS1_DISP_WDMA2		12
++#define CLK_OVLSYS1_DISP_DLI_ASYNC0	13
++#define CLK_OVLSYS1_DISP_DLI_ASYNC1	14
++#define CLK_OVLSYS1_DISP_DLI_ASYNC2	15
++#define CLK_OVLSYS1_DISP_DLO_ASYNC0	16
++#define CLK_OVLSYS1_DISP_DLO_ASYNC1	17
++#define CLK_OVLSYS1_DISP_DLO_ASYNC2	18
++#define CLK_OVLSYS1_DISP_DLO_ASYNC3	19
++#define CLK_OVLSYS1_DISP_DLO_ASYNC4	20
++#define CLK_OVLSYS1_DISP_DLO_ASYNC5	21
++#define CLK_OVLSYS1_DISP_DLO_ASYNC6	22
++#define CLK_OVLSYS1_INLINEROT		23
++#define CLK_OVLSYS1_SMI_SUB_COMMON0	24
++#define CLK_OVLSYS1_DISP_Y2R0		25
++#define CLK_OVLSYS1_DISP_Y2R1		26
++
++/* MMINFRA */
++#define CLK_MMINFRA_GCE_D		0
++#define CLK_MMINFRA_GCE_M		1
++#define CLK_MMINFRA_SMI			2
++#define CLK_MMINFRA_GCE_26M		3
++
++/* MDPSYS0 */
++#define CLK_MDP0_MDP_MUTEX0		0
++#define CLK_MDP0_APB_BUS		1
++#define CLK_MDP0_SMI0			2
++#define CLK_MDP0_MDP_RDMA0		3
++#define CLK_MDP0_MDP_RDMA2		4
++#define CLK_MDP0_MDP_HDR0		5
++#define CLK_MDP0_MDP_AAL0		6
++#define CLK_MDP0_MDP_RSZ0		7
++#define CLK_MDP0_MDP_TDSHP0		8
++#define CLK_MDP0_MDP_COLOR0		9
++#define CLK_MDP0_MDP_WROT0		10
++#define CLK_MDP0_MDP_FAKE_ENG0		11
++#define CLK_MDP0_MDP_DLI_ASYNC0		12
++#define CLK_MDP0_MDP_DLI_ASYNC1		13
++#define CLK_MDP0_MDPSYS_CONFIG		14
++#define CLK_MDP0_MDP_RDMA1		15
++#define CLK_MDP0_MDP_RDMA3		16
++#define CLK_MDP0_MDP_HDR1		17
++#define CLK_MDP0_MDP_AAL1		18
++#define CLK_MDP0_MDP_RSZ1		19
++#define CLK_MDP0_MDP_TDSHP1		20
++#define CLK_MDP0_MDP_COLOR1		21
++#define CLK_MDP0_MDP_WROT1		22
++#define CLK_MDP0_MDP_FG0		23
++#define CLK_MDP0_MDP_RSZ2		24
++#define CLK_MDP0_MDP_WROT2		25
++#define CLK_MDP0_MDP_DLO_ASYNC0		26
++#define CLK_MDP0_MDP_FG1		27
++#define CLK_MDP0_MDP_RSZ3		28
++#define CLK_MDP0_MDP_WROT3		29
++#define CLK_MDP0_MDP_DLO_ASYNC1		30
++#define CLK_MDP0_MDP_DLI_ASYNC2		31
++#define CLK_MDP0_MDP_DLI_ASYNC3		32
++#define CLK_MDP0_MDP_DLO_ASYNC2		33
++#define CLK_MDP0_MDP_DLO_ASYNC3		34
++#define CLK_MDP0_MDP_BIRSZ0		35
++#define CLK_MDP0_MDP_BIRSZ1		36
++#define CLK_MDP0_IMG_DL_ASYNC0		37
++#define CLK_MDP0_IMG_DL_ASYNC1		38
++#define CLK_MDP0_HRE_TOP_MDPSYS		39
++
++/* MDPSYS1 */
++#define CLK_MDP1_MDP_MUTEX0		0
++#define CLK_MDP1_APB_BUS		1
++#define CLK_MDP1_SMI0			2
++#define CLK_MDP1_MDP_RDMA0		3
++#define CLK_MDP1_MDP_RDMA2		4
++#define CLK_MDP1_MDP_HDR0		5
++#define CLK_MDP1_MDP_AAL0		6
++#define CLK_MDP1_MDP_RSZ0		7
++#define CLK_MDP1_MDP_TDSHP0		8
++#define CLK_MDP1_MDP_COLOR0		9
++#define CLK_MDP1_MDP_WROT0		10
++#define CLK_MDP1_MDP_FAKE_ENG0		11
++#define CLK_MDP1_MDP_DLI_ASYNC0		12
++#define CLK_MDP1_MDP_DLI_ASYNC1		13
++#define CLK_MDP1_MDPSYS_CONFIG		14
++#define CLK_MDP1_MDP_RDMA1		15
++#define CLK_MDP1_MDP_RDMA3		16
++#define CLK_MDP1_MDP_HDR1		17
++#define CLK_MDP1_MDP_AAL1		18
++#define CLK_MDP1_MDP_RSZ1		19
++#define CLK_MDP1_MDP_TDSHP1		20
++#define CLK_MDP1_MDP_COLOR1		21
++#define CLK_MDP1_MDP_WROT1		22
++#define CLK_MDP1_MDP_FG0		23
++#define CLK_MDP1_MDP_RSZ2		24
++#define CLK_MDP1_MDP_WROT2		25
++#define CLK_MDP1_MDP_DLO_ASYNC0		26
++#define CLK_MDP1_MDP_FG1		27
++#define CLK_MDP1_MDP_RSZ3		28
++#define CLK_MDP1_MDP_WROT3		29
++#define CLK_MDP1_MDP_DLO_ASYNC1		30
++#define CLK_MDP1_MDP_DLI_ASYNC2		31
++#define CLK_MDP1_MDP_DLI_ASYNC3		32
++#define CLK_MDP1_MDP_DLO_ASYNC2		33
++#define CLK_MDP1_MDP_DLO_ASYNC3		34
++#define CLK_MDP1_MDP_BIRSZ0		35
++#define CLK_MDP1_MDP_BIRSZ1		36
++#define CLK_MDP1_IMG_DL_ASYNC0		37
++#define CLK_MDP1_IMG_DL_ASYNC1		38
++#define CLK_MDP1_HRE_TOP_MDPSYS		39
++
++/* VDECSYS_SOC */
++#define CLK_VDE1_LAT_CKEN		0
++#define CLK_VDE1_LAT_ACTIVE		1
++#define CLK_VDE1_LAT_CKEN_ENG		2
++#define CLK_VDE1_VDEC_CKEN		3
++#define CLK_VDE1_VDEC_ACTIVE		4
++#define CLK_VDE1_VDEC_CKEN_ENG		5
++
++/* VDECSYS */
++#define CLK_VDE2_LAT_CKEN		0
++#define CLK_VDE2_LAT_ACTIVE		1
++#define CLK_VDE2_LAT_CKEN_ENG		2
++#define CLK_VDE2_VDEC_CKEN		3
++#define CLK_VDE2_VDEC_ACTIVE		4
++#define CLK_VDE2_VDEC_CKEN_ENG		5
++
++/* VENCSYS */
++#define CLK_VEN1_CKE0_LARB		0
++#define CLK_VEN1_CKE1_VENC		1
++#define CLK_VEN1_CKE2_JPGENC		2
++#define CLK_VEN1_CKE3_JPGDEC		3
++#define CLK_VEN1_CKE4_JPGDEC_C1		4
++#define CLK_VEN1_CKE5_GALS		5
++#define CLK_VEN1_CKE6_GALS_SRAM		6
++
++/* VENCSYS_C1 */
++#define CLK_VEN2_CKE0_LARB		0
++#define CLK_VEN2_CKE1_VENC		1
++#define CLK_VEN2_CKE2_JPGENC		2
++#define CLK_VEN2_CKE3_JPGDEC		3
++#define CLK_VEN2_CKE4_JPGDEC_C1		4
++#define CLK_VEN2_CKE5_GALS		5
++#define CLK_VEN2_CKE6_GALS_SRAM		6
++
+ #endif /* _DT_BINDINGS_CLK_MEDIATEK_MT6897_H */

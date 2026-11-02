@@ -1,0 +1,541 @@
+From: buntOS contributors
+Subject: [PATCH] rtc: add MediaTek MT6685 RTC
+
+The RTC of the MT6897 boards is in the MT6685 on the SPMI bus. Without it
+the time is wrong until the network is up.
+
+This is based on the MediaTek driver, in its version in the OnePlus MT6897
+kernel, and on the one AngeloGioacchino Del Regno posted (v1 2/2, see the
+link below). It differs from that second one in these ways:
+
+ - The year register counts from 1968, as in the MediaTek driver and in
+   the stock kernel of the Lenovo TB375FC. The posted driver takes the
+   register as years since 1900 and leaves a start date of 1968 to the RTC
+   core, which only offsets the years outside of 1900-2027. So 2026, a
+   register value of 58 from Android, reads as 2086 there, and writing
+   2026 puts 126 in the register, which Android reads as 2094. A device
+   can go on running Android next to this, so the register has to mean the
+   same to both.
+
+ - Reading doesn't write to BBPU. MediaTek has dropped the BBPU reload from
+   the read path in 2025 ("rtc: Fix power-on timing and add delay" in the
+   Motorola kernel, and the OnePlus one has that too), and only opens the
+   clocks for a moment before reading. So the registers must follow the
+   counter while they have their clocks, though nothing says so in words.
+   The stock module of this tablet is older and still has the reload. BBPU
+   also holds the power enable and the commands that clear the power key
+   and the spare registers, so it is better left alone.
+
+ - The two clocks are gated from here with the sequence of the MediaTek
+   driver. The posted driver needs the SCK_TOP clock controller and its
+   changes to the common MediaTek clock code for these two gates alone.
+
+ - No alarm, for now. The interrupt needs more than this driver:
+   spmi-mtk-pmif only clears the event of a SID from a chained handler, so
+   requesting the interrupt of SID 9 directly would keep the parent
+   interrupt firing, and that one also has the power key. So this waits
+   until it can be tried on a device. Without an alarm, this writes nothing
+   to the alarm registers, IRQ_EN, BBPU and SCK_TOP_INT. A power-off alarm
+   that Android has left armed stays armed, and if it goes off under Linux
+   nothing clears its event: spmi-mtk-pmif doesn't look at a SID without a
+   handler. That is so with or without this driver.
+
+The bootloader and Android keep the reason for a boot, the state of the
+power key and a power-off alarm in the same registers. So this only ever
+writes the two clock gates, six time registers and the write trigger, and
+the regmap refuses anything else. The MediaTek driver, the bootloader and
+the posted driver all write these registers as two bytes, so this does too,
+with the same values: the high bytes are 0. It never reads IRQ_STA either,
+which clears when read, and the read table keeps debugfs away from it. That
+table also has the chip ID, the gates and the lock state, for debugfs to
+tell what went wrong on a device. Probing itself writes nothing, though the
+RTC core reads the time twice while registering, and each read opens and
+closes the gates. The week day register is neither read nor written: the
+MediaTek driver writes it from an unset variable.
+
+The MediaTek driver also writes at shutdown: it clears the power enable in
+BBPU and the alarm in IRQ_EN, sets them again for a power-off alarm, and
+sets TOP2_ELR1 for a normal power off sequence. The bootloader sets
+TOP2_ELR1 too. It is not known yet if this needs that to power off. That is
+for the device.
+
+The registers and bits have been compared with the MediaTek headers, the
+stock module and the tables of the bootloader by a script. It has run on a
+register model with a fake SPMI controller in QEMU, but not on a device. It
+is not known if the clocks alone refresh the time on this tablet, though
+newer kernels of the same SoC rely on it.
+
+Link: https://lore.kernel.org/r/20251024083318.25890-3-angelogioacchino.delregno@collabora.com
+---
+ drivers/rtc/Kconfig      |  12 ++
+ drivers/rtc/Makefile     |   1 +
+ drivers/rtc/rtc-mt6685.c | 426 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 439 insertions(+)
+
+diff --git a/drivers/rtc/Kconfig b/drivers/rtc/Kconfig
+index 01def82..27ec870 100644
+--- a/drivers/rtc/Kconfig
++++ b/drivers/rtc/Kconfig
+@@ -1956,6 +1956,18 @@ config RTC_DRV_MT6397
+ 
+ 	  If you want to use MediaTek(R) RTC interface, select Y or M here.
+ 
++config RTC_DRV_MT6685
++	tristate "MediaTek MT6685 Clock IC based RTC"
++	depends on MFD_MTK_SPMI_PMIC || COMPILE_TEST
++	depends on SPMI
++	select REGMAP_SPMI
++	help
++	  Say yes here to enable support for the Real Time Clock found
++	  in the MediaTek MT6685 Clock IC communicating over SPMI.
++
++	  This driver can also be built as a module. If so, the module
++	  will be called rtc-mt6685.
++
+ config RTC_DRV_MT7622
+ 	tristate "MediaTek SoC based RTC"
+ 	depends on ARCH_MEDIATEK || COMPILE_TEST
+diff --git a/drivers/rtc/Makefile b/drivers/rtc/Makefile
+index 0347645..57f69cb 100644
+--- a/drivers/rtc/Makefile
++++ b/drivers/rtc/Makefile
+@@ -115,6 +115,7 @@ obj-$(CONFIG_RTC_DRV_SSD202D)	+= rtc-ssd202d.o
+ obj-$(CONFIG_RTC_DRV_MSM6242)	+= rtc-msm6242.o
+ obj-$(CONFIG_RTC_DRV_MT2712)	+= rtc-mt2712.o
+ obj-$(CONFIG_RTC_DRV_MT6397)	+= rtc-mt6397.o
++obj-$(CONFIG_RTC_DRV_MT6685)	+= rtc-mt6685.o
+ obj-$(CONFIG_RTC_DRV_MT7622)	+= rtc-mt7622.o
+ obj-$(CONFIG_RTC_DRV_MV)	+= rtc-mv.o
+ obj-$(CONFIG_RTC_DRV_MXC)	+= rtc-mxc.o
+diff --git a/drivers/rtc/rtc-mt6685.c b/drivers/rtc/rtc-mt6685.c
+new file mode 100644
+index 0000000..593e33d
+--- /dev/null
++++ b/drivers/rtc/rtc-mt6685.c
+@@ -0,0 +1,426 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MediaTek MT6685 Clock IC - Real Time Clock IP driver
++ *
++ * Copyright (C) 2020 MediaTek Inc.
++ * Copyright (C) 2025 Collabora Ltd.
++ *
++ * Based on the MediaTek driver and on the one posted by
++ * AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>.
++ *
++ * The bootloader and the other operating system on a device keep what they need
++ * in this block too: the reason for a boot, the state of the power key, a
++ * power-off alarm. So this driver only reads and sets the time, and its regmap
++ * refuses to write anywhere else.
++ */
++
++#include <linux/array_size.h>
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/rtc.h>
++#include <linux/spmi.h>
++#include <linux/time.h>
++
++/* The chip ID, read only through debugfs */
++#define MT6685_HWCID			0x008
++
++/* The clock gates of the RTC registers in SCK_TOP. A set bit gates a clock. */
++#define MT6685_SCK_TOP_CKPDN		0x514
++#define MT6685_SCK_TOP_CKPDN_SET	0x515
++#define MT6685_SCK_TOP_CKPDN_CLR	0x516
++#define  MT6685_RTC_MCLK_PDN		BIT(4)
++#define  MT6685_RTC_32K_PDN		BIT(5)
++
++/*
++ * The RTC of the normal world. The one of the secure world is at 0x600. These
++ * registers are 16 bits wide, in two bytes on the SPMI bus.
++ */
++#define MT6685_RTC_BBPU			0x588
++#define  MT6685_RTC_BBPU_CBUSY		BIT(6)
++#define MT6685_RTC_TC_SEC		0x592
++#define MT6685_RTC_TC_MIN		0x594
++#define MT6685_RTC_TC_HOU		0x596
++#define MT6685_RTC_TC_DOM		0x598
++#define MT6685_RTC_TC_MTH		0x59c
++#define MT6685_RTC_TC_YEA		0x59e
++#define MT6685_RTC_WRTGR		0x5c2
++/* Tells if the registers are locked, read only through debugfs */
++#define MT6685_RTC_SPAR_MACRO		0x5d8
++
++#define MT6685_RTC_CBUSY_POLL_US	10
++#define MT6685_RTC_CBUSY_TIMEOUT_US	USEC_PER_SEC
++
++/* What the registers need to follow the clocks, as in the MediaTek driver */
++#define MT6685_RTC_CLOCK_DELAY_US	1000
++#define MT6685_RTC_REFRESH_DELAY_US	60
++#define MT6685_RTC_VERIFY_DELAY_US	2000
++
++#define MT6685_RTC_READ_TRIES		3
++#define MT6685_RTC_VERIFY_TRIES		2
++
++/* A write that took may have ticked this many seconds when it is read back */
++#define MT6685_RTC_VERIFY_MAX_TICK	2
++
++/*
++ * The MediaTek kernels take a year register of 0 as 1968. The hardware has a
++ * leap year in every fourth year from 0, which holds until 2095.
++ */
++#define MT6685_RTC_YEAR_OFFSET		68
++
++enum mt6685_rtc_tc_field {
++	MT6685_TC_SEC,
++	MT6685_TC_MIN,
++	MT6685_TC_HOUR,
++	MT6685_TC_DOM,
++	MT6685_TC_MON,
++	MT6685_TC_YEAR,
++	MT6685_TC_COUNT,
++};
++
++/*
++ * The time is in the low bytes. The MediaTek driver writes the day of the week
++ * from an unset variable and never reads it, so it is not here.
++ */
++static const struct {
++	u16 reg;
++	u8 mask;
++} mt6685_rtc_tc_regs[MT6685_TC_COUNT] = {
++	[MT6685_TC_SEC] = { MT6685_RTC_TC_SEC, GENMASK(5, 0) },
++	[MT6685_TC_MIN] = { MT6685_RTC_TC_MIN, GENMASK(5, 0) },
++	[MT6685_TC_HOUR] = { MT6685_RTC_TC_HOU, GENMASK(4, 0) },
++	[MT6685_TC_DOM] = { MT6685_RTC_TC_DOM, GENMASK(4, 0) },
++	[MT6685_TC_MON] = { MT6685_RTC_TC_MTH, GENMASK(3, 0) },
++	[MT6685_TC_YEAR] = { MT6685_RTC_TC_YEA, GENMASK(6, 0) },
++};
++
++/*
++ * The counter runs from its own clock. The registers show it only after they
++ * have had their clocks for a moment, and a write needs the clocks to take
++ * effect.
++ */
++static int mt6685_rtc_ungate(struct regmap *map)
++{
++	int ret;
++
++	ret = regmap_write(map, MT6685_SCK_TOP_CKPDN_CLR, MT6685_RTC_32K_PDN);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(map, MT6685_SCK_TOP_CKPDN_CLR, MT6685_RTC_MCLK_PDN);
++	if (ret)
++		return ret;
++
++	fsleep(MT6685_RTC_CLOCK_DELAY_US);
++
++	return 0;
++}
++
++static int mt6685_rtc_gate(struct regmap *map)
++{
++	int ret, ret_mclk;
++
++	ret = regmap_write(map, MT6685_SCK_TOP_CKPDN_SET, MT6685_RTC_32K_PDN);
++	ret_mclk = regmap_write(map, MT6685_SCK_TOP_CKPDN_SET,
++				MT6685_RTC_MCLK_PDN);
++
++	fsleep(MT6685_RTC_CLOCK_DELAY_US);
++
++	return ret ?: ret_mclk;
++}
++
++/* Every driver of this chip writes both bytes, the low one first */
++static int mt6685_rtc_write_reg(struct regmap *map, unsigned int reg,
++				unsigned int val)
++{
++	int ret;
++
++	ret = regmap_write(map, reg, val);
++	if (ret)
++		return ret;
++
++	return regmap_write(map, reg + 1, 0);
++}
++
++static int mt6685_rtc_read_tc(struct regmap *map, struct rtc_time *tm)
++{
++	unsigned int val[MT6685_TC_COUNT];
++	int i, ret;
++
++	for (i = 0; i < MT6685_TC_COUNT; i++) {
++		ret = regmap_read(map, mt6685_rtc_tc_regs[i].reg, &val[i]);
++		if (ret)
++			return ret;
++
++		val[i] &= mt6685_rtc_tc_regs[i].mask;
++	}
++
++	tm->tm_sec = val[MT6685_TC_SEC];
++	tm->tm_min = val[MT6685_TC_MIN];
++	tm->tm_hour = val[MT6685_TC_HOUR];
++	tm->tm_mday = val[MT6685_TC_DOM];
++	tm->tm_mon = (int)val[MT6685_TC_MON] - 1;
++	tm->tm_year = val[MT6685_TC_YEAR] + MT6685_RTC_YEAR_OFFSET;
++
++	return 0;
++}
++
++static int mt6685_rtc_write_tc(struct regmap *map, const struct rtc_time *tm)
++{
++	const unsigned int val[MT6685_TC_COUNT] = {
++		[MT6685_TC_SEC] = tm->tm_sec,
++		[MT6685_TC_MIN] = tm->tm_min,
++		[MT6685_TC_HOUR] = tm->tm_hour,
++		[MT6685_TC_DOM] = tm->tm_mday,
++		[MT6685_TC_MON] = tm->tm_mon + 1,
++		[MT6685_TC_YEAR] = tm->tm_year - MT6685_RTC_YEAR_OFFSET,
++	};
++	int i, ret;
++
++	for (i = 0; i < MT6685_TC_COUNT; i++) {
++		ret = mt6685_rtc_write_reg(map, mt6685_rtc_tc_regs[i].reg,
++					   val[i]);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int mt6685_rtc_refresh(struct regmap *map)
++{
++	int ret, ret_gate;
++
++	ret = mt6685_rtc_ungate(map);
++	if (!ret)
++		fsleep(MT6685_RTC_REFRESH_DELAY_US);
++
++	ret_gate = mt6685_rtc_gate(map);
++
++	return ret ?: ret_gate;
++}
++
++static int mt6685_rtc_read_time(struct device *dev, struct rtc_time *tm)
++{
++	struct regmap *map = dev_get_drvdata(dev);
++	int tries = MT6685_RTC_READ_TRIES;
++	unsigned int sec;
++	int ret;
++
++	do {
++		if (!tries--)
++			return -EIO;
++
++		ret = mt6685_rtc_refresh(map);
++		if (ret)
++			return ret;
++
++		ret = mt6685_rtc_read_tc(map, tm);
++		if (ret)
++			return ret;
++
++		ret = regmap_read(map, MT6685_RTC_TC_SEC, &sec);
++		if (ret)
++			return ret;
++	} while ((sec & mt6685_rtc_tc_regs[MT6685_TC_SEC].mask) < tm->tm_sec);
++
++	ret = rtc_valid_tm(tm);
++	if (ret)
++		return ret;
++
++	/* This fills in the day of the week */
++	rtc_time64_to_tm(rtc_tm_to_time64(tm), tm);
++
++	return 0;
++}
++
++/* If the bootloader has left the registers locked, writes do nothing */
++static int mt6685_rtc_verify_time(struct device *dev, struct regmap *map,
++				  struct rtc_time *tm)
++{
++	time64_t want = rtc_tm_to_time64(tm);
++	struct rtc_time now;
++	time64_t have;
++	int i, ret;
++
++	for (i = 0; i < MT6685_RTC_VERIFY_TRIES; i++) {
++		if (i)
++			fsleep(MT6685_RTC_VERIFY_DELAY_US);
++
++		ret = mt6685_rtc_read_tc(map, &now);
++		if (ret)
++			return ret;
++
++		have = rtc_tm_to_time64(&now);
++		if (have >= want && have - want <= MT6685_RTC_VERIFY_MAX_TICK)
++			return 0;
++	}
++
++	/* The NTP sync of the kernel tries again every other second */
++	dev_err_ratelimited(dev,
++			    "the RTC did not take the time: wrote %ptR, reads %ptR\n",
++			    tm, &now);
++
++	return -EIO;
++}
++
++static int mt6685_rtc_write_time(struct device *dev, struct regmap *map,
++				 struct rtc_time *tm)
++{
++	unsigned int bbpu;
++	int ret;
++
++	ret = mt6685_rtc_write_tc(map, tm);
++	if (ret)
++		return ret;
++
++	/* The time reaches the counter with this, all at once */
++	ret = mt6685_rtc_write_reg(map, MT6685_RTC_WRTGR, 1);
++	if (ret)
++		return ret;
++
++	ret = regmap_read_poll_timeout(map, MT6685_RTC_BBPU, bbpu,
++				       !(bbpu & MT6685_RTC_BBPU_CBUSY),
++				       MT6685_RTC_CBUSY_POLL_US,
++				       MT6685_RTC_CBUSY_TIMEOUT_US);
++	if (ret)
++		return ret;
++
++	return mt6685_rtc_verify_time(dev, map, tm);
++}
++
++static int mt6685_rtc_set_time(struct device *dev, struct rtc_time *tm)
++{
++	struct regmap *map = dev_get_drvdata(dev);
++	int ret, ret_gate;
++
++	ret = mt6685_rtc_ungate(map);
++	if (!ret)
++		ret = mt6685_rtc_write_time(dev, map, tm);
++
++	ret_gate = mt6685_rtc_gate(map);
++
++	return ret ?: ret_gate;
++}
++
++static const struct rtc_class_ops mt6685_rtc_ops = {
++	.read_time = mt6685_rtc_read_time,
++	.set_time = mt6685_rtc_set_time,
++};
++
++static const struct regmap_range mt6685_rtc_wr_ranges[] = {
++	regmap_reg_range(MT6685_SCK_TOP_CKPDN_SET, MT6685_SCK_TOP_CKPDN_CLR),
++	regmap_reg_range(MT6685_RTC_TC_SEC, MT6685_RTC_TC_DOM + 1),
++	regmap_reg_range(MT6685_RTC_TC_MTH, MT6685_RTC_TC_YEA + 1),
++	regmap_reg_range(MT6685_RTC_WRTGR, MT6685_RTC_WRTGR + 1),
++};
++
++static const struct regmap_access_table mt6685_rtc_wr_table = {
++	.yes_ranges = mt6685_rtc_wr_ranges,
++	.n_yes_ranges = ARRAY_SIZE(mt6685_rtc_wr_ranges),
++};
++
++/* Keeps debugfs away from the registers that change when read, like IRQ_STA */
++static const struct regmap_range mt6685_rtc_rd_ranges[] = {
++	regmap_reg_range(MT6685_HWCID, MT6685_HWCID),
++	regmap_reg_range(MT6685_SCK_TOP_CKPDN, MT6685_SCK_TOP_CKPDN),
++	regmap_reg_range(MT6685_RTC_BBPU, MT6685_RTC_BBPU),
++	regmap_reg_range(MT6685_RTC_TC_SEC, MT6685_RTC_TC_SEC),
++	regmap_reg_range(MT6685_RTC_TC_MIN, MT6685_RTC_TC_MIN),
++	regmap_reg_range(MT6685_RTC_TC_HOU, MT6685_RTC_TC_HOU),
++	regmap_reg_range(MT6685_RTC_TC_DOM, MT6685_RTC_TC_DOM),
++	regmap_reg_range(MT6685_RTC_TC_MTH, MT6685_RTC_TC_MTH),
++	regmap_reg_range(MT6685_RTC_TC_YEA, MT6685_RTC_TC_YEA),
++	regmap_reg_range(MT6685_RTC_SPAR_MACRO, MT6685_RTC_SPAR_MACRO),
++};
++
++static const struct regmap_access_table mt6685_rtc_rd_table = {
++	.yes_ranges = mt6685_rtc_rd_ranges,
++	.n_yes_ranges = ARRAY_SIZE(mt6685_rtc_rd_ranges),
++};
++
++static const struct regmap_config mt6685_rtc_regmap_config = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.max_register = MT6685_RTC_SPAR_MACRO,
++	.wr_table = &mt6685_rtc_wr_table,
++	.rd_table = &mt6685_rtc_rd_table,
++};
++
++static void mt6685_rtc_remove_sdev(void *data)
++{
++	spmi_device_remove(data);
++}
++
++/* The regmap needs a device of its own to live on the SPMI bus */
++static struct regmap *mt6685_rtc_init_regmap(struct device *dev)
++{
++	struct spmi_device *sparent = to_spmi_device(dev->parent);
++	struct spmi_device *sdev;
++	int ret;
++
++	sdev = spmi_device_alloc(sparent->ctrl);
++	if (!sdev)
++		return ERR_PTR(-ENOMEM);
++
++	sdev->usid = sparent->usid;
++	dev_set_name(&sdev->dev, "%d-%02x-rtc", sdev->ctrl->nr, sdev->usid);
++
++	ret = device_add(&sdev->dev);
++	if (ret) {
++		put_device(&sdev->dev);
++		return ERR_PTR(ret);
++	}
++
++	ret = devm_add_action_or_reset(dev, mt6685_rtc_remove_sdev, sdev);
++	if (ret)
++		return ERR_PTR(ret);
++
++	return devm_regmap_init_spmi_ext(sdev, &mt6685_rtc_regmap_config);
++}
++
++static int mt6685_rtc_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct rtc_device *rdev;
++	struct regmap *map;
++
++	map = mt6685_rtc_init_regmap(dev);
++	if (IS_ERR(map))
++		return dev_err_probe(dev, PTR_ERR(map), "cannot get regmap\n");
++
++	platform_set_drvdata(pdev, map);
++
++	rdev = devm_rtc_allocate_device(dev);
++	if (IS_ERR(rdev))
++		return PTR_ERR(rdev);
++
++	rdev->ops = &mt6685_rtc_ops;
++	rdev->range_min = mktime64(1968, 1, 1, 0, 0, 0);
++	rdev->range_max = mktime64(2095, 12, 31, 23, 59, 59);
++
++	return devm_rtc_register_device(rdev);
++}
++
++static const struct of_device_id mt6685_rtc_of_match[] = {
++	{ .compatible = "mediatek,mt6685-rtc" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, mt6685_rtc_of_match);
++
++static struct platform_driver mt6685_rtc_driver = {
++	.driver = {
++		.name = "rtc-mt6685",
++		.of_match_table = mt6685_rtc_of_match,
++	},
++	.probe = mt6685_rtc_probe,
++};
++module_platform_driver(mt6685_rtc_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6685 Clock IC RTC driver");
++MODULE_LICENSE("GPL");

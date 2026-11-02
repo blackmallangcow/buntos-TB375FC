@@ -1,0 +1,69 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: mailbox: mediatek,mt8196-gpueb-mbox: add MT6897
+
+The GPUEB mailbox of the MediaTek MT6897 (Dimensity 8300) has the same
+registers as the one of the MT8196, with another channel table.
+
+Its clock is not described. In the vendor kernel the GPUEB driver has no
+clock at all, and the clock is out of reach of the topckgen and PLL
+drivers: it is set in the MFG RPC block by the boot firmware, before the
+GPUEB starts.
+
+Interrupt and addresses are from the device tree of the Lenovo TB375FC
+stock firmware.
+---
+ .../mailbox/mediatek,mt8196-gpueb-mbox.yaml   | 27 ++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml b/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml
+index ab5b780..68922ee 100644
+--- a/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml
++++ b/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml
+@@ -12,6 +12,7 @@ maintainers:
+ properties:
+   compatible:
+     enum:
++      - mediatek,mt6897-gpueb-mbox
+       - mediatek,mt8196-gpueb-mbox
+ 
+   reg:
+@@ -41,10 +42,22 @@ required:
+   - compatible
+   - reg
+   - reg-names
+-  - clocks
+   - interrupts
+   - "#mbox-cells"
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6897-gpueb-mbox
++    then:
++      properties:
++        clocks: false
++    else:
++      required:
++        - clocks
++
+ additionalProperties: false
+ 
+ examples:
+@@ -62,3 +75,15 @@ examples:
+         interrupts = <GIC_SPI 608 IRQ_TYPE_LEVEL_HIGH 0>;
+         #mbox-cells = <1>;
+     };
++  - |
++    #include <dt-bindings/interrupt-controller/arm-gic.h>
++    #include <dt-bindings/interrupt-controller/irq.h>
++
++    mailbox@13c2fd80 {
++        compatible = "mediatek,mt6897-gpueb-mbox";
++        reg = <0x13c2fd80 0x280>,
++              <0x13c62000 0x7c>;
++        reg-names = "data", "ctl";
++        interrupts = <GIC_SPI 588 IRQ_TYPE_LEVEL_HIGH 0>;
++        #mbox-cells = <1>;
++    };

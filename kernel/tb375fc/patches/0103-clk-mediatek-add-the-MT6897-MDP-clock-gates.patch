@@ -1,0 +1,224 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: add the MT6897 MDP clock gates
+
+Add the mdpsys0 and mdpsys1 blocks of MT6897, with the registers and bits
+of the MediaTek driver in the OnePlus MT6897 kernel (clk-mt6897-mdpsys.c).
+The same module of the stock firmware of the Lenovo TB375FC has the same
+tables. As in the vendor tables, the gates of mdpsys1 have the mdp0 mux as
+their parent.
+
+The MDP power domains take one gate each from these blocks to come up, so
+the blocks cannot use runtime PM and their gates have no status read.
+
+---
+ drivers/clk/mediatek/Kconfig             |  10 ++
+ drivers/clk/mediatek/Makefile            |   1 +
+ drivers/clk/mediatek/clk-mt6897-mdpsys.c | 167 +++++++++++++++++++++++++++++
+ 3 files changed, 178 insertions(+)
+
+diff --git a/drivers/clk/mediatek/Kconfig b/drivers/clk/mediatek/Kconfig
+index f538cdd24..932229bb6 100644
+--- a/drivers/clk/mediatek/Kconfig
++++ b/drivers/clk/mediatek/Kconfig
+@@ -395,6 +395,16 @@ config COMMON_CLK_MT6897_IMP_IIC_WRAP
+ 	  clock from one of these gates. Say Y or M here when a device on the
+ 	  I2C buses is used.
+ 
++config COMMON_CLK_MT6897_MDPSYS
++	tristate "Clock driver for MediaTek MT6897 mdpsys"
++	depends on COMMON_CLK_MT6897
++	default COMMON_CLK_MT6897
++	help
++	  This driver supports the MediaTek MT6897 clock gates of the mdpsys0
++	  and mdpsys1 blocks, used by the MDP engines for rotation, scaling and
++	  colour conversion. The two MDP power domains need one gate each to
++	  come up, so build it in if they are listed in the device tree.
++
+ config COMMON_CLK_MT6897_MMSYS
+ 	tristate "Clock driver for MediaTek MT6897 mmsys"
+ 	depends on COMMON_CLK_MT6897
+diff --git a/drivers/clk/mediatek/Makefile b/drivers/clk/mediatek/Makefile
+index 1f4c9a1d3..8fbafab15 100644
+--- a/drivers/clk/mediatek/Makefile
++++ b/drivers/clk/mediatek/Makefile
+@@ -37,6 +37,7 @@ obj-$(CONFIG_COMMON_CLK_MT6797_VENCSYS) += clk-mt6797-venc.o
+ obj-$(CONFIG_COMMON_CLK_MT6897) += clk-mt6897-apmixedsys.o clk-mt6897-topckgen.o \
+ 				   clk-mt6897-vlpckgen.o clk-mt6897-peri_ao.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_IMP_IIC_WRAP) += clk-mt6897-imp_iic_wrap.o
++obj-$(CONFIG_COMMON_CLK_MT6897_MDPSYS) += clk-mt6897-mdpsys.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_MMSYS) += clk-mt6897-mmsys.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_UFSSYS) += clk-mt6897-ufs.o
+ obj-$(CONFIG_COMMON_CLK_MT2701) += clk-mt2701.o
+diff --git a/drivers/clk/mediatek/clk-mt6897-mdpsys.c b/drivers/clk/mediatek/clk-mt6897-mdpsys.c
+new file mode 100644
+index 000000000..36d4b31b6
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6897-mdpsys.c
+@@ -0,0 +1,167 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ * Author: Benjamin Chao <benjamin.chao@mediatek.com>
++ *
++ * Copyright (c) 2026 buntOS contributors
++ */
++#include <dt-bindings/clock/mediatek,mt6897-clock.h>
++
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++/*
++ * These blocks only answer while their power domain is on, and the driver has
++ * no way to tell. So their gates have no .is_enabled, see the ops in
++ * clk-gate.c. A consumer has to power the domain up before it enables a gate.
++ */
++static const struct mtk_gate_regs mdp_cg0_regs = {
++	.set_ofs = 0x104,
++	.clr_ofs = 0x108,
++	.sta_ofs = 0x100,
++};
++
++static const struct mtk_gate_regs mdp_cg1_regs = {
++	.set_ofs = 0x114,
++	.clr_ofs = 0x118,
++	.sta_ofs = 0x110,
++};
++
++#define GATE_MDP_CG0(_id, _name, _shift) {			\
++		.id = _id,					\
++		.name = _name,					\
++		.parent_name = "mdp0",				\
++		.regs = &mdp_cg0_regs,				\
++		.shift = _shift,				\
++		.ops = &mtk_clk_gate_ops_setclr_no_status,	\
++	}
++
++#define GATE_MDP_CG1(_id, _name, _shift) {			\
++		.id = _id,					\
++		.name = _name,					\
++		.parent_name = "mdp0",				\
++		.regs = &mdp_cg1_regs,				\
++		.shift = _shift,				\
++		.ops = &mtk_clk_gate_ops_setclr_no_status,	\
++	}
++
++static const struct mtk_gate mdp0_clks[] = {
++	GATE_MDP_CG0(CLK_MDP0_MDP_MUTEX0, "mdp0_mdp_mutex0", 0),
++	GATE_MDP_CG0(CLK_MDP0_APB_BUS, "mdp0_apb_bus", 1),
++	GATE_MDP_CG0(CLK_MDP0_SMI0, "mdp0_smi0", 2),
++	GATE_MDP_CG0(CLK_MDP0_MDP_RDMA0, "mdp0_mdp_rdma0", 3),
++	GATE_MDP_CG0(CLK_MDP0_MDP_RDMA2, "mdp0_mdp_rdma2", 4),
++	GATE_MDP_CG0(CLK_MDP0_MDP_HDR0, "mdp0_mdp_hdr0", 5),
++	GATE_MDP_CG0(CLK_MDP0_MDP_AAL0, "mdp0_mdp_aal0", 6),
++	GATE_MDP_CG0(CLK_MDP0_MDP_RSZ0, "mdp0_mdp_rsz0", 7),
++	GATE_MDP_CG0(CLK_MDP0_MDP_TDSHP0, "mdp0_mdp_tdshp0", 8),
++	GATE_MDP_CG0(CLK_MDP0_MDP_COLOR0, "mdp0_mdp_color0", 9),
++	GATE_MDP_CG0(CLK_MDP0_MDP_WROT0, "mdp0_mdp_wrot0", 10),
++	GATE_MDP_CG0(CLK_MDP0_MDP_FAKE_ENG0, "mdp0_mdp_fake_eng0", 11),
++	GATE_MDP_CG0(CLK_MDP0_MDP_DLI_ASYNC0, "mdp0_mdp_dli_async0", 12),
++	GATE_MDP_CG0(CLK_MDP0_MDP_DLI_ASYNC1, "mdp0_mdp_dli_async1", 13),
++	GATE_MDP_CG0(CLK_MDP0_MDPSYS_CONFIG, "mdp0_mdpsys_config", 14),
++	GATE_MDP_CG0(CLK_MDP0_MDP_RDMA1, "mdp0_mdp_rdma1", 15),
++	GATE_MDP_CG0(CLK_MDP0_MDP_RDMA3, "mdp0_mdp_rdma3", 16),
++	GATE_MDP_CG0(CLK_MDP0_MDP_HDR1, "mdp0_mdp_hdr1", 17),
++	GATE_MDP_CG0(CLK_MDP0_MDP_AAL1, "mdp0_mdp_aal1", 18),
++	GATE_MDP_CG0(CLK_MDP0_MDP_RSZ1, "mdp0_mdp_rsz1", 19),
++	GATE_MDP_CG0(CLK_MDP0_MDP_TDSHP1, "mdp0_mdp_tdshp1", 20),
++	GATE_MDP_CG0(CLK_MDP0_MDP_COLOR1, "mdp0_mdp_color1", 21),
++	GATE_MDP_CG0(CLK_MDP0_MDP_WROT1, "mdp0_mdp_wrot1", 22),
++	GATE_MDP_CG0(CLK_MDP0_MDP_FG0, "mdp0_mdp_fg0", 23),
++	GATE_MDP_CG0(CLK_MDP0_MDP_RSZ2, "mdp0_mdp_rsz2", 24),
++	GATE_MDP_CG0(CLK_MDP0_MDP_WROT2, "mdp0_mdp_wrot2", 25),
++	GATE_MDP_CG0(CLK_MDP0_MDP_DLO_ASYNC0, "mdp0_mdp_dlo_async0", 26),
++	GATE_MDP_CG0(CLK_MDP0_MDP_FG1, "mdp0_mdp_fg1", 27),
++	GATE_MDP_CG0(CLK_MDP0_MDP_RSZ3, "mdp0_mdp_rsz3", 28),
++	GATE_MDP_CG0(CLK_MDP0_MDP_WROT3, "mdp0_mdp_wrot3", 29),
++	GATE_MDP_CG0(CLK_MDP0_MDP_DLO_ASYNC1, "mdp0_mdp_dlo_async1", 30),
++	GATE_MDP_CG0(CLK_MDP0_MDP_DLI_ASYNC2, "mdp0_mdp_dli_async2", 31),
++	GATE_MDP_CG1(CLK_MDP0_MDP_DLI_ASYNC3, "mdp0_mdp_dli_async3", 0),
++	GATE_MDP_CG1(CLK_MDP0_MDP_DLO_ASYNC2, "mdp0_mdp_dlo_async2", 1),
++	GATE_MDP_CG1(CLK_MDP0_MDP_DLO_ASYNC3, "mdp0_mdp_dlo_async3", 2),
++	GATE_MDP_CG1(CLK_MDP0_MDP_BIRSZ0, "mdp0_mdp_birsz0", 3),
++	GATE_MDP_CG1(CLK_MDP0_MDP_BIRSZ1, "mdp0_mdp_birsz1", 4),
++	GATE_MDP_CG1(CLK_MDP0_IMG_DL_ASYNC0, "mdp0_img_dl_async0", 5),
++	GATE_MDP_CG1(CLK_MDP0_IMG_DL_ASYNC1, "mdp0_img_dl_async1", 6),
++	GATE_MDP_CG1(CLK_MDP0_HRE_TOP_MDPSYS, "mdp0_hre_mdpsys", 7),
++};
++
++static const struct mtk_clk_desc mdp0_mcd = {
++	.clks = mdp0_clks,
++	.num_clks = ARRAY_SIZE(mdp0_clks),
++};
++
++static const struct mtk_gate mdp1_clks[] = {
++	GATE_MDP_CG0(CLK_MDP1_MDP_MUTEX0, "mdp1_mdp_mutex0", 0),
++	GATE_MDP_CG0(CLK_MDP1_APB_BUS, "mdp1_apb_bus", 1),
++	GATE_MDP_CG0(CLK_MDP1_SMI0, "mdp1_smi0", 2),
++	GATE_MDP_CG0(CLK_MDP1_MDP_RDMA0, "mdp1_mdp_rdma0", 3),
++	GATE_MDP_CG0(CLK_MDP1_MDP_RDMA2, "mdp1_mdp_rdma2", 4),
++	GATE_MDP_CG0(CLK_MDP1_MDP_HDR0, "mdp1_mdp_hdr0", 5),
++	GATE_MDP_CG0(CLK_MDP1_MDP_AAL0, "mdp1_mdp_aal0", 6),
++	GATE_MDP_CG0(CLK_MDP1_MDP_RSZ0, "mdp1_mdp_rsz0", 7),
++	GATE_MDP_CG0(CLK_MDP1_MDP_TDSHP0, "mdp1_mdp_tdshp0", 8),
++	GATE_MDP_CG0(CLK_MDP1_MDP_COLOR0, "mdp1_mdp_color0", 9),
++	GATE_MDP_CG0(CLK_MDP1_MDP_WROT0, "mdp1_mdp_wrot0", 10),
++	GATE_MDP_CG0(CLK_MDP1_MDP_FAKE_ENG0, "mdp1_mdp_fake_eng0", 11),
++	GATE_MDP_CG0(CLK_MDP1_MDP_DLI_ASYNC0, "mdp1_mdp_dli_async0", 12),
++	GATE_MDP_CG0(CLK_MDP1_MDP_DLI_ASYNC1, "mdp1_mdp_dli_async1", 13),
++	GATE_MDP_CG0(CLK_MDP1_MDPSYS_CONFIG, "mdp1_mdpsys_config", 14),
++	GATE_MDP_CG0(CLK_MDP1_MDP_RDMA1, "mdp1_mdp_rdma1", 15),
++	GATE_MDP_CG0(CLK_MDP1_MDP_RDMA3, "mdp1_mdp_rdma3", 16),
++	GATE_MDP_CG0(CLK_MDP1_MDP_HDR1, "mdp1_mdp_hdr1", 17),
++	GATE_MDP_CG0(CLK_MDP1_MDP_AAL1, "mdp1_mdp_aal1", 18),
++	GATE_MDP_CG0(CLK_MDP1_MDP_RSZ1, "mdp1_mdp_rsz1", 19),
++	GATE_MDP_CG0(CLK_MDP1_MDP_TDSHP1, "mdp1_mdp_tdshp1", 20),
++	GATE_MDP_CG0(CLK_MDP1_MDP_COLOR1, "mdp1_mdp_color1", 21),
++	GATE_MDP_CG0(CLK_MDP1_MDP_WROT1, "mdp1_mdp_wrot1", 22),
++	GATE_MDP_CG0(CLK_MDP1_MDP_FG0, "mdp1_mdp_fg0", 23),
++	GATE_MDP_CG0(CLK_MDP1_MDP_RSZ2, "mdp1_mdp_rsz2", 24),
++	GATE_MDP_CG0(CLK_MDP1_MDP_WROT2, "mdp1_mdp_wrot2", 25),
++	GATE_MDP_CG0(CLK_MDP1_MDP_DLO_ASYNC0, "mdp1_mdp_dlo_async0", 26),
++	GATE_MDP_CG0(CLK_MDP1_MDP_FG1, "mdp1_mdp_fg1", 27),
++	GATE_MDP_CG0(CLK_MDP1_MDP_RSZ3, "mdp1_mdp_rsz3", 28),
++	GATE_MDP_CG0(CLK_MDP1_MDP_WROT3, "mdp1_mdp_wrot3", 29),
++	GATE_MDP_CG0(CLK_MDP1_MDP_DLO_ASYNC1, "mdp1_mdp_dlo_async1", 30),
++	GATE_MDP_CG0(CLK_MDP1_MDP_DLI_ASYNC2, "mdp1_mdp_dli_async2", 31),
++	GATE_MDP_CG1(CLK_MDP1_MDP_DLI_ASYNC3, "mdp1_mdp_dli_async3", 0),
++	GATE_MDP_CG1(CLK_MDP1_MDP_DLO_ASYNC2, "mdp1_mdp_dlo_async2", 1),
++	GATE_MDP_CG1(CLK_MDP1_MDP_DLO_ASYNC3, "mdp1_mdp_dlo_async3", 2),
++	GATE_MDP_CG1(CLK_MDP1_MDP_BIRSZ0, "mdp1_mdp_birsz0", 3),
++	GATE_MDP_CG1(CLK_MDP1_MDP_BIRSZ1, "mdp1_mdp_birsz1", 4),
++	GATE_MDP_CG1(CLK_MDP1_IMG_DL_ASYNC0, "mdp1_img_dl_async0", 5),
++	GATE_MDP_CG1(CLK_MDP1_IMG_DL_ASYNC1, "mdp1_img_dl_async1", 6),
++	GATE_MDP_CG1(CLK_MDP1_HRE_TOP_MDPSYS, "mdp1_hre_mdpsys", 7),
++};
++
++static const struct mtk_clk_desc mdp1_mcd = {
++	.clks = mdp1_clks,
++	.num_clks = ARRAY_SIZE(mdp1_clks),
++};
++
++static const struct of_device_id of_match_clk_mt6897_mdpsys[] = {
++	{ .compatible = "mediatek,mt6897-mdpsys0", .data = &mdp0_mcd },
++	{ .compatible = "mediatek,mt6897-mdpsys1", .data = &mdp1_mcd },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, of_match_clk_mt6897_mdpsys);
++
++static struct platform_driver clk_mt6897_mdpsys_drv = {
++	.probe = mtk_clk_simple_probe,
++	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "clk-mt6897-mdpsys",
++		.of_match_table = of_match_clk_mt6897_mdpsys,
++	},
++};
++module_platform_driver(clk_mt6897_mdpsys_drv);
++
++MODULE_DESCRIPTION("MediaTek MT6897 mdpsys clocks driver");
++MODULE_LICENSE("GPL");

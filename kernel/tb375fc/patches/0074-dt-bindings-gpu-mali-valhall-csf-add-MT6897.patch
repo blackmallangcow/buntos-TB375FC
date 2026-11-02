@@ -1,0 +1,39 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: gpu: mali-valhall-csf: add MT6897
+
+The Mali-G615 of the MediaTek MT6897 is integrated like the G925 of the
+MT8196: power, clocks and the OPP table come from the
+mediatek,mt6897-gpufreq power domain, and so does the mask of working
+shader cores.
+
+There is no need for a compatible of its own in the driver, the generic
+one does. MT8196 is special there for its ASN hash, and the vendor
+kernel doesn't use one for MT6897: its device tree has no
+l2-hash-values, the only way to set it in the Mali driver.
+---
+ .../devicetree/bindings/gpu/arm,mali-valhall-csf.yaml        | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/gpu/arm,mali-valhall-csf.yaml b/Documentation/devicetree/bindings/gpu/arm,mali-valhall-csf.yaml
+index 8eccd43..5839374 100644
+--- a/Documentation/devicetree/bindings/gpu/arm,mali-valhall-csf.yaml
++++ b/Documentation/devicetree/bindings/gpu/arm,mali-valhall-csf.yaml
+@@ -18,6 +18,7 @@ properties:
+     oneOf:
+       - items:
+           - enum:
++              - mediatek,mt6897-mali      # G615
+               - mediatek,mt8196-mali
+               - nxp,imx95-mali            # G310
+               - rockchip,rk3588-mali
+@@ -127,7 +128,9 @@ allOf:
+       properties:
+         compatible:
+           contains:
+-            const: mediatek,mt8196-mali
++            enum:
++              - mediatek,mt6897-mali
++              - mediatek,mt8196-mali
+     then:
+       properties:
+         mali-supply: false

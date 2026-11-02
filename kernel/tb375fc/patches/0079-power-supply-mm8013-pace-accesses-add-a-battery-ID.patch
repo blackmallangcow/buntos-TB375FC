@@ -1,0 +1,121 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mm8013: pace accesses, add a battery ID
+
+The MM8013 on the Lenovo TB375FC needs more care than this driver takes.
+
+The vendor driver waits 4 ms before every access and tries reads three
+times, with another 10 ms in between, in all of its helpers. A port of
+Linux to this tablet reported that word reads over the same bus are
+unreliable, with a wrong second byte, and works around it by reading the
+two bytes in two transfers. That leaves a window for a value that
+changes in between, so this keeps word reads and does what the vendor
+does. The wire format is unchanged: SMBus word reads are the same two
+messages that regmap sent.
+
+Whether this cures what the port saw is not known. A retry helps a
+transfer that fails, not one that succeeds with a wrong byte, and only
+the pacing could help with that. This has to be seen on the hardware.
+
+The vendor driver knows the battery ID 0x0103, for which the check in
+this driver fails.
+
+Link: https://github.com/u0n0u/tb375fc-linux
+---
+ drivers/power/supply/mm8013.c | 52 +++++++++++++++++++++++++++++++----
+ 1 file changed, 47 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/power/supply/mm8013.c b/drivers/power/supply/mm8013.c
+index 819667a..6a88a2b 100644
+--- a/drivers/power/supply/mm8013.c
++++ b/drivers/power/supply/mm8013.c
+@@ -11,6 +11,7 @@
+ #define REG_BATID			0x00 /* This one is very unclear */
+  #define BATID_101			0x0101 /* 107kOhm */
+  #define BATID_102			0x0102 /* 10kOhm */
++ #define BATID_103			0x0103
+ #define REG_TEMPERATURE			0x06
+ #define REG_VOLTAGE			0x08
+ #define REG_FLAGS			0x0a
+@@ -39,6 +40,15 @@
+ 
+ #define DECIKELVIN_TO_DECIDEGC(t)	(t - 2731)
+ 
++/*
++ * The gauge must not be accessed in quick succession: it can fail the transfer,
++ * or answer with bad data. The vendor driver for the Lenovo TB375FC waits this
++ * long before every access, and tries reads three times with a pause in between.
++ */
++#define MM8013_ACCESS_DELAY_US		4000
++#define MM8013_RETRY_DELAY_US		10000
++#define MM8013_READ_TRIES		3
++
+ struct mm8013_chip {
+ 	struct i2c_client *client;
+ 	struct regmap *regmap;
+@@ -57,7 +67,9 @@ static int mm8013_checkdevice(struct mm8013_chip *chip)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	if (val == BATID_102)
++	if (val == BATID_103)
++		battery_id = 3;
++	else if (val == BATID_102)
+ 		battery_id = 2;
+ 	else if (val == BATID_101)
+ 		battery_id = 1;
+@@ -236,13 +248,43 @@ static const struct power_supply_desc mm8013_desc = {
+ 	.get_property		= mm8013_get_property,
+ };
+ 
++static int mm8013_reg_read(void *context, unsigned int reg, unsigned int *val)
++{
++	struct i2c_client *client = context;
++	int tries = MM8013_READ_TRIES;
++	int ret;
++
++	for (;;) {
++		fsleep(MM8013_ACCESS_DELAY_US);
++		ret = i2c_smbus_read_word_data(client, reg);
++		if (ret >= 0 || !--tries)
++			break;
++		fsleep(MM8013_RETRY_DELAY_US);
++	}
++
++	if (ret < 0)
++		return ret;
++
++	*val = ret;
++
++	return 0;
++}
++
++static int mm8013_reg_write(void *context, unsigned int reg, unsigned int val)
++{
++	struct i2c_client *client = context;
++
++	fsleep(MM8013_ACCESS_DELAY_US);
++
++	return i2c_smbus_write_word_data(client, reg, val);
++}
++
+ static const struct regmap_config mm8013_regmap_config = {
+ 	.reg_bits = 8,
+ 	.val_bits = 16,
+ 	.max_register = 0x68,
+-	.use_single_read = true,
+-	.use_single_write = true,
+-	.val_format_endian = REGMAP_ENDIAN_LITTLE,
++	.reg_read = mm8013_reg_read,
++	.reg_write = mm8013_reg_write,
+ };
+ 
+ static int mm8013_probe(struct i2c_client *client)
+@@ -263,7 +305,7 @@ static int mm8013_probe(struct i2c_client *client)
+ 
+ 	chip->client = client;
+ 
+-	chip->regmap = devm_regmap_init_i2c(client, &mm8013_regmap_config);
++	chip->regmap = devm_regmap_init(dev, NULL, client, &mm8013_regmap_config);
+ 	if (IS_ERR(chip->regmap)) {
+ 		ret = PTR_ERR(chip->regmap);
+ 		return dev_err_probe(dev, ret, "Couldn't initialize regmap\n");

@@ -1,0 +1,675 @@
+From: buntOS contributors
+Subject: [PATCH] thermal/drivers/mediatek/lvts: add MT6897
+
+The LVTS of the MT6897 differs from what this driver knows in two ways,
+both from the LVTS driver in the OnePlus MT6897 kernel.
+
+First, firmware sets the hardware up before the kernel starts. The
+vendor driver for this SoC never calls its init functions, it only reads
+the measurement registers. There is no clock or reset to use, and the
+common init here would change what was set up: the reset clears the
+thresholds, and LVTS_MONCTL0 with only the sensors that have a zone
+stops the others. So this domain is read-only: no init, no suspend
+handling, no thresholds or interrupts. Zones must be polled.
+
+Whether the firmware also arms the hardware reset is not known. The
+vendor table says 119 C, but its driver only programs that when a
+critical trip is written from sysfs, and the boot firmware has no LVTS
+address in it. So nothing here counts on it: the critical trips of the
+zones may be the only protection there is. The probe logs PROTCTL,
+PROTTC and MONINT of each controller, which tell.
+
+Second, the conversion is
+
+	T = (a << 14) / raw + golden * 500 - a
+
+with a per sensor coefficient a, taken from the calibration count of the
+sensor, and a golden temperature per domain. Both have two sets of
+constants: bit 31 of the first word of the fuses says if the MCU domain
+was calibrated at high temperature. The other domains are never. Getting
+one out of step with the other is dangerous: the golden temperatures are
+around 30 C and 85 C, so the MCU domain would read 55 C too low. That is
+why they are chosen together here and kept with the sensor, and why the
+driver's global golden temperature is not used.
+
+Since a low reading is the dangerous kind of wrong, the probe refuses
+what would give one:
+
+ - A golden temperature outside of 20-45 C, or 70-100 C for high
+   temperature calibration. The vendor driver falls back to defaults
+   only if all fuses are zero, which is an uncalibrated sample. Here it
+   is much more likely that the data doesn't come from the right place,
+   so this is an error too.
+
+ - A calibration count more than a quarter away from the nominal one. A
+   count of zero makes the coefficient negative, and the reading go down
+   as the die gets hotter.
+
+ - A controller with its clock off, or with a sensor off in
+   LVTS_MONCTL0. The registers keep the last reading, which looks fine.
+
+ - An offset in the low half of LVTS_PROTCTL. It is added to every raw
+   value, and the vendor driver uses it to hold off the hardware reset.
+
+The last two are also checked for every reading, as nothing says that
+they stay as they are, across system sleep for example.
+
+Such a reading, or one of zero or below -40 C, returns -EAGAIN. The
+driver warns once each time the readings go bad, and says when they are
+back. The core retries -EAGAIN without a word until there is a good
+reading, so the zone comes back with the sensor. With any other error it
+would disable the zone for good after a few minutes. The vendor driver
+has a raw value of 0 as a normal case, so this may well happen, with a
+domain that is powered off for example.
+
+The coefficient is computed in 64 bits. The vendor code does it in 32,
+which wraps for a normal calibration count from 15340 up.
+
+The firmware should have programmed the same counts in LVTS_EDATA. The
+probe reads them back and warns if it didn't, as a way to see that the
+fuses come from the right place and are assigned to the right sensors.
+It can become an error once this has been seen on the hardware.
+---
+ drivers/thermal/mediatek/lvts_thermal.c | 484 +++++++++++++++++++++++-
+ 1 file changed, 481 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/thermal/mediatek/lvts_thermal.c b/drivers/thermal/mediatek/lvts_thermal.c
+index a9617d5..b68bddc 100644
+--- a/drivers/thermal/mediatek/lvts_thermal.c
++++ b/drivers/thermal/mediatek/lvts_thermal.c
+@@ -17,6 +17,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/reset.h>
+ #include <linux/thermal.h>
++#include <linux/unaligned.h>
+ #include <dt-bindings/thermal/mediatek,lvts-thermal.h>
+ 
+ #include "../thermal_hwmon.h"
+@@ -99,6 +100,38 @@
+ 
+ #define LVTS_MSR_OFFSET_MT8196		-984
+ 
++/*
++ * The MT6897 has a coefficient per sensor. It comes from the calibration count
++ * of the sensor, and from constants that depend on the temperature the fuses
++ * were calibrated at: normal or high.
++ */
++#define LVTS_COEFF_SLOPE_MT6897		224280
++#define LVTS_COEFF_CONST_MT6897		280000
++#define LVTS_COUNT_R_MT6897		14698
++#define LVTS_COEFF_SLOPE_HT_MT6897	279280
++#define LVTS_COEFF_CONST_HT_MT6897	170000
++#define LVTS_COUNT_R_HT_MT6897		18302
++
++/* All the fuses of the four domains, in words */
++#define LVTS_CALIB_LEN_MT6897		(29 * sizeof(u32))
++#define LVTS_CALIB_HT_MT6897		BIT(31)
++
++/*
++ * Accepted calibration, far wider than the spread of real parts (the golden
++ * temperatures are in units of 0.5 C). A value outside of this is not from a
++ * fuse of this kind, and using it could make a hot die read as a cool one.
++ */
++#define LVTS_GOLDEN_MIN_MT6897		40
++#define LVTS_GOLDEN_MAX_MT6897		90
++#define LVTS_GOLDEN_HT_MIN_MT6897	140
++#define LVTS_GOLDEN_HT_MAX_MT6897	200
++#define LVTS_COUNT_R_DELTA_MT6897	4	/* a quarter of the nominal count */
++
++/* Colder than this is a bad reading: raw values grow as it gets colder */
++#define LVTS_MIN_TEMP_MT6897		-40000
++/* Added to every measurement, which then reads colder */
++#define LVTS_PROTOFFSET_MT6897		GENMASK(15, 0)
++
+ #define LVTS_MSR_READ_TIMEOUT_US	400
+ #define LVTS_MSR_READ_WAIT_US		(LVTS_MSR_READ_TIMEOUT_US / 2)
+ 
+@@ -106,6 +139,7 @@
+ 
+ #define LVTS_MAX_CAL_OFFSETS		3
+ #define LVTS_NUM_CAL_OFFSETS_MT7988	3
++#define LVTS_NUM_CAL_OFFSETS_MT6897	2
+ #define LVTS_NUM_CAL_OFFSETS_MT8196	2
+ 
+ static int golden_temp = LVTS_GOLDEN_TEMP_DEFAULT;
+@@ -149,6 +183,13 @@ struct lvts_platform_ops {
+ struct lvts_data {
+ 	const struct lvts_ctrl_data *lvts_ctrl;
+ 	const struct lvts_platform_ops *ops;
++	/*
++	 * Firmware has set everything up before the kernel starts. The kernel
++	 * only reads temperatures.
++	 */
++	bool fw_managed;
++	/* Sensors may be calibrated at high temperature, see LVTS_CALIB_HT */
++	bool high_temp_calib;
+ 	const u32 *conn_cmd;
+ 	const u32 *init_cmd;
+ 	int num_cal_offsets;
+@@ -170,6 +211,11 @@ struct lvts_sensor {
+ 	int dt_id;
+ 	int low_thresh;
+ 	int high_thresh;
++	/* Only for fw_managed domains: coefficient and golden temperature in mC */
++	int coeff;
++	int golden_mc;
++	/* Only for fw_managed domains: the last reading could not be used */
++	bool fw_unusable;
+ };
+ 
+ struct lvts_ctrl {
+@@ -191,6 +237,7 @@ struct lvts_domain {
+ 	void __iomem *base;
+ 	size_t calib_len;
+ 	u8 *calib;
++	bool fw_managed;
+ #ifdef CONFIG_DEBUG_FS
+ 	struct dentry *dom_dentry;
+ #endif
+@@ -630,6 +677,69 @@ static const struct thermal_zone_device_ops lvts_ops = {
+ 	.set_trips = lvts_set_trips,
+ };
+ 
++/*
++ * A controller that isn't measuring keeps showing its last reading, which looks
++ * fine, and an offset makes every reading colder than it is. The vendor driver
++ * adds one to hold off the hardware reset while it reprograms the thresholds.
++ */
++static const char *lvts_fw_sensor_problem(const struct lvts_sensor *lvts_sensor)
++{
++	if (!(readl(LVTS_CLKEN(lvts_sensor->base)) & BIT(0)))
++		return "the controller is not clocked";
++
++	if (readl(LVTS_PROTCTL(lvts_sensor->base)) & LVTS_PROTOFFSET_MT6897)
++		return "the controller adds an offset to its measurements";
++
++	if (!(readl(LVTS_MONCTL0(lvts_sensor->base)) & BIT(lvts_sensor->id)))
++		return "the controller does not measure this sensor";
++
++	return NULL;
++}
++
++static int lvts_fw_get_temp(struct thermal_zone_device *tz, int *temp)
++{
++	struct lvts_sensor *lvts_sensor = thermal_zone_device_priv(tz);
++	const char *problem = lvts_fw_sensor_problem(lvts_sensor);
++	u32 raw = readl(lvts_sensor->msr) & GENMASK(15, 0);
++	int t = INT_MIN;
++
++	if (raw)
++		t = (int)div_u64((u64)lvts_sensor->coeff << 14, raw) +
++		    lvts_sensor->golden_mc - lvts_sensor->coeff;
++
++	if (!problem && t < LVTS_MIN_TEMP_MT6897)
++		problem = "implausible reading";
++
++	/*
++	 * The core retries -EAGAIN until there is a good reading again, without
++	 * a word. Any other error would make it disable the zone for good in the
++	 * end. So this is the place to say that the zone protects nothing now.
++	 */
++	if (problem) {
++		if (!lvts_sensor->fw_unusable)
++			dev_warn_ratelimited(thermal_zone_device(tz),
++					     "%s is not usable: %s, raw 0x%x\n",
++					     thermal_zone_device_type(tz), problem, raw);
++		lvts_sensor->fw_unusable = true;
++		return -EAGAIN;
++	}
++
++	if (lvts_sensor->fw_unusable) {
++		dev_info_ratelimited(thermal_zone_device(tz), "%s is usable again\n",
++				     thermal_zone_device_type(tz));
++		lvts_sensor->fw_unusable = false;
++	}
++
++	*temp = t;
++
++	return 0;
++}
++
++/* No trips: nothing is written to the hardware, these zones are polled */
++static const struct thermal_zone_device_ops lvts_fw_ops = {
++	.get_temp = lvts_fw_get_temp,
++};
++
+ static int lvts_sensor_init(struct device *dev, struct lvts_ctrl *lvts_ctrl,
+ 					const struct lvts_ctrl_data *lvts_ctrl_data)
+ {
+@@ -939,6 +1049,172 @@ static int lvts_golden_temp_init(struct device *dev, u8 *calib,
+ 	return 0;
+ }
+ 
++/*
++ * The first word of the fuses has the golden temperature for normal calibration
++ * in bits 7:0, the one for high temperature calibration in bits 15:8, and in
++ * bit 31 whether the sensors that can use it were calibrated that way.
++ *
++ * The coefficient and the golden temperature of a sensor must come from the same
++ * calibration: the difference between the two golden temperatures alone is about
++ * 55 C. Everything that does not look like a calibrated part is refused. Without
++ * zones the failure is visible. With a wrong formula a hot die can look cool, and
++ * nothing would tell.
++ */
++static int lvts_fw_sensors_init(struct device *dev, struct lvts_ctrl *lvts_ctrl,
++				const struct lvts_ctrl_data *ctrl_data,
++				const u8 *calib, size_t calib_len)
++{
++	void __iomem *edata[] = {
++		LVTS_EDATA00(lvts_ctrl->base),
++		LVTS_EDATA01(lvts_ctrl->base),
++		LVTS_EDATA02(lvts_ctrl->base),
++		LVTS_EDATA03(lvts_ctrl->base)
++	};
++	const struct lvts_data *lvts_data = lvts_ctrl->lvts_data;
++	u32 word = get_unaligned_le32(calib);
++	bool ht = lvts_data->high_temp_calib && (word & LVTS_CALIB_HT_MT6897);
++	u32 golden = ht ? (word >> 8) & 0xff : word & 0xff;
++	u32 golden_min = ht ? LVTS_GOLDEN_HT_MIN_MT6897 : LVTS_GOLDEN_MIN_MT6897;
++	u32 golden_max = ht ? LVTS_GOLDEN_HT_MAX_MT6897 : LVTS_GOLDEN_MAX_MT6897;
++	u32 slope = ht ? LVTS_COEFF_SLOPE_HT_MT6897 : LVTS_COEFF_SLOPE_MT6897;
++	u32 scale = ht ? LVTS_COEFF_CONST_HT_MT6897 : LVTS_COEFF_CONST_MT6897;
++	u32 nominal = ht ? LVTS_COUNT_R_HT_MT6897 : LVTS_COUNT_R_MT6897;
++	u32 delta = nominal / LVTS_COUNT_R_DELTA_MT6897;
++	int i, ret;
++
++	if (golden < golden_min || golden > golden_max)
++		return dev_err_probe(dev, -ENODATA,
++				     "Bad golden temperature %u in calibration 0x%08x\n",
++				     golden, word);
++
++	lvts_for_each_valid_sensor(i, ctrl_data) {
++		struct lvts_sensor *sensor = &lvts_ctrl->sensors[i];
++		const char *problem = lvts_fw_sensor_problem(sensor);
++		u32 hw, count = 0;
++
++		if (problem)
++			return dev_err_probe(dev, -ENODATA, "Sensor %d: %s\n",
++					     sensor->dt_id, problem);
++
++		ret = lvts_decode_sensor_calibration(&ctrl_data->lvts_sensor[i],
++						     calib, calib_len,
++						     lvts_data->num_cal_offsets,
++						     &count);
++		if (ret)
++			return ret;
++
++		if (count < nominal - delta || count > nominal + delta)
++			return dev_err_probe(dev, -ENODATA,
++					     "Bad calibration count %u for sensor %d\n",
++					     count, sensor->dt_id);
++
++		sensor->coeff = slope - scale +
++				div_u64((u64)scale * count, nominal);
++		sensor->golden_mc = golden * 500;
++
++		/*
++		 * The firmware should program the same counts. If it doesn't,
++		 * the fuses may not be the right ones for this sensor.
++		 */
++		hw = readl(edata[i]);
++		if (hw != count)
++			dev_warn(dev, "sensor %d: fuse count %u, firmware has %u\n",
++				 sensor->dt_id, count, hw);
++
++		dev_dbg(dev, "sensor %d: count %u, coefficient %d, MSR 0x%x\n",
++			sensor->dt_id, count, sensor->coeff, readl(sensor->msr));
++	}
++
++	/* PROTCTL, PROTTC and MONINT tell whether a hardware reset is armed */
++	dev_info(dev, "controller at 0x%x: %s calibration, golden %u, MONCTL0 0x%x, PROTCTL 0x%x, PROTTC 0x%x, MONINT 0x%x, ID 0x%x\n",
++		 ctrl_data->offset, ht ? "high temperature" : "normal", golden,
++		 readl(LVTS_MONCTL0(lvts_ctrl->base)),
++		 readl(LVTS_PROTCTL(lvts_ctrl->base)),
++		 readl(LVTS_PROTTC(lvts_ctrl->base)),
++		 readl(LVTS_MONINT(lvts_ctrl->base)),
++		 readl(LVTS_ID(lvts_ctrl->base)));
++
++	return 0;
++}
++
++static int lvts_fw_register_zones(struct device *dev, struct lvts_ctrl *lvts_ctrl)
++{
++	int i;
++
++	lvts_for_each_valid_sensor(i, lvts_ctrl) {
++		struct lvts_sensor *sensor = &lvts_ctrl->sensors[i];
++		struct thermal_zone_device *tz;
++
++		tz = devm_thermal_of_zone_register(dev, sensor->dt_id, sensor,
++						   &lvts_fw_ops);
++		if (IS_ERR(tz)) {
++			if (PTR_ERR(tz) == -ENODEV)
++				continue;
++
++			return PTR_ERR(tz);
++		}
++
++		devm_thermal_add_hwmon_sysfs(dev, tz);
++
++		sensor->tz = tz;
++	}
++
++	return 0;
++}
++
++/* Only reads from the hardware, and nothing else: see struct lvts_data. */
++static int lvts_fw_domain_init(struct device *dev, struct lvts_domain *lvts_td,
++			       const struct lvts_data *lvts_data)
++{
++	size_t size = sizeof(*lvts_td->lvts_ctrl) * lvts_data->num_lvts_ctrl;
++	struct lvts_ctrl *lvts_ctrl;
++	int i, ret;
++
++	ret = lvts_calibration_read(dev, lvts_td, lvts_data);
++	if (ret)
++		return ret;
++
++	if (lvts_td->calib_len != LVTS_CALIB_LEN_MT6897)
++		return dev_err_probe(dev, -EINVAL,
++				     "Calibration of %zu bytes, expected %zu\n",
++				     lvts_td->calib_len, LVTS_CALIB_LEN_MT6897);
++
++	lvts_ctrl = devm_kzalloc(dev, size, GFP_KERNEL);
++	if (!lvts_ctrl)
++		return -ENOMEM;
++
++	lvts_td->fw_managed = true;
++	lvts_td->lvts_ctrl = lvts_ctrl;
++	lvts_td->num_lvts_ctrl = lvts_data->num_lvts_ctrl;
++
++	for (i = 0; i < lvts_data->num_lvts_ctrl; i++) {
++		const struct lvts_ctrl_data *ctrl_data = &lvts_data->lvts_ctrl[i];
++
++		lvts_ctrl[i].base = lvts_td->base + ctrl_data->offset;
++		lvts_ctrl[i].lvts_data = lvts_data;
++		lvts_ctrl[i].mode = ctrl_data->mode;
++
++		ret = lvts_sensor_init(dev, &lvts_ctrl[i], ctrl_data);
++		if (ret)
++			return ret;
++
++		ret = lvts_fw_sensors_init(dev, &lvts_ctrl[i], ctrl_data,
++					   lvts_td->calib, lvts_td->calib_len);
++		if (ret)
++			return ret;
++	}
++
++	devm_kfree(dev, lvts_td->calib);
++
++	for (i = 0; i < lvts_data->num_lvts_ctrl; i++) {
++		ret = lvts_fw_register_zones(dev, &lvts_ctrl[i]);
++		if (ret)
++			return ret;
++	}
++
++	return lvts_debugfs_init(dev, lvts_td);
++}
++
+ static int lvts_ctrl_init(struct device *dev, struct lvts_domain *lvts_td,
+ 					const struct lvts_data *lvts_data)
+ {
+@@ -1458,9 +1734,12 @@ static int lvts_probe(struct platform_device *pdev)
+ 	if (!lvts_data)
+ 		return -ENODEV;
+ 
+-	lvts_td->clk = devm_clk_get_enabled(dev, NULL);
+-	if (IS_ERR(lvts_td->clk))
+-		return dev_err_probe(dev, PTR_ERR(lvts_td->clk), "Failed to retrieve clock\n");
++	if (!lvts_data->fw_managed) {
++		lvts_td->clk = devm_clk_get_enabled(dev, NULL);
++		if (IS_ERR(lvts_td->clk))
++			return dev_err_probe(dev, PTR_ERR(lvts_td->clk),
++					     "Failed to retrieve clock\n");
++	}
+ 
+ 	res = platform_get_mem_or_io(pdev, 0);
+ 	if (!res)
+@@ -1470,6 +1749,16 @@ static int lvts_probe(struct platform_device *pdev)
+ 	if (IS_ERR(lvts_td->base))
+ 		return dev_err_probe(dev, PTR_ERR(lvts_td->base), "Failed to map io resource\n");
+ 
++	if (lvts_data->fw_managed) {
++		platform_set_drvdata(pdev, lvts_td);
++
++		ret = lvts_fw_domain_init(dev, lvts_td, lvts_data);
++		if (ret)
++			return dev_err_probe(dev, ret, "Failed to initialize the lvts domain\n");
++
++		return 0;
++	}
++
+ 	lvts_td->reset = devm_reset_control_get_by_index(dev, 0);
+ 	if (IS_ERR(lvts_td->reset))
+ 		return dev_err_probe(dev, PTR_ERR(lvts_td->reset), "Failed to get reset control\n");
+@@ -1505,6 +1794,9 @@ static void lvts_remove(struct platform_device *pdev)
+ 
+ 	lvts_td = platform_get_drvdata(pdev);
+ 
++	if (lvts_td->fw_managed)
++		return;
++
+ 	for (i = 0; i < lvts_td->num_lvts_ctrl; i++)
+ 		lvts_ctrl_set_enable(&lvts_td->lvts_ctrl[i], false);
+ }
+@@ -1561,6 +1853,9 @@ static int lvts_suspend(struct device *dev)
+ 
+ 	lvts_td = dev_get_drvdata(dev);
+ 
++	if (lvts_td->fw_managed)
++		return 0;
++
+ 	for (i = 0; i < lvts_td->num_lvts_ctrl; i++) {
+ 		lvts_ctrl_monitor_enable(dev, &lvts_td->lvts_ctrl[i], false);
+ 		usleep_range(100, 200);
+@@ -1579,6 +1874,9 @@ static int lvts_resume(struct device *dev)
+ 
+ 	lvts_td = dev_get_drvdata(dev);
+ 
++	if (lvts_td->fw_managed)
++		return 0;
++
+ 	ret = clk_prepare_enable(lvts_td->clk);
+ 	if (ret)
+ 		return ret;
+@@ -2005,6 +2303,153 @@ static const struct lvts_ctrl_data mt8196_lvts_ap_data_ctrl[] = {
+ 	}
+ };
+ 
++/*
++ * Stream index map for the fuses of mt6897, as 32-bit words of the four cells.
++ * Words 1-14 (MCU and AP), 17 (APU) and 18 (GPU) have the calibration counts of
++ * two sensors each, the first sensor in the upper half:
++ *
++ * <-sensor#1--> <-sensor#0--> <-sensor#3--> <-sensor#2-->
++ *  0x04 | 0x05 | 0x06 | 0x07 | 0x08 | 0x09 | 0x0A | 0x0B
++ */
++static const struct lvts_ctrl_data mt6897_lvts_mcu_data_ctrl[] = {
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_MCU_MEDIUM_CPU4_0,
++			  .cal_offsets = { 0x06, 0x07 } },
++			{ .dt_id = MT6897_MCU_MEDIUM_CPU4_1,
++			  .cal_offsets = { 0x04, 0x05 } },
++			{ .dt_id = MT6897_MCU_MEDIUM_CPU5_0,
++			  .cal_offsets = { 0x0A, 0x0B } },
++			{ .dt_id = MT6897_MCU_MEDIUM_CPU5_1,
++			  .cal_offsets = { 0x08, 0x09 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 1, 1),
++		.offset = 0x0,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	},
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_MCU_LITTLE_CPU2,
++			  .cal_offsets = { 0x0E, 0x0F } },
++			{ .dt_id = MT6897_MCU_LITTLE_CPU3,
++			  .cal_offsets = { 0x0C, 0x0D } },
++			{ .dt_id = MT6897_MCU_MEDIUM_CPU6_0,
++			  .cal_offsets = { 0x12, 0x13 } },
++			{ .dt_id = MT6897_MCU_MEDIUM_CPU6_1,
++			  .cal_offsets = { 0x10, 0x11 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 1, 1),
++		.offset = 0x100,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	},
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_MCU_DSU0,
++			  .cal_offsets = { 0x16, 0x17 } },
++			{ .dt_id = MT6897_MCU_LITTLE_CPU0,
++			  .cal_offsets = { 0x14, 0x15 } },
++			{ .dt_id = MT6897_MCU_LITTLE_CPU1,
++			  .cal_offsets = { 0x1A, 0x1B } },
++			{ .dt_id = MT6897_MCU_DSU1,
++			  .cal_offsets = { 0x18, 0x19 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 1, 1),
++		.offset = 0x200,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	},
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_MCU_BIG_CPU7_0,
++			  .cal_offsets = { 0x1E, 0x1F } },
++			{ .dt_id = MT6897_MCU_BIG_CPU7_1,
++			  .cal_offsets = { 0x1C, 0x1D } },
++			{ .dt_id = MT6897_MCU_DSU2,
++			  .cal_offsets = { 0x22, 0x23 } },
++			{ .dt_id = MT6897_MCU_DSU3,
++			  .cal_offsets = { 0x20, 0x21 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 1, 1),
++		.offset = 0x300,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	}
++};
++
++static const struct lvts_ctrl_data mt6897_lvts_ap_data_ctrl[] = {
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_AP_TOP0,
++			  .cal_offsets = { 0x26, 0x27 } },
++			{ .dt_id = MT6897_AP_TOP1,
++			  .cal_offsets = { 0x24, 0x25 } },
++			{ .dt_id = MT6897_AP_TOP2,
++			  .cal_offsets = { 0x2A, 0x2B } },
++			{ .dt_id = MT6897_AP_TOP3,
++			  .cal_offsets = { 0x28, 0x29 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 1, 1),
++		.offset = 0x0,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	},
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_AP_BOT0,
++			  .cal_offsets = { 0x2E, 0x2F } },
++			{ .dt_id = MT6897_AP_BOT1,
++			  .cal_offsets = { 0x2C, 0x2D } },
++			{ .dt_id = MT6897_AP_BOT2,
++			  .cal_offsets = { 0x32, 0x33 } },
++			{ .dt_id = MT6897_AP_BOT3,
++			  .cal_offsets = { 0x30, 0x31 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 1, 1),
++		.offset = 0x100,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	},
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_AP_MD0,
++			  .cal_offsets = { 0x36, 0x37 } },
++			{ .dt_id = MT6897_AP_MD1,
++			  .cal_offsets = { 0x34, 0x35 } },
++			{ .dt_id = MT6897_AP_MD2,
++			  .cal_offsets = { 0x3A, 0x3B } },
++			{ .dt_id = MT6897_AP_MD3,
++			  .cal_offsets = { 0x38, 0x39 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 1, 1),
++		.offset = 0x200,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	}
++};
++
++static const struct lvts_ctrl_data mt6897_lvts_apu_data_ctrl[] = {
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_APU0,
++			  .cal_offsets = { 0x46, 0x47 } },
++			{ .dt_id = MT6897_APU1,
++			  .cal_offsets = { 0x44, 0x45 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 0, 0),
++		.offset = 0x0,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	}
++};
++
++static const struct lvts_ctrl_data mt6897_lvts_gpu_data_ctrl[] = {
++	{
++		.lvts_sensor = {
++			{ .dt_id = MT6897_GPU0,
++			  .cal_offsets = { 0x4A, 0x4B } },
++			{ .dt_id = MT6897_GPU1,
++			  .cal_offsets = { 0x48, 0x49 } }
++		},
++		VALID_SENSOR_MAP(1, 1, 0, 0),
++		.offset = 0x0,
++		.mode = LVTS_MSR_FILTERED_MODE,
++	}
++};
++
+ static const struct lvts_platform_ops lvts_platform_ops_mt7988 = {
+ 	.lvts_raw_to_temp = lvts_raw_to_temp_mt7988,
+ 	.lvts_temp_to_raw = lvts_temp_to_raw_mt7988,
+@@ -2015,6 +2460,35 @@ static const struct lvts_platform_ops lvts_platform_ops_mt8196 = {
+ 	.lvts_temp_to_raw = lvts_temp_to_raw_mt8196,
+ };
+ 
++static const struct lvts_data mt6897_lvts_mcu_data = {
++	.lvts_ctrl	= mt6897_lvts_mcu_data_ctrl,
++	.num_lvts_ctrl	= ARRAY_SIZE(mt6897_lvts_mcu_data_ctrl),
++	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT6897,
++	.fw_managed	= true,
++	.high_temp_calib = true,
++};
++
++static const struct lvts_data mt6897_lvts_ap_data = {
++	.lvts_ctrl	= mt6897_lvts_ap_data_ctrl,
++	.num_lvts_ctrl	= ARRAY_SIZE(mt6897_lvts_ap_data_ctrl),
++	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT6897,
++	.fw_managed	= true,
++};
++
++static const struct lvts_data mt6897_lvts_apu_data = {
++	.lvts_ctrl	= mt6897_lvts_apu_data_ctrl,
++	.num_lvts_ctrl	= ARRAY_SIZE(mt6897_lvts_apu_data_ctrl),
++	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT6897,
++	.fw_managed	= true,
++};
++
++static const struct lvts_data mt6897_lvts_gpu_data = {
++	.lvts_ctrl	= mt6897_lvts_gpu_data_ctrl,
++	.num_lvts_ctrl	= ARRAY_SIZE(mt6897_lvts_gpu_data_ctrl),
++	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT6897,
++	.fw_managed	= true,
++};
++
+ static const struct lvts_data mt7987_lvts_ap_data = {
+ 	.lvts_ctrl	= mt7987_lvts_ap_data_ctrl,
+ 	.num_lvts_ctrl	= ARRAY_SIZE(mt7987_lvts_ap_data_ctrl),
+@@ -2172,6 +2646,10 @@ static const struct lvts_data mt8196_lvts_ap_data = {
+ };
+ 
+ static const struct of_device_id lvts_of_match[] = {
++	{ .compatible = "mediatek,mt6897-lvts-ap", .data = &mt6897_lvts_ap_data },
++	{ .compatible = "mediatek,mt6897-lvts-apu", .data = &mt6897_lvts_apu_data },
++	{ .compatible = "mediatek,mt6897-lvts-gpu", .data = &mt6897_lvts_gpu_data },
++	{ .compatible = "mediatek,mt6897-lvts-mcu", .data = &mt6897_lvts_mcu_data },
+ 	{ .compatible = "mediatek,mt7987-lvts-ap", .data = &mt7987_lvts_ap_data },
+ 	{ .compatible = "mediatek,mt7988-lvts-ap", .data = &mt7988_lvts_ap_data },
+ 	{ .compatible = "mediatek,mt8186-lvts", .data = &mt8186_lvts_data },

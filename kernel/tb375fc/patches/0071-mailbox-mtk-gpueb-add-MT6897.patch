@@ -1,0 +1,192 @@
+From: buntOS contributors
+Subject: [PATCH] mailbox: mtk-gpueb: add MT6897
+
+The MT6897 mailbox has eleven channels. Compared to the MT8196 the
+brisket channel is shorter and the ppb channel does not exist, so the
+receive side of all channels starts at 0xd8 instead of 0xe0.
+
+The table comes from send-table and recv-table of the gpueb node in the
+device tree of the stock firmware, which the vendor kernel lays out in
+the same order in gpueb_mbox_setup_pin_table(): all send pins, then all
+receive pins. The OEM device tree in the OnePlus MT6897 kernel has the
+same tables.
+
+There is no clock to get, see the binding.
+
+The interrupt is requested with IRQF_NO_SUSPEND, as in the vendor
+kernel. The power domain of the GPU asks the GPUEB to power it off and
+on from the noirq phases of system sleep, where genpd does that. Without
+the flag the replies wait until after the phase: the request times out
+while the GPUEB has acted on it, and the domain ends up out of step with
+the GPU, which hangs the bus when the GPU driver resumes.
+
+The interrupt is shared and level triggered, and only channels with a
+client have a handler. A message on any other channel would keep it
+asserted until the core disables the line. The vendor handler clears all
+of them, so here such a message is dropped with a warning.
+
+The channel is marked as free before the client hears of a reply. The
+power domain of the GPU sends its next message right away, and from
+another CPU that can come before the end of the handler. The send gets
+-EBUSY, which the mailbox core doesn't retry until the next send, so the
+message waits for nothing and the GPU is lost for a GPUEB that is fine.
+The interrupt is masked until the handler is done, so nothing can come
+in early.
+
+The MT8196 would benefit from all of these, but is left as it is here.
+---
+ drivers/mailbox/mtk-gpueb-mailbox.c | 84 +++++++++++++++++++++++++++--
+ 1 file changed, 79 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/mailbox/mtk-gpueb-mailbox.c b/drivers/mailbox/mtk-gpueb-mailbox.c
+index f6d2bec..a5f0c01 100644
+--- a/drivers/mailbox/mtk-gpueb-mailbox.c
++++ b/drivers/mailbox/mtk-gpueb-mailbox.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include <linux/atomic.h>
++#include <linux/bitmap.h>
+ #include <linux/clk.h>
+ #include <linux/device.h>
+ #include <linux/interrupt.h>
+@@ -74,7 +75,20 @@ struct mtk_gpueb_mbox_chan_desc {
+ 	const u8 rx_len;
+ };
+ 
++/**
++ * struct mtk_gpueb_mbox_variant - per-SoC constant data
++ * @no_clock: the GPUEB clock is not under control of the kernel
++ * @no_suspend: clients need the replies in the noirq phases of system sleep
++ * @drop_unstarted: the GPUEB may send on channels nobody has started
++ * @early_rx_done: clients send their next message as soon as they have a reply
++ * @num_channels: number of entries in @channels
++ * @channels: description of the channels
++ */
+ struct mtk_gpueb_mbox_variant {
++	const bool no_clock;
++	const bool no_suspend;
++	const bool drop_unstarted;
++	const bool early_rx_done;
+ 	const u8 num_channels;
+ 	const struct mtk_gpueb_mbox_chan_desc channels[] __counted_by(num_channels);
+ };
+@@ -89,6 +103,30 @@ static void mtk_gpueb_mbox_read_rx(void *buf, struct mtk_gpueb_mbox_chan *chan)
+ 	memcpy_fromio(buf, chan->ebm->mbox_mmio + chan->c->rx_offset, chan->c->rx_len);
+ }
+ 
++/*
++ * A message on a channel nobody has started has no handler to clear it. The
++ * interrupt would stay asserted until the core disables the line, and the channels
++ * in use would go silent with it.
++ */
++static bool mtk_gpueb_mbox_drop_unstarted(struct mtk_gpueb_mbox *ebm, u32 rx_sts)
++{
++	unsigned long pending = rx_sts;
++	bool dropped = false;
++	unsigned int i;
++
++	for_each_set_bit(i, &pending, ebm->v->num_channels) {
++		if (atomic_read(&ebm->ch[i].rx_status) != GPUEB_MBOX_BLOCKED)
++			continue;
++
++		dev_warn_once(ebm->dev, "Dropped a message on channel %s\n",
++			      ebm->ch[i].c->name);
++		writel(BIT(i), ebm->mbox_ctl + GPUEB_MBOX_CTL_IRQ_CLR);
++		dropped = true;
++	}
++
++	return dropped;
++}
++
+ static irqreturn_t mtk_gpueb_mbox_isr(int irq, void *data)
+ {
+ 	struct mtk_gpueb_mbox_chan *ch = data;
+@@ -101,6 +139,9 @@ static irqreturn_t mtk_gpueb_mbox_isr(int irq, void *data)
+ 			return IRQ_WAKE_THREAD;
+ 	}
+ 
++	if (ch->ebm->v->drop_unstarted && mtk_gpueb_mbox_drop_unstarted(ch->ebm, rx_sts))
++		return IRQ_HANDLED;
++
+ 	return IRQ_NONE;
+ }
+ 
+@@ -116,6 +157,13 @@ static irqreturn_t mtk_gpueb_mbox_thread(int irq, void *data)
+ 
+ 		mtk_gpueb_mbox_read_rx(buf, ch);
+ 		writel(BIT(ch->num), ch->ebm->mbox_ctl + GPUEB_MBOX_CTL_IRQ_CLR);
++		/*
++		 * A send that finds the channel busy stays in the queue of the
++		 * core until the next send, and its reply never comes. This is
++		 * safe: the interrupt is masked until this thread is done.
++		 */
++		if (ch->ebm->v->early_rx_done)
++			atomic_set(&ch->rx_status, 0);
+ 		mbox_chan_received_data(&ch->ebm->mbox.chans[ch->num], buf);
+ 		atomic_set(&ch->rx_status, 0);
+ 		return IRQ_HANDLED;
+@@ -164,7 +212,9 @@ static int mtk_gpueb_mbox_startup(struct mbox_chan *chan)
+ 	writel(BIT(ch->num), ch->ebm->mbox_ctl + GPUEB_MBOX_CTL_IRQ_CLR);
+ 
+ 	ret = devm_request_threaded_irq(ch->ebm->dev, ch->ebm->irq, mtk_gpueb_mbox_isr,
+-					mtk_gpueb_mbox_thread, IRQF_SHARED | IRQF_ONESHOT,
++					mtk_gpueb_mbox_thread,
++					IRQF_SHARED | IRQF_ONESHOT |
++					(ch->ebm->v->no_suspend ? IRQF_NO_SUSPEND : 0),
+ 					ch->full_name, ch);
+ 	if (ret) {
+ 		dev_err(ch->ebm->dev, "Failed to request IRQ: %pe\n",
+@@ -224,10 +274,12 @@ static int mtk_gpueb_mbox_probe(struct platform_device *pdev)
+ 	if (ebm->irq < 0)
+ 		return ebm->irq;
+ 
+-	ebm->clk = devm_clk_get_prepared(ebm->dev, NULL);
+-	if (IS_ERR(ebm->clk))
+-		return dev_err_probe(ebm->dev, PTR_ERR(ebm->clk),
+-				     "Failed to get 'eb' clock\n");
++	if (!ebm->v->no_clock) {
++		ebm->clk = devm_clk_get_prepared(ebm->dev, NULL);
++		if (IS_ERR(ebm->clk))
++			return dev_err_probe(ebm->dev, PTR_ERR(ebm->clk),
++					     "Failed to get 'eb' clock\n");
++	}
+ 
+ 	ebm->mbox_mmio = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(ebm->mbox_mmio))
+@@ -281,6 +333,27 @@ static int mtk_gpueb_mbox_probe(struct platform_device *pdev)
+ 	return devm_mbox_controller_register(ebm->dev, &ebm->mbox);
+ }
+ 
++static const struct mtk_gpueb_mbox_variant mtk_gpueb_mbox_mt6897 = {
++	.no_clock = true,
++	.no_suspend = true,
++	.drop_unstarted = true,
++	.early_rx_done = true,
++	.num_channels = 11,
++	.channels = {
++		{ "fast-dvfs-event", 0, 0x0000, 16, 0x00d8, 16 },
++		{ "gpufreq",         1, 0x0010, 32, 0x00e8, 32 },
++		{ "sleep",           2, 0x0030, 12, 0x0108,  4 },
++		{ "timer",           3, 0x003c, 24, 0x010c,  4 },
++		{ "fhctl",           4, 0x0054, 36, 0x0110,  4 },
++		{ "ccf",             5, 0x0078, 16, 0x0114, 16 },
++		{ "gpumpu",          6, 0x0088, 24, 0x0124,  4 },
++		{ "fast-dvfs",       7, 0x00a0, 24, 0x0128, 24 },
++		{ "ipir-c-met",      8, 0x00b8,  4, 0x0140, 16 },
++		{ "ipis-c-met",      9, 0x00bc, 16, 0x0150,  4 },
++		{ "brisket",        10, 0x00cc, 12, 0x0154, 12 },
++	},
++};
++
+ static const struct mtk_gpueb_mbox_variant mtk_gpueb_mbox_mt8196 = {
+ 	.num_channels = 12,
+ 	.channels = {
+@@ -300,6 +373,7 @@ static const struct mtk_gpueb_mbox_variant mtk_gpueb_mbox_mt8196 = {
+ };
+ 
+ static const struct of_device_id mtk_gpueb_mbox_of_ids[] = {
++	{ .compatible = "mediatek,mt6897-gpueb-mbox", .data = &mtk_gpueb_mbox_mt6897 },
+ 	{ .compatible = "mediatek,mt8196-gpueb-mbox", .data = &mtk_gpueb_mbox_mt8196 },
+ 	{ /* Sentinel */ }
+ };

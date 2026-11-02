@@ -1,0 +1,459 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: add the MT6897 display clock gates
+
+Add the dispsys0, dispsys1, ovlsys0, ovlsys1 and mminfra blocks of MT6897,
+with the registers and bits of the MediaTek driver in the OnePlus MT6897
+kernel (clk-mt6897-mmsys.c). The same module of the stock firmware of the
+Lenovo TB375FC has the same tables. Part of the gates go through the
+hardware voter. As in the vendor tables, the gates of dispsys1 and ovlsys1
+have the disp0 and ovl0 muxes as their parents.
+
+The bootloader leaves the display running on these blocks, and probing
+touches neither the registers nor the power domains. The gates have no
+status read, so the clock core leaves them alone until a consumer enables
+them.
+
+The MT8196 display clock drivers are written to be children of mtk-mmsys,
+but mtk-mmsys has no data for either SoC yet. So these blocks bind by
+compatible for now. They move to mtk-mmsys with the display pipeline.
+
+---
+ drivers/clk/mediatek/Kconfig            |  10 +
+ drivers/clk/mediatek/Makefile           |   1 +
+ drivers/clk/mediatek/clk-mt6897-mmsys.c | 395 ++++++++++++++++++++++++++++++
+ 3 files changed, 406 insertions(+)
+
+diff --git a/drivers/clk/mediatek/Kconfig b/drivers/clk/mediatek/Kconfig
+index 82fb6380c..f538cdd24 100644
+--- a/drivers/clk/mediatek/Kconfig
++++ b/drivers/clk/mediatek/Kconfig
+@@ -395,6 +395,16 @@ config COMMON_CLK_MT6897_IMP_IIC_WRAP
+ 	  clock from one of these gates. Say Y or M here when a device on the
+ 	  I2C buses is used.
+ 
++config COMMON_CLK_MT6897_MMSYS
++	tristate "Clock driver for MediaTek MT6897 mmsys"
++	depends on COMMON_CLK_MT6897
++	default COMMON_CLK_MT6897
++	help
++	  This driver supports the MediaTek MT6897 clock gates of the display
++	  blocks (dispsys0, dispsys1, ovlsys0, ovlsys1) and of mminfra. Part of
++	  the gates are switched through the hardware voter. Say Y or M here
++	  when the display pipeline is used.
++
+ config COMMON_CLK_MT6897_UFSSYS
+ 	tristate "Clock driver for MediaTek MT6897 ufssys"
+ 	depends on COMMON_CLK_MT6897
+diff --git a/drivers/clk/mediatek/Makefile b/drivers/clk/mediatek/Makefile
+index a978375a7..1f4c9a1d3 100644
+--- a/drivers/clk/mediatek/Makefile
++++ b/drivers/clk/mediatek/Makefile
+@@ -37,6 +37,7 @@ obj-$(CONFIG_COMMON_CLK_MT6797_VENCSYS) += clk-mt6797-venc.o
+ obj-$(CONFIG_COMMON_CLK_MT6897) += clk-mt6897-apmixedsys.o clk-mt6897-topckgen.o \
+ 				   clk-mt6897-vlpckgen.o clk-mt6897-peri_ao.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_IMP_IIC_WRAP) += clk-mt6897-imp_iic_wrap.o
++obj-$(CONFIG_COMMON_CLK_MT6897_MMSYS) += clk-mt6897-mmsys.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_UFSSYS) += clk-mt6897-ufs.o
+ obj-$(CONFIG_COMMON_CLK_MT2701) += clk-mt2701.o
+ obj-$(CONFIG_COMMON_CLK_MT2701_AUDSYS) += clk-mt2701-aud.o
+diff --git a/drivers/clk/mediatek/clk-mt6897-mmsys.c b/drivers/clk/mediatek/clk-mt6897-mmsys.c
+new file mode 100644
+index 000000000..fc1a9988f
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6897-mmsys.c
+@@ -0,0 +1,395 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ * Author: Benjamin Chao <benjamin.chao@mediatek.com>
++ *
++ * Copyright (c) 2026 buntOS contributors
++ */
++#include <dt-bindings/clock/mediatek,mt6897-clock.h>
++
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++/*
++ * These blocks only answer while their power domain is on, and the driver has
++ * no way to tell. So their gates have no .is_enabled, see the ops in
++ * clk-gate.c. A consumer has to power the domain up before it enables a gate.
++ */
++static const struct mtk_gate_regs mm_cg0_regs = {
++	.set_ofs = 0x104,
++	.clr_ofs = 0x108,
++	.sta_ofs = 0x100,
++};
++
++static const struct mtk_gate_regs mm_cg1_regs = {
++	.set_ofs = 0x114,
++	.clr_ofs = 0x118,
++	.sta_ofs = 0x110,
++};
++
++static const struct mtk_gate_regs mm_cg2_regs = {
++	.set_ofs = 0x1a4,
++	.clr_ofs = 0x1a8,
++	.sta_ofs = 0x1a0,
++};
++
++static const struct mtk_gate_regs disp0_hwv0_regs = {
++	.set_ofs = 0x0018,
++	.clr_ofs = 0x001c,
++	.sta_ofs = 0x1c0c,
++};
++
++static const struct mtk_gate_regs disp0_hwv1_regs = {
++	.set_ofs = 0x0020,
++	.clr_ofs = 0x0024,
++	.sta_ofs = 0x1c10,
++};
++
++static const struct mtk_gate_regs disp0_hwv2_regs = {
++	.set_ofs = 0x0028,
++	.clr_ofs = 0x002c,
++	.sta_ofs = 0x1c14,
++};
++
++static const struct mtk_gate_regs disp1_hwv0_regs = {
++	.set_ofs = 0x0030,
++	.clr_ofs = 0x0034,
++	.sta_ofs = 0x1c18,
++};
++
++static const struct mtk_gate_regs disp1_hwv1_regs = {
++	.set_ofs = 0x0038,
++	.clr_ofs = 0x003c,
++	.sta_ofs = 0x1c1c,
++};
++
++static const struct mtk_gate_regs disp1_hwv2_regs = {
++	.set_ofs = 0x0040,
++	.clr_ofs = 0x0044,
++	.sta_ofs = 0x1c20,
++};
++
++static const struct mtk_gate_regs ovl0_hwv_regs = {
++	.set_ofs = 0x0068,
++	.clr_ofs = 0x006c,
++	.sta_ofs = 0x1c34,
++};
++
++static const struct mtk_gate_regs ovl1_hwv_regs = {
++	.set_ofs = 0x0070,
++	.clr_ofs = 0x0074,
++	.sta_ofs = 0x1c38,
++};
++
++static const struct mtk_gate_regs mminfra_hwv0_regs = {
++	.set_ofs = 0x0058,
++	.clr_ofs = 0x005c,
++	.sta_ofs = 0x1c2c,
++};
++
++static const struct mtk_gate_regs mminfra_hwv1_regs = {
++	.set_ofs = 0x0060,
++	.clr_ofs = 0x0064,
++	.sta_ofs = 0x1c30,
++};
++
++#define GATE_MM(_id, _name, _parent, _regs, _shift) {		\
++		.id = _id,					\
++		.name = _name,					\
++		.parent_name = _parent,				\
++		.regs = _regs,					\
++		.shift = _shift,				\
++		.ops = &mtk_clk_gate_ops_setclr_no_status,	\
++	}
++
++#define GATE_HWV_MM(_id, _name, _parent, _regs, _hwv_regs, _shift) {	\
++		.id = _id,						\
++		.name = _name,						\
++		.parent_name = _parent,					\
++		.regs = _regs,						\
++		.hwv_regs = _hwv_regs,					\
++		.shift = _shift,					\
++		.ops = &mtk_clk_gate_hwv_ops_setclr_no_status,		\
++	}
++
++#define GATE_HWV_DISP0_0(_id, _name, _shift)		\
++	GATE_HWV_MM(_id, _name, "disp0", &mm_cg0_regs,	\
++		    &disp0_hwv0_regs, _shift)
++
++#define GATE_DISP0_0(_id, _name, _shift)	\
++	GATE_MM(_id, _name, "disp0", &mm_cg0_regs, _shift)
++
++#define GATE_HWV_DISP0_1(_id, _name, _shift)		\
++	GATE_HWV_MM(_id, _name, "disp0", &mm_cg1_regs,	\
++		    &disp0_hwv1_regs, _shift)
++
++#define GATE_DISP0_1(_id, _name, _shift)	\
++	GATE_MM(_id, _name, "disp0", &mm_cg1_regs, _shift)
++
++#define GATE_HWV_DISP0_2(_id, _name, _shift)		\
++	GATE_HWV_MM(_id, _name, "disp0", &mm_cg2_regs,	\
++		    &disp0_hwv2_regs, _shift)
++
++#define GATE_DISP0_2(_id, _name, _shift)	\
++	GATE_MM(_id, _name, "disp0", &mm_cg2_regs, _shift)
++
++#define GATE_HWV_DISP1_0(_id, _name, _shift)		\
++	GATE_HWV_MM(_id, _name, "disp0", &mm_cg0_regs,	\
++		    &disp1_hwv0_regs, _shift)
++
++#define GATE_DISP1_0(_id, _name, _shift)	\
++	GATE_MM(_id, _name, "disp0", &mm_cg0_regs, _shift)
++
++#define GATE_HWV_DISP1_1(_id, _name, _shift)		\
++	GATE_HWV_MM(_id, _name, "disp0", &mm_cg1_regs,	\
++		    &disp1_hwv1_regs, _shift)
++
++#define GATE_DISP1_1(_id, _name, _shift)	\
++	GATE_MM(_id, _name, "disp0", &mm_cg1_regs, _shift)
++
++#define GATE_HWV_DISP1_2(_id, _name, _shift)		\
++	GATE_HWV_MM(_id, _name, "disp0", &mm_cg2_regs,	\
++		    &disp1_hwv2_regs, _shift)
++
++#define GATE_DISP1_2(_id, _name, _shift)	\
++	GATE_MM(_id, _name, "disp0", &mm_cg2_regs, _shift)
++
++#define GATE_HWV_OVL0(_id, _name, _shift)		\
++	GATE_HWV_MM(_id, _name, "ovl0", &mm_cg0_regs,	\
++		    &ovl0_hwv_regs, _shift)
++
++#define GATE_OVL0(_id, _name, _shift)	\
++	GATE_MM(_id, _name, "ovl0", &mm_cg0_regs, _shift)
++
++#define GATE_HWV_OVL1(_id, _name, _shift)		\
++	GATE_HWV_MM(_id, _name, "ovl0", &mm_cg0_regs,	\
++		    &ovl1_hwv_regs, _shift)
++
++#define GATE_OVL1(_id, _name, _shift)	\
++	GATE_MM(_id, _name, "ovl0", &mm_cg0_regs, _shift)
++
++#define GATE_HWV_MMINFRA_0(_id, _name, _shift)			\
++	GATE_HWV_MM(_id, _name, "mminfra", &mm_cg0_regs,	\
++		    &mminfra_hwv0_regs, _shift)
++
++#define GATE_HWV_MMINFRA_1(_id, _name, _shift)			\
++	GATE_HWV_MM(_id, _name, "mminfra", &mm_cg1_regs,	\
++		    &mminfra_hwv1_regs, _shift)
++
++static const struct mtk_gate disp0_clks[] = {
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISPSYS_CONFIG, "dispsys0_disp_cfg", 0),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_MUTEX0, "dispsys0_disp_mutex0", 1),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_AAL0, "dispsys0_disp_aal0", 2),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_C3D0, "dispsys0_disp_c3d0", 3),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_CCORR0, "dispsys0_disp_ccorr0", 4),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_CCORR1, "dispsys0_disp_ccorr1", 5),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_CHIST0, "dispsys0_disp_chist0", 6),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_CHIST1, "dispsys0_disp_chist1", 7),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_COLOR0, "dispsys0_disp_color0", 8),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_DITHER0, "dispsys0_di0", 9),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_DITHER1, "dispsys0_di1", 10),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DLI_ASYNC0, "dispsys0_dli0", 11),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DLI_ASYNC1, "dispsys0_dli1", 12),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DLI_ASYNC2, "dispsys0_dli2", 13),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DLI_ASYNC3, "dispsys0_dli3", 14),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DLI_ASYNC4, "dispsys0_dli4", 15),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DLI_ASYNC5, "dispsys0_dli5", 16),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DLO_ASYNC0, "dispsys0_dlo0", 17),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DLO_ASYNC1, "dispsys0_dlo1", 18),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_DP_INTF0, "dispsys0_dp_intclk", 19),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DSC_WRAP0, "dispsys0_dscw0", 20),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_DSI0, "dispsys0_clk0", 21),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_GAMMA0, "dispsys0_disp_gamma0", 22),
++	GATE_DISP0_0(CLK_DISPSYS0_MDP_AAL0, "dispsys0_mdp_aal0", 23),
++	GATE_DISP0_0(CLK_DISPSYS0_MDP_RDMA0, "dispsys0_mdp_rdma0", 24),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_MERGE0, "dispsys0_disp_merge0", 25),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_MERGE1, "dispsys0_disp_merge1", 26),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_ODDMR0, "dispsys0_disp_oddmr0", 27),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_POSTALIGN0, "dispsys0_palign0", 28),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_POSTMASK0, "dispsys0_pmask0", 29),
++	GATE_DISP0_0(CLK_DISPSYS0_DISP_RELAY0, "dispsys0_disp_relay0", 30),
++	GATE_HWV_DISP0_0(CLK_DISPSYS0_DISP_RSZ0, "dispsys0_disp_rsz0", 31),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_SPR0, "dispsys0_disp_spr0", 0),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_TDSHP0, "dispsys0_disp_tdshp0", 1),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_TDSHP1, "dispsys0_disp_tdshp1", 2),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_UFBC_WDMA1, "dispsys0_wdma1", 3),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_VDCM0, "dispsys0_disp_vdcm0", 4),
++	GATE_HWV_DISP0_1(CLK_DISPSYS0_DISP_WDMA1, "dispsys0_disp_wdma1", 5),
++	GATE_HWV_DISP0_1(CLK_DISPSYS0_SMI_SUB_COMM0, "dispsys0_smi_comm0", 6),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_Y2R0, "dispsys0_disp_y2r0", 7),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_CCORR2, "dispsys0_disp_ccorr2", 8),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_CCORR3, "dispsys0_disp_ccorr3", 9),
++	GATE_DISP0_1(CLK_DISPSYS0_DISP_GAMMA1, "dispsys0_disp_gamma1", 10),
++	GATE_HWV_DISP0_2(CLK_DISPSYS0_DSI_CLK, "dispsys0_dsi_clk", 0),
++	GATE_DISP0_2(CLK_DISPSYS0_DP_CLK, "dispsys0_dp_clk", 1),
++	GATE_HWV_DISP0_2(CLK_DISPSYS0_26M_CLK, "dispsys0_26m_clk", 10),
++};
++
++static const struct mtk_clk_desc disp0_mcd = {
++	.clks = disp0_clks,
++	.num_clks = ARRAY_SIZE(disp0_clks),
++};
++
++static const struct mtk_gate disp1_clks[] = {
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISPSYS_CONFIG, "dispsys1_disp_cfg", 0),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_MUTEX0, "dispsys1_disp_mutex0", 1),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_AAL0, "dispsys1_disp_aal0", 2),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_C3D0, "dispsys1_disp_c3d0", 3),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_CCORR0, "dispsys1_disp_ccorr0", 4),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_CCORR1, "dispsys1_disp_ccorr1", 5),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_CHIST0, "dispsys1_disp_chist0", 6),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_CHIST1, "dispsys1_disp_chist1", 7),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_COLOR0, "dispsys1_disp_color0", 8),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_DITHER0, "dispsys1_di0", 9),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_DITHER1, "dispsys1_di1", 10),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DLI_ASYNC0, "dispsys1_dli0", 11),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DLI_ASYNC1, "dispsys1_dli1", 12),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DLI_ASYNC2, "dispsys1_dli2", 13),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DLI_ASYNC3, "dispsys1_dli3", 14),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DLI_ASYNC4, "dispsys1_dli4", 15),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DLI_ASYNC5, "dispsys1_dli5", 16),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DLO_ASYNC0, "dispsys1_dlo0", 17),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DLO_ASYNC1, "dispsys1_dlo1", 18),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_DP_INTF0, "dispsys1_dp_intclk", 19),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DSC_WRAP0, "dispsys1_dscw0", 20),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_DSI0, "dispsys1_clk0", 21),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_GAMMA0, "dispsys1_disp_gamma0", 22),
++	GATE_DISP1_0(CLK_DISPSYS1_MDP_AAL0, "dispsys1_mdp_aal0", 23),
++	GATE_DISP1_0(CLK_DISPSYS1_MDP_RDMA0, "dispsys1_mdp_rdma0", 24),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_MERGE0, "dispsys1_disp_merge0", 25),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_MERGE1, "dispsys1_disp_merge1", 26),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_ODDMR0, "dispsys1_disp_oddmr0", 27),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_POSTALIGN0, "dispsys1_palign0", 28),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_POSTMASK0, "dispsys1_pmask0", 29),
++	GATE_DISP1_0(CLK_DISPSYS1_DISP_RELAY0, "dispsys1_disp_relay0", 30),
++	GATE_HWV_DISP1_0(CLK_DISPSYS1_DISP_RSZ0, "dispsys1_disp_rsz0", 31),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_SPR0, "dispsys1_disp_spr0", 0),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_TDSHP0, "dispsys1_disp_tdshp0", 1),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_TDSHP1, "dispsys1_disp_tdshp1", 2),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_UFBC_WDMA1, "dispsys1_wdma1", 3),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_VDCM0, "dispsys1_disp_vdcm0", 4),
++	GATE_HWV_DISP1_1(CLK_DISPSYS1_DISP_WDMA1, "dispsys1_disp_wdma1", 5),
++	GATE_HWV_DISP1_1(CLK_DISPSYS1_SMI_SUB_COMM0, "dispsys1_smi_comm0", 6),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_Y2R0, "dispsys1_disp_y2r0", 7),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_CCORR2, "dispsys1_disp_ccorr2", 8),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_CCORR3, "dispsys1_disp_ccorr3", 9),
++	GATE_DISP1_1(CLK_DISPSYS1_DISP_GAMMA1, "dispsys1_disp_gamma1", 10),
++	GATE_HWV_DISP1_2(CLK_DISPSYS1_DSI_CLK, "dispsys1_dsi_clk", 0),
++	GATE_DISP1_2(CLK_DISPSYS1_DP_CLK, "dispsys1_dp_clk", 1),
++	GATE_HWV_DISP1_2(CLK_DISPSYS1_26M_CLK, "dispsys1_26m_clk", 10),
++};
++
++static const struct mtk_clk_desc disp1_mcd = {
++	.clks = disp1_clks,
++	.num_clks = ARRAY_SIZE(disp1_clks),
++};
++
++static const struct mtk_gate ovl0_clks[] = {
++	GATE_HWV_OVL0(CLK_OVLSYS0_CONFIG, "ovlsys0_ovl_config", 0),
++	GATE_OVL0(CLK_OVLSYS0_DISP_FAKE_ENG0, "ovlsys0_ovl_fake_e0", 1),
++	GATE_OVL0(CLK_OVLSYS0_DISP_FAKE_ENG1, "ovlsys0_ovl_fake_e1", 2),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_MUTEX0, "ovlsys0_ovl_mutex0", 3),
++	GATE_HWV_OVL0(CLK_OVLSYS0_OVL0_2L, "ovlsys0_disp_ovl0_2l", 4),
++	GATE_HWV_OVL0(CLK_OVLSYS0_OVL1_2L, "ovlsys0_disp_ovl1_2l", 5),
++	GATE_HWV_OVL0(CLK_OVLSYS0_OVL2_2L, "ovlsys0_disp_ovl2_2l", 6),
++	GATE_HWV_OVL0(CLK_OVLSYS0_OVL3_2L, "ovlsys0_disp_ovl3_2l", 7),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_RSZ1, "ovlsys0_ovl_rsz1", 8),
++	GATE_HWV_OVL0(CLK_OVLSYS0_MDP_RSZ0, "ovlsys0_ovl_mdp", 9),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_WDMA0, "ovlsys0_ovl_wdma0", 10),
++	GATE_OVL0(CLK_OVLSYS0_DISP_UFBC_WDMA0, "ovlsys0_wdma0", 11),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_WDMA2, "ovlsys0_ovl_wdma2", 12),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLI_ASYNC0, "ovlsys0_dli0", 13),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLI_ASYNC1, "ovlsys0_dli1", 14),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLI_ASYNC2, "ovlsys0_dli2", 15),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLO_ASYNC0, "ovlsys0_dlo0", 16),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLO_ASYNC1, "ovlsys0_dlo1", 17),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLO_ASYNC2, "ovlsys0_dlo2", 18),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLO_ASYNC3, "ovlsys0_dlo3", 19),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLO_ASYNC4, "ovlsys0_dlo4", 20),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLO_ASYNC5, "ovlsys0_dlo5", 21),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_DLO_ASYNC6, "ovlsys0_dlo6", 22),
++	GATE_HWV_OVL0(CLK_OVLSYS0_INLINEROT, "ovlsys0_ovl_irot", 23),
++	GATE_HWV_OVL0(CLK_OVLSYS0_SMI_SUB_COMMON0, "ovlsys0_cg0_smi_com0", 24),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_Y2R0, "ovlsys0_ovl_y2r0", 25),
++	GATE_HWV_OVL0(CLK_OVLSYS0_DISP_Y2R1, "ovlsys0_ovl_y2r1", 26),
++};
++
++static const struct mtk_clk_desc ovl0_mcd = {
++	.clks = ovl0_clks,
++	.num_clks = ARRAY_SIZE(ovl0_clks),
++};
++
++static const struct mtk_gate ovl1_clks[] = {
++	GATE_HWV_OVL1(CLK_OVLSYS1_CONFIG, "ovlsys1_ovl_config", 0),
++	GATE_OVL1(CLK_OVLSYS1_DISP_FAKE_ENG0, "ovlsys1_ovl_fake_e0", 1),
++	GATE_OVL1(CLK_OVLSYS1_DISP_FAKE_ENG1, "ovlsys1_ovl_fake_e1", 2),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_MUTEX0, "ovlsys1_ovl_mutex0", 3),
++	GATE_HWV_OVL1(CLK_OVLSYS1_OVL0_2L, "ovlsys1_disp_ovl0_2l", 4),
++	GATE_HWV_OVL1(CLK_OVLSYS1_OVL1_2L, "ovlsys1_disp_ovl1_2l", 5),
++	GATE_HWV_OVL1(CLK_OVLSYS1_OVL2_2L, "ovlsys1_disp_ovl2_2l", 6),
++	GATE_HWV_OVL1(CLK_OVLSYS1_OVL3_2L, "ovlsys1_disp_ovl3_2l", 7),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_RSZ1, "ovlsys1_ovl_rsz1", 8),
++	GATE_HWV_OVL1(CLK_OVLSYS1_MDP_RSZ0, "ovlsys1_ovl_mdp", 9),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_WDMA0, "ovlsys1_ovl_wdma0", 10),
++	GATE_OVL1(CLK_OVLSYS1_DISP_UFBC_WDMA0, "ovlsys1_wdma0", 11),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_WDMA2, "ovlsys1_ovl_wdma2", 12),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLI_ASYNC0, "ovlsys1_dli0", 13),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLI_ASYNC1, "ovlsys1_dli1", 14),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLI_ASYNC2, "ovlsys1_dli2", 15),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLO_ASYNC0, "ovlsys1_dlo0", 16),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLO_ASYNC1, "ovlsys1_dlo1", 17),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLO_ASYNC2, "ovlsys1_dlo2", 18),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLO_ASYNC3, "ovlsys1_dlo3", 19),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLO_ASYNC4, "ovlsys1_dlo4", 20),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLO_ASYNC5, "ovlsys1_dlo5", 21),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_DLO_ASYNC6, "ovlsys1_dlo6", 22),
++	GATE_HWV_OVL1(CLK_OVLSYS1_INLINEROT, "ovlsys1_ovl_irot", 23),
++	GATE_HWV_OVL1(CLK_OVLSYS1_SMI_SUB_COMMON0, "ovlsys1_cg0_smi_com0", 24),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_Y2R0, "ovlsys1_ovl_y2r0", 25),
++	GATE_HWV_OVL1(CLK_OVLSYS1_DISP_Y2R1, "ovlsys1_ovl_y2r1", 26),
++};
++
++static const struct mtk_clk_desc ovl1_mcd = {
++	.clks = ovl1_clks,
++	.num_clks = ARRAY_SIZE(ovl1_clks),
++};
++
++static const struct mtk_gate mminfra_clks[] = {
++	GATE_HWV_MMINFRA_0(CLK_MMINFRA_GCE_D, "mminfra_gce_d", 0),
++	GATE_HWV_MMINFRA_0(CLK_MMINFRA_GCE_M, "mminfra_gce_m", 1),
++	GATE_HWV_MMINFRA_0(CLK_MMINFRA_SMI, "mminfra_smi", 2),
++	GATE_HWV_MMINFRA_1(CLK_MMINFRA_GCE_26M, "mminfra_gce_26m", 17),
++};
++
++static const struct mtk_clk_desc mminfra_mcd = {
++	.clks = mminfra_clks,
++	.num_clks = ARRAY_SIZE(mminfra_clks),
++};
++
++static const struct of_device_id of_match_clk_mt6897_mmsys[] = {
++	{ .compatible = "mediatek,mt6897-dispsys0", .data = &disp0_mcd },
++	{ .compatible = "mediatek,mt6897-dispsys1", .data = &disp1_mcd },
++	{ .compatible = "mediatek,mt6897-ovlsys0", .data = &ovl0_mcd },
++	{ .compatible = "mediatek,mt6897-ovlsys1", .data = &ovl1_mcd },
++	{ .compatible = "mediatek,mt6897-mminfra", .data = &mminfra_mcd },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, of_match_clk_mt6897_mmsys);
++
++static struct platform_driver clk_mt6897_mmsys_drv = {
++	.probe = mtk_clk_simple_probe,
++	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "clk-mt6897-mmsys",
++		.of_match_table = of_match_clk_mt6897_mmsys,
++	},
++};
++module_platform_driver(clk_mt6897_mmsys_drv);
++
++MODULE_DESCRIPTION("MediaTek MT6897 mmsys clocks driver");
++MODULE_LICENSE("GPL");

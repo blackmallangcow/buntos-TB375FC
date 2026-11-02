@@ -17,6 +17,7 @@
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/power/mediatek,mt6897-power.h>
 #include <dt-bindings/reset/mediatek,mt6897-resets.h>
+#include <dt-bindings/thermal/mediatek,lvts-thermal.h>
 
 / {
 	compatible = "mediatek,mt6897";
@@ -241,6 +242,37 @@
 		};
 	};
 
+	/*
+	 * The fuses as the boot firmware passes them on. The cell offsets are in
+	 * that copy (atag,devinfo), not in the efuse block at 0x11e80000.
+	 */
+	efuse: efuse {
+		compatible = "mediatek,mt6897-devinfo";
+		status = "disabled";
+
+		nvmem-layout {
+			compatible = "fixed-layout";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			lvts_calib2: calib@2d4 {
+				reg = <0x2d4 0x28>;
+			};
+
+			lvts_calib4: calib@2fc {
+				reg = <0x2fc 0x10>;
+			};
+
+			lvts_calib1: calib@310 {
+				reg = <0x310 0x38>;
+			};
+
+			lvts_calib3: calib@364 {
+				reg = <0x364 0x4>;
+			};
+		};
+	};
+
 	pmu-a510 {
 		compatible = "arm,cortex-a510-pmu";
 		interrupt-parent = <&gic>;
@@ -266,6 +298,424 @@
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
+	};
+
+	thermal-zones {
+		cpu4-0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU4_0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu4-1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU4_1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu5-0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU5_0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu5-1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU5_1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu2-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_LITTLE_CPU2>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu3-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_LITTLE_CPU3>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu6-0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU6_0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu6-1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU6_1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		dsu0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_DSU0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_LITTLE_CPU0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_LITTLE_CPU1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		dsu1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_DSU1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu7-0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_BIG_CPU7_0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu7-1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_BIG_CPU7_1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		dsu2-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_DSU2>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		dsu3-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_mcu MT6897_MCU_DSU3>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		soc-top0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_TOP0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		soc-top1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_TOP1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		soc-top2-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_TOP2>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		soc-top3-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_TOP3>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		soc-bot0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_BOT0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		soc-bot1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_BOT1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		soc-bot2-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_BOT2>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		soc-bot3-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_BOT3>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		md0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_MD0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		md1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_MD1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		md2-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_MD2>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		md3-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_ap MT6897_AP_MD3>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		apu0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_apu MT6897_APU0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		apu1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_apu MT6897_APU1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		gpu0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_gpu MT6897_GPU0>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+
+		gpu1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&lvts_gpu MT6897_GPU1>;
+
+			trips {
+				trip-crit {
+					temperature = <115000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
 	};
 
 	timer: timer {
@@ -394,6 +844,30 @@
 		 * remote processors, and switches some PLLs, muxes and gates,
 		 * and some of the power domains.
 		 */
+		lvts_ap: thermal-sensor@10315000 {
+			compatible = "mediatek,mt6897-lvts-ap";
+			reg = <0 0x10315000 0 0x1000>;
+			interrupts = <GIC_SPI 264 IRQ_TYPE_LEVEL_HIGH 0>;
+			nvmem-cells = <&lvts_calib1>, <&lvts_calib2>,
+				      <&lvts_calib3>, <&lvts_calib4>;
+			nvmem-cell-names = "lvts-calib-data-1", "lvts-calib-data-2",
+					   "lvts-calib-data-3", "lvts-calib-data-4";
+			#thermal-sensor-cells = <1>;
+			status = "disabled";
+		};
+
+		lvts_mcu: thermal-sensor@10316000 {
+			compatible = "mediatek,mt6897-lvts-mcu";
+			reg = <0 0x10316000 0 0x1000>;
+			interrupts = <GIC_SPI 265 IRQ_TYPE_LEVEL_HIGH 0>;
+			nvmem-cells = <&lvts_calib1>, <&lvts_calib2>,
+				      <&lvts_calib3>, <&lvts_calib4>;
+			nvmem-cell-names = "lvts-calib-data-1", "lvts-calib-data-2",
+					   "lvts-calib-data-3", "lvts-calib-data-4";
+			#thermal-sensor-cells = <1>;
+			status = "disabled";
+		};
+
 		hwv: syscon@10320000 {
 			compatible = "mediatek,mt6897-hwv", "syscon";
 			reg = <0 0x10320000 0 0x2000>;
@@ -948,6 +1422,24 @@
 		};
 
 		/*
+		 * The display, MDP and video codec clock gates. These blocks only
+		 * answer while their power domain is on, so a consumer powers its
+		 * domain before it enables a gate. The nodes have no power-domains:
+		 * the VEN and MDP domains need gates of these blocks to come up, and
+		 * runtime PM would power a domain up and down at probe, with mm-infra
+		 * and the screen. The driver touches neither the blocks nor the
+		 * domains at probe.
+		 * TODO(2c display): enable with the display pipeline.
+		 */
+		dispsys0: clock-controller@14000000 {
+			compatible = "mediatek,mt6897-dispsys0", "syscon";
+			reg = <0 0x14000000 0 0x1000>;
+			mediatek,hardware-voter = <&hwv>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		/*
 		 * TODO(2c display): compatible, clocks and PHY with the display
 		 * pipeline. See the board's &dsi0 for the panel.
 		 */
@@ -959,9 +1451,61 @@
 			status = "disabled";
 		};
 
+		dispsys1: clock-controller@14200000 {
+			compatible = "mediatek,mt6897-dispsys1", "syscon";
+			reg = <0 0x14200000 0 0x1000>;
+			mediatek,hardware-voter = <&hwv>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
 		dsi1: dsi@1420d000 {
 			reg = <0 0x1420d000 0 0x1000>;
 			interrupts = <GIC_SPI 412 IRQ_TYPE_LEVEL_HIGH 0>;
+			status = "disabled";
+		};
+
+		ovlsys0: clock-controller@14400000 {
+			compatible = "mediatek,mt6897-ovlsys0", "syscon";
+			reg = <0 0x14400000 0 0x1000>;
+			mediatek,hardware-voter = <&hwv>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		ovlsys1: clock-controller@14600000 {
+			compatible = "mediatek,mt6897-ovlsys1", "syscon";
+			reg = <0 0x14600000 0 0x1000>;
+			mediatek,hardware-voter = <&hwv>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		vdecsys_soc: clock-controller@1600f000 {
+			compatible = "mediatek,mt6897-vdecsys-soc", "syscon";
+			reg = <0 0x1600f000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		vdecsys: clock-controller@1602f000 {
+			compatible = "mediatek,mt6897-vdecsys", "syscon";
+			reg = <0 0x1602f000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		vencsys: clock-controller@17000000 {
+			compatible = "mediatek,mt6897-vencsys", "syscon";
+			reg = <0 0x17000000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		vencsys_c1: clock-controller@17800000 {
+			compatible = "mediatek,mt6897-vencsys-c1", "syscon";
+			reg = <0 0x17800000 0 0x1000>;
+			#clock-cells = <1>;
 			status = "disabled";
 		};
 
@@ -1053,6 +1597,84 @@
 			status = "disabled";
 		};
 
+		/*
+		 * Mali-G615 MC6. Power, clocks and voltages are the GPUEB's. No
+		 * dma-coherent: the vendor kernel needs a TF-A call to keep the
+		 * DSU up for it, which nothing here makes. No ASN hash either.
+		 */
+		gpu: gpu@13000000 {
+			compatible = "mediatek,mt6897-mali", "arm,mali-valhall-csf";
+			reg = <0 0x13000000 0 0x480000>;
+			clocks = <&gpueb 0>, <&gpueb 1>;
+			clock-names = "core", "stacks";
+			interrupts = <GIC_SPI 586 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 585 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 584 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "job", "mmu", "gpu";
+			nvmem-cells = <&gpu_shader_present>;
+			nvmem-cell-names = "shader-present";
+			power-domains = <&gpueb>;
+			status = "disabled";
+		};
+
+		/*
+		 * The name matters: the boot firmware adds the shared memory to the
+		 * node at /soc/gpueb. The firmware itself comes from the gpueb
+		 * partition, loaded and started by the boot firmware.
+		 */
+		gpueb: gpueb@13c2fd1c {
+			compatible = "mediatek,mt6897-gpufreq";
+			reg = <0 0x13c2fd1c 0 0x64>,
+			      <0 0x1c001f00 0 0x4>;
+			reg-names = "gpr", "mfg0-pwr";
+			mboxes = <&gpueb_mbox 0>, <&gpueb_mbox 1>, <&gpueb_mbox 2>,
+				 <&gpueb_mbox 3>, <&gpueb_mbox 4>, <&gpueb_mbox 5>,
+				 <&gpueb_mbox 7>;
+			mbox-names = "fast-dvfs-event", "gpufreq", "sleep", "timer",
+				     "fhctl", "ccf", "fast-dvfs";
+			#clock-cells = <1>;
+			#nvmem-cell-cells = <0>;
+			#power-domain-cells = <0>;
+			status = "disabled";
+
+			gpu_shader_present: shader-present {
+			};
+		};
+
+		gpueb_mbox: mailbox@13c2fd80 {
+			compatible = "mediatek,mt6897-gpueb-mbox";
+			reg = <0 0x13c2fd80 0 0x280>,
+			      <0 0x13c62000 0 0x7c>;
+			reg-names = "data", "ctl";
+			interrupts = <GIC_SPI 588 IRQ_TYPE_LEVEL_HIGH 0>;
+			#mbox-cells = <1>;
+			status = "disabled";
+		};
+
+		lvts_gpu: thermal-sensor@13ff0000 {
+			compatible = "mediatek,mt6897-lvts-gpu";
+			reg = <0 0x13ff0000 0 0x1000>;
+			interrupts = <GIC_SPI 592 IRQ_TYPE_LEVEL_HIGH 0>;
+			nvmem-cells = <&lvts_calib1>, <&lvts_calib2>,
+				      <&lvts_calib3>, <&lvts_calib4>;
+			nvmem-cell-names = "lvts-calib-data-1", "lvts-calib-data-2",
+					   "lvts-calib-data-3", "lvts-calib-data-4";
+			#thermal-sensor-cells = <1>;
+			status = "disabled";
+		};
+
+		lvts_apu: thermal-sensor@19004000 {
+			compatible = "mediatek,mt6897-lvts-apu";
+			reg = <0 0x19004000 0 0x1000>;
+			interrupts = <GIC_SPI 635 IRQ_TYPE_LEVEL_HIGH 0>;
+			nvmem-cells = <&lvts_calib1>, <&lvts_calib2>,
+				      <&lvts_calib3>, <&lvts_calib4>;
+			nvmem-cell-names = "lvts-calib-data-1", "lvts-calib-data-2",
+					   "lvts-calib-data-3", "lvts-calib-data-4";
+			#thermal-sensor-cells = <1>;
+			status = "disabled";
+		};
+
 		/* TOPRGU, already running when the bootloader hands over */
 		watchdog: watchdog@1c00a000 {
 			compatible = "mediatek,mt6897-wdt", "mediatek,mt6589-wdt";
@@ -1123,6 +1745,28 @@
 			reg = <0 0x1cc10000 0 0x1000>;
 			interrupts = <GIC_SPI 330 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&clk13m>;
+			status = "disabled";
+		};
+
+		mminfra: clock-controller@1e800000 {
+			compatible = "mediatek,mt6897-mminfra", "syscon";
+			reg = <0 0x1e800000 0 0x1000>;
+			mediatek,hardware-voter = <&hwv>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		mdpsys0: clock-controller@1f000000 {
+			compatible = "mediatek,mt6897-mdpsys0", "syscon";
+			reg = <0 0x1f000000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		mdpsys1: clock-controller@1f800000 {
+			compatible = "mediatek,mt6897-mdpsys1", "syscon";
+			reg = <0 0x1f800000 0 0x1000>;
+			#clock-cells = <1>;
 			status = "disabled";
 		};
 	};

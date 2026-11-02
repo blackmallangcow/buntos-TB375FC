@@ -1,0 +1,143 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: power: mediatek,mt8196-gpufreq: add MT6897
+
+The MT6897 has the same kind of embedded controller for GPU power and
+frequency, but it is used differently.
+
+The boot firmware loads the controller from a partition, starts it and
+never stops it, so there is no RPC block to use and no clock or supply
+for the kernel to control. It also allocates the memory shared with the
+controller, protects it, and passes it on by adding two properties to
+the node it finds at the path /soc/gpueb. Hence the node name, and no
+memory-region: the region in /reserved-memory has a number in its name
+that changes between boots, and a region of our own would not have the
+protection set up for the controller.
+
+Instead of the RPC block, the second register is the power control of
+MFG0, the domain the controller is in. That is what the boot firmware
+checks before it touches the controller, and it is the only way to tell
+if its SRAM is safe to read.
+---
+ .../power/mediatek,mt8196-gpufreq.yaml        | 82 ++++++++++++++++---
+ 1 file changed, 70 insertions(+), 12 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/power/mediatek,mt8196-gpufreq.yaml b/Documentation/devicetree/bindings/power/mediatek,mt8196-gpufreq.yaml
+index 66fc59b..a37a900 100644
+--- a/Documentation/devicetree/bindings/power/mediatek,mt8196-gpufreq.yaml
++++ b/Documentation/devicetree/bindings/power/mediatek,mt8196-gpufreq.yaml
+@@ -15,23 +15,20 @@ description:
+ 
+ properties:
+   $nodename:
+-    pattern: '^power-controller@[a-f0-9]+$'
++    pattern: '^(power-controller|gpueb)@[a-f0-9]+$'
+ 
+   compatible:
+     enum:
++      - mediatek,mt6897-gpufreq
+       - mediatek,mt8196-gpufreq
+ 
+   reg:
+-    items:
+-      - description: GPR memory area
+-      - description: RPC memory area
+-      - description: SoC variant ID register
++    minItems: 2
++    maxItems: 3
+ 
+   reg-names:
+-    items:
+-      - const: gpr
+-      - const: rpc
+-      - const: hw-revision
++    minItems: 2
++    maxItems: 3
+ 
+   clocks:
+     items:
+@@ -90,14 +87,57 @@ required:
+   - compatible
+   - reg
+   - reg-names
+-  - clocks
+-  - clock-names
+   - mboxes
+   - mbox-names
+-  - memory-region
+   - "#clock-cells"
+   - "#power-domain-cells"
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6897-gpufreq
++    then:
++      description:
++        The boot firmware loads and starts the embedded controller, and it is
++        never stopped. It controls all clocks and supplies of the GPU. The boot
++        firmware finds this node by the path /soc/gpueb, and adds the address
++        and size of the memory it shares with the controller to it, as the
++        64-bit properties gpueb_mem_addr and gpueb_mem_size.
++      properties:
++        $nodename:
++          pattern: '^gpueb@[a-f0-9]+$'
++        reg:
++          items:
++            - description: GPR memory area
++            - description: power control register of MFG0, the domain of the controller
++        reg-names:
++          items:
++            - const: gpr
++            - const: mfg0-pwr
++        clocks: false
++        clock-names: false
++        memory-region: false
++    else:
++      properties:
++        $nodename:
++          pattern: '^power-controller@[a-f0-9]+$'
++        reg:
++          items:
++            - description: GPR memory area
++            - description: RPC memory area
++            - description: SoC variant ID register
++        reg-names:
++          items:
++            - const: gpr
++            - const: rpc
++            - const: hw-revision
++      required:
++        - clocks
++        - clock-names
++        - memory-region
++
+ additionalProperties: false
+ 
+ examples:
+@@ -125,6 +165,24 @@ examples:
+         #nvmem-cell-cells = <0>;
+         #power-domain-cells = <0>;
+ 
++        shader-present {
++        };
++    };
++  - |
++    gpueb@13c2fd1c {
++        compatible = "mediatek,mt6897-gpufreq";
++        reg = <0x13c2fd1c 0x64>,
++              <0x1c001f00 0x4>;
++        reg-names = "gpr", "mfg0-pwr";
++        mboxes = <&gpueb_mbox 0>, <&gpueb_mbox 1>, <&gpueb_mbox 2>,
++                 <&gpueb_mbox 3>, <&gpueb_mbox 4>, <&gpueb_mbox 5>,
++                 <&gpueb_mbox 7>;
++        mbox-names = "fast-dvfs-event", "gpufreq", "sleep", "timer", "fhctl",
++                     "ccf", "fast-dvfs";
++        #clock-cells = <1>;
++        #nvmem-cell-cells = <0>;
++        #power-domain-cells = <0>;
++
+         shader-present {
+         };
+     };

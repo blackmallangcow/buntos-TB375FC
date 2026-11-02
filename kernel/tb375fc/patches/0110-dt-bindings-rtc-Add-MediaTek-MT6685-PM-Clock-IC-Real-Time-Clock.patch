@@ -1,0 +1,59 @@
+From: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Date: Fri, 24 Oct 2025 10:33:17 +0200
+Subject: [PATCH] dt-bindings: rtc: Add MediaTek MT6685 PM/Clock IC Real Time Clock
+
+[ Not upstream yet: v1 1/2 from
+  https://lore.kernel.org/r/20251024083318.25890-2-angelogioacchino.delregno@collabora.com ]
+
+The MediaTek MT6685 PM / Clock IC contains various SPMI sub
+devices, of which two are Real Time Clock IPs, one usually
+reserved for the secure world and one for the unsecured one,
+reachable at different SPMI addresses.
+
+Signed-off-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Acked-by: Conor Dooley <conor.dooley@microchip.com>
+[ buntOS: interrupts is not required. The driver here has no alarm yet, and
+  the interrupt can't be described before the PMIC has an interrupt
+  controller. ]
+---
+ .../bindings/rtc/mediatek,mt6685-rtc.yaml     | 32 +++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/rtc/mediatek,mt6685-rtc.yaml b/Documentation/devicetree/bindings/rtc/mediatek,mt6685-rtc.yaml
+new file mode 100644
+index 0000000..33d42de
+--- /dev/null
++++ b/Documentation/devicetree/bindings/rtc/mediatek,mt6685-rtc.yaml
+@@ -0,0 +1,32 @@
++# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/rtc/mediatek,mt6685-rtc.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6685 PM/Clock IC Real Time Clock
++
++allOf:
++  - $ref: rtc.yaml#
++
++maintainers:
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++
++properties:
++  compatible:
++    const: mediatek,mt6685-rtc
++
++  reg:
++    maxItems: 1
++
++  interrupts:
++    maxItems: 1
++
++  clocks:
++    maxItems: 1
++
++required:
++  - compatible
++  - reg
++
++unevaluatedProperties: false
