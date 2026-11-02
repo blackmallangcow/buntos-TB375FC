@@ -125,7 +125,7 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 | 판 | `TB375FC_CN_OPEN_USER_M21.814_A16_ZUXOS_1.5.10.044_ST_260123`(내부 이름 ZUI 17.5.10.044). Android 16(SDK 36), 보안 패치 2026-02-05, vendor 보안 패치 2024-10-05, 첫 API 34 |
 | 커널 | GKI `6.1.138-android14-11`(2025-06-28 빌드). Android 16으로 올라가도 커널과 vendor는 Android 14 세대 그대로다 |
 | 잠금 | `ro.boot.flash.locked=1`, `vbmeta.device_state=locked`, `verifiedbootstate=green`. `ro.oem_unlock_supported`와 `sys.oem_unlock_allowed` 속성은 없다 |
-| 슬롯 | A/B이고 지금 `_b`다. 동적 파티션 |
+| 슬롯 | A/B이고 지금 `_b`다. 동적 파티션이고 Virtual A/B다(`ro.virtual_ab.enabled=true`). 아래 "fastboot와 재부팅"을 본다 |
 | 메모리·저장장치 | RAM 8GB(`ro.boot.ddr_size`), 저장장치 128GB(`/data` 108G). 부팅 장치는 UFS `112b0000.ufshci` |
 | 화면 | 패널이 그리는 버퍼는 가로 2944×1840이다(SurfaceFlinger의 `framebufferSpace`, 터치 입력의 `physicalFrame`). 이 크기는 화면 회전 설정과 상관없다. Android는 세로(1840×2944)를 기본 방향으로 두고(`primary_display_orientation=270`) 가속도 센서로 자동 회전한다. 측정 때는 자동 회전이 꺼지고 가로(90°)로 고정되어 있었다. 144Hz, 밀도 340 |
 | 입력 장치(`dumpsys input`) | `NVTCapacitiveTouchScreen`(터치), `touch-pen`(펜), `hall`, `tn_wakeup`(포고 키보드 깨우기), `gf-keys`(지문), `mtk-pmic-keys`, `mtk-kpd`, `mt6897-mt6368 Headset Jack` |
@@ -165,6 +165,34 @@ TB375FC 중국판 순정 펌웨어 `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.09
 Android의 `CAPACITY`는 순정 커널이 매끄럽게 만든 값이다. 충전이 끝나면 게이지 RSOC와 차이가 5 미만인 동안 100을 붙든다. Linux의 `capacity`는 게이지 RSOC 그대로다
 
 `battery_maintenance_on=1`, `persist.sys.battery.battery_maintenance_v2.enabled=1`이다. 순정의 '배터리 유지 관리'는 충전 전압을 표로 정한다. 충전기/게이지 값은 v10이 사이클에 따라 150회 미만 4500/4530, 150~1019회 4480/4470, 1020~1049회 4430/4410, 1050회부터 4340/4310이고, v20은 사이클과 상관없이 4340/4310이다. 이 기기는 22회인데 4340/4310이므로 v20이다.
+
+### fastboot와 재부팅 (2026-11-02)
+
+잠긴 채로 맥에서 `adb reboot bootloader`, `fastboot getvar`, `fastboot flashing get_unlock_ability`, `fastboot reboot`를 돌렸다. 기기에 쓴 것은 없고, 안드로이드가 1분 안에 같은 슬롯과 같은 판으로 돌아왔다.
+- `getvar`와 `by-name` 목록은 포크의 `.handoff/tb375fc-device-readings/`(git 밖)에 두었다.
+- `getvar all`은 `Bootloader_SN_Part1`, `Bootloader_SN_Part2`도 준다. 기기 식별 값으로 보여 저장하지 않았다.
+
+| 항목 | 결과 |
+|---|---|
+| 맥 fastboot | 닿는다. 맥 포트에 바로 꽂았다. `is-userspace: no`라 LK의 fastboot다. `is-logical` 항목이 없어 super 안의 논리 파티션은 다루지 못한다 |
+| LK | `product: P98300DA2`, `version-bootloader: P98300DA2_fa07c1604_202601221851`, `hwboardid: MT8792_8+128_27`, `version: 0.5`, `protocol_version: 2` |
+| 잠금 | `unlocked: no`, `secure: yes`. `flashing get_unlock_ability`는 `unlock_ability is false`다. `flash_lock: no`도 있는데 뜻은 모른다. `flash lk`를 받는지는 시험하지 않았다 |
+| 슬롯 | `current-slot: b`. `b`는 successful yes·retry 1, `a`는 successful no·retry 0이고 둘 다 unbootable no다 |
+| 전송 한도 | `max-download-size: 0x8000000`(128MiB) |
+| 파티션 크기 | `boot`, `vendor_boot` 64MiB, `lk` 16MiB, `init_boot`, `dtbo`, `vbmeta`, `vbmeta_system`, `vbmeta_vendor` 8MiB(슬롯마다), `super` 9GiB(슬롯 없음), `userdata` 108.2GiB(`0x1b0d7f8000`, f2fs). `getvar`는 이 18개만 크기를 준다 |
+| OTA 기록 | `persist.sys.boot.reason.history`는 `reboot,ota` 2026-08-18, `shutdown,battery` 2026-09-26, 2026-10-01(KST)이다. OTA 앱을 마지막으로 쓴 때도 2026-08-18이다. `_b`는 이때 넘어온 슬롯으로 본다 |
+| 기다리는 업데이트 | 없다고 본다. 31일 부팅에서 `update_engine`의 CPU 합이 27초였고, `lenovo_ota_new_version_found=0`, `lenovo_ota_process=0`, `csdk_control_ota_downloadStatus=0`이고, `snapuserd`가 돌지 않았다. LK의 `current-slot`이 안드로이드의 슬롯과 같았고, 재부팅 뒤 판이 같다 |
+| mapper | `system_b-cow`, `product_b-cow`, `odm_dlkm_b-cow`가 있다. 8월 OTA가 super에 만든 COW가 남은 것으로 본다(짐작). 병합 중이면 돌아야 할 `snapuserd`가 없다 |
+| 배터리(`dumpsys battery`) | 100%, 4254mV, 20.5도, `Charge counter` 10098000, health good, USB 5V 500mA |
+| 온도(`dumpsys thermalservice`) | CPU·GPU 33.8도, NPU·TPU·SoC 34.1도, 배터리 22.3도, 피부 25.2도, USB 포트 28.0도(충전 중, 부팅 31일째) |
+| 온도 문턱(같은 곳, 심함·치명·비상·종료) | CPU·GPU·NPU 105·90·100·117, TPU·SoC 85·90·100·117, 피부 48·53·58·80(가벼움 43, 보통 45), 배터리 50·55·59·60. 차례가 맞지 않는 값도 HAL이 준 그대로다. 우리 트리의 critical 115도는 종료 문턱 아래다 |
+| 알람 | `dumpsys alarm`의 `Next alarm clock information`이 비어 있다 |
+| 막힌 것 | `/sys/class/rtc/*`, `/sys/class/thermal/thermal_zone*`(68개)의 `type`과 `temp`, `/proc/partitions`. `/sys/devices/platform/boardinfo/boardinfo`는 없다 |
+
+포팅에 닿는 것:
+- **판 내리기:** `_a`가 successful no, retry 0이다. 판 내리기가 `_a`에 구우면 슬롯을 바꿔야 할 수 있다(체크리스트 3절 1번).
+- **슬롯:** Virtual A/B라 지금 super의 논리 파티션은 `_b` 쪽만 온전하다고 본다(AOSP 동작, 기기에서 확인하지 않았다). `_a`의 boot 계열은 OTA 전 판으로 보이고, 백업에서 확인한다.
+- **이미지 크기:** 지금 커널로 만든 이미지(boot 18MB, init_boot 1.5MB, vendor_boot 57KB)는 파티션과 전송 한도 안이다.
 
 ## 8. 남은 것
 
