@@ -105,7 +105,8 @@ if [[ -n $modroot ]]; then
 			done
 			echo "$m" >>"$root/etc/buntos/modules"
 			added+=("$m")
-		elif [[ -f $src/modules.builtin ]] && tr '-' '_' <"$src/modules.builtin" | grep -q "/$m\.ko$"; then
+		# grep -q는 첫 줄에서 끝나 tr이 SIGPIPE를 맞으면 pipefail이 내장 모듈을 "못 찾음"으로 가른다. 끝까지 읽게 한다
+		elif [[ -f $src/modules.builtin ]] && tr '-' '_' <"$src/modules.builtin" | grep "/$m\.ko$" >/dev/null; then
 			builtin+=("$m")
 		else
 			missing+=("$m")
@@ -122,7 +123,8 @@ rev=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown)
 if [[ $rev != unknown && -n $(git -C "$repo" status --porcelain -- bsp/lenovo-tb375fc 2>/dev/null) ]]; then
 	rev+=-dirty
 fi
-bbver=$("$busybox" 2>&1 | head -n 1 | awk '{print $2}')
+# head -n 1이면 pipefail에서 busybox가 SIGPIPE를 맞아 가끔(400번에 33번) 스크립트가 141로 끝난다. awk는 끝까지 읽는다
+bbver=$("$busybox" 2>&1 | awk 'NR == 1 {print $2}')
 echo "busybox $bbver, modules $modver, git $rev" >"$root/etc/buntos/initramfs"
 
 # 커널은 init을 띄우기 전에 /dev/console을 연다. initramfs에는 devtmpfs가 저절로 붙지 않으므로 노드를 넣는다
