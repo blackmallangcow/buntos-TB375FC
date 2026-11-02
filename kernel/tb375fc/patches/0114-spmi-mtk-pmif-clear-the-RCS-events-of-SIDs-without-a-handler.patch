@@ -1,0 +1,137 @@
+From: buntOS contributors
+Subject: [PATCH] spmi: mtk-pmif: clear the RCS events of SIDs without a handler
+
+The RCS interrupt is a level interrupt, and only the EOI of a SID's chained
+interrupt clears an event from the SPMI_SLV_x_y_EINT registers. So the
+event of a SID without a handler stays: the chained handler skips a SID
+that isn't enabled, and doesn't even read the registers above the one of
+irq_max_sid. The parent interrupt fires again as soon as it is unmasked.
+Nothing ends this, since the spurious interrupt detection doesn't see
+chained handlers. That CPU spends nearly all its time here from then on.
+The handler still serves the SIDs that have one, but whatever needs that
+CPU has to wait.
+
+Such an event can happen. On the Lenovo TB375FC only the MT6363 at SID 4
+and the MT6368 at SID 5 have handlers. The MT6685 at SID 9 raises one for
+its RTC alarm, and the MediaTek RTC driver arms that alarm at shutdown if
+Android has a power-off alarm set, so it may go off under Linux. An event
+can also come in before the driver of a PMIC has probed.
+
+Read all four registers, and clear the event of a SID that isn't enabled.
+The MediaTek driver treats such events the same way: rcs_irq_handler(), in
+the OnePlus MT6897 kernel and in the stock module of this tablet, reads the
+status of all 16 SIDs on every interrupt and clears any event it finds,
+before it looks at whether the SID is enabled. The four registers are
+there: this handler only runs on SPMI 2.0 buses, whose register table has
+them, mtk_spmi_irq_init() already writes all four, and the stock module has
+them at the same offsets.
+
+SIDs with a handler go on as before. An event cleared while the driver of a
+PMIC is yet to set up its chained handler is no loss: mtk-spmi-pmic masks
+and clears all the interrupts of the PMIC and writes its RCS done register
+in probe, before that, so the handler would find nothing to do.
+
+What this doesn't do:
+
+ - Touch the chip. The source of the event stays there, as nothing here
+   knows what it is. A chip that raises the event again right after it is
+   cleared, for as long as its source is there, still keeps this handler
+   running. Whether the MT6685 does that can only be seen on a device: the
+   RCS done register of the MT63xx PMICs says nothing about it, since the
+   MediaTek drivers don't use that register on the MT6685. So log the
+   cleared events, with a rate limit. They are the only trace of this.
+
+ - Cover a chained handler that was removed. The irq core doesn't call
+   .irq_disable for that, so the SID stays enabled, and an event that comes
+   in when the driver of a PMIC has unbound stays as well.
+
+ - Keep the events of a SID that is disabled with disable_irq(). They used
+   to wait for enable_irq(), with the parent interrupt firing all along.
+   Nothing does that to these interrupts today.
+
+irq_min_sid and irq_max_sid have no users left. irq_min_sid never moved in
+any case: it starts at zero and could only go down.
+
+Fixes: ab1b3469fc28 ("spmi: mtk-pmif: Implement Request Capable Slave (RCS) interrupt")
+Link: https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6897/blob/76792af3e1fefabd34be6dd684bfc9facc4d5b17/kernel/kernel_device_modules-6.1/drivers/spmi/spmi-mtk-pmif-core.c
+---
+ drivers/spmi/spmi-mtk-pmif.c | 36 ++++++++++++++++--------------------
+ 1 file changed, 16 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/spmi/spmi-mtk-pmif.c b/drivers/spmi/spmi-mtk-pmif.c
+index c605643..397800d 100644
+--- a/drivers/spmi/spmi-mtk-pmif.c
++++ b/drivers/spmi/spmi-mtk-pmif.c
+@@ -63,8 +63,6 @@ struct pmif_bus {
+ 	int irq;
+ 	struct clk_bulk_data clks[PMIF_MAX_CLKS];
+ 	size_t nclks;
+-	u8 irq_min_sid;
+-	u8 irq_max_sid;
+ 	u16 irq_en;
+ 	raw_spinlock_t	lock;
+ };
+@@ -496,34 +494,38 @@ static void mtk_spmi_handle_chained_irq(struct irq_desc *desc)
+ 	struct pmif_bus *pbus = irq_desc_get_handler_data(desc);
+ 	struct irq_chip *chip = irq_desc_get_chip(desc);
+ 	struct pmif *arb = to_mtk_pmif(pbus->ctrl);
+-	u8 regidx_min, regidx_max;
+ 	bool irq_handled = false;
+ 	unsigned int i;
+ 
+-	regidx_min = pbus->irq_min_sid / 4;
+-	regidx_min += SPMI_SLV_3_0_EINT;
+-
+-	regidx_max = pbus->irq_max_sid / 4;
+-	regidx_max += SPMI_SLV_3_0_EINT;
+-
+ 	chained_irq_enter(chip, desc);
+ 
+-	for (i = regidx_min; i <= regidx_max; i++) {
++	for (i = SPMI_SLV_3_0_EINT; i <= SPMI_SLV_F_C_EINT; i++) {
+ 		u32 val = mtk_spmi_readl(arb, pbus, i);
+ 
+ 		while (val) {
+ 			u8 bit = __ffs(val);
+ 			u8 bank = bit / 8;
+ 			u8 sid = ((i - SPMI_SLV_3_0_EINT) * 4) + bank;
++			u8 sta = val >> (8 * bank);
++			u32 mask = PMIF_RCS_IRQ_MASK << (8 * bank);
+ 
+-			val &= ~(PMIF_RCS_IRQ_MASK << (8 * bank));
++			val &= ~mask;
++			irq_handled = true;
+ 
+-			/* Check if IRQs for this SID are enabled */
+-			if (!(pbus->irq_en & BIT(sid)))
++			/*
++			 * Only the EOI of a SID's handler clears its event.
++			 * Left alone, it would keep the parent interrupt
++			 * asserted, and this function would keep running.
++			 */
++			if (!(pbus->irq_en & BIT(sid))) {
++				mtk_spmi_writel(arb, pbus, mask, i);
++				dev_info_ratelimited(&pbus->ctrl->dev,
++						     "cleared event 0x%02x of SID %u: not enabled\n",
++						     sta, sid);
+ 				continue;
++			}
+ 
+ 			generic_handle_domain_irq_safe(pbus->dom, sid);
+-			irq_handled = true;
+ 		}
+ 	}
+ 
+@@ -598,12 +600,6 @@ static int mtk_spmi_rcs_irq_translate(struct irq_domain *d, struct irq_fwspec *f
+ 	*out_hwirq = intspec[0];
+ 	*out_type = intspec[2] & IRQ_TYPE_SENSE_MASK;
+ 
+-	if (pbus->irq_min_sid > intspec[0])
+-		pbus->irq_min_sid = intspec[0];
+-
+-	if (pbus->irq_max_sid < intspec[0])
+-		pbus->irq_max_sid = intspec[0];
+-
+ 	dev_dbg(dev, "Found SPMI IRQ %u (map: 0x%lx)\n", intspec[0], *out_hwirq);
+ 
+ 	return 0;

@@ -147,5 +147,9 @@
 0111-dt-bindings-mfd-mediatek-mt6685-add-the-RTC.patch
 0112-mfd-mtk-spmi-pmic-add-MediaTek-MT6685.patch
 0113-rtc-add-MediaTek-MT6685-RTC.patch
+# 0114: spmi: mtk-pmif 고침(업스트림에 없음). 처리기 없는 SID의 RCS 이벤트를 지운다. 벤더 rcs_irq_handler처럼 칸 넷을 다 읽는다. 안드로이드가 남긴 MT6685 알람이 리눅스에서
+# 울려도 EINT 248이 계속 울리지 않는다. 칩이 같은 이벤트를 곧바로 다시 내면 막지 못한다. 0007·0008 위에 얹힌다. 기기에서 확인한 뒤 업스트림에 낸다
+0114-spmi-mtk-pmif-clear-the-RCS-events-of-SIDs-without-a-handler.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 RTC까지 0110~0113에 있다):
 #  - wifi: mt76: mt7921 SoC의 레거시 명령 길(기기에서 uni cmd를 받지 않을 때)
+#  - spmi: mtk-pmif: 처리기가 있는 SID도 처리기 앞에서 지운다(벤더와 스톡의 순서). 지금은 EOI가 칩의 RCS 완료 쓰기 뒤에 와서, 그 사이 새 RCS가 지워지면 그 PMIC의 인터럽트가 재부팅까지 멈출 수 있다(창은 좁다. 코드로 본 것이다). 처리기를 뗀 SID와 직접 요청한 SID도 함께 풀린다
