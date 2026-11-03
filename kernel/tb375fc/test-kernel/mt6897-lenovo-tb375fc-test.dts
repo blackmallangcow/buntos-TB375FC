@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+// SPDX-FileCopyrightText: 2026 buntOS contributors
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
 // 시험용: 커널에 넣는 트리. gen_dts.py가 기기의 살아 있는 트리에서 만들었다.
 #include "mt6897-lenovo-tb375fc.dts"
 #include "test-stage.dtsi"
@@ -6,7 +7,7 @@
 / {
 	chosen {
 		/delete-property/ stdout-path;
-		bootargs = "console=tty0 ignore_loglevel log_buf_len=1M root=PARTLABEL=buntos rootfstype=btrfs rw systemd.firstboot=no buntos.usbdebug=1 buntos.wait=10 buntos.telnet=1 buntos.autoreboot=30 buntos.dump=1 panic=30 clk_ignore_unused pd_ignore_unused regulator_ignore_unused arm64.nomte";
+		bootargs = "console=tty0 ignore_loglevel log_buf_len=1M root=PARTLABEL=buntos rootfstype=btrfs rw systemd.firstboot=no buntos.usbdebug=1 buntos.wait=10 buntos.telnet=1 buntos.autoreboot=30 modprobe.blacklist=mt7921soc,mtk_connsys,btmtkbeif,panthor,mt6375,mt6375_charger,tcpci_mt6375 buntos.dump=1 panic=30 clk_ignore_unused pd_ignore_unused regulator_ignore_unused arm64.nomte";
 	};
 
 	memory@40000000 {
@@ -90,7 +91,8 @@
 		reg = <0x0 0x8cc00000 0x0 0xd00000>;
 		no-map;
 	};
-	mblock-38-shared-dma-pool-wifi-reserve-memory-dma@8d900000 {
+	wifi_dma: mblock-38-shared-dma-pool-wifi-reserve-memory-dma@8d900000 {
+		compatible = "shared-dma-pool";
 		reg = <0x0 0x8d900000 0x0 0x1400000>;
 		no-map;
 	};
@@ -189,3 +191,20 @@
 		no-map;
 	};
 };
+
+&consys {
+	emi-addr = /bits/ 64 <0x8cc00000>;
+};
+
+&wifi {
+	memory-region = <&wifi_dma>;
+};
+
+&gpueb {
+	gpueb_mem_addr = /bits/ 64 <0x7fe70000>;
+	gpueb_mem_size = /bits/ 64 <0x180000>;
+};
+
+#if __has_include("lk-private.dtsi")
+#include "lk-private.dtsi"
+#endif

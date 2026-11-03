@@ -16,7 +16,7 @@ mkdir -p "$W" "$dest"
 restore() { kernel/tb375fc/build.sh prepare >/dev/null 2>&1 || true; }
 trap restore EXIT
 kernel/tb375fc/build.sh prepare 2>&1 | tail -n 1 | cut -c1-100
-cpp -nostdinc -I "$T/arch/arm64/boot/dts/mediatek" -I "$T/arch/arm64/boot/dts" -I "$T/include" -I "$T/scripts/dtc/include-prefixes" \
+cpp -nostdinc -I "$repo/.handoff/tb375fc-test-kernel" -I "$T/arch/arm64/boot/dts/mediatek" -I "$T/arch/arm64/boot/dts" -I "$T/include" -I "$T/scripts/dtc/include-prefixes" \
 	-undef -D__DTS__ -x assembler-with-cpp "$here/mt6897-lenovo-tb375fc-test.dts" 2>/dev/null >"$W/test.pre.dts"
 dtc -q -I dts -O dtb -i "$T/arch/arm64/boot/dts/mediatek" -o "$W/test.dtb" "$W/test.pre.dts"
 fdtget -t s "$W/test.dtb" /chosen bootargs

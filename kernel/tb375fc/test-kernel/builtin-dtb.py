@@ -35,6 +35,7 @@ old2 = '''	/* Early fixups are done, map the FDT as read-only now */
 assert s.count(old1) == 1 and s.count(old2) == 1
 s = s.replace(old1, new1).replace(old2, '')
 open(p, 'w').write(s)
+# REUSE-IgnoreStart
 open(t + '/arch/arm64/kernel/tb375fc-dtb.S', 'w').write(f'''/* SPDX-License-Identifier: GPL-2.0 */
 	.section .rodata, "a"
 	.balign 8
@@ -42,6 +43,7 @@ open(t + '/arch/arm64/kernel/tb375fc-dtb.S', 'w').write(f'''/* SPDX-License-Iden
 __tb375fc_dtb:
 	.incbin "{dtb}"
 ''')
+# REUSE-IgnoreEnd
 m = t + '/arch/arm64/kernel/Makefile'
 ms = open(m).read()
 if 'tb375fc-dtb.o' not in ms:

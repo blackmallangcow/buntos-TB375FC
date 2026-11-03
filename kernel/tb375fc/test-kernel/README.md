@@ -8,9 +8,9 @@
 
 | 파일 | 내용 |
 |---|---|
-| `gen_dts.py` | 안드로이드의 `/sys/firmware/fdt`에서 예약 영역을 읽어 시험 dts를 만든다. 원본 트리에는 식별자가 있어 저장소에 넣지 않는다 |
+| `gen_dts.py` | 안드로이드의 `/sys/firmware/fdt`에서 예약 영역과 LK가 적는 값(`emi-addr`, `memory-region`, `gpueb_mem_*`)을 읽어 시험 dts를 만든다. 퓨즈 사본 `atag,devinfo`는 기기 값이라 셋째 인자의 `lk-private.dtsi`로 내고 저장소에 넣지 않는다(`.handoff/tb375fc-test-kernel/`). 원본 트리에는 식별자가 있어 저장소에 넣지 않는다 |
 | `mt6897-lenovo-tb375fc-test.dts` | 위에서 만든 트리. 보드 dts를 포함하고 명령줄, 메모리, 예약 영역을 더한다 |
-| `test-stage.dtsi` | 2b에서 시험하는 단계까지 켤 노드(지금 핀, 클럭, SPMI, USB, UFS). 보드 dts는 그대로 두고 여기서만 `okay`로 바꾼다 |
+| `test-stage.dtsi` | 시험하는 단계까지 켤 노드(지금 핀, 클럭, SPMI, USB, UFS, 입력, connsys, RTC, 열, 게이지, GPU, 충전). 보드 dts는 그대로 두고 여기서만 `okay`로 바꾼다 |
 | `builtin-dtb.py` | 작업 트리의 `setup_machine_fdt()`를 고쳐 커널에 넣은 트리를 쓰게 한다 |
 | `build-test.sh` | 빌드 VM에서 시험 커널과 `boot.img`를 만든다 |
 | `flash-b-test.sh` | 맥에서 슬롯 `_b`에 굽는다 |

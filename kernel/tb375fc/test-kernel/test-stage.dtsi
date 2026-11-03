@@ -1,5 +1,6 @@
+// SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
-// 시험용: 2b에서 하나씩 켜는 노드. 기기에서 확인한 뒤 보드 dts로 옮긴다.
+// 시험용: 2b부터 하나씩 켜는 노드. 기기에서 확인한 뒤 보드 dts로 옮긴다.
 
 // LK가 켜 둔 화면은 mmpll에서 나오는 클럭으로 돈다. 커널에는 화면 드라이버가 없어 이 사용자를 모르므로,
 // 같은 PLL을 쓰는 UFS가 클럭을 내리면 사용자가 0이 되어 PLL을 끈다. simpledrm이 잡아 둔다.
@@ -56,5 +57,200 @@
 };
 
 &ufshci {
+	status = "okay";
+};
+
+// 7. 2c 입력. 터치와 펜(spi2), 홀 센서(gpio-keys), 포고 키보드(uart3). vddio_1v8은 패널과 터치의 I/O 전원이다.
+&vddio_1v8 {
+	status = "okay";
+};
+
+&spi2 {
+	status = "okay";
+};
+
+&{/gpio-keys} {
+	status = "okay";
+};
+
+&uart3 {
+	status = "okay";
+};
+
+// 볼륨 내림 키
+&keypad {
+	status = "okay";
+};
+
+// 9.1, 9.2 2d. 드라이버는 명령줄의 modprobe.blacklist로 막고 손으로 올린다. 6.10 RTC도 MT6685와 함께 켠다.
+&spm {
+	status = "okay";
+};
+
+&mt6685 {
+	status = "okay";
+};
+
+&mt6685_rtc {
+	status = "okay";
+};
+
+&mt6363_vcn13 {
+	status = "okay";
+};
+
+&mt6363_vrfio18 {
+	status = "okay";
+};
+
+&mt6368_vant18 {
+	status = "okay";
+};
+
+&mt6368_vcn33_1 {
+	status = "okay";
+};
+
+&mt6368_vcn33_2 {
+	status = "okay";
+};
+
+&consys {
+	status = "okay";
+};
+
+&wifi {
+	status = "okay";
+};
+
+&bluetooth {
+	status = "okay";
+};
+
+// 9.4 2e 열과 게이지. efuse는 LK의 퓨즈 사본을 읽는다(lk-private.dtsi).
+&efuse {
+	status = "okay";
+};
+
+&lvts_ap {
+	status = "okay";
+};
+
+&lvts_mcu {
+	status = "okay";
+};
+
+&imp_iic_wrap_s {
+	status = "okay";
+};
+
+&i2c7 {
+	status = "okay";
+};
+
+// 9.4 2·3단계. GPU 전원은 요청하지 않는다.
+&lvts_apu {
+	status = "okay";
+};
+
+&lvts_gpu {
+	status = "okay";
+};
+
+&gpueb_mbox {
+	status = "okay";
+};
+
+&gpueb {
+	status = "okay";
+};
+
+// 9.4 4단계. panthor는 명령줄의 modprobe.blacklist로 막고 손으로 올린다.
+&gpu {
+	status = "okay";
+};
+
+// 9.3 A 충전 읽기만. 모듈은 명령줄의 modprobe.blacklist로 막고 손으로 올린다.
+&imp_iic_wrap_n {
+	status = "okay";
+};
+
+&imp_iic_wrap_en {
+	status = "okay";
+};
+
+&i2c5 {
+	status = "okay";
+};
+
+&i2c10 {
+	status = "okay";
+};
+
+&mt6375 {
+	status = "okay";
+};
+
+// 2e 유휴: 펌웨어가 PSCI CPU_SUSPEND를 거절해 상태마다 rejected만 쌓인다(2026-11-04). 까닭을 찾을 때까지 뺀다.
+&cpu0 {
+	/delete-property/ cpu-idle-states;
+};
+
+&cpu1 {
+	/delete-property/ cpu-idle-states;
+};
+
+&cpu2 {
+	/delete-property/ cpu-idle-states;
+};
+
+&cpu3 {
+	/delete-property/ cpu-idle-states;
+};
+
+&cpu4 {
+	/delete-property/ cpu-idle-states;
+};
+
+&cpu5 {
+	/delete-property/ cpu-idle-states;
+};
+
+&cpu6 {
+	/delete-property/ cpu-idle-states;
+};
+
+&cpu7 {
+	/delete-property/ cpu-idle-states;
+};
+
+// 9.3 B 충전 넘겨받기. 모듈은 명령줄의 modprobe.blacklist로 막고, 멈추는 스크립트를 건 뒤에 손으로 올린다.
+&battery {
+	status = "okay";
+};
+
+&mt6375 {
+	charger {
+		monitored-battery = <&battery>;
+		mediatek,fuel-gauge = <&fuel_gauge>;
+	};
+};
+
+// 9.3 C 인터럽트와 TCPC, 싱크만. tcpci_mt6375는 명령줄로 막고 시간 제한을 걸어 손으로 올린다.
+&mt6375 {
+	interrupt-parent = <&pio>;
+	interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
+
+	charger {
+		mediatek,usb-port = <&mt6375_tcpc>;
+	};
+};
+
+&mt6375_tcpc {
+	status = "okay";
+};
+
+// 8절 3단계, 9.3 C: TCPC의 VBUS 레귤레이터가 이 입력 FET 스위치를 입력으로 잡는다. 켜지 않는다.
+&charge_pump_65 {
 	status = "okay";
 };
