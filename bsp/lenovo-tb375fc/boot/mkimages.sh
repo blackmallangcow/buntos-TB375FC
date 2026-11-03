@@ -11,6 +11,7 @@
 #                    init이 표지를 읽어 LK가 우리 vendor_boot(곧 우리 장치 트리)를 읽었는지 알린다
 #   dtbo.img         DT 표, 빈 오버레이 하나 (벤더 dtbo는 벤더 노드 경로를 찾는 fixup이 우리 트리에서 실패할 수 있다)
 # 원래 이미지와 달리 AVB 꼬리와 파티션 크기 채움, dtbo 뒤의 MediaTek 서명 블록(cert1·cert2)이 없다.
+# 기기의 LK는 언락해도 DT 표가 있는 dtbo에 서명을 요구해 이 dtbo.img를 거부한다(2026-11-03). 파티션 앞을 0으로 채우면 건너뛴다.
 #
 # 사용법: mkimages.sh --kernel <Image> --dtb <DTB> --initramfs <cpio 또는 cpio.lz4> [선택]...
 #   --kernel <Image>        압축하지 않은 arm64 Image (arch/arm64/boot/Image)
@@ -18,8 +19,8 @@
 #   --initramfs <파일>      newc cpio. 누르지 않았으면 LZ4 legacy로 누른다 (../initramfs/mkinitramfs.sh가 만든다)
 #   --cmdline <명령줄>      boot.img의 커널 명령줄 (기본은 아래 cmdline)
 #   --vendor-cmdline <줄>   vendor_boot의 명령줄 (기본 bootopt=64S3,32N2,64N2. LK가 읽는 값이라 바꾸지 않는다)
-#   --boot-ramdisk          initramfs를 boot.img에도 넣는다. fastboot boot는 boot.img만 RAM으로 보내므로, LK가 그
-#                           램디스크를 쓰는지 볼 때 쓴다(확인되지 않았다)
+#   --boot-ramdisk          initramfs를 boot.img에도 넣는다. LK가 그 램디스크를 쓰는지 볼 때 쓴다(확인되지 않았다).
+#                           이 기기의 LK에는 fastboot boot가 없어 이미지는 슬롯에 굽는다(2026-11-03)
 #   --out <디렉터리>        출력 (기본 ~/buntos-build/tb375fc/images). 이미지 넷과 images.txt(해시, 입력, 명령줄)
 set -euo pipefail
 umask 022

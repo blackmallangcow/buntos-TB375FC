@@ -119,7 +119,7 @@ screen /dev/ttyACM0 115200
 ## 기기에서 띄우기 전에
 
 - 언락과 굽기는 buntOS 설계안 4.2.3절의 go/no-go 넷을 통과한 뒤에 한다. 백업과 복구는 SP Flash Tool과 그 판의 순정 펌웨어 묶음(인증 DA·auth)으로 하고, 언락은 판에 묶인 커뮤니티의 길로 한다([TB375FC 설계안](../../docs/tb375fc/DESIGN.md) 2.1절). 파티션 이름과 슬롯은 기기에서 `fastboot getvar all`로 확인한다.
-- **`fastboot boot`와 헤더 v4.** LK는 `fastboot boot`를 지원한다(LK의 fastboot 명령 표). 다만 `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있으므로, LK는 이 둘을 굽혀 있는 파티션(원래 것)에서 읽을 가능성이 높다. LK가 세 이미지의 머리를 모두 읽는 것은 LK 문자열로 확인했고, RAM으로 받은 boot.img와 어떻게 잇는지는 기기에서 본다.
+- **`fastboot boot`와 헤더 v4.** 이 기기의 LK에는 `fastboot boot`가 없다(기기가 `unknown command`로 거부, 명령 표에도 없다. 2026-11-03). 이미지는 비운 슬롯 `_b`에 굽는다. 아래는 다른 LK를 위한 설명이다. `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있으므로, LK는 이 둘을 굽혀 있는 파티션(원래 것)에서 읽을 가능성이 높다. LK가 세 이미지의 머리를 모두 읽는 것은 LK 문자열로 확인했고, RAM으로 받은 boot.img와 어떻게 잇는지는 기기에서 본다.
   - 그러면 우리 커널이 원래 장치 트리로 뜬다. `--boot-ramdisk`로 만든 boot.img는 initramfs를 boot.img에도 넣어, LK가 그 램디스크를 쓰는지 보게 한다.
   - init은 vendor_boot 표지(`/etc/buntos/vendor_boot`)로 LK가 우리 vendor_boot를 읽었는지 알린다.
   - 우리 장치 트리로 띄우는 확실한 길은 비운 슬롯에 넷을 굽는 것이다(설계안 2.4절).
