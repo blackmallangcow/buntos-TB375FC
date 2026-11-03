@@ -1,0 +1,58 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 부팅이 끝나면 슬롯 _b의 재시도를 되돌린다. LK는 부팅마다 재시도를 줄이고 successful_boot를 세우는 쪽이 없어,
+# 잘 도는 시스템도 일곱 번 부팅하면 _a(안드로이드)로 넘어간다. successful_boot는 세우지 않는다. 세우면 LK가
+# 횟수를 세지 않아, 뜨지 않는 커널을 구웠을 때 _a로 돌아갈 길이 없어진다.
+# misc의 0x800에 있는 AOSP bootloader_control 32바이트에서 slot_info[1]의 재시도와 crc32만 고친다.
+# _b가 활성 슬롯이 아니면 손대지 않는다. 사용법: slot-keep [misc 장치]
+set -euo pipefail
+
+misc=${1:-/dev/disk/by-partlabel/misc}
+offset=$((0x800))
+
+die() {
+	echo "slot-keep: $*" >&2
+	exit 1
+}
+
+# 인자의 바이트들을 그대로 낸다
+emit() {
+	local v
+	for v in "$@"; do
+		# shellcheck disable=SC2059 # 형식 문자열로 바이트를 만든다
+		printf "\\x$(printf %02x "$v")"
+	done
+}
+
+# 표준 입력의 crc32를 맨 앞 바이트부터(리틀 엔디언) 낸다. gzip 꼬리의 앞 네 바이트가 같은 값이다
+crc32_bytes() {
+	gzip -c | tail -c 8 | head -c 4 | od -An -v -tu1
+}
+
+mapfile -t b < <(dd if="$misc" bs=32 count=1 iflag=skip_bytes skip="$offset" 2>/dev/null | od -An -v -tu1 -w1 | tr -d ' ')
+[[ ${#b[@]} -eq 32 ]] || die "bootloader_control을 읽지 못했다"
+((b[4] == 0x42 && b[5] == 0x43 && b[6] == 0x41 && b[7] == 0x42)) || die "매직이 BCAB가 아니다"
+((b[8] == 1 && b[9] == 2)) || die "판이나 슬롯 수가 다르다"
+
+read -r -a crc < <(emit "${b[@]:0:28}" | crc32_bytes)
+[[ "${crc[*]}" == "${b[28]} ${b[29]} ${b[30]} ${b[31]}" ]] || die "crc32가 맞지 않는다"
+
+# slot_metadata: 비트 0~3 우선순위, 4~6 재시도, 7 successful_boot
+if (((b[14] & 0x0f) <= (b[12] & 0x0f))); then
+	echo "slot-keep: 활성 슬롯이 _b가 아니다. 그대로 둔다"
+	exit 0
+fi
+old=$(((b[14] >> 4) & 7))
+if ((old == 7)); then
+	exit 0
+fi
+b[14]=$(((b[14] & 0x8f) | 0x70))
+read -r -a crc < <(emit "${b[@]:0:28}" | crc32_bytes)
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+emit "${b[@]:0:28}" "${crc[@]}" >"$tmp"
+dd if="$tmp" of="$misc" bs=32 count=1 oflag=seek_bytes,dsync seek="$offset" conv=notrunc 2>/dev/null
+echo "slot-keep: _b의 재시도를 $old에서 7로 되돌렸다"

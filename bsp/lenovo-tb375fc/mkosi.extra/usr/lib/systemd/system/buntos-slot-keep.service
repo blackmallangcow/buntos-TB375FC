@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 부팅이 multi-user.target까지 왔으면 슬롯 _b의 재시도를 되돌린다. 거기까지 못 오는 부팅은 횟수가 줄어,
+# 다 쓰면 LK가 _a(안드로이드)로 돌아간다. 안드로이드로 돌아가려면 이 서비스를 끄고 재부팅을 되풀이한다.
+
+[Unit]
+Description=Give slot _b its boot retries back after a good boot
+# 루트가 일찍 올라와 파티션 링크보다 multi-user.target이 먼저 온다. 경로 조건으로 보면 건너뛴다
+Requires=dev-disk-by\x2dpartlabel-misc.device
+After=dev-disk-by\x2dpartlabel-misc.device multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/buntos/slot-keep
+
+[Install]
+WantedBy=multi-user.target

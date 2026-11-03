@@ -8,3 +8,4 @@ disable ssh.socket
 enable buntos-usb-gadget.service
 enable buntos-usb-shell.service
 enable buntos-usb-sshd.service
+enable buntos-slot-keep.service
