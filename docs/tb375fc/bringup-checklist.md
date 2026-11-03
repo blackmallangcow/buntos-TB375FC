@@ -332,7 +332,7 @@ fastboot flash init_boot <패치한 이미지>
 
 ### 5.7 전원 도메인 상태 (읽기만)
 
-1. [ ] `0x1c001fb0`, `0x1c001fb4`(SPM 상태), `0x1c001e04`(conn), `0x10321410`(HW voter EN). 화면이 켜져 있으면 EN의 bit 0, 3, 4, 5, 6이 설 것으로 본다(짐작). 다르면 패치 0054의 표를 의심한다. 물리 주소 읽기는 1절의 시험 도구를 쓴다.
+1. [ ] `0x1c001fb0`, `0x1c001fb4`(SPM 상태), `0x1c001e04`(conn), `0x10321410`(HW voter EN). 물리 주소 읽기는 1절의 시험 도구를 쓴다. 2026-11-04 실측: 화면이 켜져 있어도 EN은 커널 시작부터 `0x80000000`이다(bit 0, 3, 4, 5, 6이 설 것이라는 짐작은 틀렸다). 화면 전원은 SPM `PWR_CON`에서 보인다: MDP(`0xe94`, `0xe98`)는 꺼져 있고 그다음 `0xe9c`~`0xea8`이 켜져 있다(`0xC200224D`, 순서로 본 DIS0, DIS1, OVL0, OVL1). `conn`(`0xe04`)은 꺼져 있다(`0x02000012`). `0x1c001fb0`, `0x1c001fb4`는 아직 읽지 않았다.
 
 ### 5.8 EL2 판정
 
@@ -377,6 +377,7 @@ fastboot flash init_boot <패치한 이미지>
 4. [ ] HW voter 시간을 본다. 먹스·게이트는 5 ms 안에 DONE과 게이트 비트를 본다(패치 0101. 업스트림은 30µs이고 OEM은 몇 초까지 기다린다). `-ETIMEDOUT`이 나면 늘린다. 2b에서 실제로 쓰는 HWV 클럭은 PLL이다. `i2c` 먹스(HWV CG 21)는 I2C 장치가 붙을 때 처음 쓴다(8절).
 5. [ ] UART 콘솔을 본다. 8250_mtk가 pericfg_ao 게이트를 기다리므로 probe가 pericfg_ao 뒤로 밀린다. earlycon이 그 사이를 메운다. 게이트를 켜도 부모 `uart` 먹스가 LK 상태(26M일 것)를 유지하는지 본다.
 6. [ ] USB는 `usb_top`·`ssusb_xhci` 게이트 먹스와 frmcnt 게이트를 켠다. 나머지는 LK 상태 그대로다. UFS 호스트의 클럭은 6.6절에서 본다.
+    - **LK가 돌리는 블록의 부모 PLL을 다른 장치와 함께 쓰면 꺼질 수 있다(2026-11-04 실측).** `clk_ignore_unused`는 쓰지 않는 클럭을 늦은 초기화에서 끄지 않을 뿐, 다른 장치가 켰다 끈 뒤 사용자 수가 0이 된 PLL은 막지 못한다. UFS와 화면이 `mmpll`을 함께 써서 화면이 죽었고, 시험 층에서 `framebuffer0`의 `clocks`로 잡아 두었다. 새 장치를 켤 때 `clk_summary`에서 부모 PLL을 보고, 화면 쪽과 겹치면 같이 잡는다.
 7. [ ] `clk32k`의 펌웨어 값 32000 Hz가 맞는지(26 MHz에서 나눈 32K인지, RTC 수정의 32768인지) 안드로이드나 커널 기록으로 본다. 2b 소비자에는 영향이 없다.
 
 ### 6.3 SPMI
@@ -481,7 +482,7 @@ fastboot flash init_boot <패치한 이미지>
     - "mode operation not allowed"는 MT6319 벅에 `regulator-allowed-modes`가 없어 남는 기록이다. 동작에는 상관없다. 실측으로 절전 전환마다 남는다(약 3분에 18번). 줄이려면 8/vbuck3에 벤더처럼 모드를 허용하는데, VCCQ가 LP 모드를 타므로 쓰기 시험과 함께 본다.
 2. [x] RTFF MTCMOS SiP 호출을 본다(2026-11-04. 지나간다). 초기화에서 MTCMOS를 끄고 켠다(벤더와 같은 순서). `caps` 줄 바로 뒤에서 멈추면 이 길이다. 그때는 match data에서 `UFS_MTK_CAP_RTFF_MTCMOS`를 빼 본다(드라이버 한 줄).
 3. [x] 호스트 리셋을 본다(2026-11-04. 링크가 선다). HCE enable 때 리셋 셋을 100µs 걸었다 푼다. "Host reset assert/deassert failed"가 없고 링크가 서는지 본다.
-4. [x] 먹스 부모를 본다(2026-11-04. LK 값 그대로 `ufs` 약 458 MHz, `aes_ufsfde` 546 MHz). `clk_summary`에서 `ufs`·`aes_ufsfde`의 주파수를 읽는다. LK가 26 MHz(부모 0)로 두었으면 느리다. 그때는 dtsi에 `assigned-clocks`로 벤더의 낮은 부모(mainpll_d4_d2, univpll_d6)를 준다. UFS 3.x 장치면 벤더도 낮은 쪽으로 고정한다(`ufs_mtk_fix_clock_scaling`).
+4. [x] 먹스 부모를 본다(2026-11-04. LK 값 그대로 `ufs` 약 458 MHz, `aes_ufsfde` 546 MHz. `ufs`의 부모가 화면과 같은 `mmpll`이라 화면을 죽였다. 6.2절의 주의를 본다). `clk_summary`에서 `ufs`·`aes_ufsfde`의 주파수를 읽는다. LK가 26 MHz(부모 0)로 두었으면 느리다. 그때는 dtsi에 `assigned-clocks`로 벤더의 낮은 부모(mainpll_d4_d2, univpll_d6)를 준다. UFS 3.x 장치면 벤더도 낮은 쪽으로 고정한다(`ufs_mtk_fix_clock_scaling`).
 5. [x] 기어와 전력 모드를 본다(2026-11-04. HS-G4 Rate B 2레인, UFS 3.1): HS 기어·rate, PMC via FASTAUTO 길, 장치 판(`wspecversion`).
 6. [x] 클럭 게이팅과 런타임 PM을 본다(2026-11-04. `SLEEP`, `HIBERN8`과 복귀를 되풀이해 오류가 없고 refclk 기록도 없다. 쓰기와 함께는 아직이다). idle 뒤 hibern8과 ref 클럭 SiP 핸드셰이크("missing ack of refclk req"가 없어야 한다), 런타임 suspend의 MTCMOS 끄기·켜기 뒤 I/O를 본다.
 7. [x] UFS가 뜬 뒤 VEMC가 런타임 PM에서 문제없는지 본다(2026-11-04. 절전에 꺼지고 활동에 켜진다. 벤더도 같다).
@@ -566,6 +567,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
 
 기기에서 UFS·USB가 뜬 뒤에 한다.
 
+- 시험 층(`test-stage.dtsi`)의 노드를 보드 dts로 옮긴다. 이때 `framebuffer0`의 `clocks`도 함께 옮긴다. 빠지면 UFS가 화면을 죽인다(6.2절).
 - UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`).
 - MCQ. 공통 바인딩의 인터럽트 수를 고치고, 큐 인터럽트 SPI 177~184를 넣고, `mediatek,ufs-disable-mcq`를 뺀다. 이 속성을 뺀 시험은 그 뒤에 한다.
 - xsphy MT6897 꼴(U2 INTR_CAL·efuse, U3 RX CDR), mtu3 깨우기 접점(벤더 판 103).
@@ -1473,9 +1475,9 @@ QEMU에서 본 것은 드라이버의 차례뿐이다. 실제 SoC에서는 저�
 
 #### 0. 읽기 (드라이버 없음, 쓰기 없음)
 
-LK가 화면을 켠 채로 `tools/hw/read-display-regs.sh > lk-regs.txt`를 돌린다(HW voter EN 비트가 선 블록만 읽는다). 결과를 저장소 밖에 둔다.
+LK가 화면을 켠 채로 `tools/hw/read-display-regs.sh > lk-regs.txt`를 돌린다(SPM 전원이 켜지고 게이트가 열린 블록만 읽는다). `mmpll`을 잡아 둔 커널에서 돌린다(6.2절). 없으면 UFS가 클럭을 내린 뒤에 읽는 순간 버스가 멈춘다. 결과를 저장소 밖에 둔다. 2026-11-04에 UFS까지 켠 시험 커널로 한 번 떠 두었다(502칸).
 
-1. [ ] `HWV_EN`의 bit 0, 3, 4, 5, 6이 선다. 안 서면 LK가 화면을 켜지 않은 부팅이다. 다음으로 가지 않는다.
+1. [x] 첫 줄 `PWR_CON` 넷의 ACK(bit 30, 31)가 선다(2026-11-04. 넷 다 `0xC200224D`). 안 서면 LK가 화면을 켜지 않은 부팅이다. 다음으로 가지 않는다.
 2. [ ] `mutex0`, `mutex1`, `ovlmutex0`, `ovlmutex1`의 `0x20`이 1이고, 같은 번호에 모듈과 SOF가 있다. LK가 0번 뮤텍스를 쓰지 않으면 어느 번호인지 적는다(드라이버는 자기가 쓰는 번호만 지운다. 다른 번호가 켜져 있으면 고쳐야 한다).
 3. [ ] LK 경로가 코드에서 읽은 것과 같은지 본다. 글로벌판 LK(`bl2_ext`의 경로표) 값이다.
     - 두 `dispsys`: `0x34`=1, `0xf48`=2, `0xf4c`=0, `0xf60`=0, `0xf74`=5, `0xf98`=`0x11`, `0xfa4`=`0x20`, `0xea4`=1, `0xf0c`=1.

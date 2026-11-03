@@ -301,6 +301,8 @@ Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`
 | UFS 읽기 | **쓰지 않았다.** `lk_a`, `boot_b`, `vendor_boot_b`, `dtbo_b`의 해시가 맥의 사본과 같다. `sdc` 앞 2 GiB의 해시가 두 번 같다. 1 MiB 직접 읽기로 약 790 MB/s다. `nvdata`, `nvcfg`, `persist`는 `blockdev --setro`와 `ro,noload`로 붙었다. 뒤이어 `_a` 안드로이드가 정상으로 부팅했다 |
 | UFS 절전 | 유휴 뒤 `SLEEP`, `HIBERN8`로 내려가고 읽으면 돌아온다. 6번 되풀이에 오류가 없다. VEMC 켜기 비트(`0x1bf3`)가 절전에 0, 활동에 1로 벤더처럼 오간다. 오류 통계가 모두 0이다(`Logical Unit Resets: 1`은 초기화의 장치 리셋이다) |
 | UFS 기록 | `vufs_vccq: mode operation not allowed`가 절전 전환마다 남는다(보드가 MT6319 모드를 막았다). 약 3분에 18번이고 동작에는 영향이 없다. HS-G5 속성(`0x15d6`)을 UFS 3.1 장치가 거부해 나던 오류와 7.2.12의 재시도 경고는 패치 0144로 사라졌다 |
+| 화면이 희게 깨짐 | UFS를 켠 시험 커널에서 커널 글자가 잠깐 보인 뒤 화면 전체가 희게 변하고, 세로줄이 섞인 회백색으로 남았다(영상으로 확인). 화면 메모리는 그대로 정상이었다. `ufs`의 부모 `mmpll_d6`와 `disp0`, `ovl0`, `mminfra`의 부모 `mmpll_d4`가 같은 PLL이다. 커널은 화면 드라이버가 없어 이 사용자를 모르므로, UFS가 클럭을 내리면 사용자 수가 0이 되어 PLL을 끄는 투표를 보낸다. 그 뒤로 CPU가 `dispsys0`, `mipitx`를 읽으면 버스가 멈추거나 SError가 난다. `simple-framebuffer`의 `clocks`로 `mmpll`을 잡아 두자 UFS 절전과 복귀를 오가도 양쪽 경로 레지스터가 읽히고, 화면도 사용자가 눈으로 보아 정상이다 |
+| 화면 경로 값(LK 그대로) | OVL0 주소 `0xFC16F000`, OVL1 `0xFC1706D4`(1461화소 뒤), 피치 `0x2E00`, ROI 1483×1840(겹침 11화소). DSC `0x10081`, 조각 너비 736. DSI 둘 다 4레인 영상 모드, VSA 2, VBP 182, VFP 26, 세로 1840, 줄당 `0x5C0`바이트. `DSI_INTSTA`의 언더런 비트(bit 12)는 0이다. HW voter의 화면 비트는 LK가 넘길 때부터 0이고 전원은 SPM에서 켜져 있다(`0xe9c`~`0xeac`) |
 | 프리로더 포트 | 부팅마다 프리로더가 약 3초 동안 `MT65xx Preloader`(ACM)로 뜬다. 우리 가젯과 같은 `/dev/cu.usbmodem*`로 보이니 제품 이름으로 가린다 |
 | pstore | ECC가 없다. 2단계 기록 한 벌에서 글자 몇 개가 깨졌다(`368x115`가 `3688115`, `simple`이 `simpLe`). 다른 기록에서는 보지 못했고 원인은 모른다 |
 
