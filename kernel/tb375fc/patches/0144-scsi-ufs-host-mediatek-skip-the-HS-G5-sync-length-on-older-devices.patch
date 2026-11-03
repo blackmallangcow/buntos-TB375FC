@@ -1,0 +1,30 @@
+From: buntOS contributors
+Subject: [PATCH] scsi: ufs: host: mediatek: skip the HS-G5 sync length on older devices
+
+ufs_mtk_adjust_sync_length() reads and sets PA_TXHSG5SYNCLENGTH on every
+device. A UFS 3.1 device rejects it. On a Lenovo TB375FC with a Micron
+MT128GBCAV2U31 the peer get and the peer set each fail after three tries
+and log an error on every boot. On 7.2.12 the retries also hit the
+WARN_ON_ONCE() in ufshcd_dispatch_uic_cmd(), which mainline has since fixed
+in the retry loop.
+
+Stop before the gear 5 attribute on devices older than UFS 4.0, which can't
+use that gear.
+---
+ drivers/ufs/host/ufs-mediatek.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/ufs/host/ufs-mediatek.c b/drivers/ufs/host/ufs-mediatek.c
+--- a/drivers/ufs/host/ufs-mediatek.c
++++ b/drivers/ufs/host/ufs-mediatek.c
+@@ -1388,6 +1388,10 @@
+ 	};
+ 
+ 	cnt = sizeof(pa_min_sync_length) / sizeof(struct attr_min);
++	/* HS-G5 came with UFS 4.0. An older device rejects the attribute. */
++	if (hba->dev_info.wspecversion < 0x0400)
++		cnt--;
++
+ 	for (i = 0; i < cnt; i++) {
+ 		att = pa_min_sync_length[i].attr;
+ 		min = pa_min_sync_length[i].min_value;

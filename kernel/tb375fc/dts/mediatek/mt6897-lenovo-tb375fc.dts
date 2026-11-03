@@ -879,6 +879,11 @@
 	 * unused regulator cleanup. The driver picks the paired bucks by SID
 	 * as on MT8195 boards, which does not match this board, so no
 	 * operating modes are allowed.
+	 *
+	 * The stock voltage limits are left out: Linux must not change these
+	 * bucks, and with limits the regulator core reads the voltage when it
+	 * registers them. On 8/vbuck3 that read gives -EINVAL here, which fails
+	 * the whole PMIC.
 	 */
 	mt6319_6: pmic@6 {
 		compatible = "mediatek,mt6319-regulator", "mediatek,mt6315-regulator";
@@ -887,24 +892,18 @@
 		regulators {
 			mt6319_6_vbuck1: vbuck1 {
 				regulator-name = "vmm";
-				regulator-min-microvolt = <300000>;
-				regulator-max-microvolt = <1193750>;
 				regulator-enable-ramp-delay = <256>;
 				regulator-always-on;
 			};
 
 			mt6319_6_vbuck3: vbuck3 {
 				regulator-name = "vproc1";
-				regulator-min-microvolt = <300000>;
-				regulator-max-microvolt = <1193750>;
 				regulator-enable-ramp-delay = <256>;
 				regulator-always-on;
 			};
 
 			mt6319_6_vbuck4: vbuck4 {
 				regulator-name = "vproc3";
-				regulator-min-microvolt = <300000>;
-				regulator-max-microvolt = <1193750>;
 				regulator-enable-ramp-delay = <256>;
 				regulator-always-on;
 			};
@@ -918,16 +917,12 @@
 		regulators {
 			mt6319_7_vbuck1: vbuck1 {
 				regulator-name = "vproc2";
-				regulator-min-microvolt = <300000>;
-				regulator-max-microvolt = <1193750>;
 				regulator-enable-ramp-delay = <256>;
 				regulator-always-on;
 			};
 
 			mt6319_7_vbuck3: vbuck3 {
 				regulator-name = "mt6319_7_vbuck3";
-				regulator-min-microvolt = <300000>;
-				regulator-max-microvolt = <1193750>;
 				regulator-enable-ramp-delay = <256>;
 				regulator-always-on;
 			};
@@ -941,8 +936,6 @@
 		regulators {
 			mt6319_8_vbuck3: vbuck3 {
 				regulator-name = "vufs_vccq";
-				regulator-min-microvolt = <300000>;
-				regulator-max-microvolt = <1193750>;
 				regulator-enable-ramp-delay = <256>;
 				regulator-always-on;
 			};
@@ -999,6 +992,10 @@
  */
 &ssusb {
 	dr_mode = "peripheral";
+	/* USB 3 goes through the PS5170 redriver, which has no driver yet */
+	maximum-speed = "high-speed";
+	/* VBUS goes to the charger; without this the controller stays off the bus */
+	mediatek,force-vbus;
 	vusb33-supply = <&mt6368_vusb>;
 };
 

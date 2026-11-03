@@ -1,0 +1,28 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: usb: mediatek,mtu3: add mediatek,force-vbus
+
+The controller has an input for VBUS and a register that overrides it.
+On boards where that input doesn't follow the cable, the controller stays
+off the bus. Add a property for them.
+
+The vendor tree of the MediaTek MT6897 has the same property.
+---
+ Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml b/Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml
+--- a/Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml
++++ b/Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml
+@@ -201,6 +201,12 @@
+             105 - used by mt8195, IP2, specific 1.05;
+             106 - used by mt8195, IP3, specific 1.06;
+           enum: [1, 2, 101, 102, 103, 105, 106]
++
++  mediatek,force-vbus:
++    type: boolean
++    description: |
++      The controller can't sense VBUS on this board. Tell it that VBUS is
++      there whenever the device function is started.
+ 
+   mediatek,u3p-dis-msk:
+     $ref: /schemas/types.yaml#/definitions/uint32

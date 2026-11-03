@@ -1,0 +1,49 @@
+From 02df7fe1297d35d33c9841f345f61bf10f969300 Mon Sep 17 00:00:00 2001
+From: Nikolai Burov <nikolai.burov@jolla.com>
+Date: Sat, 11 Jul 2026 13:34:46 +0300
+Subject: [PATCH] phy: mediatek: xsphy: clear U2 DTM0 force bits during init
+
+On mobile SoCs, the USB PHY is completely powered off during bootup.
+As a result, various bits in the DTM0 register are set that prevent
+the USB 2.0 PHY from functioning. Clear them as part of the
+initialization sequence.
+
+Signed-off-by: Nikolai Burov <nikolai.burov@jolla.com>
+Reviewed-by: Manivannan Sadhasivam <manivannan.sadhasivam@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260711-mt6858-xsphy-poweron-v1-1-dee2fb71c7d5@jolla.com
+Signed-off-by: Vinod Koul <vkoul@kernel.org>
+---
+ drivers/phy/mediatek/phy-mtk-xsphy.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/drivers/phy/mediatek/phy-mtk-xsphy.c b/drivers/phy/mediatek/phy-mtk-xsphy.c
+index cc1d66954212a3..b29220bc559286 100644
+--- a/drivers/phy/mediatek/phy-mtk-xsphy.c
++++ b/drivers/phy/mediatek/phy-mtk-xsphy.c
+@@ -62,6 +62,14 @@
+ #define P2A6_RG_BC11_SW_EN	BIT(23)
+ #define P2A6_RG_OTG_VBUSCMP_EN	BIT(20)
+ 
++#define XSP_U2PHYDTM0		((SSUSB_SIFSLV_U2PHY_COM) + 0x068)
++#define P2D_FORCE_DATAIN	BIT(23)
++#define P2D_FORCE_DM_PULLDOWN	BIT(21)
++#define P2D_FORCE_DP_PULLDOWN	BIT(20)
++#define P2D_FORCE_XCVRSEL	BIT(19)
++#define P2D_FORCE_SUSPENDM	BIT(18)
++#define P2D_FORCE_TERMSEL	BIT(17)
++
+ #define XSP_U2PHYDTM1		((SSUSB_SIFSLV_U2PHY_COM) + 0x06C)
+ #define P2D_FORCE_IDDIG		BIT(9)
+ #define P2D_RG_VBUSVALID	BIT(5)
+@@ -181,6 +189,11 @@ static void u2_phy_instance_init(struct mtk_xsphy *xsphy,
+ {
+ 	void __iomem *pbase = inst->port_base;
+ 
++	mtk_phy_clear_bits(pbase + XSP_U2PHYDTM0,
++			   P2D_FORCE_DATAIN | P2D_FORCE_DM_PULLDOWN |
++			   P2D_FORCE_DP_PULLDOWN | P2D_FORCE_XCVRSEL |
++			   P2D_FORCE_SUSPENDM | P2D_FORCE_TERMSEL);
++
+ 	/* DP/DM BC1.1 path Disable */
+ 	mtk_phy_clear_bits(pbase + XSP_USBPHYACR6, P2A6_RG_BC11_SW_EN);
+ 
