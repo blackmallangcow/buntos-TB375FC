@@ -13,10 +13,9 @@ Fixes: 3c36965df808 ("regulator: Add support for MediaTek MT6363 SPMI PMIC Regul
  1 file changed, 1 insertion(+), 2 deletions(-)
 
 diff --git a/drivers/regulator/mt6363-regulator.c b/drivers/regulator/mt6363-regulator.c
-index 76dbead..03a9169 100644
 --- a/drivers/regulator/mt6363-regulator.c
 +++ b/drivers/regulator/mt6363-regulator.c
-@@ -630,8 +630,7 @@ static irqreturn_t mt6363_oc_isr(int irq, void *data)
+@@ -542,8 +542,7 @@
  
  	disable_irq_nosync(info->virq);
  

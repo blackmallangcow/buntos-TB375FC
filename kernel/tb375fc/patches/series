@@ -57,15 +57,14 @@
 0034-Input-oneplus-pogo-kbd-add-the-Lenovo-TB375FC-keyboard.patch
 0035-dt-bindings-serial-mediatek-uart-add-MT6897-and-the-pad-mode-register.patch
 0036-serial-8250_mtk-select-the-pads-of-a-UART-shared-with-the-UART-hub.patch
-# 0037~0041: MT6363 regulator 고침(업스트림에 낼 것. 7.2.12·master·regulator for-next·next-20261030이 같은 파일이다).
-# 0037 8비트 값 regmap(16비트 값은 쓸 때 다음 레지스터도 써서, 벅을 끄면 VS1·VS3·VSRAM이 꺼진다), 0038 VEMC 전압 읽기·쓰기(범위
-# 조건, TOP_TRAP=1의 VOSEL_1), 0039·0040 OC 보고와 해제 때 work 취소(MT6373 v12에 대한 Mark Brown의 리뷰), 0041 VSRAM_CPUB·CPUM·
-# CPUL·APU의 켜기·LP 레지스터(BUCK1 은행의 VS1 켜기와 VS3 LP를 가리켰다). 기기에서 확인한 뒤 낸다. 7.2.y stable에 들어오면 줄을 뺀다
-0037-regulator-mt6363-Use-8-bit-regmap-values.patch
-0038-regulator-mt6363-Fix-the-VEMC-voltage-selector.patch
+# 0041·0037·0038: 업스트림 regulator for-7.4에 적용된 커밋을 그 차례로 그대로 옮겼다(2026-11-03). 0037 8비트 값 regmap(Mergnat, 7318d3833067),
+# 0038 VEMC 전압과 trap별 레지스터(Mergnat, a8d72f246edb. TOP_TRAP이 2 이상이면 레귤레이터 probe가 실패한다), 0041 VSRAM CPU·APU의 켜기·LP 레지스터
+# (이기범, 8aed8b66751e). 0039·0040 OC 보고와 해제 때 work 취소(MT6373 v12에 대한 Mark의 지적)는 아직 업스트림에 내지 않았고, 기기에서 시험한 뒤 낸다.
+0041-regulator-mt6363-Fix-the-registers-of-the-VSRAM-CPU-and-APU-LDOs.patch
+0037-regulator-mt6363-Use-8-bit-register-values.patch
+0038-regulator-mt6363-Fix-VEMC-voltage-selection.patch
 0039-regulator-mt6363-Always-report-overcurrent-events.patch
 0040-regulator-mt6363-Cancel-the-overcurrent-work-on-removal.patch
-0041-regulator-mt6363-Fix-the-registers-of-the-VSRAM-CPU-and-APU-LDOs.patch
 # 0042~0049: USB 호스트의 VBUS. 0042 I2C 바인딩의 MT6897(mt8188 대체), 0043·0044 I2C 클럭 게이트(imp_iic_wrap 블록 다섯), 0045·0046 MT6375 MFD
 # (칩 확인과 regmap만, 쓰기 허용 목록), 0047 MT6375 OTG 부스트(레귤레이터, 처음 켤 때까지 쓰기 0번), 0048·0049 차지 펌프의 입력 FET
 # 스위치(NU2115·UPM6720, 부스트의 supply). 순정은 부스트 앞에서 이 FET를 닫는다. 모두 꺼 둔 노드이고, 기기에서 확인한 뒤 낸다
