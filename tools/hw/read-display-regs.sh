@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: 2026 buntOS contributors
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# TB375FC: LK가 화면을 켠 뒤의 레지스터를 읽기만 한다. 체크리스트 9절 2c 2차의 0단계와 4단계에서 쓴다.
-# 전원이 꺼진 블록을 읽으면 버스가 멈춘다. HW voter의 EN 비트가 선 블록만 읽는다.
+# TB375FC: LK가 화면을 켠 뒤의 레지스터를 읽기만 한다. 체크리스트 9절 2c 2차의 0단계다.
+# 전원이나 클럭이 꺼진 블록을 읽으면 버스가 멈춘다. mmpll의 사용자가 없는 커널에서 UFS가 클럭을 내린 뒤면
+# 화면 블록과 mipitx가 그렇다. framebuffer0의 clocks로 mmpll을 잡아 둔 커널에서 돌린다(6.2절).
 # 사용법: read-display-regs.sh > regs.txt   (busybox devmem이 있어야 한다)
 set -u
 rd() { printf '%s 0x%08x %s\n' "$1" "$2" "$(busybox devmem "$2" 32)"; }
@@ -11,9 +12,17 @@ blk() { # 이름 시작 오프셋...
 	name=$1; base=$2; shift 2
 	for o in "$@"; do rd "$name" $((base + o)); done
 }
-en=$(busybox devmem 0x10321410 32)
-echo "HWV_EN $en  (bit 0 MM_INFRA, 3 DIS0, 4 DIS1, 5 OVL0, 6 OVL1)"
-on() { [ $(( en >> $1 & 1 )) = 1 ]; }
+# 사용자가 없는 mmpll이면 이미 꺼졌을 수 있어 읽지 않는다. 클럭 드라이버가 없는 커널에는 이 파일이 없다
+f=/sys/kernel/debug/clk/mmpll/clk_prepare_count
+if [ -e "$f" ] && [ "$(cat "$f")" = 0 ]; then
+	echo "mmpll has no user: not reading, the bus may hang" >&2
+	exit 1
+fi
+# 전원은 SPM의 PWR_CON으로 본다(ACK bit 30, 31). HW voter의 EN은 LK가 넘길 때부터 0이라 쓸 수 없다(실측).
+# 0xe9c~0xea8이 DIS0, DIS1, OVL0, OVL1인 것은 벤더 표에 없고, MDP(0xe94, 0xe98) 다음 자리로 본 것이다
+pwr() { busybox devmem $(( 0x1c001000 + $1 )) 32; }
+echo "PWR_CON DIS0 $(pwr 0xe9c) DIS1 $(pwr 0xea0) OVL0 $(pwr 0xea4) OVL1 $(pwr 0xea8) MM_INFRA? $(pwr 0xeac)"
+on() { [ $(( $(pwr "$1") >> 30 & 3 )) = 3 ]; }
 # 클럭이 닫힌 블록도 읽으면 멈춘다. 게이트 칸 CG_CON0(0x100)의 비트가 0일 때만 읽는 블록에 쓴다
 gate_open() { [ $(( $(busybox devmem $(( $1 + 0x100 )) 32) >> $2 & 1 )) = 0 ]; }
 
@@ -31,19 +40,19 @@ PHY="0x04 0x08 0x0c 0x28 0x2c 0x30 0x3c 0x40 0x50 0x320 0x100 0x108 0x1c4 0x1c8"
 # 라브의 MMU 비트(SMI_LARB_NONSEC_CON). LK는 라브0·1의 16칸을 지운다. 1이면 OVL의 주소가 IOMMU를 지난다
 LARB="0x380 0x384 0x388 0x38c 0x390 0x394 0x398 0x39c 0x3a0 0x3a4 0x3a8 0x3ac 0x3b0 0x3b4 0x3b8 0x3bc"
 
-if on 3; then
+if on 0xe9c; then
 	blk dispsys0 0x14000000 $DISP $DISPDBG
 	blk mutex0 0x14001000 $MUTEX
 	blk dsc0 0x1400c000 $DSC
 	blk dsi0 0x1400d000 $DSI
 fi
-if on 4; then
+if on 0xea0; then
 	blk dispsys1 0x14200000 $DISP $DISPDBG
 	blk mutex1 0x14201000 $MUTEX
 	blk dsc1 0x1420c000 $DSC
 	blk dsi1 0x1420d000 $DSI
 fi
-if on 5; then
+if on 0xea4; then
 	blk ovlsys0 0x14400000 $OVLS
 	blk ovlmutex0 0x14401000 $MUTEX
 	blk ovl0 0x14402000 $OVL
@@ -56,7 +65,7 @@ if on 5; then
 		blk larb1 0x1440d000 $LARB
 	fi
 fi
-if on 6; then
+if on 0xea8; then
 	blk ovlsys1 0x14600000 $OVLS
 	blk ovlmutex1 0x14601000 $MUTEX
 	blk ovl1 0x14602000 $OVL
