@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.30
+# buntOS TB375FC 포팅 최종 설계안 v1.32
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -31,6 +31,13 @@
 - v1.28(2026-11-02): 처리기 없는 SID의 RCS를 지우는 PMIF 고침(패치 0114)을 더했다. 체인 처리기가 칸 넷을 다 읽고, 켜지지 않은 SID의 이벤트를 지운 뒤 제한된 로그를 남긴다(벤더 `rcs_irq_handler`와 같은 뜻). SID 4·5의 버스 기록은 늘어난 읽기 둘 말고 그대로다. 안드로이드 알람을 끄고 넘어가라는 규칙은 기기에서 볼 때까지만 둔다: 칩이 이벤트를 곧바로 다시 내면 0114로 막지 못한다.
 - v1.29(2026-11-02): 화면 파이프라인을 만들었다(패치 0120~0139). 판은 7.2.12 위의 작은 패치들이다. 재구성 v2는 얹지 않고 DSC v9의 넷과 DSI 고침 둘만 백포트했다. MT6897의 컨트롤러 넷(dispsys, ovlsys 두 벌)을 mediatek-drm 하나에서 쓰고, 주 경로가 두 파이프를 갖는다(OVL_2L → DSC → DSI가 왼쪽과 오른쪽에 하나씩). 표는 벤더 코드를 그대로 돌린 값과 1061항목이 맞고, 실제 드라이버를 QEMU의 레지스터 모델 위에서 돌렸다(LK 화면을 넘겨받는 길 포함). 노드는 모두 꺼 두었고 기기 시험은 없다. 첫 켜기 전에 LK가 켠 레지스터를 읽어 지워야 할 값이 더 없는지 본다. PQ를 건너뛰는 경로는 첫 프레임이 확인이다.
 - v1.30(2026-11-02): 기기를 맥에 연결해 잠긴 채로 fastboot까지 처음 보았다. 맥 `fastboot`가 닿고, 슬롯은 `_b`이고(2026-08-18 OTA), `_a`는 successful no·retry 0이다. `max-download-size`는 128MiB, `flashing get_unlock_ability`는 false다. 판을 내린 뒤 슬롯을 보는 항목을 체크리스트 3절에 더했다. RTC와 구역 온도는 셸에 막혀 4절에서 root로 읽는다. 값은 [실측 보고서](../hw/lenovo-tb375fc.md) 7절에 있다.
+- v1.31(2026-11-02): 개발자 옵션의 OEM 잠금 해제를 켜자 `get_unlock_ability`가 true가 됐다. 안드로이드 쪽 값은 비어 있어 LK에서만 보인다. 이 값만으로 언락이 되는지는 모른다.
+- v1.32(2026-11-02): 백업과 판 내리기의 준비물과 차례를 [Windows 작업 안내](windows-steps.md)로 뺐다. 16.0.20.091 묶음의 파티션 표를 읽어 기기와 맞댔다. 이름 84개와 크기 17개가 같고, `userdata`는 크기 조정 항목이라 128GB용 scatter를 따로 쓰지 않는다. 표가 `_a`에만 구우므로 판을 내린 뒤 슬롯을 바꾼다. 묶음의 efuse 설정과 실행 스크립트는 쓰지 않는다. 전원 + 볼륨 올림이 fastboot로 들어가고 전원 + 볼륨 내림이 나오는 것은 기기에서 확인했다. 나머지 키, 언락의 데이터 삭제, OEM 잠금 해제 조건은 포럼 보고로 체크리스트에 더했다.
+- v1.33(2026-11-03): 사용자 기기를 16.0.20.091로 내렸다. SP Flash Tool 백업(`userdata`, preloader, GPT 제외)과 해시 확인, `_a`에 굽기, 잠긴 채 `--set-active=a`, 복구 화면에서 초기화, Android 14 부팅까지 실측으로 확인했다. AVB rollback index는 기기와 묶음이 모두 0이다. 언락은 아직이고, 순정 LK의 `flashing unlock`과 `oem unlock`은 거부됐다(`Sn Image Auth fail`). 개발용 LK 파일의 서명을 검증했고, 아직 굽지 않았다.
+- v1.34(2026-11-03): 사용자 기기를 언락했다. 16.0.20.091에서 XDA 원글의 `lk_a`를 굽고, 시스템을 한 번 부팅한 뒤 `flashing unlock_critical`을 승인했고, 순정 LK로 되돌렸다. 언락은 유지됐고 `userdata`가 지워졌다. 이어서 `vbmeta_a`의 flags를 3으로 구워 AVB를 껐고(초기화 한 번 더, verity 장치 0개), Magisk 31.1로 root를 얻어 framebuffer(0xfc16f000, 0x3e90000), pstore 자리, GPT, 입력 장치, 펌웨어를 읽었다. 패널은 Tianma다.
+- v1.35(2026-11-03): `framebuffer0`, `framebuffer_mem`, `ramoops`를 켜고, LK의 framebuffer 노드에 `no-map`이 없어 패치 0140을 더했다. `fastboot boot`는 LK에 없어(D3) 첫 부팅은 `_b`에 굽는다.
+- v1.36(2026-11-03): **첫 리눅스 부팅 성공.** 7.2.12 시험 커널이 BusyBox 셸과 simpledrm 화면까지 갔다. LK는 서명 없는 `dtbo`를 거부하고, 우리 트리에는 펌웨어 적재가 찾는 벤더 노드가 없어, 지금은 순정 `vendor_boot`·`dtbo`에 트리를 넣은 커널을 쓴다.
+- v1.37(2026-11-03): 2a 판정: 커널이 EL1에서 시작해 KVM을 쓸 수 없다(D8, 10절). 부팅 이유 `kernel_panic,init`은 `expdb`에 남은 kedump를 LK가 되살리는 것이었고, 지우자 pstore로 커널 기록 전체를 안드로이드에서 읽을 수 있게 됐다.
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -86,7 +93,7 @@
 |---|---|---|
 | D1 | **mainline 커널.** 소스는 kernel.org 원본이고, 판은 buntOS 이미지의 Debian forky 커널과 같다(지금 7.2.12). 여기에 제출 대기 패치를 더한다. 개발 빌드는 arm64 defconfig에, 이미지용은 같은 시점 Debian forky 커널 설정에 보드 조각을 얹는다. Debian 소스 패키지의 패치는 쓰지 않고, 필요한 것만 골라 대기열에 넣는다. 벤더 GKI는 쓰지 않는다 | buntOS 설계안 4.2.2절. 필요한 업스트림 기능(6.16~7.0)이 7.2에 다 있다. 7.4 병합 창에 들어온 패널 드라이버와 SPMI 고침만 백포트한다. 원본 소스이면 개발 빌드와 이미지가 같은 트리이고, 시험한 기반이 업스트림과 같아 제출이 쉽다. Debian `linux 7.2.12-1`의 패치 77개(버그 고침 28, 기능 14, Debian 전용 35)에는 MediaTek 관련이 없고, 차이는 보안 기본값과 패키징이다. Debian 패키징으로 빌드하려면 forky 툴체인과 큰 디스크가 든다(디버그 패키지만 약 7.2GiB). 2026-11-01에 견줘 정했다 |
 | D2 | **업스트림 꼴로 짠다.** `mt6897.dtsi` + `mt6897-lenovo-tb375fc.dts`. 핀은 업스트림 `pinctrl-mt6878`을, clk·pmdomain·SPMI는 MT8196을 틀로 삼는다. MT6897 데이터는 OEM 공식 소스(OnePlus·OPPO·Motorola, GPL-2.0)에서 가져온다 | 제출할 수 있어야 유지할 수 있다. 커뮤니티 포트는 클럭·핀 드라이버 없이 fixed-clock과 부트로더 상태에 기대고, 장치 트리를 커널에 넣어 LK가 준 트리를 바꿔 끼우는 구조다. 그래서 사실 확인용과 협력 상대로 쓰고, 기반으로는 쓰지 않는다([분석](community-port.md)) |
-| D3 | **처음에는 LK가 직접 띄운다.** boot v4 + vendor_boot v4(DT 표) + 빈 dtbo, `fastboot boot`로 RAM에서. 2b부터는 U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다 | 파티션을 건드리지 않는 첫 부팅. EFI가 되면 원본 buntOS(데스크톱 라인)의 arm64 이미지 꼴과 같아진다. MT6878-mainline도 U-Boot를 권한다 |
+| D3 | **처음에는 LK가 직접 띄운다.** boot v4 + vendor_boot v4(DT 표) + 빈 dtbo, 비운 슬롯 `_b`에 구워서(처음에는 `fastboot boot`로 RAM에서 띄우려 했으나 LK에 `boot` 명령이 없었다). 2b부터는 U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다 | 안드로이드 슬롯을 건드리지 않는 첫 부팅. EFI가 되면 원본 buntOS(데스크톱 라인)의 arm64 이미지 꼴과 같아진다. MT6878-mainline도 U-Boot를 권한다 |
 | D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`, `regulator_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 7.2.12 위의 작은 패치(0120~0139)로 만들어 두었고, 켜는 것은 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다. `pd_ignore_unused`는 늦은 정리(`genpd_power_off_unused`)만 막고 sync_state는 막지 못한다. 화면 도메인을 지키는 것은 표의 기본 꺼짐과, 장치 트리에 화면 도메인을 적지 않는 것이다. MM_INFRA 아래 소비자(ISP, 카메라, VDE, VEN, MDP, DP)를 처음 붙이기 전에는 `simple-framebuffer`가 `power-domains`로 화면 도메인을 잡아야 한다. genpd는 MM_INFRA를 마지막 사용자와 함께 끈다.. 화면·코덱 클럭 노드(패치 0100~0104)는 도메인의 소비자가 아니다. `power-domains`가 없고 probe가 블록과 도메인에 닿지 않으므로, 켜도 MM_INFRA 규칙에 걸리지 않는다. 그 게이트의 소비자가 규칙에 걸린다. `clk_ignore_unused`를 빼면 이 게이트는 그대로지만 topckgen 먹스가 닫힌다. `simple-framebuffer`가 화면 도메인을 잡으면 그 기본 클럭(`mminfra`, `disp0`, `disp1`, `ovl0`, `ovl1`)은 genpd가 잡아 남는다. |
 | D5 | **Wi-Fi는 mt76에 "MT7921의 SoC 변형"을 더한다.** 펌웨어는 LK가 실은 것을 쓰고, conninfra 전원은 TF-A SIP 호출로 켜고, nvdata 보정값은 NVRAM 명령으로 넘긴다. 그 전에는 USB 동글로 우회한다(USB 호스트는 MT6375 OTG가 먼저다). 코드는 패치 0055~0060이다. DMA는 맵 없는 LK 칸 안에서 자기 `dma_map_ops`로 복사한다(업스트림 꼴은 아니다, 6절) | 칩 ID와 구조가 MT7921과 같고, 명령 머리와 레거시 명령 번호도 같다. SoC Wi-Fi 선례(mt7915/soc.c)가 있다([설계](wifi-soc7_0.md)) |
 | D6 | **펌웨어는 설치할 때 기기에서 뽑는다.** Mali CSF만 linux-firmware에서 온다. GPUEB와 Wi-Fi·BT는 LK가 올리므로, 그 파티션(GPUEB, `connsys_wifi`, `connsys_bt`)을 지킨다 | 재배포할 수 있는지 모른다(buntOS ADR-012). 안드로이드 슬롯 하나를 남긴다 |
@@ -110,7 +117,7 @@
   - ZUXOS(중국판 Android 16, 1.5.10.x)에서 바로 언락한 보고는 없다. ZUXOS 1.5.10.103 기기를 SP Flash Tool로 16.0.20.091까지 내린 뒤 언락한 보고가 있다(2026-09).
   - 레노버가 발급한 sn.img와 개인이 만든 sn.img 웹 도구는 이 기기에서 인증에 실패했다는 보고가 둘 있다(2025-09, 2025-12).
   - Android 16 판(ZUXOS 1.5.10.103 이후, 글로벌 17.5.10.095)에서 다른 판의 이미지를 구우면 "Red State"로 부팅하지 못한다는 보고가 여럿이다. 1.5.10.103부터 LK가 글로벌 이미지를 거부한다는 글도 있으나, 작성자가 AI로 썼다고 밝힌 글이라 따로 확인해야 한다.
-  - 개발용 LK는 4pda에 올라온 덤프에서 나와 출처를 확인할 수 없다. 남이 고친 부트로더를 굽는 위험이 있다.
+  - 개발용 LK는 4pda에 올라온 덤프에서 나와 출처를 확인할 수 없다. 2026-11-03에 받은 파일(XDA 원글의 `lk_a`)은 순정 LK와 같은 키로 서명됐고 서명 뒤 고친 흔적이 없다(`userdebug` 빌드, 체크리스트 3절 4번). 안전을 보장하지는 않는다.
   - v1.2에 적은 "XDA 원글을 찾지 못했다"는 틀렸다. 사이트가 자동 접근을 막아(403) 앞선 조사에서 열지 못한 것이다.
   - 커뮤니티 mainline 포트 둘은 언락 절차를 적지 않았다.
 - **슬롯:** 한쪽 슬롯과 recovery는 안드로이드로 남긴다. 정보원이자, 펌웨어를 뽑는 곳이자, 복귀 길이다.
@@ -166,7 +173,7 @@
 
 ### 2.4 처음 띄우는 법과 디버그 채널
 
-- 첫 부팅은 `fastboot boot`로 RAM에서 한다. LK의 fastboot 명령 표에 `download:`와 `boot`가 있어 이 길을 지원한다(LK 문자열). 서명하지 않은 이미지라 언락 상태여야 한다.
+- 첫 부팅은 비운 슬롯 `_b`에 구워서 한다. 처음에는 `fastboot boot`로 RAM에서 띄우려 했다. 기기에서 `Booting FAILED (remote: 'unknown command')`였고, 명령 표를 읽어 보니 16.0.20.091 순정 LK와 개발용 LK 모두 `boot`를 등록하지 않는다(2026-11-03). 앞서 근거로 삼은 LK 문자열의 `boot`는 파티션 이름이었다. 아래 두 항목은 그때의 검토다.
   - `fastboot boot`는 boot.img 하나만 RAM으로 보낸다. 헤더 v4에서 장치 트리는 vendor_boot에, initramfs는 init_boot에 있다(AOSP 문서).
   - LK는 boot·init_boot·vendor_boot 머리를 모두 읽고, 장치 트리를 예약 메모리 `mb_dtb`로 읽어 커널에 넘긴다(LK 문자열). 그래서 RAM으로 보낸 boot.img에 굽혀 있는 원래 vendor_boot·init_boot를 붙일 가능성이 높다. 이 결합만 기기에서 확인하지 않았다.
   - 그래서 init이 vendor_boot의 표지로 LK가 우리 vendor_boot를 읽었는지 알린다. initramfs를 boot.img에도 넣은 이미지(`mkimages.sh --boot-ramdisk`)로 LK가 그 램디스크를 쓰는지도 본다.
@@ -381,7 +388,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | 내부 디스크가 파일 관리자에 보여 안드로이드 파티션을 붙인다 | nvdata·persist가 바뀌거나 슬롯이 깨짐, 복귀 길을 잃음 | UFS 호스트 아래의 모든 블록 장치에 `UDISKS_IGNORE=1`(규칙 `90-buntos-tb375fc-hide-ufs.rules`). 숨김일 뿐이라 `udisksctl`로 직접 붙이는 길은 polkit 인증만 받으면 열려 있다(11절) |
 | 언락 길이 판에 묶임 | 받은 기기의 판에서 언락이 안 될 수 있다 | 받자마자 OTA를 끄고 판을 적는다. 그 판의 성공 보고를 확인한다. 안 되면 중국판 ZUI 16으로 내릴지 따로 정하고, 그래도 안 되면 buntOS ADR-011(기기 선택)을 다시 본다 |
 | 개발용 LK의 출처를 모름 | 남이 고친 부트로더를 굽는다 | 굽기 전에 순정 LK와 견준다(문자열, 서명 영역). 언락한 뒤에는 바로 순정 LK로 되돌린다 |
-| GenieZone의 EL2 점유 | KVM 불가 | 2a에서 판정(D8). "불가"면 buntOS ADR-011 재검토, gzvm은 미병합이라 나중 |
+| GenieZone의 EL2 점유 | KVM 불가 | **판정: 불가(2026-11-03, 2a에서 EL1로 시작).** D8대로 KVM을 포기한다. buntOS ADR-011의 입력으로 올린다. gzvm은 미병합이라 나중 |
 | 화면 파이프라인을 기기에서 처음 켤 때 버스가 멈춤 | 기기가 멈추고 키로 다시 켜야 한다 | 체크리스트 9.5절의 차례대로 켠다. `modprobe.blacklist=mediatek_drm`으로 시작하고 손으로 올린다. 켜지 못해도 simple-framebuffer 길은 그대로다 |
 | PQ를 건너뛰는 경로가 이 기기에서 돈 적이 없다(오른쪽은 PANEL_COMP_OUT 크로스바 1을 왼쪽에서 유추) | 한쪽 절반이 검거나 프레임이 멈춘다. 레지스터 접근은 그대로라 버스 멈춤은 아닐 것이다 | LK와 스톡은 모두 PQ와 크로스바 0을 쓴다. 첫 프레임에서 절반씩 본다. 안 되면 PQ 길로 간다 |
 | IOMMU 없이 물리 주소로 스캔아웃한다 | 라브의 MMU 비트가 1이면 스캔아웃이 틀린 주소를 읽는다. 또 GPU 버퍼를 바로 스캔아웃하지 못한다 | 0단계에서 라브 비트를 읽는다(LK는 라브0·1을 지운다). 컴포지터는 KMS 쪽에서 버퍼를 받는다. IOMMU 드라이버는 나중 일이다 |
@@ -473,7 +480,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
    - 언락 뒤 root나 2b의 가젯 셸에서 파티션 표를 읽고 새 루트 파티션의 크기와 이름을 정한다(4절): GPT의 userdata 자리, LK fastboot가 새 항목에 굽는지
    - root가 필요한 것(언락 뒤): `getevent -lp`, framebuffer 주소와 살아 있는 트리의 값(`/proc/device-tree`는 이름만 보이고 값은 막혀 있다), `/proc/iomem`, 파티션 표
    - UART 위치는 기기를 열어 찾는다
-5. **언락:** 2.1절의 언락 순서대로 한다. 그 뒤 root로 framebuffer 주소와 살아 있는 트리를 읽어 장치 트리의 framebuffer·ramoops를 켜고, 2a를 한다(`fastboot boot`).
+5. **언락:** 2.1절의 언락 순서대로 한다. 그 뒤 root로 framebuffer 주소와 살아 있는 트리를 읽어 장치 트리의 framebuffer·ramoops를 켜고, 2a를 한다(비운 슬롯 `_b`에 굽는다).
 6. **2b → 2c(1차) → 2d → 2e → 2c(2차) → 3:** 각 단계의 종료 조건을 이 포크의 문서에 남긴다.
 
 ## 12. 출처

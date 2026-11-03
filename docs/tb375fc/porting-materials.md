@@ -114,8 +114,11 @@
 | SP Flash Tool | 원글 작성자가 TB373FU 펌웨어의 DA·preloader·auth로 이 기기용 scatter와 readback 설정을 만들었다. SP Flash Tool로 개발용 ROM을 굽거나 백업을 되돌린 보고가 여럿이다. 중국판 백업을 되돌린 뒤 OTA가 되고 다시 잠글 수 있었다는 보고도 있다. 128GB 기기에 256GB 기기의 덤프를 구우면 실패한다 | ✔ 원문(브라우저), 포럼 보고 |
 | ZUXOS(Android 16) | ZUXOS 1.5.10.x에서 바로 언락한 보고는 없다. 1.5.10.103 기기를 SP Flash Tool로 16.0.20.091까지 내린 뒤 언락한 보고가 있다(2026-09). Android 16 판에서 다른 판의 이미지를 구우면 "Red State"로 부팅하지 못한다는 보고가 여럿이다(롬 바꾸기 글타래 27~29쪽, 일부는 AI로 쓴 글). 1.5.10.044를 말한 글은 찾지 못했다 | ✔ 원문(브라우저), 포럼 보고 |
 | 레노버 언락 파일 | 레노버가 발급한 sn.img와 개인이 만든 sn.img 웹 도구가 이 기기에서 인증에 실패했다는 보고가 둘 있다(2025-09, 2025-12) | ✔ 원문(브라우저), 포럼 보고 |
+| 순정 LK 언락 시도 | 사용자 기기, 16.0.20.091, OEM 잠금 해제 켬(2026-11-03). `flashing unlock`은 `oem unlock`을 쓰라며 거부했고, `oem unlock`은 `ERROR: Sn Image Auth fail`로 거부됐다. 순정 LK에는 `unlock_critical` 문자열이 없다 | ✔ 실측 |
+| 개발용 LK 검사 | XDA 원글의 `lk_a`, 16MiB, MD5 일치(2026-11-03). 구역 다섯의 `cert1`이 16.0.20.091 순정 LK와 바이트까지 같고, `cert2` 서명이 그 안의 키로 검증되며, 구역 내용과 머리글의 SHA-256이 `cert2` 값과 맞는다. 곧 순정 LK와 같은 키로 서명했고 그 뒤 고치지 않았다. 빌드는 `19ce4236_202411042159`(`userdebug`, 서명 2024-11-05)이고, 순정의 `flashing unlock` 거부 문구가 없다. 안전을 보장하지는 않는다(키 유출을 배제할 수 없고 코드는 문자열만 보았다) | ✔ 서명 검증, 문자열 |
+| 사용자 기기 언락 | ZUXOS 1.5.10.044에서 16.0.20.091로 내린 128GB 기기(2026-11-03). `lk_a`를 `_a`에만 굽고, 시스템을 한 번 부팅한 뒤 `flashing unlock_critical`을 승인해 언락했고, 순정 LK로 되돌렸다 | ✔ 실측 |
 | 레노버 공식 복구 | Rescue and Smart Assistant(Lenovo Software Fix)가 있다. 이 기기의 ROM을 그 앱으로 받았다는 보고가 있다. 일련번호·레노버 서버에 묶이는지는 확인하지 못했다 | ○ 포럼 보고 |
-| `fastboot boot` | LK fastboot 명령 표에 `download:`, `boot`, `flash:`, `erase:`, `getvar:`, `continue`, `set_active:`가 있다. LK는 boot·init_boot·vendor_boot 머리를 읽고 장치 트리를 `mb_dtb`로 넘긴다 | ✔ LK 문자열 |
+| `fastboot boot` | 없다. 기기가 `unknown command`로 거부했고, 명령 표에 `download:`, `flash:`, `erase:`, `getvar:`, `continue`, `set_active:`, `reboot` 계열, `oem`·`flashing` 계열만 있다(16.0.20.091 순정과 개발용 LK, 2026-11-03). 앞서 적은 `boot`는 파티션 이름 문자열이었다. LK는 boot·init_boot·vendor_boot 머리를 읽고 장치 트리를 `mb_dtb`로 넘긴다 | ✔ LK 문자열 |
 | 헤더 v4의 장치 트리 | 장치 트리는 vendor_boot에 있고, 부트로더가 boot와 vendor_boot를 함께 읽어 램디스크를 잇는다. `fastboot boot`일 때 어떻게 잇는지는 문서에 정해져 있지 않다 | ✔ AOSP 문서 |
 
 ## 6. 출처

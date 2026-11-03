@@ -176,9 +176,10 @@ Android의 `CAPACITY`는 순정 커널이 매끄럽게 만든 값이다. 충전�
 |---|---|
 | 맥 fastboot | 닿는다. 맥 포트에 바로 꽂았다. `is-userspace: no`라 LK의 fastboot다. `is-logical` 항목이 없어 super 안의 논리 파티션은 다루지 못한다 |
 | LK | `product: P98300DA2`, `version-bootloader: P98300DA2_fa07c1604_202601221851`, `hwboardid: MT8792_8+128_27`, `version: 0.5`, `protocol_version: 2` |
-| 잠금 | `unlocked: no`, `secure: yes`. `flashing get_unlock_ability`는 `unlock_ability is false`다. `flash_lock: no`도 있는데 뜻은 모른다. `flash lk`를 받는지는 시험하지 않았다 |
+| 잠금 | `unlocked: no`, `secure: yes`. `flashing get_unlock_ability`는 `unlock_ability is false`였고, 개발자 옵션의 OEM 잠금 해제를 켜고 재부팅한 뒤 `true`가 됐다. 안드로이드의 `oem_unlock_allowed`와 `sys.oem_unlock_allowed`는 켠 뒤에도 비어 있어 이 값은 LK에서만 보인다. `flash_lock: no`는 켜기 전후가 같고 뜻은 모른다. `flash lk`와 `flashing unlock`은 시험하지 않았다 |
 | 슬롯 | `current-slot: b`. `b`는 successful yes·retry 1, `a`는 successful no·retry 0이고 둘 다 unbootable no다 |
 | 전송 한도 | `max-download-size: 0x8000000`(128MiB) |
+| 키와 USB ID | 사용자가 눌러 맥에서 확인했다. 전원 + 볼륨 올림은 LK fastboot(`0E8D:201C`)로 들어가고, 전원 + 볼륨 내림은 기기를 끈다. USB가 꽂혀 있으면 배터리 화면이 나오고(`off-mode-charge: 1`), 이때 USB는 `0E8D:2046`("LENOVO", MIDI 인터페이스만)이고 adb와 fastboot가 없다. MIDI로 보이는 까닭은 모른다. 안드로이드의 adb 상태는 `17EF:201C`다 |
 | 파티션 크기 | `boot`, `vendor_boot` 64MiB, `lk` 16MiB, `init_boot`, `dtbo`, `vbmeta`, `vbmeta_system`, `vbmeta_vendor` 8MiB(슬롯마다), `super` 9GiB(슬롯 없음), `userdata` 108.2GiB(`0x1b0d7f8000`, f2fs). `getvar`는 이 18개만 크기를 준다 |
 | OTA 기록 | `persist.sys.boot.reason.history`는 `reboot,ota` 2026-08-18, `shutdown,battery` 2026-09-26, 2026-10-01(KST)이다. OTA 앱을 마지막으로 쓴 때도 2026-08-18이다. `_b`는 이때 넘어온 슬롯으로 본다 |
 | 기다리는 업데이트 | 없다고 본다. 31일 부팅에서 `update_engine`의 CPU 합이 27초였고, `lenovo_ota_new_version_found=0`, `lenovo_ota_process=0`, `csdk_control_ota_downloadStatus=0`이고, `snapuserd`가 돌지 않았다. LK의 `current-slot`이 안드로이드의 슬롯과 같았고, 재부팅 뒤 판이 같다 |
@@ -193,6 +194,90 @@ Android의 `CAPACITY`는 순정 커널이 매끄럽게 만든 값이다. 충전�
 - **판 내리기:** `_a`가 successful no, retry 0이다. 판 내리기가 `_a`에 구우면 슬롯을 바꿔야 할 수 있다(체크리스트 3절 1번).
 - **슬롯:** Virtual A/B라 지금 super의 논리 파티션은 `_b` 쪽만 온전하다고 본다(AOSP 동작, 기기에서 확인하지 않았다). `_a`의 boot 계열은 OTA 전 판으로 보이고, 백업에서 확인한다.
 - **이미지 크기:** 지금 커널로 만든 이미지(boot 18MB, init_boot 1.5MB, vendor_boot 57KB)는 파티션과 전송 한도 안이다.
+
+### SP Flash Tool 읽기 (2026-11-03)
+
+사용자가 Windows에서 [작업 안내](../tb375fc/windows-steps.md) 3·4절대로 읽었다. 내용은 열지 않고 파일 이름, 크기, 해시 목록만 맞댔다. 예외로 사용자 허락을 받고 `vbmeta_b`, `vbmeta_system_b`, `vbmeta_vendor_b`, `boot_b`의 AVB 머리글에서 rollback index만 읽었다.
+
+| 항목 | 값 |
+|---|---|
+| 연결 | 잠긴 채로 preloader 연결과 묶음의 인증 DA·`da.auth`로 읽기가 됐다. 드라이버는 Microsoft 카탈로그 3.0.1504.0이다 |
+| 시간 | 10.96GiB를 약 6분에 읽었다(파일 시각 기준, 약 30MB/s) |
+| 파일 | 81개다. 기기의 파티션 이름 84개에서 `userdata`(뺐다)와 `preloader_raw_a`, `preloader_raw_b`(목록에 없다)를 뺀 수다 |
+| 해시 | Windows에서 적은 SHA-256 81개를 맥에서 다시 계산해 모두 맞았다. 옮기는 동안 깨지지 않았다는 뜻이고, 도구가 기기에서 바르게 읽었다는 증명은 아니다 |
+| 파티션 표 | `Read PT` 목록은 UFS LU2의 0x8000부터 0x1dcaff8000까지 빈틈이 없고, fastboot `partition-size` 18개와 모두 같다. 묶음의 표와도 시작 주소와 크기가 같다. 다른 것은 `userdata`(`NEEDRESIZE`, 기기 0x1b0d7f8000)와 디스크 끝에 붙는 `mrdump`, `flashinfo`의 시작 주소뿐이다 |
+| 슬롯끼리 크기가 다른 것 | `logo_a` 15MiB와 `logo_b` 9MiB, `tee_a` 5MiB와 `tee_b` 7MiB. 묶음의 표도 같다 |
+| 전부 0인 파티션 | `boot_para`, `lenovoraw`, `md_sec`, `mrdump`, `otp`, `pstore`, `pvmfw_a`, `pvmfw_b`, `sec1`, `vb`. 해시로 판정했다. 정말 빈 것인지 도구가 0으로 돌려준 것인지는 모른다. 묶음의 `lenovoraw.img`도 전부 0이다 |
+| 슬롯 내용 | 둘 다 0인 `pvmfw`를 빼면 `_a`와 `_b`의 26쌍이 모두 다르다 |
+| 빠진 것 | `userdata`, `preloader_a`, `preloader_b`, `pgpt`, `sgpt`. `userdata`는 일부러 뺐고, 나머지 넷은 언락 뒤 root로 읽는다(체크리스트 4절) |
+| 판 내리기 표 | 묶음에서 굽는 항목은 32줄이고, `preloader_a`, `preloader_b`, `userdata`를 빼면 29줄이다. 이미지는 모두 기기의 파티션 크기 안에 든다 |
+| AVB rollback index | 기기의 `vbmeta_b`, `vbmeta_system_b`, `vbmeta_vendor_b`, `boot_b`와 묶음의 `vbmeta.img`, `vbmeta_system.img`, `vbmeta_vendor.img`, `boot.img`가 모두 0이다. 묶음의 `vbmeta`는 `boot`(위치 3), `vbmeta_system`(2), `vbmeta_vendor`(4)를 연결한다. 기기에 저장된 값은 읽지 못했고, LK와 preloader의 자체 검사는 이 비교로 알 수 없다 |
+| 묶음의 판 | `vbmeta.img`의 지문이 `TB375FC:14/UP1A.231005.007/ZUI_16.0.20.091_250117_PRC`다. ZUI 16.0.20.091은 Android 14다 |
+| 사본 | 같은 SSD의 다른 파티션(APFS)에 복사해 해시 81개를 모두 맞댔다. SSD 고장까지는 막지 못한다 |
+
+### 판 내리기, 슬롯, 언락 (2026-11-03)
+
+사용자가 Windows에서 16.0.20.091을 `_a` 쪽에 구운 뒤(작업 안내 6절) 맥에서 잠긴 채로 읽었다.
+
+| 항목 | 값 |
+|---|---|
+| `--set-active=a` | OKAY다. 같은 LK 세션에서는 `current-slot: b`, `slot-retry-count:a: 0`으로 남았다 |
+| `fastboot reboot bootloader` 뒤 | `current-slot: a`, `slot-retry-count:a: 6`, `slot-successful:a: no`, `slot-unbootable:a: no`다. `_b`는 successful yes, retry 1 그대로다 |
+| LK 판 | `P98300DA2_fa07c1604_202601221851`에서 `P98300DA2_8fd2b0938_202501171227`로 바뀌었다. preloader는 굽지 않았으니, 기기의 preloader가 2025-01 LK를 받아 fastboot까지 올라온 것으로 본다 |
+| `flashing get_unlock_ability` | 2025-01 LK에서도 `unlock_ability is true`다 |
+| 잠금 | `unlocked: no`, `secure: yes` |
+| 첫 부팅 | 16.0.20.091의 recovery가 `Can't load Android system` 화면을 띄웠고, `Factory data reset` 뒤 안드로이드로 부팅했다 |
+| 부팅 뒤 | `TB375FC_CN_OPEN_USER_M1.491_U_ZUI_16.0.20.091_ST_250117`, Android 14, 패치 2024-11-05, `_a`, locked, green이다. `sys.oem_unlock_allowed`는 1이다(1.5.10.044에서는 비어 있었다). mapper에 `_b`의 COW가 없다 |
+| OTA | `com.lenovo.ota`를 `disabled-user`로 껐다(`enabled=3`, force-stop 뒤 `stopped=true`). 재부팅 뒤에도 프로세스가 뜬다. `persistent=true`라서로 본다(판단). CPU 시간은 0이고 `update_engine`도 0이다 |
+| 순정 LK 언락 시도 | `fastboot flashing unlock`은 `Please usr fastboot oem unlock`, `Failed to unlock the device`로, `fastboot oem unlock`은 `ERROR: Sn Image Auth fail`로 거부됐다. 잠금, `unlock_ability`(true), 슬롯은 그대로이고 안드로이드로 돌아왔다 |
+| 부팅 이유 | `fastboot reboot`와 `adb reboot` 뒤 모두 `ro.boot.bootreason`이 `kernel_panic`, `sys.boot.reason`이 `kernel_panic,init`다. dropbox `SYSTEM_LAST_KMSG`의 패닉은 2.13초의 `Attempted to kill init! exitcode=0x00007f00`이고 커널이 6.1.138이다. 지금 커널은 6.1.112다. 판을 내린 직후 `_b`로 부팅을 시도하다 남은 기록을 계속 읽는 것으로 본다(판단). `fastboot reboot` 뒤 커널이 뜨기까지 약 3분 걸린 일이 한 번 있었고 원인은 모른다 |
+| 개발용 LK | XDA 원글의 `lk_a`를 잠긴 순정 LK가 받았다. 16MiB 전송이 51초(약 0.3MB/s)다. `P98300DA2_19ce4236_202411042159`로 떴고, 안드로이드가 36초에 locked, green으로 부팅했다 |
+| 언락 | 시스템을 한 번 부팅한 뒤 `flashing unlock_critical`이 `Start unlock flow`, `Please Implement check key function`을 찍고 OKAY로 끝났다(볼륨 키 승인). `unlocked: yes`, `secure: no`다 |
+| 되돌림 | 순정 LK를 0으로 채운 16MiB 이미지를 `lk_a`에 구웠다. `P98300DA2_8fd2b0938_202501171227`로 돌아왔고 언락은 유지됐다. 잠겼을 때와 `getvar all`에서 달라진 값은 `unlocked`, `secure`뿐이다. 다음 부팅은 설정 마법사부터 시작했다 |
+| 언락 뒤 안드로이드 | `ro.boot.flash.locked` 0, `device_state` unlocked, `verifiedbootstate` orange, `veritymode` enforcing, `_a`다. 설정 마법사를 거치며 OTA가 다시 켜져 있어(`update_engine` CPU 0) 다시 껐다. 초기화 뒤 부팅 이유는 `reboot,factory_reset`이다 |
+| AVB 끄기 | `vbmeta_a`의 flags를 3으로 구웠다. 다음 부팅은 `Can't load Android system` 복구 화면이었고 초기화가 필요했다. 초기화 뒤 `verifiedbootstate` orange, `ro.boot.veritymode`와 `ro.boot.vbmeta.device_state`는 비어 있고, mapper의 verity 장치가 0개다(켜져 있을 때는 `system-verity` 등이 있었다) |
+| 순정 LK 파일(16.0.20.091) | 구역 `lk`, `bl2_ext`, `aee`, `lk_main_dtb`, `lk_dtbo` 뒤마다 `cert1`, `cert2`가 있다. `flashing unlock_critical` 문자열은 없다. 확인 화면 문구는 `Yes (Volume UP or Volume Down)`, `No (Auto exit after 5 seconds)`다 |
+
+### root로 읽은 값 (16.0.20.091, 2026-11-03)
+
+Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`에 있다(git 밖). 명령줄과 트리에는 식별자가 들어 있어 여기에 옮기지 않았다.
+
+| 항목 | 값 |
+|---|---|
+| root | 앱에서 패치한 `init_boot_a`로 부팅했다. Magisk v31.1은 허용 창이 없어 Superuser 탭에서 `Shell`을 미리 허용해야 한다(공식 변경 내역, 실측) |
+| framebuffer | `atag,videolfb-fb_base`가 0xfc16f000, `vramSize`가 0x3e90000이다. `/reserved-memory/mblock-14-framebuffer`가 같은 값이고 `no-map`이 없다. 커뮤니티 포트의 후보와 같다. stride와 형식은 트리에 없다 |
+| 패널 | `atag,videolfb`의 이름이 `nt36532_dsi_vdo_144hz_tianma_lcm_drv`다. 이 기기는 Tianma 패널이다 |
+| ramoops | LK가 `mblock-2-pstore`(0x48090000, 0xe0000, `no-map`)를 예약하고, 명령줄에 `ramoops.mem_address=0x48090000 ramoops.mem_size=0xe0000 ramoops.pmsg_size=0x80000 ramoops.console_size=0x40000`을 넣는다 |
+| pstore | `console-ramoops-0`의 패닉은 6.1.138 커널의 것이다(2.13초, `Attempted to kill init! exitcode=0x00007f00`). 지금 커널은 6.1.112다. 부팅 이유 `kernel_panic,init`은 이 옛 기록에서 온 것으로 본다(판단) |
+| 명령줄 | `console=ttynull console=tty0 root=/dev/ram bootconfig 8250.nr_uarts=4 swiotlb=noforce arm64.nomte`와 위의 `ramoops.*`가 있다. 나머지는 이름만 적어 두었다 |
+| 메모리 | `/memory`는 0x40000000부터 0x200000000(8GiB)이다. BL31은 `mblock-4-BL31-reserved` 0x48800000, 2MiB다 |
+| GPT | LU2(`sdc`), 4KiB LBA, 항목 82개, 빈틈 없음. 형식 GUID는 모두 `ebd0a0a2-b9e5-4433-87c0-68b6b72699c7`이다. `userdata`는 LBA 2803712~31170551(110808MiB, 0x2ac800000부터)이고 뒤에 `mrdump`, `flashinfo`가 있다 |
+| 입력 | `NVTCapacitiveTouchScreen`, `touch-pen`, `gf-keys`, `tn_wakeup`, `mtk-kpd`, `mtk-pmic-keys`, `hall`, `mt6897-mt6368 Headset Jack`, `uinput_nav` |
+| efuse | `mtk-devinfo0`의 0x1cc [5:0]은 2026-11-03에 읽었다(기기마다 다른 보정값이라 숫자는 적지 않는다) |
+| RTC | `mt6685-rtc`. `date -u`와 같은 시각을 읽었다(2026-11-03) |
+| 온도 | 구역 68개를 읽었다. 값은 `root-091/thermal.txt`에 있다 |
+| 펌웨어 | `/vendor/firmware` 파일 40개를 받았다(git 밖). `novatek_ts_fw_tm.bin`, `novatek_ts_fw_boe.bin`이 있다. `extract.sh`는 맥의 `install`과 맞지 않아 멈췄고 VM에서 돌려야 한다 |
+
+### 첫 리눅스 부팅 (2026-11-03)
+
+슬롯 `_b`에 구워 시험했다. `_a`의 안드로이드는 건드리지 않았다. LK 기록은 `expdb` 파티션에 남는다.
+
+| 항목 | 값 |
+|---|---|
+| `fastboot boot` | LK에 없다. `Booting FAILED (remote: 'unknown command')`이고, 순정·개발용 LK의 명령 표에도 없다 |
+| A/B 되돌림 | `_b`가 실패하면 재시도 6번 뒤 LK가 `_a`로 돌아간다. `slot-unbootable:b`가 yes가 된다 |
+| 우리 `dtbo`(DT 표, 서명 없음) | `img_auth_required = 1`, `dtbo cert chain vfy fail (0x10100d)`, `ASSERT FAILED load_image.c:167`. 언락해도 서명을 요구한다 |
+| `dtbo`를 0으로 | `non of known hdr detected`, `load_dtbo fail`을 찍고 overlay 없이 넘어간다(코드대로) |
+| 우리 트리로 LK 통과 | 트리는 읽지만 `app_load_scp(fdt, b_mode) == NO_ERROR` ASSERT로 멈춘다. 적재 차례는 scp, ccu, spm, apu, apusys_rv, dpm, modem, adsp, gpueb, vcp, connsys이고 벤더 노드(`mediatek,scp`, `mediatek,sleep`, `/soc/gpueb`, `mediatek,vcp`, `/soc/consys` 등)를 찾는다 |
+| 시험 커널 | 순정 `vendor_boot`, 순정 `dtbo`, 우리 `boot`(내장 트리, 내장 initramfs, uart0 끔, 예약 43개와 메모리 8GiB를 살아 있는 트리에서 옮김). **7.2.12가 약 0.93초에 /init을 돌려 BusyBox 셸까지 갔다** |
+| 화면 | `simpledrmdrmfb 2944,1840`. stride 11776, `a8r8g8b8`이 맞다(글자가 또렷하다). LK의 Orange State 글자가 같은 버퍼에 남아 있다 |
+| 안 되는 것(이 단계에서 끈 것) | `no UDC within 30s`, `nvdata`·`nvcfg`·`persist: no partition`, 입력 장치 없음 |
+| 키 | 리눅스에서 전원 + 볼륨 올림은 fastboot로 들어간다. 전원 + 볼륨 내림은 반응이 없었다 |
+| pstore | 안드로이드의 ramoops는 record 0x1000, console 0x40000, ftrace 0x1000, pmsg 0x80000이고 보드 dts도 같은 값으로 맞췄다. 따뜻한 재부팅이면 리눅스에서 리눅스로, 리눅스에서 안드로이드로 기록이 넘어간다(`console-ramoops-0`, 30233바이트). 전원 + 볼륨 올림 리셋 뒤에는 비어 있다 |
+| EL | **`CPU: All CPU(s) started at EL1`, `kvm [1]: HYP mode not available`.** 이 기기에서 KVM을 쓸 수 없다. 예약 메모리의 `mblock-16-gz`로 보아 GenieZone이 EL2를 차지한 것으로 본다(판단) |
+| 부팅 시간 | `initcall_debug`를 빼면 0.16초에 `/init`을 돌린다(켜면 0.93초) |
+| `kernel_panic,init`의 원인 | `expdb` 앞에 LK의 kedump가 남아 있다(머리 `0xaee0dead`, 항목 0x12. 판 내리기 직전 백업에서는 전부 0이었다). LK가 부팅마다 `kedump: found content in expdb`로 저장된 pstore와 ram console을 메모리에 되살린다(`SYS_PSTORE_RAW`, `SYS_RAMCONSOLE_RAW`). 그래서 부팅 이유가 계속 `kernel_panic`이고 pstore에 6.1.138 패닉이 남았다. `expdb` 앞 12KB를 0으로 하자 부팅 이유가 `reboot,shell`로 돌아왔다 |
+| 커널 기록 | CPU 8개(0~3 Cortex-A510 `0x411fd461`, 4~7 Cortex-A715 `0x411fd4d0`), PSCI 1.1, GICv3 SPI 960개, 메모리 7447704K/8388608K, `mtk-wdt 1c00a000` 켜짐(31초), 성능 도메인 셋, 약 0.15초에 `/init`이다. 오류는 없고, A715 쪽에 `SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR1_EL1`이 나온다. 원문은 `.handoff/tb375fc-device-readings/boot-b-7/`에 있다 |
 
 ## 8. 남은 것
 

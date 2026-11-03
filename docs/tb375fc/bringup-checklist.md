@@ -2,14 +2,14 @@
 
 - 작성일: 2026-11-01
 - 기준: [설계안](DESIGN.md) v1.16, 패치 대기열 0001~0049
-- 상태: **기기에서 돌린 항목이 아직 없다.** 기기 결과로 고친다
+- 상태: 2절, 3절, 4절의 읽기를 기기에서 했다. 리눅스는 아직 기기에서 돌리지 않았다. 기기 결과로 고친다
 - 관련 문서: [장치 트리 README](../../kernel/tb375fc/dts/README.md), [BSP README](../../bsp/lenovo-tb375fc/README.md), [하드웨어 실측](../hw/lenovo-tb375fc.md), [포팅 재료 조사](porting-materials.md), [buntOS 설계안](../design/ARCHITECTURE.md) 4.2.3절·12.1절
 
 ## 1. 쓰는 법
 
 기기에서 할 일을 일어나는 차례로 모았다. 위에서 아래로 한다.
 
-- **아직 아무것도 기기에서 돌리지 않았다.** 사용자의 TB375FC는 잠겨 있다. 기기에서 한 일은 adb 읽기, 업데이트 앱 끄기, 잠긴 채로 fastboot 읽기와 재부팅뿐이다(2026-11-01·02). 아래 기대값은 펌웨어, OEM 코드, 스톡 모듈, QEMU, 레지스터 모델에서 왔다.
+- **리눅스는 아직 기기에서 돌리지 않았다.** 사용자의 TB375FC는 2026-11-03에 언락했다. 기기에서 한 일은 adb 읽기, 업데이트 앱 끄기, 잠긴 채로 fastboot 읽기와 재부팅(2026-11-01·02), SP Flash Tool 읽기와 판 내리기, 슬롯 변경, 초기화, 개발용 LK로 언락하고 순정 LK로 되돌리기(2026-11-03)뿐이다. 아래 기대값은 펌웨어, OEM 코드, 스톡 모듈, QEMU, 레지스터 모델에서 왔다.
 - 단계마다 목표와 종료 조건으로 시작한다. 종료 조건을 채운 뒤 다음 단계로 간다. 결과는 이 포크의 문서에 남긴다(설계안 11절). 일련번호와 MAC 주소는 적지 않는다.
 - 항목의 차례를 지킨다. 읽기만 하는 확인이 켜는 일보다 먼저다.
 - 장치 트리의 노드는 대부분 꺼져 있다. 그 단계에서 말한 노드만 `status = "okay"`로 바꾸고 이미지를 다시 만든다. 노드의 값과 출처는 [장치 트리 README](../../kernel/tb375fc/dts/README.md)에, 이미지 만들기는 [BSP README](../../bsp/lenovo-tb375fc/README.md)의 "만들기"에 있다.
@@ -53,7 +53,7 @@
 
 ### 2.1 판과 OTA
 
-1. [ ] 기기의 판을 적는다. 사용자 기기는 중국판 ZUXOS 1.5.10.044(Android 16)다(실측).
+1. [ ] 기기의 판을 적는다. 사용자 기기는 중국판 ZUXOS 1.5.10.044(Android 16)였고(실측), 2026-11-03에 16.0.20.091(Android 14)로 내렸다.
 2. [ ] OTA를 끈다(go/no-go 4). 언락 길이 ZUI 16에 묶여 있으니 받자마자 끈다. 1.5.10.103 이후 판에서는 판 바꾸기 문제가 많이 보고됐다(포럼 보고). 그래서 1.5.10.044에 머문다. 사용자 기기는 2026-11-01에 이미 껐다.
 
     ```bash
@@ -89,28 +89,30 @@ root 없이 읽기만 한다.
 
 ### 2.3 전체 백업 (go/no-go 1)
 
-mtkclient로는 안 된다(V6 DA에 DAA·SLA). 순정 펌웨어 묶음의 인증 DA·auth와 SP Flash Tool로 readback한다. 이 길은 포럼 보고로 보았고, 기기에서 확인해야 한다.
+mtkclient로는 안 된다(V6 DA에 DAA·SLA). 순정 펌웨어 묶음의 인증 DA·auth와 SP Flash Tool로 readback한다. 이 길은 포럼 보고로 보았고, 기기에서 확인해야 한다. 준비물과 차례, 명령은 [Windows 작업 안내](windows-steps.md)에 있다.
 
 > **위험: 데이터 손실.** nvdata·nvram 계열에는 Wi-Fi MAC과 보정값이 있다. 잃으면 되살릴 수 없다. 이 백업을 해시로 확인하기 전에는 아무것도 굽지 않는다. 뒤의 판 내리기, 언락, GPT 고침을 되돌리는 길이 모두 이 백업이다.
 
-1. [ ] SP Flash Tool을 준비한다. Windows 도구다. 인증 DA·auth는 그 기기 판의 레노버 펌웨어 묶음에 든 것을 쓴다. 우리가 본 중국판 묶음에는 인증 DA(`DA_BR.bin`), `da.auth`, SLA 파일이 있다.
-    - 공용 컴퓨터에서 한다면 도구, 드라이버, 펌웨어 묶음을 외장 SSD에 담아 가고, 백업은 그 컴퓨터의 디스크가 아니라 외장 SSD(빈 곳이 128GB 넘게)에 쓴다. 백업에 Wi-Fi MAC과 보정값이 들어 있다. 드라이버 설치가 막혔거나 재부팅하면 지워지는 컴퓨터일 수 있으니 미리 본다. 해시는 맥에서 다시 맞댄다. 일반적인 판단이고 해 본 적은 없다.
-2. [ ] scatter와 readback 설정을 기기 용량(128·256GB)에 맞춘다. 사용자 기기는 128GB다. XDA 원글 작성자가 이 기기용 scatter와 readback 설정을 만들었다(포럼 보고).
-3. [ ] 전체 파티션을 readback한다. 특히 `nvram`, `nvdata`, `nvcfg`, `protect1/2`, `persist` 계열을 본다([buntOS 설계안](../design/ARCHITECTURE.md) 4.2.3절). 이 기기의 파티션 이름에는 `proinfo`, `seccfg`, `frp`, `otp`, `efuse`, `sec1`, `md_sec`, `lenovocust`, `lenovolock`, `lenovoraw`도 있다(이름은 실측, 내용은 모른다). 빠뜨리지 않는다.
-4. [ ] 다른 기기에 옮겨 해시로 확인한다.
+1. [x] SP Flash Tool을 준비한다. Windows 도구다. 인증 DA·auth는 16.0.20.091 묶음에 든 것을 쓴다. 1.5.10.044 묶음은 구한 적이 없고, 더 새 판(1.5.10.103)에 이 묶음을 구운 보고가 있다. 우리가 본 중국판 묶음에는 인증 DA(`DA_BR.bin`), `da.auth`, SLA 파일이 있다.
+    - 공용 컴퓨터에서 한다면 도구, 드라이버, 펌웨어 묶음을 외장 SSD에 담아 가고, 백업은 그 컴퓨터의 디스크가 아니라 외장 SSD에 쓴다. `userdata`를 빼면 약 11GiB다. 백업에 Wi-Fi MAC과 보정값이 들어 있다. 드라이버 설치가 막혔거나 재부팅하면 지워지는 컴퓨터일 수 있으니 미리 본다. 해시는 맥에서 다시 맞댄다. 일반적인 판단이고 해 본 적은 없다.
+2. [x] 파티션 표를 본다. 16.0.20.091 묶음의 표는 `userdata`가 크기 조정 항목(`NEEDRESIZE`)이고, 사용자 기기와 파티션 이름 84개, 읽을 수 있던 크기 17개가 같다(2026-11-02). 그래서 128GB용 scatter를 따로 받지 않는다(판단). `Auto` readback은 기기의 표를 읽는다(포럼 보고).
+3. [x] `userdata`만 빼고 전체 파티션을 readback한다. 개인 자료는 먼저 따로 옮긴다. 특히 `nvram`, `nvdata`, `nvcfg`, `protect1/2`, `persist` 계열을 본다([buntOS 설계안](../design/ARCHITECTURE.md) 4.2.3절). 이 기기의 파티션 이름에는 `proinfo`, `seccfg`, `frp`, `otp`, `efuse`, `sec1`, `md_sec`, `lenovocust`, `lenovolock`, `lenovoraw`도 있다(이름은 실측, 내용은 모른다). 빠뜨리지 않는다.
+4. [x] 다른 기기에 옮겨 해시로 확인한다.
+
+**결과(2026-11-03).** 81개를 읽어 맥에서 해시를 모두 맞댔다. 값은 [실측 보고서](../hw/lenovo-tb375fc.md) 7절의 "SP Flash Tool 읽기"에 있다. `userdata`, preloader, GPT는 빠졌고, 도구가 바르게 읽었는지와 되돌리기는 아직 확인하지 않았다. 사본은 같은 SSD의 APFS 쪽에 있다.
 
 ### 2.4 go/no-go
 
 | 조건 | 지금 | 확인 |
 |---|---|---|
-| 1. 전체 파티션 백업과 해시 확인 | 길이 있다. 기기에서 확인 | 2.3절 |
+| 1. 전체 파티션 백업과 해시 확인 | 했다(2026-11-03). `userdata`, preloader, GPT는 빠졌다 | 2.3절 |
 | 2. 독립된 보고 둘 이상과 판 일치 | 보고는 여럿이다. 판 확인이 남았다 | 아래 1번 |
-| 3. BROM·preloader 복구 길 | 있다(포럼 보고). 기기에서 확인 | 아래 2번 |
-| 4. OTA 차단 | 기기에서 한다 | 2.1절 |
+| 3. BROM·preloader 복구 길 | preloader 연결과 인증 DA 읽기는 됐다(2026-11-03). 쓰기와 BROM은 포럼 보고다 | 아래 2번 |
+| 4. OTA 차단 | 판을 내린 뒤 2026-11-03에 다시 껐다 | 2.1절 |
 
 1. [ ] 언락할 판(예: 16.0.20.091)으로 된 성공 보고를 확인한다. ZUXOS 기기는 그 판으로 내린 뒤다. 판마다 결과가 갈린다. 모두 포럼 보고다([조사](porting-materials.md) 5절).
     - 16.0.20.022·.041: 원글 작성자와 다른 사용자 여럿이 성공했다(2025-02).
-    - 16.0.20.091: TrebleDroid 위키가 언락한 뒤 GSI를 띄웠다(2025-08). 성공 보고가 있다(2025-09, 2026-09). 256GB 기기가 16.0.20.130에서 .091로 내린 뒤 개발용 LK와 sn.img가 모두 실패한 보고도 있다(2025-12).
+    - 16.0.20.091: TrebleDroid 위키가 언락한 뒤 GSI를 띄웠다(2025-08). 성공 보고가 있다(2025-09, 2025-11, 2026-09). 256GB 기기가 16.0.20.130에서 .091로 내린 뒤 개발용 LK와 sn.img가 모두 실패한 보고도 있다(2025-12).
     - 글로벌판 17.0.04.184(Android 15): 내리지 않고 개발용 LK로 언락한 보고가 있다(2025-10).
     - ZUXOS 1.5.10.x: 바로 언락한 보고는 없다. 1.5.10.103 기기를 SP Flash Tool로 16.0.20.091까지 내린 뒤 언락한 보고가 있다(2026-09).
     - 레노버가 발급한 sn.img와 개인이 만든 sn.img 웹 도구는 인증에 실패했다는 보고가 둘 있다(2025-09, 2025-12).
@@ -133,7 +135,7 @@ mtkclient로는 안 된다(V6 DA에 DAA·SLA). 순정 펌웨어 묶음의 인증
 >
 > **되돌리기.** 같은 도구(SP Flash Tool)와 순정 펌웨어 묶음으로 2.3절 백업을 되돌린다.
 
-1. [ ] ZUXOS(Android 16) 기기는 SP Flash Tool로 중국판 ZUI 16.0.20.091까지 내린다. 사용자 기기가 여기에 든다. 근거는 포럼 보고 하나이고, 1.5.10.044를 말한 글은 찾지 못했다.
+1. [x] ZUXOS(Android 16) 기기는 SP Flash Tool로 중국판 ZUI 16.0.20.091까지 내린다. 사용자 기기가 여기에 든다. 근거는 포럼 보고 하나였고, 1.5.10.044에서 되는 것을 이 기기로 확인했다(2026-11-03).
 
     > **위험: 부팅 불가·데이터 손실.**
     >
@@ -142,9 +144,12 @@ mtkclient로는 안 된다(V6 DA에 DAA·SLA). 순정 펌웨어 묶음의 인증
     > - Android 16 판(ZUXOS 1.5.10.103 이후, 글로벌 17.5.10.095)에서 다른 판의 이미지를 구우면 "Red State"로 부팅하지 못한다는 보고가 여럿이다. 1.5.10.103부터 LK가 글로벌 이미지를 거부한다는 글도 있으나, 작성자가 AI로 썼다고 밝힌 글이라 따로 확인해야 한다.
     > - 128GB 기기에 256GB 기기의 덤프를 구우면 실패한다(포럼 보고).
 
-    - 판을 내린 뒤 슬롯을 본다. 사용자 기기는 `_b`로 돌고 `_a`는 successful no, retry 0이다(실측, 2026-11-02). 판 내리기가 `_a`에 구우면 LK가 그대로 `_b`로 가서 부팅이 반복될 수 있다. `fastboot getvar all`로 슬롯을 보고 `fastboot set_active a`로 풀었다는 보고가 있다(포럼 보고). 잠긴 LK가 이 명령을 받는지는 보지 않았다. 안 받으면 SP Flash Tool로 되돌린다.
+    - 판을 내린 뒤 슬롯을 바꾼다. 사용자 기기는 `_b`로 돌고 `_a`는 successful no, retry 0이다(실측, 2026-11-02). 16.0.20.091 묶음의 파티션 표는 `_a`에만 굽는다(묶음에서 읽었다). 그래서 LK가 그대로 `_b`로 가서 부팅이 반복될 것으로 본다. `fastboot --set-active=a`로 풀었다는 보고가 여럿이고, 잠긴 기기에서 받았다는 보고도 있다(포럼 보고). 안 받으면 SP Flash Tool로 되돌린다.
+    - AVB rollback index는 기기의 `_b`와 묶음이 모두 0이다(2026-11-03, [실측 보고서](../hw/lenovo-tb375fc.md) 7절). 이 값 때문에 막히지는 않는다고 본다(판단). LK와 preloader의 자체 검사는 모른다.
+    - 사용자 기기는 2026-11-03에 `_a`에 구웠고, 잠긴 채로 `--set-active=a`가 됐다. 지금의 preloader가 2025-01 LK를 받아 fastboot까지 올라왔다(실측). 복구 화면에서 초기화한 뒤 Android 14로 부팅했고, `_a`, locked, green이다. OTA는 다시 껐다.
+    - 차례는 [Windows 작업 안내](windows-steps.md) 6·7절에 있다.
 
-2. [ ] 언락할 판이 2.4절 1번에서 확인한 판과 같은지 본다.
+2. [x] 언락할 판이 2.4절 1번에서 확인한 판과 같은지 본다. 사용자 기기는 16.0.20.091이다.
 3. [ ] 파티션 이름과 슬롯을 본다.
 
     ```bash
@@ -153,36 +158,38 @@ mtkclient로는 안 된다(V6 DA에 DAA·SLA). 순정 펌웨어 묶음의 인증
 
     잠긴 1.5.10.044에서 읽은 값은 [실측 보고서](../hw/lenovo-tb375fc.md) 7절에 있다. 판을 내린 뒤 다시 본다. `Bootloader_SN_Part1`, `Part2`와 일련번호는 문서에 옮기지 않는다.
 
-4. [ ] 개발용 LK를 순정 LK와 견준다(문자열, 서명 영역). 개발용 LK는 4pda에 올라온 덤프에서 나와 출처를 확인할 수 없다. 남이 고친 부트로더를 굽는 위험이 있다.
-5. [ ] 개발용 LK(`lk_a`)를 굽는다. 중국판 ZUI 16의 순정 LK가 `fastboot flash lk`를 받는다(포럼 보고).
+4. [x] 개발용 LK를 순정 LK와 견준다(문자열, 서명 영역). 개발용 LK는 4pda에 올라온 덤프에서 나와 출처를 확인할 수 없다.
+
+    **결과(2026-11-03).** 사용자가 XDA 원글의 `lk_a`(MD5 `2c01c2ecf1768555d75abf0e42cf7a78`)를 받았다. 구역 다섯의 `cert1`이 16.0.20.091 순정 LK와 바이트까지 같고, `cert2` 서명이 그 안의 키로 검증되며, 구역 내용과 머리글의 SHA-256이 `cert2` 값과 맞는다. 곧 순정 LK와 같은 키로 서명했고 그 뒤 고치지 않았다. 빌드는 `19ce4236_202411042159`(`userdebug`, 서명 2024-11-05)이고, 순정의 `flashing unlock` 거부 문구가 없다. 안전을 보장하지는 않는다(키 유출을 배제할 수 없고 코드는 문자열만 보았다). 기기에는 아직 굽지 않았다.
+5. [x] 개발용 LK(`lk_a`)를 굽는다. 중국판 ZUI 16의 순정 LK가 잠긴 채로 `fastboot flash lk`를 받았다(실측, 2026-11-03).
 
     ```bash
     fastboot flash lk <개발용 LK 파일>
     ```
 
-    `has-slot:lk`가 yes라(실측) 이 명령은 그때의 `current-slot`에 굽는다. 먼저 `fastboot getvar current-slot`을 본다. 7번도 같은 슬롯에 되돌린다.
+    `has-slot:lk`가 yes라(실측) 이 명령은 그때의 `current-slot`에 굽는다. 먼저 `fastboot getvar current-slot`을 본다. 7번도 같은 슬롯에 되돌린다. 2026-09 보고는 `lk_a`와 `lk_b`에 모두 구웠다.
 
     > **위험: 부팅 불가.** 출처를 확인할 수 없는 부트로더를 굽는다.
     >
     > **먼저 둘 것.** 4번의 비교, 7번에 쓸 순정 LK 파일.
 
-6. [ ] 언락한다. 언락 파일 없이 된다(포럼 보고).
+6. [x] 언락한다. 언락 파일 없이 됐다(실측, 2026-11-03). 개발용 LK로 시스템을 한 번 부팅하고 fastboot로 돌아와 실행했고, 볼륨 키로 승인하자 `unlocked: yes`, `secure: no`가 됐다.
 
     ```bash
     fastboot flashing unlock_critical
     ```
 
-    - 안 되면: 2026-09 보고는 개발용 LK를 구운 뒤 시스템으로 한 번 부팅하고 fastboot로 다시 들어가야 언락됐다고 적었다.
-    - 순정 LK의 길은 개발자 옵션의 OEM 잠금 해제, 일련번호에 묶이고 레노버가 서명한 언락 이미지, `fastboot oem unlock`(또는 `flashing unlock`)이다(LK 문자열). 레노버가 이 모델에 언락 파일을 주는 길은 찾지 못했다.
-    - 잠긴 1.5.10.044의 순정 LK에서 `fastboot flashing get_unlock_ability`는 `unlock_ability is false`다(실측, 2026-11-02). `getvar`의 `flash_lock`은 `no`인데 뜻은 모른다. 판을 내린 뒤 다시 본다.
+    - 안 되면: 2026-09 보고는 개발용 LK를 구운 뒤 시스템으로 한 번 부팅하고 fastboot로 다시 들어가야 언락됐다고 적었다. 2025-11 보고는 OEM 잠금 해제를 켜지 않아 실패했다가 켠 뒤 됐다.
+    - 순정 LK의 길은 개발자 옵션의 OEM 잠금 해제, 일련번호에 묶이고 레노버가 서명한 언락 이미지, `fastboot oem unlock`(또는 `flashing unlock`)이다(LK 문자열). 레노버가 이 모델에 언락 파일을 주는 길은 찾지 못했다. 사용자 기기의 16.0.20.091 순정 LK에서 `flashing unlock`은 `oem unlock`을 쓰라며 거부했고, `oem unlock`은 `ERROR: Sn Image Auth fail`로 거부됐다(실측, 2026-11-03). 잠금은 그대로다.
+    - 잠긴 1.5.10.044의 순정 LK에서 `fastboot flashing get_unlock_ability`는 `unlock_ability is false`였고, 개발자 옵션의 OEM 잠금 해제를 켠 뒤 `true`가 됐다(실측, 2026-11-02). 이 값만으로 언락이 되는지는 모른다. 판을 내린 뒤 다시 보고, `false`면 안드로이드에서 다시 켠다. `getvar`의 `flash_lock`은 켜기 전후 모두 `no`이고 뜻은 모른다.
     - 그래도 안 되면 buntOS ADR-011(기기 선택)을 다시 본다.
-7. [ ] 바로 순정 LK로 되돌린다.
+7. [x] 바로 순정 LK로 되돌린다. 2026-11-03에 16.0.20.091 LK를 16MiB로 채워 구웠다. 판이 `8fd2b0938`로 돌아왔고, 언락은 유지됐으며, `userdata`가 지워져 설정 마법사부터 시작했다.
 
     ```bash
     fastboot flash lk <순정 LK 파일>
     ```
 
-8. [ ] AVB를 끈다. vbmeta 셋을 `--disable-verity --disable-verification`으로 다시 굽는다(포럼 보고). 파티션 이름은 3번에서 본다.
+8. [x] AVB를 끈다. 포럼 보고는 vbmeta 셋을 `--disable-verity --disable-verification`으로 다시 굽는다. 사용자 기기(2026-11-03)에서 fastboot 36.0.2는 이 옵션으로 `vbmeta`를 구울 때 `Failed to find AVB_MAGIC at offset: 0`로 멈췄다(파일에는 `AVB0`이 있었다). 그래서 `vbmeta.img`의 123번 바이트만 3으로 바꾼 파일을 옵션 없이 구웠다. 다음 부팅은 복구 화면이었고 `Factory data reset` 뒤 부팅했다. `verifiedbootstate`는 orange, verity 장치는 0개다. 되돌리기는 원본 `vbmeta.img`를 다시 굽는 것이다(해 보지 않았다).
 9. [ ] 슬롯을 지킨다. 한쪽 슬롯과 recovery는 안드로이드로 남긴다. 정보원이자, 펌웨어를 뽑는 곳이자, 복귀 길이다. recovery는 따로 된 파티션이 없고 vendor_boot 안에 있다. GPUEB, `connsys_wifi`, `connsys_bt` 파티션도 지킨다. 이 펌웨어는 LK가 올린다(설계안 D6).
     - Virtual A/B라(실측) super의 논리 파티션은 마지막으로 구웠거나 OTA로 병합한 슬롯 쪽만 온전하다고 본다(AOSP 동작, 기기에서 확인하지 않았다). 남겨 둘 슬롯은 3번에서 본 `current-slot`, 곧 판을 내린 쪽이다.
 
@@ -206,32 +213,32 @@ fastboot flash init_boot <패치한 이미지>
 >
 > **되돌리기.** 패치 전의 `init_boot`를 다시 굽는다.
 
-1. [ ] `/proc/iomem`과 살아 있는 트리(`/proc/device-tree`)를 뜬다. root 없이는 `/proc/iomem`이 막혀 있었고, `/proc/device-tree`는 이름만 보이고 값은 막혀 있었다(실측).
+1. [x] `/proc/iomem`과 살아 있는 트리(`/proc/device-tree`)를 뜬다(2026-11-03, git 밖에 저장). root 없이는 `/proc/iomem`이 막혀 있었고, `/proc/device-tree`는 이름만 보이고 값은 막혀 있었다(실측).
 
     ```bash
     cat /proc/iomem
     ```
 
-2. [ ] framebuffer 주소·크기·형식을 확인한다. `/chosen`의 `atag,videolfb`와 `/reserved-memory`를 본다. LK는 화면 영역을 `mblock-14-framebuffer`로 예약한다(이름은 실측). 패널이 그리는 버퍼는 가로 2944×1840이다(실측, SurfaceFlinger의 `framebufferSpace`. 화면 회전 설정과 상관없다).
+2. [x] framebuffer 주소·크기·형식을 확인한다. 주소와 크기는 아래 후보와 같고 LK가 예약한다(실측, 2026-11-03). stride와 형식은 트리에 없어 첫 부팅에서 본다. `/chosen`의 `atag,videolfb`와 `/reserved-memory`를 본다. LK는 화면 영역을 `mblock-14-framebuffer`로 예약한다(이름은 실측). 패널이 그리는 버퍼는 가로 2944×1840이다(실측, SurfaceFlinger의 `framebufferSpace`. 화면 회전 설정과 상관없다).
     - 후보(커뮤니티 포트): `0xfc16f000`, 2944×1840, stride 11776, `a8r8g8b8`, 예약 크기 `0x3e90000`(LK가 할당한 크기, 세 화면보다 조금 크다). 그 포트는 LK 기록(mblock 할당, `atag,videolfb`)에서 읽어 이 주소로 fbcon을 띄웠다(12GiB 기기). 우리 기기는 8GB다. 같은지 본다.
-    - 맞으면: `framebuffer0`을 켠다. 부트로더가 예약하지 않으면 `framebuffer_mem`도 켜고, 이미 예약하면 `framebuffer_mem`을 지운다.
+    - 맞았다. `framebuffer0`과 `framebuffer_mem`을 켰다. LK의 `mblock-14-framebuffer`에는 `no-map`이 없어(실측) 그것만으로는 simpledrm이 매핑하지 못한다. LK의 노드가 트리의 앞에 오므로(실측) 패치 0140으로 `no-map`을 먼저 처리한다.
     - 다르면: 읽은 주소로 `simple-framebuffer`를 만든다.
 3. [ ] 화면의 실제 크기를 확인해 둔다(벤더 값 273.615×171.009mm, 트리에 273×171을 넣었다). DSI에는 EDID가 없다.
-4. [ ] ramoops 틈을 본다. 살아 있는 트리의 예약 영역으로 `0x48090000`~`0x4816ffff`가 비었는지 본다. 앞뒤는 `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`)다.
+4. [x] ramoops 틈을 본다. LK가 이 자리를 `mblock-2-pstore`(0x48090000, 0xe0000)로 예약하고 명령줄에 `ramoops.*`를 넣는다(실측, 2026-11-03). 노드는 명령줄이 없을 때를 위해 둔다. 살아 있는 트리의 예약 영역으로 `0x48090000`~`0x4816ffff`가 비었는지 본다. 앞뒤는 `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`)다.
     - LK는 pstore 자리를 `mblock-2-pstore`로 예약한다(이름은 실측, 값은 root 필요).
-    - LK가 명령줄에 `ramoops.*`를 넣으면 노드와 겹쳐 장치가 둘 생긴다. 하나만 둔다.
+    - LK가 명령줄에 `ramoops.*`를 넣는다(실측). 노드도 두었다. 드라이버는 하나만 받고, 둘째는 `already initialized`로 실패한다(코드로 본 것).
     - 크기가 `0xe0000`을 넘으면 minirdump를 덮는다.
-5. [ ] 예약 메모리의 실제 배치를 본 뒤 pstore 칸을 정한다. 정적 트리에는 동적 할당 셋뿐이고, TEE, GenieZone, connsys, framebuffer의 고정 예약은 preloader·LK가 부팅 때 더한다. BL31 자리는 `0x48800000`, 2MB다.
-6. [ ] 입력 장치를 읽는다. 셸로는 열리지 않았다(실측).
+5. [x] 예약 메모리의 실제 배치를 본 뒤 pstore 칸을 정한다. 값은 [실측 보고서](../hw/lenovo-tb375fc.md) 7절에 있다. 정적 트리에는 동적 할당 셋뿐이고, TEE, GenieZone, connsys, framebuffer의 고정 예약은 preloader·LK가 부팅 때 더한다. BL31 자리는 `0x48800000`, 2MB다.
+6. [x] 입력 장치를 읽는다(2026-11-03). 셸로는 열리지 않았다(실측).
 
     ```bash
     getevent -lp
     ```
 
-7. [ ] 파티션 표를 뜬다. 기기 GPT의 형식 GUID는 아직 모른다. GPT의 userdata 자리를 보고, 새 루트 파티션의 크기와 이름을 정한다(보기: userdata 108G 가운데 32~48G). 여기서는 고치지 않는다. 고치는 일은 6.8절이다.
-8. [ ] 펌웨어 파일을 얻는다. 2c의 터치에 `vendor/firmware/novatek_ts_fw_boe.bin`과 `novatek_ts_fw_tm.bin`이 있어야 한다. 파일은 저장소에 넣지 않는다. 고르는 일은 [extract.sh](../../bsp/lenovo-tb375fc/firmware/extract.sh)와 [manifest.tsv](../../bsp/lenovo-tb375fc/firmware/manifest.tsv)가 한다.
-9. [ ] efuse 낱말 `0x1cc`(devinfo)의 [5:0]을 읽어 둔다. 6.7절 6번의 U2 INTR_CAL과 견준다.
-10. [ ] 안드로이드 셸에 막혔던 값을 읽는다(실측, 2026-11-02). RTC 시간(6.10절 2번)과 구역 온도(9.4절 0번)다.
+7. [x] 파티션 표를 뜬다. 기기 GPT의 형식 GUID는 모두 `ebd0a0a2-b9e5-4433-87c0-68b6b72699c7`이다(실측, 2026-11-03). 크기와 이름은 아직 정하지 않았다. GPT의 userdata 자리를 보고, 새 루트 파티션의 크기와 이름을 정한다(보기: userdata 108G 가운데 32~48G). 여기서는 고치지 않는다. 고치는 일은 6.8절이다.
+8. [x] 펌웨어 파일을 얻는다. `/vendor/firmware`를 git 밖에 받았고 `extract.sh`는 VM에서 다시 돌린다(2026-11-03). 2c의 터치에 `vendor/firmware/novatek_ts_fw_boe.bin`과 `novatek_ts_fw_tm.bin`이 있어야 한다. 파일은 저장소에 넣지 않는다. 고르는 일은 [extract.sh](../../bsp/lenovo-tb375fc/firmware/extract.sh)와 [manifest.tsv](../../bsp/lenovo-tb375fc/firmware/manifest.tsv)가 한다.
+9. [x] efuse 낱말 `0x1cc`(devinfo)의 [5:0]을 읽어 둔다. 2026-11-03에 읽었다(기기마다 다른 보정값이라 숫자는 적지 않는다). 6.7절 6번의 U2 INTR_CAL과 견준다.
+10. [x] 안드로이드 셸에 막혔던 값을 읽는다(실측, 2026-11-02). root로 둘 다 읽었다(2026-11-03). RTC 시간(6.10절 2번)과 구역 온도(9.4절 0번)다.
 
     ```bash
     date -u; cat /sys/class/rtc/rtc0/date /sys/class/rtc/rtc0/time /sys/class/rtc/rtc0/since_epoch
@@ -248,11 +255,11 @@ fastboot flash init_boot <패치한 이미지>
 
 ### 5.1 준비
 
-1. [ ] 4절의 값으로 보드 dts의 `framebuffer0`·`ramoops`를 켠다. `uart0`은 켜져 있다. 2a 동안 uart0의 `bus`는 clk26m이다.
-2. [ ] 이미지 넷(boot, vendor_boot, init_boot, dtbo)을 만든다. [BSP README](../../bsp/lenovo-tb375fc/README.md) "만들기" 1~3번이다. 입력, 명령줄, 해시는 `images.txt`에 남는다. 기기 없이 할 수 있는 시험(`boot/test.sh`, QEMU 맛보기, `initramfs/test.sh`)도 그 README에 있다.
-3. [ ] `mkimages.sh --boot-ramdisk`로 만든 boot.img도 만들어 둔다. initramfs를 boot.img에도 넣은 이미지다.
+1. [x] 4절의 값으로 보드 dts의 `framebuffer0`·`ramoops`를 켠다(2026-11-03). `uart0`은 켜져 있다. 2a 동안 uart0의 `bus`는 clk26m이다.
+2. [x] 이미지 넷(boot, vendor_boot, init_boot, dtbo)을 만든다. [BSP README](../../bsp/lenovo-tb375fc/README.md) "만들기" 1~3번이다. 입력, 명령줄, 해시는 `images.txt`에 남는다. 기기 없이 할 수 있는 시험(`boot/test.sh`, QEMU 맛보기, `initramfs/test.sh`)도 그 README에 있다.
+3. [x] `mkimages.sh --boot-ramdisk`로 만든 boot.img도 만들어 둔다. initramfs를 boot.img에도 넣은 이미지다.
 4. [ ] 멈춤을 볼 도구를 고른다. 부팅 단계마다 화면에 블록을 그리는 카나리와 `panic=0`(패닉 화면을 남긴다)을 쓸 수 있다.
-5. [ ] Android에서 100%까지 충전하고 `dumpsys battery`로 전압과 온도를 적어 둔다. 충전 드라이버가 없는 2a~2d 동안 배터리는 다음과 같다(MediaTek LK2 코드로 본 것이고 기기의 LK는 더 새 판이다).
+5. [ ] Android에서 100%까지 충전하고 `dumpsys battery`로 전압과 온도를 적어 둔다(99%, 4466mV, 25.7도, 2026-11-03). 충전 드라이버가 없는 2a~2d 동안 배터리는 다음과 같다(MediaTek LK2 코드로 본 것이고 기기의 LK는 더 새 판이다).
     - LK는 입력과 충전을 500 mA로 두고 충전기 종류와 상관없이 그대로 넘긴다. 5 V 500 mA면 약 2.2 W이고 화면과 CPU 부하는 그보다 클 것으로 본다(추정, 측정 아님). PC나 벽 충전기에 꽂아 두어도 천천히 줄 수 있다.
     - 게이지가 없으면 잔량 경고도 저전압 종료도 없다. 마지막 방어선은 PMIC UVLO(순정 값 2.5 V)이고, 거기까지 가면 예고 없이 꺼지며 로그도 사라진다. 순정이 종료하는 값은 3.0 V 근처다.
     - 과충전 쪽 위험은 작다. 드라이버가 없으면 아무도 칩에 쓰지 않고, 칩 자체 보호는 LK가 둔 그대로다. 다만 온도에 따라 멈추는 소프트웨어 JEITA는 없다.
@@ -261,7 +268,9 @@ fastboot flash init_boot <패치한 이미지>
 
 ### 5.2 `fastboot boot`
 
-1. [ ] RAM으로 띄운다. LK의 fastboot 명령 표에 `download:`와 `boot`가 있다(LK 문자열). 파티션을 건드리지 않는 길이다(설계안 D3). 멈췄을 때 기기를 되살리는 키는 아직 모른다(10절 4번).
+**막혔다(2026-11-03). 첫 부팅은 5.3절 1번의 시험 커널로 성공했다([실측 보고서](../hw/lenovo-tb375fc.md) 7절).** 기기에서 `Booting FAILED (remote: 'unknown command')`였고, 명령 표를 읽어 보니 16.0.20.091 순정 LK와 개발용 LK 모두 `boot`를 등록하지 않는다(2026-11-03). 앞서 근거로 삼은 LK 문자열의 `boot`는 파티션 이름이었다. 그래서 5.3절 2번으로 바로 간다. 아래 항목에서 LK가 무엇을 붙이는지, 명령줄이 들어오는지는 구운 슬롯에서 본다.
+
+1. [ ] RAM으로 띄운다. LK의 fastboot 명령 표에 `download:`와 `boot`가 있다(LK 문자열). 파티션을 건드리지 않는 길이다(설계안 D3). 멈췄을 때 되살리는 키는 전원 + 볼륨 올림으로 본다. 안드로이드 상태에서 fastboot로 들어가는 것은 실측했고, 리눅스가 멈췄을 때 듣는지는 모른다(10절 4번).
 
     ```bash
     fastboot boot boot.img
@@ -289,8 +298,8 @@ fastboot flash init_boot <패치한 이미지>
 
 ### 5.3 비운 슬롯에 굽기 (원래 장치 트리로 떴을 때)
 
-1. [ ] 굽기 전에 한 번 더 보려면 장치 트리를 커널에 넣은 시험용 커널을 `fastboot boot`로 띄운다. 이 커널은 LK가 더하는 메모리·예약 값을 버리므로, 그 기기의 메모리 크기에 맞춘 예약을 함께 넣어야 한다. BL31(`0x48800000`, 2MB)도 직접 예약한다. 안 하면 보조 CPU와 서스펜드가 멈춘다(커뮤니티 포트). 그 포트의 12GiB 고정값은 8GB 판에 맞지 않는다. 업스트림에는 내지 않는다.
-2. [ ] 비운 슬롯에 넷을 굽는다. 파티션 이름과 슬롯은 `fastboot getvar all`로 확인한다. 우리 장치 트리로 띄우는 확실한 길이다.
+1. [x] 장치 트리를 커널에 넣은 시험용 커널을 `_b`에 구워 띄웠다(2026-11-03, `fastboot boot`는 LK에 없다. 도구는 [kernel/tb375fc/test-kernel](../../kernel/tb375fc/test-kernel/README.md)). 처음 계획: 굽기 전에 한 번 더 보려면 장치 트리를 커널에 넣은 시험용 커널을 `fastboot boot`로 띄운다. 이 커널은 LK가 더하는 메모리·예약 값을 버리므로, 그 기기의 메모리 크기에 맞춘 예약을 함께 넣어야 한다. BL31(`0x48800000`, 2MB)도 직접 예약한다. 안 하면 보조 CPU와 서스펜드가 멈춘다(커뮤니티 포트). 그 포트의 12GiB 고정값은 8GB 판에 맞지 않는다. 업스트림에는 내지 않는다.
+2. [ ] 비운 슬롯에 넷을 굽는다. 2026-11-03 시도: 서명 없는 `dtbo`는 LK가 거부하고, 0으로 채우면 넘어가지만 우리 트리에 LK의 펌웨어 적재가 찾는 벤더 노드가 없어 `app_load_scp`에서 멈춘다. 그 노드를 더해야 이 길이 열린다. 파티션 이름과 슬롯은 `fastboot getvar all`로 확인한다. 우리 장치 트리로 띄우는 확실한 길이다.
 
     > **위험: 부팅 불가.** 구운 슬롯이 부팅하지 못할 수 있고, 우리 vendor_boot를 구운 슬롯에서는 순정 recovery를 쓸 수 없다.
     >
@@ -310,14 +319,14 @@ fastboot flash init_boot <패치한 이미지>
 
 ### 5.5 화면, pstore, UART
 
-1. [ ] 화면 콘솔이 뜨는지 본다. LK가 dual-DSI + DSC로 켜 둔 2944×1840 화면을 그대로 받는다.
-2. [ ] 따뜻한 재부팅 뒤 ramoops가 지워지지 않는지 본다. init이 직전 기록을 `/run/buntos/pstore`에 떠 둔다. pstore 기록이 있는 경우는 QEMU에 ramoops 백엔드가 없어 시험하지 못했다.
+1. [x] 화면 콘솔이 뜨는지 본다(2026-11-03, 시험 커널). LK가 dual-DSI + DSC로 켜 둔 2944×1840 화면을 그대로 받는다.
+2. [x] 따뜻한 재부팅 뒤 ramoops가 지워지지 않는다(실측, 2026-11-03. `buntos.autoreboot`로 시험했다. 전원 + 볼륨 올림 리셋 뒤에는 비어 있다). 처음 항목: 따뜻한 재부팅 뒤 ramoops가 지워지지 않는지 본다. init이 직전 기록을 `/run/buntos/pstore`에 떠 둔다. pstore 기록이 있는 경우는 QEMU에 ramoops 백엔드가 없어 시험하지 못했다.
 3. [ ] 순정 recovery로 재부팅해 pstore와 LK 기록을 읽는 길을 본다. LK 기록은 expdb 파티션에 남고 순정 recovery에서 뜬다. 우리 vendor_boot를 구운 슬롯에서는 남겨 둔 슬롯으로 바꿔 recovery를 쓴다.
 4. [ ] UART0을 본다(TX GPIO207, RX GPIO208, 921600bps). 부트로더가 UART0 클럭을 끄고 넘기면 레지스터 접근이 멈출 수 있다. 그러면 `uart0`을 끄고 화면과 pstore로 본다.
 
 ### 5.6 안정성
 
-1. [ ] 워치독이 커널이 넘겨받은 뒤 다시 켜지지 않는지 본다(`CONFIG_MEDIATEK_WATCHDOG=y`).
+1. [x] 워치독이 커널이 넘겨받은 뒤 다시 켜지지 않는지 본다(`CONFIG_MEDIATEK_WATCHDOG=y`). 셸에서 1분 넘게 두어도 재부팅되지 않았다(2026-11-03).
 2. [ ] idle·cpufreq를 본다. 멈추면 `cpuidle.off=1`, `initcall_blacklist=mtk_cpufreq_hw_driver_init`로 하나씩 뺀다.
 3. [ ] systimer는 첫 부팅이 된 뒤에 켜 본다. 펌웨어가 같은 채널(`+0x40`)을 쓰지 않는지(멈춤, 인터럽트 폭주) 본다. 그 전에는 `disabled`이고 hrtimer broadcast가 대신한다.
 
@@ -327,7 +336,7 @@ fastboot flash init_boot <패치한 이미지>
 
 ### 5.8 EL2 판정
 
-1. [ ] 커널 기록의 `CPU: All CPU(s) started at EL2`(또는 `EL1`)와 kvm 초기화 메시지를 본다([buntOS 설계안](../design/ARCHITECTURE.md) 12.1절). 안드로이드 쪽 예비 판정은 GenieZone이 EL2를 차지할 가능성이 높다는 것이다.
+1. [x] **판정: EL1, KVM 불가(2026-11-03).** `CPU: All CPU(s) started at EL1`, `kvm [1]: HYP mode not available`이다. 커널 기록의 `CPU: All CPU(s) started at EL2`(또는 `EL1`)와 kvm 초기화 메시지를 본다([buntOS 설계안](../design/ARCHITECTURE.md) 12.1절). 안드로이드 쪽 예비 판정은 GenieZone이 EL2를 차지할 가능성이 높다는 것이다.
     - 가능: 커널이 EL2에서 시작하고 `/dev/kvm`이 생긴다.
     - 불가(EL2 점유): 커널이 EL1에서 시작하고 GenieZone 흔적이 있다. KVM을 포기하고 gzvm(미병합)은 나중에 검토한다(설계안 D8). buntOS ADR-011을 다시 본다(설계안 10절).
     - TEE를 고쳐 EL2를 빼앗는 실험(`mtk-mod-tee-nogz`)은 쓰지 않는다. 서명 우회가 필요하고 벽돌 위험이 크다.
@@ -1549,7 +1558,7 @@ modprobe mediatek-drm
 자료가 없어 비워 둔 것이다. 정해지면 이 문서에 넣는다.
 
 1. **백업에 쓸 펌웨어 묶음.** "그 기기 판의 묶음"을 쓰라는 보고뿐이다. 우리가 본 묶음은 중국판 16.0.20.091과 글로벌판 17.0.04.266이고, ZUXOS 1.5.10.044의 묶음을 구한 기록은 없다.
-2. **판을 내린 뒤의 OTA와 언락의 데이터.** 판을 내리면 OTA를 다시 꺼야 하는지, 언락이 userdata를 지우는지 자료가 없다.
+2. **판을 내린 뒤의 OTA와 언락의 데이터.** 앱을 끈 설정은 초기화하면 사라진다(포럼 보고). 그래서 판을 내린 뒤 다시 끈다. 언락은 볼륨 키로 동의하면 데이터를 지운다(포럼 보고).
 3. **명령 꼴.** vbmeta 셋의 파티션 이름과 명령, 비운 슬롯에 넷을 굽는 명령, GPT를 뜨고 고치는 도구를 정하지 않았다. 그래서 글로만 적었다. 파티션 이름은 3절 3번에서 본다.
-4. **멈췄을 때.** MT6363 드라이버가 뜨기 전(2a, 2b 초반)에 기기를 강제로 끄는 법과, 우리 슬롯에서 LK fastboot로 들어가는 키를 모른다. [커뮤니티 포트 분석](community-port.md)에는 그 포트의 주석 "멈추면 키를 눌러 fastboot로 되살린다"만 있고 어느 키인지는 없다. 굽기 전에 안드로이드 상태에서 찾아 적는다.
+4. **멈췄을 때.** 안드로이드 상태에서 전원 + 볼륨 올림은 LK fastboot로 들어가고, 전원 + 볼륨 내림은 fastboot에서 나온다(실측, 2026-11-02. [Windows 작업 안내](windows-steps.md) 8절). MT6363 드라이버가 뜨기 전(2a, 2b 초반)에 리눅스가 멈췄을 때도 이 키가 듣는지는 모른다. 첫 부팅에서 본다. [커뮤니티 포트 분석](community-port.md)에는 그 포트의 주석 "멈추면 키를 눌러 fastboot로 되살린다"만 있고 어느 키인지는 없다.
 5. **입력 통로.** UART를 찾지 못하면 2a와 2b 초반에 셸에 입력할 길이 없다. 5절과 6절 머리의 차례(화면 출력으로 보고, 가젯 뒤에 읽는다)는 이 문서의 해석이다. `/sys/firmware/fdt`를 기기 밖으로 옮기는 일도 그래서 가젯 뒤가 된다.
