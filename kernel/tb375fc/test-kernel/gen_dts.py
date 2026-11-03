@@ -33,7 +33,7 @@ for n, v in nodes.items():
 rows.sort()
 out = ['// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)', '// 시험용: 커널에 넣는 트리. gen_dts.py가 기기의 살아 있는 트리에서 만들었다.',
        '#include "mt6897-lenovo-tb375fc.dts"', '#include "test-stage.dtsi"', '', '/ {', '\tchosen {', '\t\t/delete-property/ stdout-path;',
-       '\t\tbootargs = "console=tty0 ignore_loglevel log_buf_len=1M buntos.wait=5 buntos.telnet=1 buntos.autoreboot=30 buntos.dump=1 panic=30 clk_ignore_unused pd_ignore_unused regulator_ignore_unused arm64.nomte";',
+       '\t\tbootargs = "console=tty0 ignore_loglevel log_buf_len=1M root=PARTLABEL=buntos rootfstype=btrfs rw systemd.firstboot=no buntos.usbdebug=1 buntos.wait=10 buntos.telnet=1 buntos.autoreboot=30 buntos.dump=1 panic=30 clk_ignore_unused pd_ignore_unused regulator_ignore_unused arm64.nomte";',
        '\t};', '', '\tmemory@40000000 {', '\t\treg = <0 0x40000000 0x2 0x0>;', '\t};', '};', '',
        '&uart0 {', '\tstatus = "disabled";', '};', '', '&reserved_memory {']
 for a, l, name, nm in rows:

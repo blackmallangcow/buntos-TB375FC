@@ -14,6 +14,7 @@
 | `builtin-dtb.py` | 작업 트리의 `setup_machine_fdt()`를 고쳐 커널에 넣은 트리를 쓰게 한다 |
 | `build-test.sh` | 빌드 VM에서 시험 커널과 `boot.img`를 만든다 |
 | `flash-b-test.sh` | 맥에서 슬롯 `_b`에 굽는다 |
+| `small-root/` | 2b 확인용 작은 Debian 루트. `build.sh <공개 키>`로 만들어 기기의 `buntos` 파티션에 굽는다 |
 
 ## 쓰는 법
 
@@ -32,6 +33,16 @@ kernel/tb375fc/test-kernel/flash-b-test.sh <묶음의 image 디렉터리> .hando
 ```bash
 fastboot --set-active=b && fastboot reboot
 ```
+
+## UFS 루트
+
+명령줄의 `root=PARTLABEL=buntos`로 initramfs가 넘어간다. `buntos` 파티션이 없거나 못 붙으면 패닉 없이 initramfs 셸에 남고, `buntos.autoreboot`가 그 뒤의 재부팅을 맡는다. 넘어간 뒤로는 맥에서 들어간다.
+
+```bash
+ssh root@172.16.42.1
+```
+
+커널을 바꿀 때는 fastboot가 없어도 된다. 부트 이미지를 기기로 보내 `boot_b`에 `dd`로 쓰고 재부팅한다. `_a`로 넘어간 뒤 돌아오려면 전원 + 볼륨 올림으로 fastboot에 들어가 `fastboot --set-active=b`를 한다. 그때 재시도도 새로 채워진다.
 
 ## 기록 읽기
 
