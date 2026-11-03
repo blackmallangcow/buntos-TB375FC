@@ -12,6 +12,7 @@
 |---|---|
 | [DESIGN.md](DESIGN.md) | **최종 설계안.** 핵심 결정, 부팅 길, 단계별 bring-up, 블록별 포팅 계획, 기기 맞춤 최적화, 위험, 일정 |
 | [bringup-checklist.md](bringup-checklist.md) | **기기에서 할 일의 차례.** 백업, 언락, 2a·2b·2c·USB 호스트의 확인 항목과 명령, 위험과 되돌리는 길 |
+| [lk-kernel-tree.md](lk-kernel-tree.md) | 순정 LK가 커널 장치 트리에 요구하는 것(코드로 읽음, 기기 미확인): 시험 커널을 그만두고 LK가 우리 트리를 넘기게 하는 길 |
 | [porting-materials.md](porting-materials.md) | 포팅 재료 조사: 블록마다 가까운 업스트림 드라이버, 공개 벤더 소스, 포팅 크기, 업스트림 판, 부트 체인과 복구 |
 | [wifi-soc7_0.md](wifi-soc7_0.md) | Wi-Fi·Bluetooth(connsys soc7_0, A-die MT6637) 단서 확인, LK 적재, MCU 명령 비교, 포팅 설계 |
 | [community-port.md](community-port.md) | 이 기기의 커뮤니티 mainline 포트 분석: 커밋, 우리 계획과 겹침, 부팅과 기록, 협력할 일 |

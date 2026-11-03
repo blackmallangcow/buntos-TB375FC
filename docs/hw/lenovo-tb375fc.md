@@ -279,6 +279,31 @@ Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`
 | `kernel_panic,init`의 원인 | `expdb` 앞에 LK의 kedump가 남아 있다(머리 `0xaee0dead`, 항목 0x12. 판 내리기 직전 백업에서는 전부 0이었다). LK가 부팅마다 `kedump: found content in expdb`로 저장된 pstore와 ram console을 메모리에 되살린다(`SYS_PSTORE_RAW`, `SYS_RAMCONSOLE_RAW`). 그래서 부팅 이유가 계속 `kernel_panic`이고 pstore에 6.1.138 패닉이 남았다. `expdb` 앞 12KB를 0으로 하자 부팅 이유가 `reboot,shell`로 돌아왔다 |
 | 커널 기록 | CPU 8개(0~3 Cortex-A510 `0x411fd461`, 4~7 Cortex-A715 `0x411fd4d0`), PSCI 1.1, GICv3 SPI 960개, 메모리 7447704K/8388608K, `mtk-wdt 1c00a000` 켜짐(31초), 성능 도메인 셋, 약 0.15초에 `/init`이다. 오류는 없고, A715 쪽에 `SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR1_EL1`이 나온다. 원문은 `.handoff/tb375fc-device-readings/boot-b-7/`에 있다 |
 
+### 2b 단계별 시험 (2026-11-03)
+
+시험 커널에서 노드를 `test-stage.dtsi`로 하나씩 켰다. 앞 단계는 안드로이드로 돌아온 뒤 pstore에서 읽었고, USB 셸이 뜬 뒤로는 셸에서 읽었다.
+
+| 항목 | 값 |
+|---|---|
+| 핀, 클럭 | 통과. 미뤄진 장치 없음. mainpll 2184 MHz, univpll 2496 MHz, tvdpll 약 594 MHz, ulposc 588 MHz로 문서의 짐작과 맞다. 먹스는 LK 값: `uart` 26 MHz, `ufs` 약 458 MHz, `mminfra` 약 687 MHz, `usb_top`·`ssusb_xhci` 124.8 MHz, `vlp_spmi_m`·`vlp_pwrap_ulposc` 29.4 MHz |
+| SPMI | M 버스와 PMIC 다섯(MT6363, MT6368, MT6319 셋) 통과. `Err: 0`, `mtk-spmi-pmic` 줄이 모두 0으로 인터럽트 폭주가 없다. "Cannot mask interrupts", "no interrupt group", "Could not clear RCS flag", `cleared event`가 없다. 안드로이드에서 재부팅한 경우와 리눅스에서 재부팅한 경우만 봤다 |
+| MT6363 | `TOP_TRAP`(`0x6`)이 0이다. 레일이 모두 등록되고 전압을 읽는다. 키 `mtk-pmic-keys`가 뜬다. VS1 2000 mV, VS2 1450 mV, VS3 1050 mV, VCORE 725 mV, VIO18 1820 mV, VUFS18 1800 mV, VUFS12 1200 mV |
+| VEMC | `0x1b10` = 0xb6, `0x1b1b` = 0xf5로 VOSEL 6, VOCAL 5다. `vufs_vcc`가 2550 mV로 읽힌다(옛 7.2.12의 1.2V·1.3V 오독이 고쳐졌다). 벤더 커널은 VOCAL을 더하지 않고 2500 mV로 보인다. 안드로이드에서 VEMC는 UFS 쪽이 껐다 켰다 한다(읽을 때마다 `disabled`, `enabled`로 다르다) |
+| VSRAM | `mt6363_vsram_cpub·cpum·cpul`이 743, 750, 750 mV이고 켜기 비트(`0x1dd7`, `0x1ded`, `0x1e57`의 bit 0)가 1이다 |
+| MT6368 | 레일이 모두 등록된다. `vusb33` 3000 mV, `mt6368_vio28` 1800 mV, `vgpu` 600 mV, `mt6368_vtp` 3300 mV |
+| MT6319 | `vmm`, `vproc1~3`, `mt6319_7_vbuck3`, `vufs_vccq`. 전압 한계를 주면 @8이 probe에서 `vufs_vccq: failed to get the current voltage: -EINVAL`로 실패한다. @8 벅 3의 설정값 `0x144d`(ELR4)는 0xff이고 실제 값 `0x1599`(DBG0)는 0xbf, 곧 1193.75 mV다. 드라이버 표는 0xbf까지이고 업스트림은 ELR을 읽는다. 벤더는 켜져 있으면 DBG0을 읽어 1193750 µV로 보인다. 보드에서 한계를 빼자 통과했고, 레일 요약에는 0mV로 나온다 |
+| USB 가젯 | 맥에서 `TB375FC initramfs`, 480 Mb/s, `/dev/cu.usbmodembuntos1`, `en9`가 172.16.42.2를 받는다. 직렬 셸, ping 약 1 ms, telnet이 된다. `mtu3`는 `IP version 0x1007(U3 IP)`이다. SS는 시험하지 않았다(리드라이버 드라이버 전) |
+| U2 PHY | 부트로더 뒤의 `0x11e40368`(U2PHYDTM0)이 0x02be00d4다. 서스펜드, 풀다운 둘, XCVRSEL, TERMSEL이 모두 강제다. 7.2.12의 XS-PHY는 이 비트를 지우지 않아 D+가 오르지 않고 인터럽트도 없다. 본가는 7.4에서 고쳤다(`02df7fe1297d`, 패치 0143) |
+| VBUS | 컨트롤러의 VBUS 입력이 케이블을 따르지 않는다. 가젯이 도는 중에 `0x11201c84`(MISC_CTRL)의 덮어쓰기를 지우자 맥에서 곧바로 끊겼고, 8초 뒤 되돌리자 다시 붙었다(패치 0141, 0142) |
+| PHY 값 | INTR_CAL(`0x11e40330` [29:24])은 LK가 쓴 값과 efuse 값이 하나 다르다(기기마다 다른 보정값이라 숫자는 적지 않는다). eye(`0x11e40304`)는 [14:12] = 7, [10:8] = 3으로 벤더 값과 같다. U3 CDR(`0x11e43808` [23:16])은 0x0b이고 벤더가 MT6897에 넣는 값은 0x08이다 |
+| UFS 장치 | Micron `MT128GBCAV2U31`, UFS 3.1(`wspecversion` 0x0310). HS-G4 Rate B, 2레인, Fast 모드로 붙는다. MCQ 없이 단일 도어벨이다. 먹스는 LK 값 그대로 `ufs` 약 458 MHz, `aes_ufsfde` 546 MHz다 |
+| UFS 나눔 | `sda`, `sdb` 각 4 MiB(파티션 없음), `sdc` 약 119 GiB(GPT 82개, 이름이 `PARTNAME`으로 나온다). `nvcfg` `sdc6`, `nvdata` `sdc7`, `persist` `sdc9`, `lk_a` `sdc35`, `boot_b` `sdc66`, `vendor_boot_b` `sdc67`, `dtbo_b` `sdc75` |
+| UFS 읽기 | **쓰지 않았다.** `lk_a`, `boot_b`, `vendor_boot_b`, `dtbo_b`의 해시가 맥의 사본과 같다. `sdc` 앞 2 GiB의 해시가 두 번 같다. 1 MiB 직접 읽기로 약 790 MB/s다. `nvdata`, `nvcfg`, `persist`는 `blockdev --setro`와 `ro,noload`로 붙었다. 뒤이어 `_a` 안드로이드가 정상으로 부팅했다 |
+| UFS 절전 | 유휴 뒤 `SLEEP`, `HIBERN8`로 내려가고 읽으면 돌아온다. 6번 되풀이에 오류가 없다. VEMC 켜기 비트(`0x1bf3`)가 절전에 0, 활동에 1로 벤더처럼 오간다. 오류 통계가 모두 0이다(`Logical Unit Resets: 1`은 초기화의 장치 리셋이다) |
+| UFS 기록 | `vufs_vccq: mode operation not allowed`가 절전 전환마다 남는다(보드가 MT6319 모드를 막았다). 약 3분에 18번이고 동작에는 영향이 없다. HS-G5 속성(`0x15d6`)을 UFS 3.1 장치가 거부해 나던 오류와 7.2.12의 재시도 경고는 패치 0144로 사라졌다 |
+| 프리로더 포트 | 부팅마다 프리로더가 약 3초 동안 `MT65xx Preloader`(ACM)로 뜬다. 우리 가젯과 같은 `/dev/cu.usbmodem*`로 보이니 제품 이름으로 가린다 |
+| pstore | ECC가 없다. 2단계 기록 한 벌에서 글자 몇 개가 깨졌다(`368x115`가 `3688115`, `simple`이 `simpLe`). 다른 기록에서는 보지 못했고 원인은 모른다 |
+
 ## 8. 남은 것
 
 - super의 vendor는 ZIP에서 내려받으면서 풀 수 있다(`.handoff/tb375fc-pogo/wip/super_stream.py`, 5.7GB 스트리밍, 디스크는 고른 파티션만 쓴다). 2026-11-01에 이렇게 `tn_keyboard.ko`와 키보드 HAL을 읽었다. 파티션은 모두 EROFS다

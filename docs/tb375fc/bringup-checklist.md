@@ -354,17 +354,17 @@ fastboot flash init_boot <패치한 이미지>
 
 ### 6.1 핀(pio)
 
-1. [ ] `pio`를 켠다. 드라이버는 패치 0004~0006, 0027, 0028이다. 켜면 probe가 EINT 마스크를 모두 세운다(업스트림 동작). 핀 상태(`pinctrl-0`)는 쓰는 노드가 생길 때 더한다.
+1. [x] `pio`를 켠다(2026-11-03, 시험 커널. 결과는 [실측 보고서](../hw/lenovo-tb375fc.md) 7절). 드라이버는 패치 0004~0006, 0027, 0028이다. 켜면 probe가 EINT 마스크를 모두 세운다(업스트림 동작). 핀 상태(`pinctrl-0`)는 쓰는 노드가 생길 때 더한다.
 
 ### 6.2 클럭
 
 드라이버는 패치 0009~0013이다. 표는 OEM 코드에서 옮겼고 기기 시험은 없다.
 
-1. [ ] 클럭 컨트롤러 여섯(topckgen, apmixedsys, vlpckgen, pericfg_ao, ufscfg_ao, ufscfg_pdn)과 HW voter syscon(`0x10320000`)을 켠다. uart0의 `bus`를 pericfg_ao 게이트로 바꾼다. `clk_ignore_unused`는 그대로 둔다. 없으면 simple-framebuffer가 쓰는 화면 먹스(disp·ovl·mminfra)와 쓰지 않는 UFS 게이트가 늦은 초기화에서 닫힌다.
-2. [ ] apmixedsys가 뜨는지 **먼저** 본다. mainpll은 critical이라 등록할 때 바로 HW voter로 투표한다.
+1. [x] 클럭 컨트롤러 여섯(2026-11-03, 시험 커널. uart0은 꺼 둔 채다)(topckgen, apmixedsys, vlpckgen, pericfg_ao, ufscfg_ao, ufscfg_pdn)과 HW voter syscon(`0x10320000`)을 켠다. uart0의 `bus`를 pericfg_ao 게이트로 바꾼다. `clk_ignore_unused`는 그대로 둔다. 없으면 simple-framebuffer가 쓰는 화면 먹스(disp·ovl·mminfra)와 쓰지 않는 UFS 게이트가 늦은 초기화에서 닫힌다.
+2. [x] apmixedsys가 뜨는지 **먼저** 본다(떴다). mainpll은 critical이라 등록할 때 바로 HW voter로 투표한다.
     - 패치 0012의 순서가 틀리면 `critical clk 'mainpll' failed to prepare`가 난다. 그러면 apmixedsys가 실패해 모든 클럭이 고아가 되고, UART·UFS가 클럭을 기다리며 뜨지 않는다.
     - 처음 부팅은 화면 콘솔과 pstore로 본다.
-3. [ ] 클럭 값을 읽는다.
+3. [x] 클럭 값을 읽는다(2026-11-03. PLL 넷이 짐작과 맞고 먹스는 LK 값이다. `aes_ufsfde`는 6.6절에서 본다).
 
     ```bash
     cat /sys/kernel/debug/clk/clk_summary
@@ -383,8 +383,8 @@ fastboot flash init_boot <패치한 이미지>
 
 고침은 패치 0002·0003(백포트)과 0007·0008, 0114다.
 
-1. [ ] `pio`와 함께 SPMI를 `okay`로 바꾼다. PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다. MT6685 @9는 6.10절에서 켠다.
-2. [ ] probe가 클럭 때문에 실패하지 않는지 본다. 업스트림은 자식마다 `rcs` 인터럽트(pio EINT 248)와 클럭 셋(`pmif_sys_ck`, `pmif_tmr_ck`, `spmimst_clk_mux`)을 요구하고, 없으면 probe가 실패한다. PMIF 클럭으로 `vlp_pwrap_ulposc`를 준 것은 추론이다. `vlp_pwrap_ulposc`·`vlp_spmi_m`은 게이트가 없어 켜기가 아무 일도 하지 않는다.
+1. [x] `pio`와 함께 SPMI를 `okay`로 바꾼다(2026-11-03, 시험 커널). PMIC 여섯(MT6363 @4, MT6368 @5, MT6319 @6~8, MT6685 @9)은 모두 M 버스에 있다. M 자식만 켜고 P 자식은 끈다. 별칭은 `spmi0` 하나다. MT6685 @9는 6.10절에서 켠다.
+2. [x] probe가 클럭 때문에 실패하지 않는지 본다(통과). 업스트림은 자식마다 `rcs` 인터럽트(pio EINT 248)와 클럭 셋(`pmif_sys_ck`, `pmif_tmr_ck`, `spmimst_clk_mux`)을 요구하고, 없으면 probe가 실패한다. PMIF 클럭으로 `vlp_pwrap_ulposc`를 준 것은 추론이다. `vlp_pwrap_ulposc`·`vlp_spmi_m`은 게이트가 없어 켜기가 아무 일도 하지 않는다.
 3. [ ] 패치 0007을 확인한다. 고치기 전 rcs 디먹스는 `bank = bit / 7`이라 bit 7, 14–15, 21–23, 28–31에서 bank가 하나 커지고, 원래 비트가 남아 체인 IRQ 처리기가 끝나지 않을 수 있었다(코드로 짐작). 6.4절 3번과 6.5절 4번에서 인터럽트가 가만히 있는지 본다.
 4. [ ] 패치 0008을 확인한다. 고치기 전에는 채널 설정이 버스 등록 뒤에 있어, 내장(=y) PMIC 드라이버가 먼저 probe하면 SWINF 상태 대신 `PMIF_INIT_DONE`을 읽고 명령도 그 자리에 썼다(코드로 짐작). rcs 인터럽트나 클럭을 기다리다 PMIF probe가 미뤄지면 이 경우에 든다. MT6363, MT6368, MT6319의 probe가 되는지 본다.
 5. [ ] 패치 0114를 확인한다. 고치기 전에는 처리기 없는 SID의 RCS를 아무도 지우지 않아 EINT 248이 계속 울릴 수 있었다(코드로 짐작). SID 4·5의 체인 처리는 그대로이고 칸 넷을 읽는 것만 는다(벤더도 인터럽트마다 다 읽는다). `dmesg | grep 'cleared event'`에 줄이 있으면 그 SID와 값을 적어 둔다. MT6319 @6~8에서 나올 수도 있다.
@@ -399,11 +399,11 @@ fastboot flash init_boot <패치한 이미지>
 
 ### 6.4 MT6319·MT6363
 
-패치 0014~0018(MFD, 키)과 0037~0041(regulator 고침)이다. MT6319는 DT만 쓴다. 고침은 코드와 레지스터 모델로 확인했을 뿐 기기에서 돌려 보지 않았다. 모델도 벤더 자료로 만든 것이다.
+패치 0014~0018(MFD, 키)과 0037~0041(regulator 고침)이다. MT6319는 DT만 쓴다. 0041·0037·0038은 regulator `for-7.4`에 적용된 커밋(`8aed8b66751e`, `7318d3833067`, `a8d72f246edb`)이고, 대기열 차례에 맞춰 줄 번호만 고쳤다. 0039·0040은 기기 시험 뒤 낸다. 고침은 코드와 레지스터 모델로 확인했고, 모델도 벤더 자료로 만든 것이다.
 
 이 단계에서는 보드 방침을 바꾸지 않는다. 전압 한계를 주지 않고, 펌웨어가 늘 켜 두는 레일은 always-on으로 둔다. 바꿀지는 `TOP_TRAP`과 VEMC 전압을 본 뒤 정한다. 벅 끄기를 일부러 시험하지 않는다. 소비자가 생길 때 VS1·VS3가 그대로인지 `regulator_summary`로 본다.
 
-1. [ ] probe를 본다. MT6363 MFD·regulator·키, MT6319 셋이다.
+1. [x] probe를 본다. MT6363 MFD·regulator·키, MT6319 셋이다(2026-11-03, 시험 커널. MT6319 @8은 보드의 전압 한계를 빼고 통과했다).
 
     ```bash
     dmesg | grep -i -E "spmi|mt6363|pmic|regulator"
@@ -411,7 +411,7 @@ fastboot flash init_boot <패치한 이미지>
 
     - `regulators@30` 아래 레일 등록을 본다. 노드가 있는 것은 23개이고 드라이버 표는 35개다. probe가 표 전체를 돌므로 `regulator_summary`에 몇 줄이 나올지는 기기에서 본다.
     - 없어야 하는 줄: "Cannot mask interrupts", "Interrupt N is in no interrupt group", "Could not clear RCS flag".
-2. [ ] 레일을 읽는다.
+2. [x] 레일을 읽는다(2026-11-03. 값은 실측 보고서 7절. `vufs_vccq`는 드라이버가 ELR을 읽어 0mV로 나온다).
 
     ```bash
     cat /sys/kernel/debug/regulator/regulator_summary
@@ -434,25 +434,24 @@ fastboot flash init_boot <패치한 이미지>
     ```
 
 5. [ ] 길게 누름 리셋을 본다. 전원+볼륨 올림을 길게 누르면 리셋되고 전원만으로는 되지 않아야 한다(보드는 모드 2, 시간 0. STRUP_CON11 `0xa0e` bit 2, STRUP_CON12 `0xa0f`). 문제가 있으면 `keys`의 `mediatek,long-press-mode`를 1(전원만)로 바꾼다. 8절의 되돌리는 길이 이 리셋이다.
-6. [ ] `TOP_TRAP`과 VEMC 필드를 읽는다.
+6. [x] `TOP_TRAP`과 VEMC 필드를 읽는다(2026-11-03. `TOP_TRAP` 0, VOSEL 6, VOCAL 5).
 
     ```bash
     cat /sys/kernel/debug/regmap/0-04-regulator/registers
     ```
 
-    - 주소: `0x6`(TOP_TRAP, 절대 주소 `0x36`), `0x1b10`(VOSEL), `0x1b1b`(VOCAL). 0x30을 뺀 값이고, 8비트가 되어 칸마다 한 레지스터다.
-    - TOP_TRAP이 1이면 VOCAL의 [7:4]와 [3:0]을 함께 적는다. TOP_TRAP=1의 VOCAL 위 네 비트는 MT6363에 대한 직접 근거가 없는 추정이고, 모델도 그 추정을 품는다. 틀리면 VOCAL 위 네 비트를 잘못 읽고 쓴다. 그 값이 11 이상으로 읽히면 다음 범위 전압이 되고, 선택자가 176을 넘을 수도 있다.
-    - TOP_TRAP이 0이면 이 길을 타지 않는다.
-    - TOP_TRAP이 1보다 크면 VEMC 콜백이 `-EINVAL`을 낸다.
-7. [ ] `regulator_summary`의 `vufs_vcc`(VEMC)를 본다. 7.2.12에서 1.2V나 1.3V로 나오던 값이 VOSEL 값과 같은 전압으로 나와야 한다(VOSEL 6 = 2.5V 등).
+    - 주소: `0x6`(TOP_TRAP, 절대 주소 `0x36`), `0x1b10`(VOSEL, trap 0은 [3:0], trap 1은 [7:4]), `0x1b1b`(trap 0의 VOCAL), `0x1b1c`(trap 1의 VOCAL). 0x30을 뺀 값이고, 8비트가 되어 칸마다 한 레지스터다.
+    - 어느 칸을 쓸지는 프로브 때 TOP_TRAP을 읽어 정한다(패치 0038).
+    - TOP_TRAP이 1보다 크면 레귤레이터 probe가 "Failed to select VEMC bank"로 실패해 MT6363 레일이 하나도 등록되지 않는다.
+7. [x] `regulator_summary`의 `vufs_vcc`(VEMC)를 본다(2026-11-03. 2550 mV, VOSEL 6의 2.5V에 VOCAL 5). 7.2.12에서 1.2V나 1.3V로 나오던 값이 VOSEL 값과 같은 전압으로 나와야 한다(VOSEL 6 = 2.5V 등).
 8. [ ] 다른 LDO의 VOCAL이 11~15인 곳이 있는지 본다. 범위 모델은 VOCAL을 0~10으로 보고, 11 이상이면 다음 범위로 읽는다.
-9. [ ] `mt6363_vsram_cpub·cpum·cpul`이 켜져 있는지, 그 레지스터(`0x1dd7`, `0x1ded`, `0x1e57`)의 비트 0을 본다. 부트로더가 0으로 두었다면 always-on이 켜므로 부팅 기록에 이상이 없는지 본다(패치 0041).
+9. [x] `mt6363_vsram_cpub·cpum·cpul`이 켜져 있는지(2026-11-03. 켜져 있고 비트 0이 1이다. 부팅 기록에 이상이 없다), 그 레지스터(`0x1dd7`, `0x1ded`, `0x1e57`)의 비트 0을 본다. 부트로더가 0으로 두었다면 always-on이 켜므로 부팅 기록에 이상이 없는지 본다(패치 0041).
 
 ### 6.5 MT6368
 
 패치 0023~0026이다. 보드는 펌웨어가 늘 켜 두는 레일 6개를 둔다. ssusb는 이 PMIC의 VUSB(`vusb33-supply = <&mt6368_vusb>`)를 기다린다. `CONFIG_REGULATOR_MT6368=y`여야 하고, SPMI M 버스와 MFD가 함께 있어야 한다.
 
-1. [ ] probe를 본다.
+1. [x] probe를 본다(2026-11-03, 시험 커널).
 
     ```bash
     dmesg | grep -i -E "mt6368|spmi|regulator"
@@ -463,7 +462,7 @@ fastboot flash init_boot <패치한 이미지>
     - 전압: vio28은 펌웨어대로 1.8V여야 한다. vusb33은 mtu3 바인딩이 말하는 USB AVDD 3.3V 공급이다. vgpu는 부트로더 값이다.
     - VOCAL 모델이 맞는지 이것으로 본다. LDO 전압이 표 값 + 10mV×VOCAL과 어긋나면(특히 VOCAL이 11~15) 모델을 고친다.
 3. [ ] regmap debugfs로 VOCAL 레지스터 몇 개(vusb `0x1d94`, vio28 `0x1d9c`, 벤더 주소)를 읽어 둔다. 드라이버의 주소는 벤더 주소 − 0x30이다.
-4. [ ] `/proc/interrupts`의 `mtk-spmi-pmic` 줄이 가만히 있고 `Err:`가 계속 늘지 않는지 본다. SID 5의 RCS가 pmif에서 bank 1(비트 8~15)로 오는지는 패치 0007과 함께 본다.
+4. [x] `/proc/interrupts`의 `mtk-spmi-pmic` 줄이 가만히 있고 `Err:`가 계속 늘지 않는지 본다(2026-11-03. 0이다). SID 5의 RCS가 pmif에서 bank 1(비트 8~15)로 오는지는 패치 0007과 함께 본다.
 5. [ ] 끈 뒤 전류가 0에 가까운지 본다(ELR5로 MT6368이 끄기 순서를 따르는지). 재부팅에 문제가 없는지 본다.
 
     ```bash
@@ -476,38 +475,38 @@ fastboot flash init_boot <패치한 이미지>
 
 > **위험: 데이터 손실.** UFS에는 안드로이드 파티션과 nvdata가 함께 있다. 6.8절의 GPT 고침 전에는 읽기만 한다. initramfs의 실패 길은 nvdata·nvcfg·persist를 읽기 전용(`blockdev --setro`, `ro,noload`)으로 붙인다.
 
-1. [ ] probe 차례를 본다: ufscfg_ao·pdn(클럭·리셋) → `112a0000.ufs-phy`(MT6897 ops) → `112b0000.ufshci`.
+1. [x] probe 차례를 본다(2026-11-04, 시험 커널. 읽기만 했다. 값은 [실측 보고서](../hw/lenovo-tb375fc.md) 7절): ufscfg_ao·pdn(클럭·리셋) → `112a0000.ufs-phy`(MT6897 ops) → `112b0000.ufshci`.
     - 기대: 기록에 `caps: 0x7c0`, `clk "main" present` 등 여섯 줄, "Clk-scaling not ready. Feature disabled."가 나온다.
     - "Failed to get resets"가 나오면 리셋 기술이 틀린 것이다. 리셋은 ufscfg_pdn의 set `0x48`·clr `0x4c` bit 0·1·2(UniPro, crypto, HCI)다.
-    - "mode operation not allowed"는 MT6319 벅에 `regulator-allowed-modes`가 없어 남는 기록이다. 동작에는 상관없다.
-2. [ ] RTFF MTCMOS SiP 호출을 본다. 초기화에서 MTCMOS를 끄고 켠다(벤더와 같은 순서). `caps` 줄 바로 뒤에서 멈추면 이 길이다. 그때는 match data에서 `UFS_MTK_CAP_RTFF_MTCMOS`를 빼 본다(드라이버 한 줄).
-3. [ ] 호스트 리셋을 본다. HCE enable 때 리셋 셋을 100µs 걸었다 푼다. "Host reset assert/deassert failed"가 없고 링크가 서는지 본다.
-4. [ ] 먹스 부모를 본다. `clk_summary`에서 `ufs`·`aes_ufsfde`의 주파수를 읽는다. LK가 26 MHz(부모 0)로 두었으면 느리다. 그때는 dtsi에 `assigned-clocks`로 벤더의 낮은 부모(mainpll_d4_d2, univpll_d6)를 준다. UFS 3.x 장치면 벤더도 낮은 쪽으로 고정한다(`ufs_mtk_fix_clock_scaling`).
-5. [ ] 기어와 전력 모드를 본다: HS 기어·rate, PMC via FASTAUTO 길, 장치 판(`wspecversion`).
-6. [ ] 클럭 게이팅과 런타임 PM을 본다. idle 뒤 hibern8과 ref 클럭 SiP 핸드셰이크("missing ack of refclk req"가 없어야 한다), 런타임 suspend의 MTCMOS 끄기·켜기 뒤 I/O를 본다.
-7. [ ] UFS가 뜬 뒤 VEMC가 그대로 켜져 있고 런타임 PM에서 문제없는지 본다.
+    - "mode operation not allowed"는 MT6319 벅에 `regulator-allowed-modes`가 없어 남는 기록이다. 동작에는 상관없다. 실측으로 절전 전환마다 남는다(약 3분에 18번). 줄이려면 8/vbuck3에 벤더처럼 모드를 허용하는데, VCCQ가 LP 모드를 타므로 쓰기 시험과 함께 본다.
+2. [x] RTFF MTCMOS SiP 호출을 본다(2026-11-04. 지나간다). 초기화에서 MTCMOS를 끄고 켠다(벤더와 같은 순서). `caps` 줄 바로 뒤에서 멈추면 이 길이다. 그때는 match data에서 `UFS_MTK_CAP_RTFF_MTCMOS`를 빼 본다(드라이버 한 줄).
+3. [x] 호스트 리셋을 본다(2026-11-04. 링크가 선다). HCE enable 때 리셋 셋을 100µs 걸었다 푼다. "Host reset assert/deassert failed"가 없고 링크가 서는지 본다.
+4. [x] 먹스 부모를 본다(2026-11-04. LK 값 그대로 `ufs` 약 458 MHz, `aes_ufsfde` 546 MHz). `clk_summary`에서 `ufs`·`aes_ufsfde`의 주파수를 읽는다. LK가 26 MHz(부모 0)로 두었으면 느리다. 그때는 dtsi에 `assigned-clocks`로 벤더의 낮은 부모(mainpll_d4_d2, univpll_d6)를 준다. UFS 3.x 장치면 벤더도 낮은 쪽으로 고정한다(`ufs_mtk_fix_clock_scaling`).
+5. [x] 기어와 전력 모드를 본다(2026-11-04. HS-G4 Rate B 2레인, UFS 3.1): HS 기어·rate, PMC via FASTAUTO 길, 장치 판(`wspecversion`).
+6. [x] 클럭 게이팅과 런타임 PM을 본다(2026-11-04. `SLEEP`, `HIBERN8`과 복귀를 되풀이해 오류가 없고 refclk 기록도 없다. 쓰기와 함께는 아직이다). idle 뒤 hibern8과 ref 클럭 SiP 핸드셰이크("missing ack of refclk req"가 없어야 한다), 런타임 suspend의 MTCMOS 끄기·켜기 뒤 I/O를 본다.
+7. [x] UFS가 뜬 뒤 VEMC가 런타임 PM에서 문제없는지 본다(2026-11-04. 절전에 꺼지고 활동에 켜진다. 벤더도 같다).
 8. [ ] M-PHY를 본다. 커널은 M-PHY 레지스터를 건드리지 않는다. 높은 기어에서 링크가 흔들리면 벤더(ATF·UniPro 속성)와 견준다.
 
 ### 6.7 USB 가젯
 
-mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스트 쪽은 같은 커널의 `cdc_acm`·`cdc_ncm`으로만 시험했고 가짜 UDC(`dummy_hcd`) 위였다. macOS·Windows의 NCM은 보지 못했다.
+mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-03에 맥(HS)에서 직렬 셸과 NCM이 됐다. Windows는 보지 못했다. 업스트림만으로는 뜨지 않아 패치 0141~0143이 필요하다(실측 보고서 7절).
 
 > **위험: USB 끊김.** ssusb를 켤 때 SPMI M 버스와 MT6368(MFD·regulator)이 켜져 있지 않으면 mtu3가 공급을 기다리며 뜨지 않는다. 포트가 하나이고 호스트 모드가 없어 이 길이 화면 말고는 유일하다.
 >
 > **먼저 둘 것.** 6.3~6.5절의 노드, 화면 콘솔과 pstore.
 
-1. [ ] mtu3가 `vusb33`을 받아 뜨는지 본다. 더미 공급 경고 "supply vusb33 not found"가 없어야 한다.
-2. [ ] `dr_mode`와 UDC 이름, 실제 열거를 본다. `dummy_udc`와 달리 초기화 순서가 다를 수 있어 서비스가 `buntos.wait`초 기다린다.
-3. [ ] 호스트에서 직렬 포트에 들어간다. 호스트의 장치 이름은 macOS `/dev/cu.usbmodem*`, Linux `/dev/ttyACM0`이다. USB 제품 문자열로 어느 쪽 가젯인지 안다(`TB375FC initramfs`, `TB375FC`).
+1. [x] mtu3가 `vusb33`을 받아 뜨는지 본다(2026-11-03). 더미 공급 경고 "supply vusb33 not found"가 없어야 한다.
+2. [x] `dr_mode`와 UDC 이름, 실제 열거를 본다(2026-11-03. `11201000.usb`, 맥에서 `configured`). `dummy_udc`와 달리 초기화 순서가 다를 수 있어 서비스가 `buntos.wait`초 기다린다.
+3. [x] 호스트에서 직렬 포트에 들어간다(2026-11-03). 호스트의 장치 이름은 macOS `/dev/cu.usbmodem*`, Linux `/dev/ttyACM0`이다. 부팅 때 프리로더도 약 3초 동안 같은 꼴의 포트를 내니 거기에 쓰지 않는다. USB 제품 문자열로 어느 쪽 가젯인지 안다(`TB375FC initramfs`, `TB375FC`).
 
     ```bash
     screen /dev/ttyACM0 115200
     ```
 
-4. [ ] 네트워크를 본다. 기기는 172.16.42.1/24, 호스트는 DHCP로 172.16.42.2를 받는다. initramfs에서는 `buntos.telnet=1`이면 telnetd가 뜬다. 옵션은 [init](../../bsp/lenovo-tb375fc/initramfs/init) 머리말에 있다.
+4. [x] 네트워크를 본다(2026-11-03. 맥의 `en9`가 172.16.42.2를 받고 ping과 telnet이 된다). 기기는 172.16.42.1/24, 호스트는 DHCP로 172.16.42.2를 받는다. initramfs에서는 `buntos.telnet=1`이면 telnetd가 뜬다. 옵션은 [init](../../bsp/lenovo-tb375fc/initramfs/init) 머리말에 있다.
 5. [ ] 속도를 본다. USB3는 PS5170 리드라이버가 있어야 해 그 드라이버 전에는 HS로만 붙는다(설계안 4절). SS가 흔들리면 벤더가 MT6897에만 넣는 U3 RX CDR 값부터 본다(U3 포트 `+0x408`의 [23:16] `RG_XTP_LN0_RX_CDR_RESERVE` = 0x8).
-6. [ ] U2 INTR_CAL을 본다. `0x11e40330`의 [29:24]를 읽어 LK가 둔 값을 적고, 4절 9번의 efuse 값과 견준다. 다르면 xsphy MT6897 꼴(칸과 nvmem)을 만든다.
-7. [ ] eye 값을 본다. `0x11e40304`의 [14:12] = 7, [10:8] = 3인지 본다.
+6. [ ] U2 INTR_CAL을 본다(2026-11-03. LK 값과 efuse 값이 하나 다르다. HS 열거는 된다. 신호 품질을 볼 때 다시 본다). `0x11e40330`의 [29:24]를 읽어 LK가 둔 값을 적고, 4절 9번의 efuse 값과 견준다. 다르면 xsphy MT6897 꼴(칸과 nvmem)을 만든다.
+7. [x] eye 값을 본다(2026-11-03. 맞다). `0x11e40304`의 [14:12] = 7, [10:8] = 3인지 본다.
 
 ### 6.8 루트 파티션
 
@@ -515,7 +514,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 호스�
 
 이미지의 systemd가 UFS의 GPT를 고치지 못하게 `systemd-repart`와 `systemd-gpt-auto-generator`를 보드 프로필과 initramfs에서 가렸다. 이 가림을 풀지 않는다. QEMU에서 GPT와 다른 파티션의 해시로 확인했다.
 
-1. [ ] 가젯 셸에서 UFS를 읽기 전용으로 확인하고 파티션 표를 읽는다. 커널이 MediaTek GPT를 읽어 `PARTNAME`이 나오는지 본다. LU 여럿에서 같은 이름이 없는지 본다. 지금은 먼저 찾은 것을 쓰고 겹침을 따로 알리지 않는다.
+1. [x] 가젯 셸에서 UFS를 읽기 전용으로 확인하고 파티션 표를 읽는다(2026-11-04. 표는 `sdc`에만 있고 `PARTNAME` 82개가 나온다). 커널이 MediaTek GPT를 읽어 `PARTNAME`이 나오는지 본다. LU 여럿에서 같은 이름이 없는지 본다. 지금은 먼저 찾은 것을 쓰고 겹침을 따로 알리지 않는다.
 2. [ ] 크기와 이름을 정한다(4절 7번).
 3. [ ] 고치기 전의 GPT(앞·뒤 표)를 떠서 기기 밖에 둔다.
 4. [ ] GPT를 고친다.
