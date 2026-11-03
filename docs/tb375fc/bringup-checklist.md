@@ -338,6 +338,7 @@ fastboot flash init_boot <패치한 이미지>
 
 1. [x] **판정: EL1, KVM 불가(2026-11-03).** `CPU: All CPU(s) started at EL1`, `kvm [1]: HYP mode not available`이다. 커널 기록의 `CPU: All CPU(s) started at EL2`(또는 `EL1`)와 kvm 초기화 메시지를 본다([buntOS 설계안](../design/ARCHITECTURE.md) 12.1절). 안드로이드 쪽 예비 판정은 GenieZone이 EL2를 차지할 가능성이 높다는 것이다.
     - 가능: 커널이 EL2에서 시작하고 `/dev/kvm`이 생긴다.
+    - 결정(2026-11-04, 사용자): 일반 개발 환경에는 EL1로 충분해 이 기기로 그대로 간다. 다른 태블릿을 매입하면 그때 다시 시도한다.
     - 불가(EL2 점유): 커널이 EL1에서 시작하고 GenieZone 흔적이 있다. KVM을 포기하고 gzvm(미병합)은 나중에 검토한다(설계안 D8). buntOS ADR-011을 다시 본다(설계안 10절).
     - TEE를 고쳐 EL2를 빼앗는 실험(`mtk-mod-tee-nogz`)은 쓰지 않는다. 서명 우회가 필요하고 벽돌 위험이 크다.
 
@@ -567,7 +568,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
 
 기기에서 UFS·USB가 뜬 뒤에 한다.
 
-- 재시도 다루기. LK가 `_b`의 재시도를 부팅마다 줄이고 `successful_boot`를 세우는 쪽이 없어, 잘 도는 시스템도 7번 부팅하면 `_a`로 넘어간다. `misc`(0x800)의 재시도를 부팅이 끝난 뒤 되돌리는 서비스가 필요하다.
+- [x] 재시도 다루기(2026-11-04). LK가 `_b`의 재시도를 부팅마다 줄이고 `successful_boot`를 세우는 쪽이 없어, 잘 도는 시스템도 7번 부팅하면 `_a`로 넘어간다. `buntos-slot-keep`이 부팅 뒤 `misc`(0x800)의 재시도를 7로 되돌린다. `successful_boot`는 세우지 않아, 뜨지 않는 커널은 그대로 `_a`로 돌아간다. 안드로이드로 일부러 가려면 이 서비스를 끄고 재부팅한다(`.handoff`의 `to-a.sh`). 처음 판은 경로 조건을 써서 부팅 때 늘 건너뛰었고, 재시도를 다 써 안드로이드로 넘어갔다. 지금은 장치 유닛을 기다린다.
 - 시험 층(`test-stage.dtsi`)의 노드를 보드 dts로 옮긴다. 이때 `framebuffer0`의 `clocks`도 함께 옮긴다. 빠지면 UFS가 화면을 죽인다(6.2절).
 - UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`).
 - MCQ. 공통 바인딩의 인터럽트 수를 고치고, 큐 인터럽트 SPI 177~184를 넣고, `mediatek,ufs-disable-mcq`를 뺀다. 이 속성을 뺀 시험은 그 뒤에 한다.
@@ -597,14 +598,14 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
 
 **리눅스:**
 
-3. [ ] `pmic@9`만 `okay`로 바꾼다(`rtc@580`은 그대로). 이 드라이버 때문에 버스에 닿는 것이 없다(MFD는 자식만 띄운다).
+3. [x] `pmic@9`만 `okay`로 바꾼다(`rtc@580`은 그대로). 이 드라이버 때문에 버스에 닿는 것이 없다(MFD는 자식만 띄운다).
 
     ```bash
     ls -l /sys/bus/spmi/devices/0-09/driver    # mtk-spmi-pmic
     ls /sys/class/rtc                          # 비어 있다
     ```
 
-4. [ ] `rtc@580`도 `okay`로 바꾼다. 부팅 로그를 본다.
+4. [x] (2026-11-04: 맞는 시각, 연도 정상) `rtc@580`도 `okay`로 바꾼다. 부팅 로그를 본다.
 
     ```bash
     dmesg | grep -i -E 'rtc|mt6685'
@@ -615,7 +616,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
     - **연도가 2086이나 2094면** 연도 칸의 해석이 틀린 것이다. 여기서 멈추고 `hwclock -w`를 하지 않는다. 안드로이드로 돌아가면 그 값을 읽는다.
     - 칩이 연도 칸 0·1(1968·1969)이나 틀린 날짜를 담고 있으면 `-EINVAL`이고 시스템 시간을 건드리지 않는다.
 
-5. [ ] 시간이 흐르는지 본다. **이것이 드라이버의 가장 큰 가정이다.** 레지스터가 클럭 게이트를 잠깐 여는 것만으로 카운터를 따라온다고 본다(OnePlus 커널과 2025년 뒤 MediaTek 판). 이 기기의 스톡 모듈은 더 옛 판이라 BBPU `RELOAD`를 쓴다.
+5. [x] (2026-11-04: 3초에 3씩 는다) 시간이 흐르는지 본다. **이것이 드라이버의 가장 큰 가정이다.** 레지스터가 클럭 게이트를 잠깐 여는 것만으로 카운터를 따라온다고 본다(OnePlus 커널과 2025년 뒤 MediaTek 판). 이 기기의 스톡 모듈은 더 옛 판이라 BBPU `RELOAD`를 쓴다.
 
     ```bash
     for i in 1 2 3; do cat /sys/class/rtc/rtc0/time /sys/class/rtc/rtc0/since_epoch; sleep 3; done
@@ -716,25 +717,25 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
     - f. USB 메모리는 그대로 보여야 한다. USB 호스트가 되는 8절 6단계 뒤에 꽂아 사이드바에 나타나고 붙는지 본다. `udevadm info -q property -n /dev/sdX1 | grep UDISKS_`는 비어 있어야 한다.
     - g. 숨김일 뿐 막지 않는다는 것은 소스와 QEMU에서 확인했으므로 기기에서 붙여 보지 않는다.
 
-2. [ ] 터치 펌웨어를 넣는다. 드라이버는 터치를 열 때 루트에서 읽는다(`TOUCHSCREEN_NOVATEK_NVT_SPI=m`).
+2. [x] 터치 펌웨어를 넣는다. 드라이버는 터치를 열 때 루트에서 읽는다(`TOUCHSCREEN_NOVATEK_NVT_SPI=m`).
     - `vendor/firmware/novatek_ts_fw_boe.bin` → `/lib/firmware/lenovo/tb375fc/novatek_ts_fw_boe.bin`
     - `vendor/firmware/novatek_ts_fw_tm.bin` → `/lib/firmware/lenovo/tb375fc/novatek_ts_fw_tm.bin`
-3. [ ] 노드를 켠다. pio·클럭 컨트롤러에 더해 `spi2`, `gpio-keys`, `vddio_1v8`, `uart3`이다. `vddio_1v8`(GPIO63)은 패널과 터치가 같이 쓰는 I/O 전원이라 simple-framebuffer 동안 꺼지면 안 된다. 그래서 `regulator-always-on`이다.
+3. [x] 노드를 켠다. pio·클럭 컨트롤러에 더해 `spi2`, `gpio-keys`, `vddio_1v8`, `uart3`이다. `vddio_1v8`(GPIO63)은 패널과 터치가 같이 쓰는 I/O 전원이라 simple-framebuffer 동안 꺼지면 안 된다. 그래서 `regulator-always-on`이다.
 4. [ ] 패널 노드와 `framebuffer0`의 `panel`이 트리에 있다(꺼 둠). simpledrm 커넥터의 크기(`modetest` 또는 `/sys/class/drm`)가 273×171mm인지, 기본 배율이 225%인지 본다.
 5. [ ] 전체 이미지에서 `greetd`·`bunt-comp`와의 관계, 공통 설치 뒤 스크립트와의 순서(보드 것이 먼저 돈다)를 본다. 작은 시험 이미지에는 데스크톱 꾸러미가 없어 보지 못했다.
 
 ### 7.2 터치
 
-패치 0027~0031이다. 프로토콜은 OEM 코드, 패널 판별과 펌웨어 이름은 제3자 미러, 좌표 범위는 실측에서 왔다. 기기 시험은 없다.
+패치 0027~0031이다. 프로토콜은 OEM 코드, 패널 판별과 펌웨어 이름은 제3자 미러, 좌표 범위는 실측에서 왔다. 2026-11-04에 1~4번을 기기에서 확인했다. 서스펜드와 복귀(5번)는 아직이다.
 
-1. [ ] spi2 probe를 본다. `/sys/kernel/debug/clk`에서 spi2 먹스의 부모와 값을 읽는다.
+1. [x] spi2 probe를 본다. `/sys/kernel/debug/clk`에서 spi2 먹스의 부모와 값을 읽는다(182 MHz). 컨트롤러 자체 CS로는 0만 돌아와 보드 dts를 `cs-gpios`로 바꿨다.
     - SCLK는 9.6 MHz 아래여야 한다. 부모 182 MHz면 9.1 MHz, 208 MHz면 9.45 MHz다(코드로 본 것).
     - 전송이 깨지면 `cs-gpios = <&pio 12 GPIO_ACTIVE_LOW>`(GPIO12를 GPIO로)를 쓴다. OEM의 소프트웨어 CS를 업스트림이 쓰지 않는다. 이 드라이버는 전송 하나짜리 메시지만 써서 차이가 작을 것으로 보지만 기기에서 본다.
-2. [ ] 터치 probe를 본다. `dyndbg`로 `novatek_nvt_spi`를 켠다.
+2. [x] 터치 probe를 본다(Tianma, `_tm` 펌웨어). `dyndbg`로 `novatek_nvt_spi`를 켠다.
     - trim ID: `xx xx xx 32 65 03`.
     - 패널 ID(GPIO184): 0이면 BOE(`novatek_ts_fw_boe.bin`), 1이면 Tianma와 Tianma 무광(`novatek_ts_fw_tm.bin`). LK 기록의 패널과 맞는지 본다. 패널 드라이버도 이 줄로 고른다.
-3. [ ] 열 때를 본다(`evtest`). 펌웨어는 터치를 열 때 내려받는다. 리셋 상태 0xA0·0xA1, 펌웨어 판, 손가락 좌표를 본다. 컨트롤러 좌표는 X 0~18400, Y 0~29440이고 픽셀의 10배다(실측).
-4. [ ] 화면 네 모서리를 눌러 축을 정한다. `touchscreen-inverted-x/y`를 여기서 정한다. `touchscreen-swapped-x-y`는 보드에 있다.
+3. [x] 열 때를 본다(`evtest`). 펌웨어는 터치를 열 때 내려받는다. 리셋 상태 0xA0·0xA1, 펌웨어 판, 손가락 좌표를 본다. 컨트롤러 좌표는 X 0~18400, Y 0~29440이고 픽셀의 10배다(실측).
+4. [x] 축을 정한다. 결과는 `touchscreen-inverted-x`다(위아래가 반대였다). 화면에 점을 찍는 시험 도구로 사용자가 확인했다. `touchscreen-swapped-x-y`는 보드에 있다.
 5. [ ] 서스펜드·복귀 뒤 터치와 시간을 본다. 복귀 때 펌웨어를 다시 올린다.
 6. [ ] 펌웨어 워치독 복구를 본다. 드물다. 일어나면 기록에 "controller was reset"이 남는다.
 
@@ -752,7 +753,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
 
 패치 0032~0036이다. 프로토콜은 글로벌판(TB373FU) 스톡 모듈을 읽은 것이고, 사용자 기기는 중국판 ZUXOS다. 키보드 MCU는 액세서리 쪽이라 프로토콜이 같을 것으로 본다(판단). 실물 확인은 이 절이다. 드라이버는 사용자 공간 시뮬레이터로 돌렸고 기기 시험은 없다. 3번이 프로토콜 판단을 가르는 첫 확인이다.
 
-1. [ ] UART3 패드 모드(`mediatek,syscon-pad-mode`, pericfg_ao `0x50`)를 본다. 켠 뒤 `0x11036050`의 값은 bit 4 = 1, bit 0 = 0이어야 한다. 스톡 로그의 "first get uart3_def_value"처럼 바뀌기 전 값(리셋 값)도 본다. 이 비트 없이는 UART3이 패드로 나가지 않을 수 있어 필요하다고 판단했다.
+1. [x] (2026-11-04: `0x10`) UART3 패드 모드(`mediatek,syscon-pad-mode`, pericfg_ao `0x50`)를 본다. 켠 뒤 `0x11036050`의 값은 bit 4 = 1, bit 0 = 0이어야 한다. 스톡 로그의 "first get uart3_def_value"처럼 바뀌기 전 값(리셋 값)도 본다. 이 비트 없이는 UART3이 패드로 나가지 않을 수 있어 필요하다고 판단했다.
 2. [ ] GPIO26이 키보드를 붙이면 0, 떼면 1인지 본다. GPIO61(전원)이 따라가는지 본다.
 3. [ ] 처음 프레임을 본다. `dyndbg`로 `oneplus_pogo_kbd`를 켠다.
     - 기대: 전원 뒤 첫 프레임이 0x7B로 풀리고 "bad sum"이 없다. 그러면 프로토콜 판단이 맞다.
@@ -951,11 +952,13 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
     6. [ ] `framebuffer0`에 이 블록의 게이트를 `clocks`로 적지 않는다. simpledrm은 클럭을 켠 뒤에 도메인을 잡아, LK가 화면을 켜지 않은 부팅에서 꺼진 블록에 쓴다.
 - 2d: `consys@18001000`(`mediatek,mt6897-consys`), `wifi@18000000`(`mediatek,mt6897-wifi`), `bluetooth@18800000`. 전원 도메인(위)이 먼저이고 차례는 9.1절과 9.2절이다. 진짜 루트에서 nvdata를 붙일 때는 initramfs처럼 `blockdev --setro`와 `ro,noload`로 붙인다.
 - 2e: 전원 키로 s2idle에서 깨는지, mcusys-off·system idle 상태와 s2idle(SPM), DSU PMU(SPI 35), `#cooling-cells`, mtu3 깨우기 접점, 커넥터 과열 보호(`usb_board_ntc`, GPIO179). `clk_ignore_unused`를 뺄 때 `mfgsc_ref`에도 `CLK_IGNORE_UNUSED`를 준다(패치 0013은 `mfg_ref`에만 있다).
-- 3: 볼륨 내림(SoC 키패드)이 업스트림 `mt6779-keypad`로 되는지 본다.
+- 볼륨 내림(SoC 키패드)은 업스트림 `mt6779-keypad`로 된다(2026-11-04, 패치 0145).
 
 ### 9.1 2d Wi-Fi
 
-아래는 코드와 자료로 짠 차례다. 기기에서 돌린 적이 없다. 2a(부팅, 콘솔), 2b(SPMI·PMIC·핀·USB 가젯)가 된 뒤에 한다.
+**결과(2026-11-04).** 시험 커널은 트리를 안에 넣어 LK의 값을 받지 못하므로 `gen_dts.py`가 순정 트리의 `emi-addr`, `memory-region`을 옮겨 적는다. 1~5단계의 줄이 `firmware running`까지 나왔다. `unified command probe: -110`으로 uni 명령을 받지 않는다. 시험을 건너뛰면 CE 0x8a에 답이 온다. 레거시 경로(0061~)가 필요하다. 처음 본 EXT 0x3e 시간 초과는 명령을 몰아 보내 링이 멈춘 뒤의 일이었고, 멀쩡한 펌웨어에서는 EXT 명령에 답이 온다. 보정 파일은 기기 파티션을 열지 않고 백업에서 꺼내 넣었다.
+
+아래는 코드와 자료로 짠 차례다. 2a(부팅, 콘솔), 2b(SPMI·PMIC·핀·USB 가젯)가 된 뒤에 한다.
 위에서 아래로 하고, 앞 단계를 채운 뒤 다음으로 간다. 장치 트리는 단계마다 적은 노드를 켠다.
 
 1·2단계 다음에는 9.2절의 Bluetooth를 먼저 한다. nvdata도 DMA 칸도 필요 없어 connsys 전원의 첫 시험으로 가볍다. 다만 Wi-Fi 없이 켜면 보정이 나쁠 수 있으므로, 전원 길의 시험과 RF 품질은 나눠 본다.
@@ -1125,7 +1128,9 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 
 ### 9.2 2d Bluetooth
 
-아래는 코드와 자료로 짠 차례다. 기기에서 돌린 적이 없다. 2a(부팅, 콘솔), 2b(SPMI·PMIC·핀·USB 가젯)가 된 뒤에 한다.
+**결과(2026-11-04).** 1~2단계의 줄이 모두 나왔고 `WMT function on: status 0`, 보정 status 0이다. 시험값 주소를 넣으면 어댑터가 켜지고 스캔에서 주변 장치 17개가 보인다. 펌웨어가 LMP에 Synchronization Train을 세우고 명령 표에는 올리지 않아 HCI 초기화가 멈췄다(패치 0087). 남은 것: 페어링, 부팅 때 주소 넣기, Wi-Fi와 함께 쓰기.
+
+아래는 코드와 자료로 짠 차례다. 2a(부팅, 콘솔), 2b(SPMI·PMIC·핀·USB 가젯)가 된 뒤에 한다.
 9.1절의 1·2단계가 먼저다. 그 뒤로 Bluetooth와 Wi-Fi는 어느 쪽을 먼저 해도 된다.
 
 #### 공통 준비
@@ -1222,7 +1227,9 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 
 단계 A와 B는 충전, C와 D는 TCPC다. 8절(VBUS)은 단계 D로 합쳐진다. D에서는 `usb_vbus_output`을 켜지 않는다.
 
-코드와 자료로 짠 차례이고 기기에서 돌린 적이 없다. UFS 루트와 USB 가젯이 기기에서 된 뒤에 한다. 모든 시험은 **시간이 지나면 저절로 되돌아가는 배경 스크립트**로 하고, 결과는 UFS에 남긴다. 멈추면 전원 키 길게. 먼저 Android에서 100%까지 충전하고 `dumpsys battery`로 전압과 온도를 적어 둔다. 게이지 값과 견줄 기준이다.
+**결과(2026-11-04, 사용자 동석, 전력계 없음, 배터리 82%).** A, B의 1·2·4번, C의 1·2·4·7번을 확인했다. i2c-mt65xx가 TCPC의 `vbus-supply`를 자기 공급으로 잡아 버스가 뜨지 못했다(패치 0148). TCPC는 VBUS 레귤레이터의 입력 때문에 `charge_pump_65`를 켜야 뜬다. 맥 포트에서 입력 1.5 A, 배터리 약 520 mA다. 70% 조건은 입력 0.5 A가 부하보다 작아 CV에 닿지 않으므로 넘겼다. 남은 것: B의 타이머, C의 케이블 뒤집기와 충전기 시험, 만충, D, E. 부팅 때 충전 드라이버를 올리는 결정도 남았다.
+
+UFS 루트와 USB 가젯이 기기에서 된 뒤에 한다. 모든 시험은 **시간이 지나면 저절로 되돌아가는 배경 스크립트**로 하고, 결과는 UFS에 남긴다. 멈추면 전원 키 길게. 먼저 Android에서 100%까지 충전하고 `dumpsys battery`로 전압과 온도를 적어 둔다. 게이지 값과 견줄 기준이다.
 
 #### A. 읽기만 (쓰기 0번)
 
@@ -1372,7 +1379,11 @@ D가 안정된 뒤 5 V 충전기와 PC에서 한 번씩. 하드 리셋이 나는
 
 ### 9.4 2e GPU·열·게이지
 
-패치 0070~0079다. 코드, 벤더 자료, 모의 시험으로 확인했고 기기에서 돌리지 않았다. 아래는 기기에서만 알 수 있는 것이다. 각 단계는 앞 단계가 맞을 때만 넘어간다. 노드를 켜는 차례 자체가 안전장치다. 첫 판단 거리는 하드웨어 열 리셋이 켜져 있는지다(1번). 게이지(6번)는 9.3절 B보다 먼저다.
+패치 0070~0079다.
+
+**결과(2026-11-04).** 0~4번과 6번을 기기에서 봤다. 0번의 값은 표와 같다. 하드웨어 리셋은 켜진 것으로 본다. 다만 AP 셋째 컨트롤러는 펌웨어가 오프셋을 남겨 미뤄져 있어 경고만 남기고 쓴다(패치 0146). GPU·APU 구역은 전원이 켜질 때까지 조용히 기다린다(패치 0147). 냉각 장치가 없으면 전 코어 부하에서 5초에 93도라 CPU와 GPU에 passive 85도를 넣었다. 커뮤니티 포트가 멈춘 GPU 첫 전원은 문제없이 지났다. Mesa는 26.3.0-rc3으로 렌더링 결과까지 맞았다. 컴포지터와 서스펜드(7번)는 아직이다. CPU 유휴 상태는 PSCI 거절로 뺐다.
+
+코드, 벤더 자료, 모의 시험으로 짠 차례다. 아래는 기기에서만 알 수 있는 것이다. 각 단계는 앞 단계가 맞을 때만 넘어간다. 노드를 켜는 차례 자체가 안전장치다. 첫 판단 거리는 하드웨어 열 리셋이 켜져 있는지다(1번). 게이지(6번)는 9.3절 B보다 먼저다.
 
 위험: 부팅 불가가 아니라 그 자리 멈춤이다. 커뮤니티 포트는 GPU 첫 전원 근처에서 SoC가 멈췄다는 보고가 있다(포럼 보고). 되돌리는 길은 전원 키 길게와 그 앞 단계의 dtb다.
 

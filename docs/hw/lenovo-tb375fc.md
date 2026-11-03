@@ -275,6 +275,7 @@ Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`
 | 키 | 리눅스에서 전원 + 볼륨 올림은 fastboot로 들어간다. 전원 + 볼륨 내림은 반응이 없었다 |
 | pstore | 안드로이드의 ramoops는 record 0x1000, console 0x40000, ftrace 0x1000, pmsg 0x80000이고 보드 dts도 같은 값으로 맞췄다. 따뜻한 재부팅이면 리눅스에서 리눅스로, 리눅스에서 안드로이드로 기록이 넘어간다(`console-ramoops-0`, 30233바이트). 전원 + 볼륨 올림 리셋 뒤에는 비어 있다 |
 | EL | **`CPU: All CPU(s) started at EL1`, `kvm [1]: HYP mode not available`.** 이 기기에서 KVM을 쓸 수 없다. 예약 메모리의 `mblock-16-gz`로 보아 GenieZone이 EL2를 차지한 것으로 본다(판단) |
+| EL1에서 되는 것 | 8코어(A510 넷, A715 넷) 모두 같은 기능 줄이다. PAC, BTI, SVE2(128비트), AMU, PMU(A510 카운터 7, A715 21)가 잡힌다. 네임스페이스 여섯 종(user, pid, mount, uts, ipc, net)을 만들어 봤다. MTE는 `arm64.nomte`로 껐고 순정 명령줄에도 같은 인자가 있어, EL2 때문인지는 모른다. EL1에서는 EL2 레지스터를 읽지 못해 stage-2 변환 여부와 그 손해를 잴 수 없다. 리눅스에 보이는 메모리는 7.36 GiB이고, 순정 트리의 GenieZone 예약은 26 MiB, `hypervisor` 노드는 `disabled`다 |
 | 부팅 시간 | `initcall_debug`를 빼면 0.16초에 `/init`을 돌린다(켜면 0.93초) |
 | `kernel_panic,init`의 원인 | `expdb` 앞에 LK의 kedump가 남아 있다(머리 `0xaee0dead`, 항목 0x12. 판 내리기 직전 백업에서는 전부 0이었다). LK가 부팅마다 `kedump: found content in expdb`로 저장된 pstore와 ram console을 메모리에 되살린다(`SYS_PSTORE_RAW`, `SYS_RAMCONSOLE_RAW`). 그래서 부팅 이유가 계속 `kernel_panic`이고 pstore에 6.1.138 패닉이 남았다. `expdb` 앞 12KB를 0으로 하자 부팅 이유가 `reboot,shell`로 돌아왔다 |
 | 커널 기록 | CPU 8개(0~3 Cortex-A510 `0x411fd461`, 4~7 Cortex-A715 `0x411fd4d0`), PSCI 1.1, GICv3 SPI 960개, 메모리 7447704K/8388608K, `mtk-wdt 1c00a000` 켜짐(31초), 성능 도메인 셋, 약 0.15초에 `/init`이다. 오류는 없고, A715 쪽에 `SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR1_EL1`이 나온다. 원문은 `.handoff/tb375fc-device-readings/boot-b-7/`에 있다 |
@@ -322,6 +323,32 @@ Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`
 | 안드로이드 슬롯 | `_b`의 재시도를 다 쓰자 `_a`가 새 표에서 부팅해, 약 47초 뒤 USB 장치(`联想小新Pad Pro 12.7`)로 올라왔다. 화면에 초기 설정이 나온다(사용자 확인). 초기화 상태라 ADB는 꺼져 있다 |
 | fastboot | `getvar partition-size:userdata`는 `0x70d700000`(28.2 GiB)이고 `buntos`는 값이 비어 있다. `--set-active=b` 뒤 `_b`의 재시도는 6이다 |
 | A/B 정보 | `misc`의 오프셋 0x800(AOSP `bootloader_control`, 매직 `BCAB`). `_b`의 재시도는 LK가 부팅마다 줄이고, 다 쓰면 `_a`로 간다. `successful_boot`를 세우는 쪽이 아직 없다 |
+
+### 2c·2d·2e 기기 시험 (2026-11-04)
+
+시험 커널에서 본 값이다. 재부팅해도 같은 트리가 돈다. 전력계 없이 칩 설정값과 게이지로 봤다.
+
+| 항목 | 값 |
+|---|---|
+| 터치 | NT36532. 컨트롤러 자체 CS로는 칩이 0만 돌려주고, GPIO12를 소프트웨어 CS로 쓰면 trim ID `32 65 03`이 온다. 1 MHz와 4 MHz에서 같다. 패널 ID(GPIO184)는 1이고 LK 기록의 Tianma와 맞다. 터치를 열면 펌웨어 약 600 KB가 SPI로 내려간다. 축은 `touchscreen-swapped-x-y`와 `touchscreen-inverted-x`다. 화면에 점을 찍어 사용자가 확인했다. 두 손가락 확인, 보고 간격 약 7 ms |
+| 키 | 전원과 볼륨 올림은 MT6363 키, 볼륨 내림은 SoC 키패드(`mt6779-keypad`, 행 0 열 0, 32 ms)다 |
+| 덮개, 펜, 키보드 | 미확인(액세서리 없음). 입력 장치는 올라온다. UART3 패드 `0x11036050`은 `0x10`, 키보드가 없을 때 GPIO26은 1이다 |
+| RTC | MT6685. `hctosys`로 시스템 시간이 맞고 3초에 3씩 는다. 쓰기는 아직 안 했다 |
+| connsys | conn 도메인이 켜지고 꺼진다. A-die `0x66378a01`, 클럭 52 MHz co-clock. SIP `init_atf_data`, `afe_sw_patch`는 -1을 돌려주고 벤더처럼 계속 간다 |
+| Bluetooth | `BGF: version 02080000`, `WMT function on: status 0`, 보정 status 0(1020바이트), HCI 6.0, 제조사 70. 스캔에서 주변 장치 17개. 주소는 시험값이다. 실패한 Wi-Fi 위에서 켜면 BGF ROM이 돌지 않았다(`radios 0x9`, `MCU ROM: 00000000`). Wi-Fi가 정상일 때 다시 본다 |
+| Wi-Fi | ROM, 링, PHY action, 펌웨어 시작까지 된다. 빌드 `t-neptune-main-soc7_0-2104-PONSOT_SOC7_0_E1_ASIC-20250320113502`. uni `DEV_INFO`에는 멀쩡한 펌웨어에서도 답이 없고, CE `GET_NIC_CAPAB`과 EXT 명령에는 답이 온다. 명령을 연달아 보내면 명령 링이 간헐적으로 멈춘다 |
+| 열 센서 | MCU, AP 유휴 38~42도. 컨트롤러에 PROTCTL 전략, PROTTC 약 119도, MONINT bit 31이 서 있어 하드웨어 리셋이 켜진 것으로 본다. AP 셋째 컨트롤러(모뎀 센서)만 `PROTCTL` 낮은 절반에 `0x3FFF`가 남아 리셋이 미뤄져 있다. 측정값은 다른 컨트롤러와 같은 범위다. GPU·APU 컨트롤러는 그쪽 전원이 꺼지면 `CLKEN`이 0이다 |
+| CPU 냉각 | 냉각 없이 전 코어 부하에서 5초 안에 93도. passive 85도와 cpufreq 냉각을 넣으면 40초 동안 87~93도, cpu7 약 2.0 GHz. 멈추면 5초 안에 46~53도 |
+| CPU 유휴 | `cpu-off`, `cluster-off`는 사용 0, `rejected`만 쌓인다(1천만 회 이상). 유휴 상태를 끄면 전류가 약 30 mA 준다. PSCI CPU_SUSPEND 거절로 본다. 벤더 쪽 초기화가 필요한지는 모른다 |
+| 게이지 | MM8013. 4.27 V, 87%, 28.7도, `charge_full` 9676 mAh, 설계 10000 mAh, 사이클 23. `current_now`는 방전이 양수다. `0x30`은 이번에 `0x11b2`(4530)였다 |
+| 충전 칩 | MT6375 `0x72`, TCPC `cf 29 75 63`, 차지 펌프 UPM6720 @0x65. LK 값: CV 4.35 V, ICHG·AICR 0.5 A, CHG_EN 1, 워치독 꺼짐, `0x33` = `0x80`. 읽기 전용 드라이버에서 쓰기 0 |
+| 충전 넘겨받기 | CV 4.34 V, 입력·충전 0.5 A. `inhibit-charge`로 `CHG_EN` 0, `auto`로 복귀. 게이지를 떼면 27초 뒤 `Lost the fuel gauge`로 멈추고 다시 묶으면 돌아온다 |
+| USB-C 싱크 | 맥 포트 Rp 1.5A. 입력 1.5 A, 배터리에 약 520 mA, 4.217 V에서 4.252 V, 1분 동안 온도 변화 없음. 가젯은 그대로이고, 드라이버를 내리면 `0x1a` `0x0a`, 입력 0.5 A다 |
+| GPU | GPUEB `65 GPU OPPs, 0 stack OPPs, shader cores 0x130013`. panthor: Mali-G615 `0xb8a3`, CSF v2.8.0(linux-firmware arch11.8). devfreq 265 MHz~1.4 GHz. 런타임 서스펜드에서 `off-0`이다 |
+| Mesa | 26.1.6은 G615를 몰라 llvmpipe로 내려간다. 26.3.0-rc3은 `Mali-G615 MC6 (Panfrost)`, ES 3.1이다. 1080p 전 픽셀 맞대기 오류 0, 무거운 셰이더 평균 230~248 FPS. 85도 passive로 약 1.13 GHz, 86도에서 안정된다 |
+| 개발 환경 | 기기에서 gcc, git, make, Podman(`debian:stable-slim`, `--network=host`), 네임스페이스 여섯 종이 된다 |
+| 대기 전류 | 화면 켬, 입력 0.5 A, 시험 커널에서 배터리 약 450~550 mA 방전 |
+| 슬롯 | 재시도는 부팅마다 준다. `buntos-slot-keep`이 `misc`의 `_b` 재시도를 되돌린다 |
 
 ## 8. 남은 것
 
