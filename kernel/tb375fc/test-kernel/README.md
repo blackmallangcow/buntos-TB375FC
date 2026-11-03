@@ -10,6 +10,7 @@
 |---|---|
 | `gen_dts.py` | 안드로이드의 `/sys/firmware/fdt`에서 예약 영역을 읽어 시험 dts를 만든다. 원본 트리에는 식별자가 있어 저장소에 넣지 않는다 |
 | `mt6897-lenovo-tb375fc-test.dts` | 위에서 만든 트리. 보드 dts를 포함하고 명령줄, 메모리, 예약 영역을 더한다 |
+| `test-stage.dtsi` | 2b에서 시험하는 단계까지 켤 노드(지금 핀, 클럭, SPMI, USB, UFS). 보드 dts는 그대로 두고 여기서만 `okay`로 바꾼다 |
 | `builtin-dtb.py` | 작업 트리의 `setup_machine_fdt()`를 고쳐 커널에 넣은 트리를 쓰게 한다 |
 | `build-test.sh` | 빌드 VM에서 시험 커널과 `boot.img`를 만든다 |
 | `flash-b-test.sh` | 맥에서 슬롯 `_b`에 굽는다 |
@@ -35,5 +36,9 @@ fastboot --set-active=b && fastboot reboot
 ## 기록 읽기
 
 명령줄의 `buntos.autoreboot=15`가 따뜻한 재부팅을 반복하게 한다. 재시도를 다 쓰면 LK가 `_a`로 돌아가고, 안드로이드에서 root로 `/sys/fs/pstore/console-ramoops-0`을 읽으면 마지막 부팅의 기록 전체가 나온다. 전원 + 볼륨 올림으로 리셋하면 pstore가 비어 있다. `expdb` 앞에 LK의 kedump가 남아 있으면 부팅마다 옛 기록을 되살리므로 지워야 한다(실측 보고서 7절).
+
+명령줄의 `buntos.dump=1`은 재부팅 직전에 `devices_deferred`, `/proc/interrupts`, `clk_summary`, `regulator_summary`, `pinctrl-maps`, `/sys/class/udc`, 묶인 플랫폼 장치를 `dump: ` 줄로 커널 기록에 남긴다. pmsg는 안드로이드에서 보이지 않아 커널 기록에 쓴다.
+
+USB 가젯이 켜진 뒤로는 맥에서 `/dev/cu.usbmodem*`(직렬 셸)나 `172.16.42.1`(telnet)로 들어간다. 부팅 때 프리로더도 약 3초 동안 같은 꼴의 포트를 내니, `ioreg -p IOUSB`에 `TB375FC`가 보일 때만 쓴다. 들어가서 `touch /run/buntos/no-autoreboot`를 하면 자동 재부팅이 멈춘다. 안드로이드로 돌아가려면 `reboot -f`로 재시도를 다 쓴다.
 
 셸에 머물게 하려면 시험 dts에서 `buntos.autoreboot`를 빼고 다시 만든다. 빠져나오는 키는 전원 + 볼륨 올림이고, 그 뒤 `fastboot --set-active=a`로 안드로이드로 돌아간다.

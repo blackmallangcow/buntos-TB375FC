@@ -30,6 +30,7 @@
 #   buntos.telnet=1        가젯 네트워크(172.16.42.1:23)에 암호 없는 telnetd를 띄운다
 #   buntos.debug=1         set -x
 #   buntos.autoreboot=<초> 그만큼 뒤에 따뜻하게 재부팅한다. 입력 장치가 없을 때 기록을 pstore에 남기는 시험용이다
+#   buntos.dump=1          재부팅 직전에 클럭, 레일, 인터럽트, 미뤄진 장치 등의 상태를 커널 기록에 남긴다 (console-ramoops-0)
 
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM=linux ENV=/etc/profile
 log=/run/buntos/boot.log
@@ -131,11 +132,63 @@ mount_ro() {
 	fi
 }
 
+# PMIC 레지스터를 하나씩 읽는다. registers 파일을 통째로 읽으면 칩의 모든 레지스터를 읽게 되므로
+# dd로 그 칸만 읽는다. 줄은 9바이트다(주소 4자리, 값 2자리)
+pmic_regs() {
+	local f=/sys/kernel/debug/regmap/$1/registers r
+	shift
+	for r; do
+		dd if="$f" bs=9 skip=$((r)) count=1 2>/dev/null
+	done
+}
+
+dump_state() {
+	for f in /sys/kernel/debug/devices_deferred /proc/interrupts /sys/kernel/debug/clk/clk_summary \
+		/sys/kernel/debug/regulator/regulator_summary /sys/kernel/debug/pinctrl/pinctrl-maps; do
+		echo "=== $f"
+		[ -e "$f" ] && cat "$f"
+	done
+	echo "=== /sys/kernel/debug/regmap"
+	ls /sys/kernel/debug/regmap
+	# MT6319: 벅 넷의 ELR(설정값)과 DBG0(실제 값), DBG4(켜짐 상태)
+	for sid in 06 07 08; do
+		echo "--- $sid"
+		pmic_regs "0-$sid" 0x1449 0x144b 0x144d 0x144f 0x1499 0x149d 0x1519 0x151d 0x1599 0x159d 0x1619 0x161d
+	done
+	# MT6363: TOP_TRAP, VEMC의 VOSEL·VOCAL 둘, VSRAM_CPUB·CPUM·CPUL 켜기
+	echo "--- 04"
+	pmic_regs 0-04-regulator 0x6 0x1b10 0x1b1b 0x1b1c 0x1dd7 0x1ded 0x1e57
+	echo "=== /sys/class/udc"
+	ls /sys/class/udc 2>&1
+	cat /sys/class/udc/*/state /sys/class/udc/*/current_speed 2>&1
+	for f in /sys/kernel/debug/usb/*/link-state /sys/kernel/debug/usb/*/regs/*; do
+		echo "--- $f"
+		cat "$f"
+	done
+	# PHY: U2PHYDTM0, U2PHYDTM1, INTR_CAL 칸, 눈 설정 칸
+	for a in 0x11e40368 0x11e4036c 0x11e40330 0x11e40304; do
+		echo "$a $(busybox devmem $a 32)"
+	done
+	echo "=== /sys/bus/platform/drivers"
+	for d in /sys/bus/platform/devices/*; do
+		[ -e "$d/driver" ] && echo "bound ${d##*/}"
+	done
+}
+
 late() {
 	after=$(arg buntos.autoreboot)
 	if [ -n "$after" ]; then
 		say "autoreboot in ${after}s"
-		( sleep "$after"; sync; reboot -f ) &
+		(
+			sleep "$after"
+			# 셸에서 이 파일을 만들면 재부팅하지 않는다
+			[ -e /run/buntos/no-autoreboot ] && exit 0
+			if [ "$(arg buntos.dump)" = 1 ]; then
+				dump_state 2>&1 | while IFS= read -r l; do echo "dump: $l" >/dev/kmsg; done
+			fi
+			sync
+			reboot -f
+		) &
 	fi
 
 	local wait_s

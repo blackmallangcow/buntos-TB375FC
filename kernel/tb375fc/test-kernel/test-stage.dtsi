@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+// 시험용: 2b에서 하나씩 켜는 노드. 기기에서 확인한 뒤 보드 dts로 옮긴다.
+
+// 6.1 핀, 6.2 클럭
+&pio {
+	status = "okay";
+};
+
+&apmixedsys {
+	status = "okay";
+};
+
+&topckgen {
+	status = "okay";
+};
+
+&vlpckgen {
+	status = "okay";
+};
+
+&pericfg_ao {
+	status = "okay";
+};
+
+&ufscfg_ao {
+	status = "okay";
+};
+
+&ufscfg_pdn {
+	status = "okay";
+};
+
+// 6.3 SPMI, 6.4 MT6363·MT6319, 6.5 MT6368. M 버스의 PMIC만 켠다. MT6685(@9)와 P 버스는 보드 dts대로 꺼져 있다.
+&spmi {
+	status = "okay";
+};
+
+// 6.7 USB 가젯. xhci0은 보드 dts대로 꺼 둔다.
+&ssusb {
+	status = "okay";
+};
+
+&xsphy {
+	status = "okay";
+};
+
+// 6.6 UFS. 안드로이드 파티션과 nvdata가 있으니 읽기만 한다.
+&ufsphy {
+	status = "okay";
+};
+
+&ufshci {
+	status = "okay";
+};

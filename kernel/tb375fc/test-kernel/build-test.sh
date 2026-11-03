@@ -23,8 +23,8 @@ fdtget -t s "$W/test.dtb" /chosen bootargs
 python3 -I "$here/builtin-dtb.py" "$T" "$W/test.dtb"
 "$T/scripts/config" --file "$O/.config" --set-str INITRAMFS_SOURCE "$B/images/initramfs.cpio.lz4" -e RD_LZ4
 touch "$T/arch/arm64/kernel/tb375fc-dtb.S"
-make -C "$T" O="$O" ARCH=arm64 olddefconfig >/dev/null
-make -C "$T" O="$O" ARCH=arm64 -j"$(nproc)" Image 2>&1 | grep -E 'error|warning: .*(setup|tb375fc)|OBJCOPY' | tail -n 4
+make -C "$T" O="$O" ARCH=arm64 LOCALVERSION= olddefconfig >/dev/null
+make -C "$T" O="$O" ARCH=arm64 LOCALVERSION= -j"$(nproc)" Image 2>&1 | grep -E 'error|warning: .*(setup|tb375fc)|OBJCOPY' | tail -n 4
 bsp/lenovo-tb375fc/boot/mkimages.sh --kernel "$K/Image" --dtb "$W/test.dtb" --initramfs "$B/images/initramfs.cpio.lz4" --out "$W/images" | tail -n 1
 cp "$W/images/boot.img" "$W/test.dtb" "$dest/"
 sha256sum "$dest/boot.img"
