@@ -1,0 +1,109 @@
+From: buntOS contributors
+Subject: [PATCH] of: reserved_mem: mark no-map regions before other reservations
+
+early_init_dt_reserve_memory() refuses to mark memory no-map once it is
+reserved, so the result depends on the order of the nodes when two of them
+cover the same memory.
+
+That order isn't always ours to choose. The LK bootloader of the MediaTek
+MT6897 adds a node for each of its allocations at the front of
+/reserved-memory. Its node for the framebuffer has no no-map, and it comes
+before the no-map node in the board's tree, so the board's node fails with
+-EBUSY. The memory then stays in the linear map, where neither ioremap nor
+memremap with write-combining will map it, and simpledrm can't use the
+framebuffer the bootloader left on.
+
+Handle the no-map nodes in a first pass. A later plain reservation of the
+same memory still works, and regions that overlap anything else fail as
+they did.
+
+The order is from the tree the bootloader passes to the vendor kernel, read
+on a TB375FC. This has not run with the bootloader's nodes on our tree yet.
+---
+ drivers/of/of_reserved_mem.c | 73 ++++++++++++++++++++++++++++++------------------------------
+ 1 file changed, 43 insertions(+), 30 deletions(-)
+
+diff --git a/drivers/of/of_reserved_mem.c b/drivers/of/of_reserved_mem.c
+--- a/drivers/of/of_reserved_mem.c
++++ b/drivers/of/of_reserved_mem.c
+@@ -347,37 +347,50 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	fdt_for_each_subnode(child, fdt, node) {
+-		const char *uname;
+-		int err;
+-
+-		if (!of_fdt_device_is_available(fdt, child))
+-			continue;
+-
+-		uname = fdt_get_name(fdt, child, NULL);
+-
+-		err = __reserved_mem_reserve_reg(child, uname);
+-		if (!err)
+-			count++;
+-
+-		/*
+-		 * Save the nodes for the dynamically-placed regions
+-		 * into an array which will be used for allocation right
+-		 * after all the statically-placed regions are reserved
+-		 * or marked as no-map. This is done to avoid dynamically
+-		 * allocating from one of the statically-placed regions.
+-		 */
+-		if (err != -ENOENT || !of_get_flat_dt_prop(child, "size", NULL))
+-			continue;
+-
+-		if (dynamic_nodes_cnt == MAX_RESERVED_REGIONS) {
+-			pr_err("too many defined dynamic regions, skip '%s'\n",
+-			       uname);
+-			continue;
++	/*
++	 * Mark the no-map regions first. Memory can't be marked no-map once it
++	 * is reserved, and a bootloader can add its own node for a region in
++	 * front of the node in the tree, without no-map.
++	 */
++	for (int pass = 0; pass < 2; pass++) {
++		fdt_for_each_subnode(child, fdt, node) {
++			const char *uname;
++			bool nomap;
++			int err;
++
++			if (!of_fdt_device_is_available(fdt, child))
++				continue;
++
++			nomap = of_get_flat_dt_prop(child, "no-map", NULL);
++			if (nomap != (pass == 0))
++				continue;
++
++			uname = fdt_get_name(fdt, child, NULL);
++
++			err = __reserved_mem_reserve_reg(child, uname);
++			if (!err)
++				count++;
++
++			/*
++			 * Save the nodes for the dynamically-placed regions
++			 * into an array which will be used for allocation right
++			 * after all the statically-placed regions are reserved
++			 * or marked as no-map. This is done to avoid dynamically
++			 * allocating from one of the statically-placed regions.
++			 */
++			if (err != -ENOENT ||
++			    !of_get_flat_dt_prop(child, "size", NULL))
++				continue;
++
++			if (dynamic_nodes_cnt == MAX_RESERVED_REGIONS) {
++				pr_err("too many defined dynamic regions, skip '%s'\n",
++				       uname);
++				continue;
++			}
++
++			dynamic_nodes[dynamic_nodes_cnt] = child;
++			dynamic_nodes_cnt++;
+ 		}
+-
+-		dynamic_nodes[dynamic_nodes_cnt] = child;
+-		dynamic_nodes_cnt++;
+ 	}
+ 	for (int i = 0; i < dynamic_nodes_cnt; i++) {
+ 		const char *uname;

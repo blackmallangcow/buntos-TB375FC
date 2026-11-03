@@ -33,9 +33,9 @@
 
 		/*
 		 * The bootloader drives the panel over both DSI links with DSC
-		 * and scans out one 2944x1840 buffer. TODO(2a): the base is
-		 * from the community port's bootloader log; confirm it on the
-		 * device before enabling this and framebuffer_mem.
+		 * and scans out one 2944x1840 buffer. The base is the one in the
+		 * tree it passes to the vendor kernel (atag,videolfb). The stride
+		 * and format are from the community port.
 		 */
 		framebuffer0: framebuffer@fc16f000 {
 			compatible = "simple-framebuffer";
@@ -45,7 +45,6 @@
 			stride = <(2944 * 4)>;
 			format = "a8r8g8b8";
 			panel = <&panel0>;
-			status = "disabled";
 		};
 	};
 
@@ -512,21 +511,30 @@
 };
 
 &reserved_memory {
-	/* The bootloader's three-buffer allocation behind framebuffer0 */
+	/*
+	 * The bootloader's three-buffer allocation behind framebuffer0. It adds
+	 * a node of its own for this memory, without no-map, but simpledrm can't
+	 * map memory that is in the linear map.
+	 */
 	framebuffer_mem: framebuffer@fc16f000 {
 		reg = <0 0xfc16f000 0 0x3e90000>;
 		no-map;
-		status = "disabled";
 	};
 
-	/* TODO(2a): confirm this gap survives warm reboots, then enable */
+	/*
+	 * The bootloader reserves this too (mblock-2-pstore) and passes the same
+	 * values as ramoops.* on the command line. Those win and this device
+	 * then fails to probe with "already initialized". It is here for boots
+	 * without them. The sizes are the vendor kernel's, so that the slot with
+	 * Android finds the records in the same places.
+	 */
 	ramoops@48090000 {
 		compatible = "ramoops";
 		reg = <0 0x48090000 0 0xe0000>;
-		record-size = <0x20000>;
+		record-size = <0x1000>;
 		console-size = <0x40000>;
+		ftrace-size = <0x1000>;
 		pmsg-size = <0x80000>;
-		status = "disabled";
 	};
 };
 

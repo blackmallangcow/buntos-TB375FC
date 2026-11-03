@@ -5,7 +5,7 @@ TB375FC(MediaTek MT6897)의 mainline 장치 트리다. 설계안 [2.3절](../../
 | 파일 | 내용 |
 |---|---|
 | `mediatek/mt6897.dtsi` | SoC. CPU·GIC·아키텍처 타이머·PSCI·PMU·워치독·cpufreq-hw는 켜 두고, UART(보드가 켠다)·systimer·UFS·USB·pio·SPMI·클럭 컨트롤러·SPI 여덟은 `disabled`로 둔다 |
-| `mediatek/mt6897-lenovo-tb375fc.dts` | 보드. `chosen`, `memory`, UART0을 켠다. framebuffer·ramoops는 기기에서 확인할 때까지 `disabled`. SPMI M 버스에 MT6363(키, 레일 23개), MT6368(레일 6개), MT6319 셋을 두고, UFS 공급(`vcc` MT6363 VEMC, `vccq` MT6319 8/vbuck3)과 USB 공급(`vusb33` MT6368 VUSB)을 잇는다(SPMI는 2b까지 꺼져 있다) |
+| `mediatek/mt6897-lenovo-tb375fc.dts` | 보드. `chosen`, `memory`, UART0, framebuffer, ramoops를 켠다(주소는 기기에서 확인, 2026-11-03). SPMI M 버스에 MT6363(키, 레일 23개), MT6368(레일 6개), MT6319 셋을 두고, UFS 공급(`vcc` MT6363 VEMC, `vccq` MT6319 8/vbuck3)과 USB 공급(`vusb33` MT6368 VUSB)을 잇는다(SPMI는 2b까지 꺼져 있다) |
 | `mediatek/mt6897-lenovo-tb373fu.dts` | 글로벌판(Idea Tab Pro). tb375fc.dts를 include하고 `model`·`compatible`만 바꾼다 |
 
 - `build.sh`가 `mediatek/*.dts*`를 Linux 7.2.12의 `arch/arm64/boot/dts/mediatek/`에 복사하고, 패치 0001이 빌드 목록에 dtb 둘을 더한다.
@@ -122,8 +122,8 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `chosen` | `stdout-path = "serial0:921600n8"` | MTK 관례 | 부트로더가 `bootargs`, initrd, `kaslr-seed`, `atag,*`를 더한다 |
 | `uart0` | `okay`. TX GPIO207, RX GPIO208(mode 1) | 벤더 pinfunc | 디버그 UART다 |
 | `memory@40000000` | 1GiB 자리 | 펌웨어 | 부트로더가 실제 크기(8·12GiB)로 고친다. 펌웨어 정적 트리도 1GiB 자리다 |
-| `framebuffer0` | `0xfc16f000`, 2944×1840, stride 11776, `a8r8g8b8` | 커뮤니티 | `disabled`. 바인딩대로 `/chosen` 아래에 둔다. 커뮤니티는 LK 기록(mblock 할당, `atag,videolfb`)에서 읽었고, 이 주소로 fbcon을 띄웠다(12GiB 기기) |
-| `framebuffer_mem` | `0xfc16f000`, 0x3e90000(LK가 할당한 크기, 세 화면보다 조금 크다), `no-map` | 커뮤니티 | `disabled`. 부트로더가 이미 예약하면 지운다 |
+| `framebuffer0` | `0xfc16f000`, 2944×1840, stride 11776, `a8r8g8b8` | 실측(주소), 커뮤니티(stride, 형식) | 켜 둠. 바인딩대로 `/chosen` 아래에 둔다. 주소는 8GB 기기의 `atag,videolfb`와 같다(2026-11-03). 커뮤니티는 이 주소로 fbcon을 띄웠다(12GiB 기기) |
+| `framebuffer_mem` | `0xfc16f000`, 0x3e90000(LK가 할당한 크기, 세 화면보다 조금 크다), `no-map` | 실측 | 켜 둠. LK도 같은 자리를 `mblock-14-framebuffer`로 넣지만 `no-map`이 없어 simpledrm이 매핑하지 못한다. LK의 노드가 트리 앞에 오므로 패치 0140이 `no-map`을 먼저 처리한다. LK가 우리 트리에 어떻게 넣는지는 기기에서 본다 |
 | MT6363 `pmic@4` | `interrupts = <4 64 IRQ_TYPE_LEVEL_HIGH>`(SPMI rcs, SID 4. 가운데 칸은 컨트롤러가 버린다), `interrupt-controller`, 셀 셋. `keys`: 전원 PWRKEY 48/뗌 51(`KEY_POWER`, `wakeup-source`), HOMEKEY 49/뗌 52(`KEY_VOLUMEUP`), 길게 누름 리셋 모드 2(전원+볼륨 올림), 시간 0. `regulators@30`: 펌웨어가 늘 켜 두는 22개(`regulator-always-on`)와 VEMC(`vufs_vcc`) | 펌웨어, OnePlus 공식 MT6897 커널(인터럽트 번호, 레지스터) | `mediatek,mt6363`(패치 0015·0016). 레지스터 기준 0x30은 벤더 주소 − 업스트림 주소로 확인했다(TOP_TRAP 0x36/0x6 등). 펌웨어가 필요할 때만 켜는 11개(vbuck1·3·7, vcn13·15, vrf*, vsram-digrf)는 노드에 넣지 않아 리눅스가 건드리지 않는다. 전압 한계도 주지 않는다(코어가 부트로더 전압을 바꾸지 않게. VEMC 전압 읽기는 7.2.12에서 틀린다). 이름은 펌웨어 소비자에서 땄다: `vcore`(dvfsrc), `vsram_gpu`(gpufreq의 vsram), `vmodem`·`vsram_modem`(모뎀), `vufs_vcc`(UFS), `vio18` |
 | `ufshci` 공급 | `vcc-supply = <&mt6363_vemc>`, `vccq-supply = <&mt6319_8_vbuck3>` | 펌웨어 | 펌웨어 `ufshci`와 같다 |
 | MT6368 `pmic@5` | `interrupts = <5 48 IRQ_TYPE_LEVEL_HIGH>`(SPMI rcs, SID 5. 가운데 칸은 컨트롤러가 버린다. 48은 MT6368 RCS0), `interrupt-controller`, 셀 셋. `regulators@30`: 펌웨어가 늘 켜 두는 6개 vbuck2(`vgpu`), vbuck5, vbuck6, vio28, vtp, vusb(`vusb33`). 모두 `regulator-always-on` | 펌웨어, OEM(레지스터, 전압 표, 인터럽트 번호) | `mediatek,mt6368`(패치 0025·0026)과 `mediatek,mt6368-regulator`(0023·0024). 레지스터 기준은 MT6363과 같은 0x30이다(드라이버의 주소 = 벤더 주소 − 0x30). 펌웨어가 늘 켜 두지 않는 레일(vbuck1·3·4, vaux18, vrf13·18-aif, vant18, vibr, vfp, vmc, vaud18, vcn33-1·2, vefuse, vmch-eint-*, vsim2)과 펌웨어에 없는 vpa·vmch는 노드에 넣지 않아 리눅스가 건드리지 않는다. 전압 한계도 주지 않는다(MT6363과 같은 방침). 이름은 펌웨어 소비자에서 땄다: `vgpu`(gpufreq의 `vgpu-supply`), `vusb33`(ssusb의 `vusb33-supply`) |
@@ -149,7 +149,7 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `pio` 핀 상태 | `spi2-pins`(GPIO11~14, 6 mA), `touch-pins`(GPIO9 IRQ, GPIO184 패널 ID, GPIO60 리셋), `hall-pins`(GPIO1), `pogo-keyboard-pins`(GPIO181 UTXD3, GPIO26·40 입력, GPIO61·71), `pogo-keyboard-rx-pins`(GPIO180 URXD3), `pogo-keyboard-rx-detached-pins`(GPIO180 입력) | 펌웨어 | drive-strength는 0027이 핀 드라이버에 더한 연산으로 적용된다 |
 | `aliases` | `spmi0 = &spmi_m` | 7.2.12 드라이버 | 버스가 둘인 MT8196 꼴은 버스마다 `spmiN` 별칭이 있어야 probe한다 |
 | MT6319 `pmic@6`~`pmic@8` | 6: vbuck1(`vmm`)·vbuck3(`vproc1`)·vbuck4(`vproc3`), 7: vbuck1(`vproc2`)·vbuck3, 8: vbuck3(`vufs_vccq`). 모두 0.3~1.19375V | 펌웨어 | `mediatek,mt6319-regulator` + `mt6315` 대체. 이름은 펌웨어의 소비자에서 땄다(ISP·카메라 전원 도메인, MCUPM CPU DVFS의 proc1~4, UFS VCCQ). 소비자가 아직 없어 모두 `regulator-always-on`이다. 펌웨어는 셋 모두 buck1+buck2 2상인데, 7.2.12 드라이버는 SID로 짝을 정해(6이면 1+2+4) 맞지 않으므로 동작 모드(`regulator-allowed-modes`)는 열지 않는다 |
-| `ramoops` | `0x48090000`, 0xe0000(record 0x20000, console 0x40000, pmsg 0x80000) | 커뮤니티 | `disabled`. `aee_debug_kinfo`(`0x48080000`+0x10000)와 `minirdump`(`0x48170000`) 사이 틈이다. LK가 벤더 커널 명령줄에 넣는 `ramoops.*` 값과 같다(벤더 자신의 ramoops 자리) |
+| `ramoops` | `0x48090000`, 0xe0000(record 0x1000, console 0x40000, ftrace 0x1000, pmsg 0x80000) | 실측(안드로이드의 ramoops 파라미터) | 켜 둠. LK가 `mblock-2-pstore`로 예약하고 명령줄에 같은 `ramoops.*`를 넣는다(LK 문자열, 2026-11-03). 그러면 `ramoops_init`이 먼저 만든 장치가 쓰이고 이 노드는 `already initialized`로 실패한다(7.2.12 `fs/pstore/ram.c`). 명령줄이 없을 때를 위해 둔다 |
 
 ## 바인딩에 더할 것
 
@@ -182,7 +182,7 @@ UFS 호스트와 M-PHY의 MT6897 compatible은 패치 0019·0020이 더한다(�
    - `/reserved-memory`에 `mblock-*` 노드가 붙는지. BL31(`0x48800000`, 2MB)이 들어오지 않으면 직접 예약한다(커뮤니티: 없으면 보조 CPU와 서스펜드가 멈춘다)
    - `/cpus` 노드를 이름으로 건드리는지. 우리 이름(`cpu@100`)이 펌웨어 이름(`cpu@100` = 첫 A715)과 가리키는 코어가 다르다
 2. **framebuffer.** 안드로이드에서 `/proc/iomem`과 살아 있는 트리(`/chosen`의 `atag,videolfb`, `/reserved-memory`)로 주소·크기·형식을 확인한다. 둘 다 root가 필요하다. 실기기(ZUXOS 1.5.10.044, 2026-11-01)에서는 `/proc/iomem`이 막혀 있었고, `/proc/device-tree`는 이름만 보이고 값은 막혀 있었다. 이름으로는 LK가 화면 영역을 `mblock-14-framebuffer`로 예약한다. 패널이 그리는 버퍼는 가로 2944×1840이다(SurfaceFlinger의 `framebufferSpace`. 화면 회전 설정과 상관없다). 커뮤니티 포트는 이 주소로 fbcon을 띄웠다(12GiB 기기). 우리 기기는 8GB다. 맞으면 `framebuffer0`을 켜고, 부트로더가 예약하지 않으면 `framebuffer_mem`도 켠다. 안드로이드에서 실제 크기 약 273×171mm도 확인해 둔다(2c에서 `panel` 노드의 `width-mm`·`height-mm`).
-3. **ramoops.** 살아 있는 트리의 예약 영역으로 `0x48090000`~`0x4816ffff`가 비었는지, 따뜻한 재부팅에 지워지지 않는지 보고 켠다. 실기기에서 LK는 pstore 자리를 `mblock-2-pstore`로 예약한다(값은 root 필요). LK가 명령줄에 `ramoops.*`를 넣으면 노드와 겹쳐 장치가 둘 생기므로 하나만 둔다. 크기가 `0xe0000`을 넘으면 minirdump를 덮는다.
+3. **ramoops.** 켜 두었다. 따뜻한 재부팅에 지워지지 않는지 본다. LK가 pstore 자리를 `mblock-2-pstore`(`0x48090000`, `0xe0000`)로 예약하고 명령줄에 `ramoops.*`를 넣는다(실측, 2026-11-03). 두 번째 장치는 드라이버가 `already initialized`로 거부한다. 크기가 `0xe0000`을 넘으면 minirdump를 덮는다.
 4. **UART0.** 시험 패드(GPIO207 TX, GPIO208 RX)의 위치와 921600bps를 확인한다. 부트로더가 UART0 클럭을 끄고 넘기면 레지스터 접근이 멈출 수 있다. 그러면 `uart0`을 끄고 화면과 pstore로 본다. 커뮤니티 포트도 UART를 쓰지 않았다(uarthub 경로에 mainline 드라이버가 없다는 주석). "UART0이 키보드 줄"이라는 그쪽 주석은 펌웨어와 맞지 않는다(키보드는 UART3).
 5. **워치독.** 커널이 넘겨받은 뒤 다시 켜지지 않는지 본다(`CONFIG_MEDIATEK_WATCHDOG=y`).
 6. **idle·cpufreq.** 멈추면 `cpuidle.off=1`, `initcall_blacklist=mtk_cpufreq_hw_driver_init`로 하나씩 뺀다.

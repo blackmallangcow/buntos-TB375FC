@@ -54,7 +54,7 @@ limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'kernel/tb375fc/debian-con
 
 | 단계 | 커널 쪽 | 상태 |
 |---|---|---|
-| 2a 첫 부팅 | UART(8250_mtk), simpledrm 화면 콘솔, pstore, 워치독, LZ4 initramfs | 설정 조각과 장치 트리에 있음. framebuffer·ramoops 노드는 기기에서 주소를 확인한 뒤 켠다 |
+| 2a 첫 부팅 | UART(8250_mtk), simpledrm 화면 콘솔, pstore, 워치독, LZ4 initramfs | 설정 조각과 장치 트리에 있음. framebuffer·ramoops 노드의 주소를 기기에서 확인하고 켰다(2026-11-03). 패치 0140이 LK의 노드보다 `no-map`을 먼저 처리한다. 트리를 넣은 시험 커널이 기기에서 셸과 화면까지 갔다(2026-11-03) |
 | 2b 저장장치·USB | UFS(ufs-mediatek), mtu3·xHCI·xsphy, USB 가젯, 핀·EINT, SPMI, MT6363·MT6319, cpufreq-hw | 핀·클럭·MFD·MT6363 키·UFS 드라이버와 SPMI 고침은 패치 대기열에 있고, pio·클럭 컨트롤러·SPMI(M 버스)·MT6363·MT6368·MT6319·UFS·USB 노드는 장치 트리에 있다(꺼 둠). USB를 켤 때는 SPMI와 MT6368도 켜야 한다(`vusb33`). UFS·USB에는 전원 도메인이 없다 |
 | 2c 입력 | gpio-keys(홀), SPI, I2C, serdev | NT36532 터치·펜(0030·0031), 포고 키보드(0032~0036)는 패치 대기열에, SPI 여덟·터치·홀 센서·패널 VDDIO·키보드 노드는 장치 트리에 있다(꺼 둠) |
 | USB 호스트 | I2C5·I2C10, MT6375 OTG, 차지 펌프 입력 FET, mtu3 otg 모드 | 드라이버는 패치 대기열(0042~0049)에, 노드는 장치 트리에 있다(꺼 둠). UFS 루트와 USB 가젯이 기기에서 된 뒤에 켠다. TCPC 전까지 역할과 VBUS는 사용자 공간에서 손으로 켠다 |
