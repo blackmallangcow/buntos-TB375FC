@@ -511,14 +511,14 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
 
 ### 6.8 루트 파티션
 
-자리는 userdata를 줄여 만든 새 GPT 파티션이다. 형식 GUID는 root-arm64(`b921b045-1df0-41c3-af44-4c6f280d3fae`)이고 명령줄은 `root=PARTLABEL=<이름>`이다. USB-C 저장장치 길은 쓰지 않는다. 전체 이미지(`tools/image/build.sh lenovo-tb375fc`)를 만든 기록은 아직 없고, 작은 시험 이미지로만 봤다.
+자리는 userdata를 줄여 만든 새 GPT 파티션 `buntos`다. 형식 GUID는 root-arm64(`b921b045-1df0-41c3-af44-4c6f280d3fae`)이고 명령줄은 `root=PARTLABEL=buntos`다. USB-C 저장장치 길은 쓰지 않는다. 2026-11-04에 작은 Debian 이미지로 2b 종료 조건을 지났다. 전체 이미지(`tools/image/build.sh lenovo-tb375fc`)를 기기에 올린 기록은 아직 없다. 값은 [실측 보고서](../hw/lenovo-tb375fc.md) 7절에 있다.
 
 이미지의 systemd가 UFS의 GPT를 고치지 못하게 `systemd-repart`와 `systemd-gpt-auto-generator`를 보드 프로필과 initramfs에서 가렸다. 이 가림을 풀지 않는다. QEMU에서 GPT와 다른 파티션의 해시로 확인했다.
 
 1. [x] 가젯 셸에서 UFS를 읽기 전용으로 확인하고 파티션 표를 읽는다(2026-11-04. 표는 `sdc`에만 있고 `PARTNAME` 82개가 나온다). 커널이 MediaTek GPT를 읽어 `PARTNAME`이 나오는지 본다. LU 여럿에서 같은 이름이 없는지 본다. 지금은 먼저 찾은 것을 쓰고 겹침을 따로 알리지 않는다.
-2. [ ] 크기와 이름을 정한다(4절 7번).
-3. [ ] 고치기 전의 GPT(앞·뒤 표)를 떠서 기기 밖에 둔다.
-4. [ ] GPT를 고친다.
+2. [x] 크기와 이름을 정한다(4절 7번). `buntos` 80 GiB, `userdata` 28.2 GiB(2026-11-04).
+3. [x] 고치기 전의 GPT(앞·뒤 표)를 떠서 기기 밖에 둔다(2026-11-04. 맥과 SSD).
+4. [x] GPT를 고친다(2026-11-04. 가젯 셸에서 `dd`, 뒤 표 → 앞 항목 → 앞 헤더. 항목 82개로 꽉 차 있어 83개로 늘렸다).
 
     > **위험: 부팅 불가·데이터 손실.** preloader·LK가 고친 GPT를 읽지 못하면 부팅이 막힌다. userdata를 한 번 지운다(공장 초기화). 안드로이드 슬롯은 남는다.
     >
@@ -526,8 +526,8 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
     >
     > **되돌리기.** 언락 전에 뜬 SP Flash 백업이다. 고친 GPT는 SP Flash Tool scatter와 달라지므로 고친 GPT도 떠 둔다.
 
-5. [ ] preloader·LK가 고친 GPT를 어떻게 읽는지, LK의 fastboot가 새 항목을 아는지 본다.
-6. [ ] 루트 파티션 파일(`buntos.root-arm64.raw`)을 굽는다. fastboot로 굽고(sparse. `max-download-size`가 128MiB라(실측) `fastboot`가 나눠 보낸다), 안 되면 가젯으로 `dd`한다. 이미지의 ESP와 UKI는 LK가 쓰지 않으므로, 이미지에서는 이 파일만 굽는다.
+5. [x] preloader·LK가 고친 GPT를 어떻게 읽는지, LK의 fastboot가 새 항목을 아는지 본다(2026-11-04). 프리로더와 LK는 새 표로 부팅하고, `_a` 안드로이드도 뜬다. fastboot의 `getvar partition-size:userdata`는 새 크기(`0x70d700000`)를 내지만 `buntos`는 값이 비어 있다. 새 항목에 fastboot로 굽는 것은 해 보지 않았고, 가젯 셸의 `dd`로 굽는다.
+6. [x] 루트 파티션 파일(`buntos.root-arm64.raw`)을 굽는다(2026-11-04. 작은 이미지 861 MB를 가젯 네트워크로 받아 `dd`, 23초). fastboot로 굽고(sparse. `max-download-size`가 128MiB라(실측) `fastboot`가 나눠 보낸다), 안 되면 가젯으로 `dd`한다. 이미지의 ESP와 UKI는 LK가 쓰지 않으므로, 이미지에서는 이 파일만 굽는다.
 
     > **위험: 데이터 손실.** `dd`의 대상은 새 파티션뿐이다. userdata 전체, super, 루프 파일은 쓰지 않는다. 안드로이드 슬롯을 지키지 못하거나 metadata 암호화로 열 수 없다.
 
@@ -537,27 +537,27 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
     limactl shell --workdir "$PWD" buntos-dev -- bash -lc 'x=$(mktemp -d) && dpkg-deb -x ~/buntos-build/tb375fc/deb/linux-image-7.2.12-tb375fc_*_arm64.deb $x && bsp/lenovo-tb375fc/initramfs/mkinitramfs.sh --modules $x && bsp/lenovo-tb375fc/boot/mkimages.sh --kernel $x/boot/vmlinuz-7.2.12-tb375fc --dtb $x/usr/lib/linux-image-7.2.12-tb375fc/mediatek/mt6897-lenovo-tb375fc.dtb --initramfs ~/buntos-build/tb375fc/images/initramfs.cpio.lz4 --cmdline "console=ttyS0,921600n8 console=tty0 earlycon clk_ignore_unused pd_ignore_unused regulator_ignore_unused root=PARTLABEL=<이름> rootfstype=btrfs rw systemd.firstboot=no buntos.usbdebug=1 systemd.set_credential_binary=ssh.authorized_keys.root:$(base64 -w0 <공개 키 파일>)"'
     ```
 
-8. [ ] LK가 `root=`와 `buntos.usbdebug=1`을 커널에 넘기는지 본다. `/proc/cmdline`이 `/run/buntos/boot.log`에 남는다. LK가 자기 `root=`나 `ro`를 덧붙여도 우리 값이 이긴다.
+8. [ ] LK가 `root=`와 `buntos.usbdebug=1`을 커널에 넘기는지 본다(시험 커널은 트리의 명령줄을 쓰므로 LK 길에서 본다). `/proc/cmdline`이 `/run/buntos/boot.log`에 남는다. LK가 자기 `root=`나 `ro`를 덧붙여도 우리 값이 이긴다.
 
     > **위험: USB 끊김.** 진짜 루트의 USB 길은 명령줄에 `buntos.usbdebug=1`이 있을 때만 돈다. 없으면 넘어간 뒤 가젯이 없다.
     >
     > **먼저 둘 것.** LK가 이 값을 넘기는지 `/proc/cmdline`으로 본다. 안 넘어오면 커널 `CMDLINE`(+`CMDLINE_EXTEND`)로 주고 `buntos.usbdebug=1`을 함께 넣는다. 그때 공개 키는 커널 설정에 넣지 말고 ttyACM 셸에서 넣는다.
 
 9. [ ] 못 넘어갔으면 까닭을 본다. 패닉 없이 셸이 뜨고, 까닭은 화면, dmesg, pstore, `/run/buntos/boot.log`에 남는다. 찾지 못했으면 `/run/buntos/block.txt`에 장치와 GPT 이름 목록이 있다. UFS가 뜨는 시간도 본다(`buntos.wait` 기본 30초면 되는가).
-10. [ ] 들어간다. 넘어가는 동안 USB가 잠깐 없다. 가젯은 진짜 루트에서 새로 띄운다.
+10. [x] 들어간다(2026-11-04. 맥에서 SSH, 시험 커널). 넘어가는 동안 USB가 잠깐 없다. 가젯은 진짜 루트에서 새로 띄운다.
 
     ```bash
     ssh root@172.16.42.1
     ```
 
     공개 키가 아직 없거나 네트워크가 안 되면 ttyACM의 암호 없는 root 셸을 쓴다. 셋 다 다른 서비스를 기다리지 않아, sysinit이 멈추거나 emergency.target으로 넘어가도 들어갈 수 있다.
-11. [ ] 실제 UFS의 btrfs를 본다. `discard=async`가 저절로 켜진다(QEMU의 마운트 옵션에서 봤다). UFS의 UNMAP과 안드로이드 쪽 영향은 파티션 안이라 없을 것으로 보지만 기기에서 본다.
+11. [x] 실제 UFS의 btrfs를 본다(2026-11-04. `discard=async`가 켜지고, 2 GiB를 439 MB/s로 쓰고 재부팅 뒤에도 해시가 같다. 안드로이드 쪽 영향은 아래 안드로이드 부팅에서 본다). `discard=async`가 저절로 켜진다(QEMU의 마운트 옵션에서 봤다). UFS의 UNMAP과 안드로이드 쪽 영향은 파티션 안이라 없을 것으로 보지만 기기에서 본다.
 12. [ ] 넘어간 뒤의 화면을 본다. simpledrm의 fbcon이 systemd, greetd를 지나도 사는지 본다.
 13. [ ] 워치독을 본다. `mtk_wdt`는 내장이고 넘어가도 커널이 먹인다(`WATCHDOG_HANDLE_BOOT_ENABLED=y`). systemd의 `RuntimeWatchdogSec`을 켜지 않아도 오래 사는지 본다.
 14. [ ] 안드로이드 파티션이 70개쯤일 때 `systemd-udevd`와 `blkid`가 걸리는 시간을 본다. UFS를 가리는 규칙(`90-buntos-tb375fc-hide-ufs.rules`)은 부모 사슬만 보고 프로그램을 돌리지 않는다(시간은 재지 않았다).
-15. [ ] 실제 크기의 btrfs 늘리기와 첫 부팅 시간, `systemd-firstboot`(`systemd.firstboot=no`)를 본다. 늘리기는 `systemd-growfs-root.service`이고 파일 시스템만 늘린다.
+15. [x] 실제 크기의 btrfs 늘리기와 첫 부팅 시간, `systemd-firstboot`(`systemd.firstboot=no`)를 본다(2026-11-04. 80 GiB까지 늘어나고 첫 부팅이 3.5초다). 늘리기는 `systemd-growfs-root.service`이고 파일 시스템만 늘린다.
 16. [ ] pstore를 본다. ramoops 자리를 정한 뒤 `/run/buntos/pstore`와 `systemd-pstore`(`/var/lib/systemd/pstore`)에 남는지 본다.
-17. [ ] 가상화 판별이 `none`인지 본다. `buntos-vm-sleep.service`가 `ConditionVirtualization=vm`이라 기기에서는 돌지 않아야 한다.
+17. [x] 가상화 판별이 `none`인지 본다(2026-11-04). `buntos-vm-sleep.service`가 `ConditionVirtualization=vm`이라 기기에서는 돌지 않아야 한다.
 
     ```bash
     systemd-detect-virt
@@ -567,6 +567,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
 
 기기에서 UFS·USB가 뜬 뒤에 한다.
 
+- 재시도 다루기. LK가 `_b`의 재시도를 부팅마다 줄이고 `successful_boot`를 세우는 쪽이 없어, 잘 도는 시스템도 7번 부팅하면 `_a`로 넘어간다. `misc`(0x800)의 재시도를 부팅이 끝난 뒤 되돌리는 서비스가 필요하다.
 - 시험 층(`test-stage.dtsi`)의 노드를 보드 dts로 옮긴다. 이때 `framebuffer0`의 `clocks`도 함께 옮긴다. 빠지면 UFS가 화면을 죽인다(6.2절).
 - UFS 클럭 스케일링(먹스 부모, 게이트의 `CLK_SET_RATE_PARENT`).
 - MCQ. 공통 바인딩의 인터럽트 수를 고치고, 큐 인터럽트 SPI 177~184를 넣고, `mediatek,ufs-disable-mcq`를 뺀다. 이 속성을 뺀 시험은 그 뒤에 한다.

@@ -306,6 +306,23 @@ Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`
 | 프리로더 포트 | 부팅마다 프리로더가 약 3초 동안 `MT65xx Preloader`(ACM)로 뜬다. 우리 가젯과 같은 `/dev/cu.usbmodem*`로 보이니 제품 이름으로 가린다 |
 | pstore | ECC가 없다. 2단계 기록 한 벌에서 글자 몇 개가 깨졌다(`368x115`가 `3688115`, `simple`이 `simpLe`). 다른 기록에서는 보지 못했고 원인은 모른다 |
 
+### 루트 파티션과 UFS 루트 (2026-11-04)
+
+| 항목 | 값 |
+|---|---|
+| 원래 GPT | 항목 82개로 꽉 차 있다. 빈 칸이 없다. 앞 표는 LBA 1(항목 LBA 2), 뒤 표 헤더는 LBA 31240191(항목 31240184), 쓸 수 있는 범위 8~31240183 |
+| 항목 수 한도 | 프리로더 `parse_gpt_header`: 항목 193개 미만(`cmp w22, #0xc1`), 항목 크기 128(`0x80`), 읽기 크기 16 KiB 이하(코드로 읽음). LK는 헤더의 값대로 할당한다. 83개로 늘렸다 |
+| 새 표 | `userdata` LBA 2803712~10198783(28.2 GiB), `buntos` LBA 10198784~31170551(80.0 GiB, 항목 83, 형식 root-arm64, 1 MiB 정렬). `mrdump`, `flashinfo`는 그대로다 |
+| 쓰기 | 리눅스 가젯 셸에서 `dd`로 뒤 표 → 앞 항목 → 앞 헤더 차례로 썼다. `userdata`, `metadata`의 앞부분을 먼저 지웠다 |
+| 부트로더 | 프리로더와 LK가 새 표로 부팅한다. 재부팅에서 커널까지 약 18초다 |
+| UFS 쓰기 | 2 GiB 무작위 값을 439 MB/s로 썼고, 캐시를 비운 뒤와 재부팅 뒤에 해시가 같다. 오류 통계 0 |
+| 루트 전환 | 시험 커널의 initramfs가 `root=PARTLABEL=buntos`를 찾아 넘어간다. Debian forky systemd가 `running`까지 약 3.2초(커널 1.4초 + 사용자 공간 1.8초)다. btrfs가 `discard=async`로 붙고 80 GiB까지 저절로 늘어난다 |
+| USB 길 | `buntos.usbdebug=1`로 진짜 루트의 가젯, 직렬 셸, SSH가 뜬다. 맥에서 `ssh root@172.16.42.1`로 들어간다 |
+| 커널 갈기 | fastboot 없이 리눅스에서 `boot_b`에 `dd`로 굽고 해시를 맞댔다. 다음 부팅이 그 커널로 뜬다 |
+| 안드로이드 슬롯 | `_b`의 재시도를 다 쓰자 `_a`가 새 표에서 부팅해, 약 47초 뒤 USB 장치(`联想小新Pad Pro 12.7`)로 올라왔다. 화면에 초기 설정이 나온다(사용자 확인). 초기화 상태라 ADB는 꺼져 있다 |
+| fastboot | `getvar partition-size:userdata`는 `0x70d700000`(28.2 GiB)이고 `buntos`는 값이 비어 있다. `--set-active=b` 뒤 `_b`의 재시도는 6이다 |
+| A/B 정보 | `misc`의 오프셋 0x800(AOSP `bootloader_control`, 매직 `BCAB`). `_b`의 재시도는 LK가 부팅마다 줄이고, 다 쓰면 `_a`로 간다. `successful_boot`를 세우는 쪽이 아직 없다 |
+
 ## 8. 남은 것
 
 - super의 vendor는 ZIP에서 내려받으면서 풀 수 있다(`.handoff/tb375fc-pogo/wip/super_stream.py`, 5.7GB 스트리밍, 디스크는 고른 파티션만 쓴다). 2026-11-01에 이렇게 `tn_keyboard.ko`와 키보드 HAL을 읽었다. 파티션은 모두 EROFS다
