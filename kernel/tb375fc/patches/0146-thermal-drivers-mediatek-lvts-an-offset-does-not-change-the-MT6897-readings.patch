@@ -1,0 +1,48 @@
+From: buntOS contributors
+Subject: [PATCH] thermal/drivers/mediatek/lvts: an offset does not change the MT6897 readings
+
+The boot firmware of the Lenovo TB375FC leaves the hardware reset offset
+0x3fff in LVTS_PROTCTL of the third AP controller. The vendor driver's
+comment says that the offset is added to the raw measurements, so the
+driver refused such a controller. Its LVTS_MSR values are in the same
+range as those of the other two AP controllers, so the measurements are
+not shifted. Say that the hardware reset is held off and use the sensors.
+---
+ drivers/thermal/mediatek/lvts_thermal.c | 14 ++++++--------
+ 1 file changed, 6 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/thermal/mediatek/lvts_thermal.c b/drivers/thermal/mediatek/lvts_thermal.c
+--- a/drivers/thermal/mediatek/lvts_thermal.c
++++ b/drivers/thermal/mediatek/lvts_thermal.c
+@@ -677,18 +677,11 @@
+ 	.set_trips = lvts_set_trips,
+ };
+ 
+-/*
+- * A controller that isn't measuring keeps showing its last reading, which looks
+- * fine, and an offset makes every reading colder than it is. The vendor driver
+- * adds one to hold off the hardware reset while it reprograms the thresholds.
+- */
++/* A controller that isn't measuring keeps showing its last reading */
+ static const char *lvts_fw_sensor_problem(const struct lvts_sensor *lvts_sensor)
+ {
+ 	if (!(readl(LVTS_CLKEN(lvts_sensor->base)) & BIT(0)))
+ 		return "the controller is not clocked";
+-
+-	if (readl(LVTS_PROTCTL(lvts_sensor->base)) & LVTS_PROTOFFSET_MT6897)
+-		return "the controller adds an offset to its measurements";
+ 
+ 	if (!(readl(LVTS_MONCTL0(lvts_sensor->base)) & BIT(lvts_sensor->id)))
+ 		return "the controller does not measure this sensor";
+@@ -1133,6 +1126,11 @@
+ 		 readl(LVTS_PROTTC(lvts_ctrl->base)),
+ 		 readl(LVTS_MONINT(lvts_ctrl->base)),
+ 		 readl(LVTS_ID(lvts_ctrl->base)));
++
++	/* It holds off the hardware reset and doesn't change the measurements */
++	if (readl(LVTS_PROTCTL(lvts_ctrl->base)) & LVTS_PROTOFFSET_MT6897)
++		dev_warn(dev, "controller at %#x: the hardware reset is held off\n",
++			 ctrl_data->offset);
+ 
+ 	return 0;
+ }

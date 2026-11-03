@@ -11,6 +11,7 @@
  * clock, pinctrl and power domain drivers are described but disabled.
  */
 
+#include <dt-bindings/thermal/thermal.h>
 #include <dt-bindings/clock/mediatek,mt6897-clock.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
@@ -89,6 +90,7 @@
 			enable-method = "psci";
 			performance-domains = <&performance 0>;
 			capacity-dmips-mhz = <338>;
+			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_off_l &cluster_off_l>;
 		};
 
@@ -99,6 +101,7 @@
 			enable-method = "psci";
 			performance-domains = <&performance 0>;
 			capacity-dmips-mhz = <338>;
+			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_off_l &cluster_off_l>;
 		};
 
@@ -109,6 +112,7 @@
 			enable-method = "psci";
 			performance-domains = <&performance 0>;
 			capacity-dmips-mhz = <338>;
+			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_off_l &cluster_off_l>;
 		};
 
@@ -119,6 +123,7 @@
 			enable-method = "psci";
 			performance-domains = <&performance 0>;
 			capacity-dmips-mhz = <338>;
+			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_off_l &cluster_off_l>;
 		};
 
@@ -129,6 +134,7 @@
 			enable-method = "psci";
 			performance-domains = <&performance 1>;
 			capacity-dmips-mhz = <1080>;
+			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_off_m &cluster_off_m>;
 		};
 
@@ -139,6 +145,7 @@
 			enable-method = "psci";
 			performance-domains = <&performance 1>;
 			capacity-dmips-mhz = <1080>;
+			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_off_m &cluster_off_m>;
 		};
 
@@ -149,6 +156,7 @@
 			enable-method = "psci";
 			performance-domains = <&performance 1>;
 			capacity-dmips-mhz = <1080>;
+			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_off_m &cluster_off_m>;
 		};
 
@@ -159,6 +167,7 @@
 			enable-method = "psci";
 			performance-domains = <&performance 2>;
 			capacity-dmips-mhz = <1024>;
+			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_off_b &cluster_off_b>;
 		};
 
@@ -324,208 +333,440 @@
 	thermal-zones {
 		cpu4-0-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU4_0>;
 
 			trips {
+				cpu4_0_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu4_0_alert>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu4-1-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU4_1>;
 
 			trips {
+				cpu4_1_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu4_1_alert>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu5-0-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU5_0>;
 
 			trips {
+				cpu5_0_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu5_0_alert>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu5-1-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU5_1>;
 
 			trips {
+				cpu5_1_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu5_1_alert>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu2-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_LITTLE_CPU2>;
 
 			trips {
+				cpu2_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu2_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu3-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_LITTLE_CPU3>;
 
 			trips {
+				cpu3_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu3_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu6-0-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU6_0>;
 
 			trips {
+				cpu6_0_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu6_0_alert>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu6-1-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_MEDIUM_CPU6_1>;
 
 			trips {
+				cpu6_1_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu6_1_alert>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		dsu0-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_DSU0>;
 
 			trips {
+				dsu0_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&dsu0_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu0-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_LITTLE_CPU0>;
 
 			trips {
+				cpu0_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu0_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu1-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_LITTLE_CPU1>;
 
 			trips {
+				cpu1_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu1_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		dsu1-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_DSU1>;
 
 			trips {
+				dsu1_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&dsu1_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu7-0-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_BIG_CPU7_0>;
 
 			trips {
+				cpu7_0_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu7_0_alert>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		cpu7-1-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_BIG_CPU7_1>;
 
 			trips {
+				cpu7_1_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu7_1_alert>;
+					cooling-device = <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
 
 		dsu2-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_DSU2>;
 
 			trips {
+				dsu2_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
 				};
 			};
+
+			cooling-maps {
+				map0 {
+					trip = <&dsu2_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
 		};
 
 		dsu3-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_mcu MT6897_MCU_DSU3>;
 
 			trips {
+				dsu3_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&dsu3_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -714,26 +955,54 @@
 
 		gpu0-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_gpu MT6897_GPU0>;
 
 			trips {
+				gpu0_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
 				};
 			};
+
+			cooling-maps {
+				map0 {
+					trip = <&gpu0_alert>;
+					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
 		};
 
 		gpu1-thermal {
 			polling-delay = <1000>;
+			polling-delay-passive = <150>;
 			thermal-sensors = <&lvts_gpu MT6897_GPU1>;
 
 			trips {
+				gpu1_alert: trip-alert {
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				trip-crit {
 					temperature = <115000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&gpu1_alert>;
+					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -1800,6 +2069,7 @@
 			nvmem-cells = <&gpu_shader_present>;
 			nvmem-cell-names = "shader-present";
 			power-domains = <&gpueb>;
+			#cooling-cells = <2>;
 			status = "disabled";
 		};
 
@@ -1871,6 +2141,15 @@
 		vlpcfg_bus: syscon@1c00c000 {
 			compatible = "mediatek,mt6897-vlpcfg-bus", "syscon";
 			reg = <0 0x1c00c000 0 0x1000>;
+			status = "disabled";
+		};
+
+		keypad: keypad@1c00e000 {
+			compatible = "mediatek,mt6897-keypad", "mediatek,mt6779-keypad";
+			reg = <0 0x1c00e000 0 0x1000>;
+			interrupts = <GIC_SPI 138 IRQ_TYPE_EDGE_RISING 0>;
+			clocks = <&clk26m>;
+			clock-names = "kpd";
 			status = "disabled";
 		};
 

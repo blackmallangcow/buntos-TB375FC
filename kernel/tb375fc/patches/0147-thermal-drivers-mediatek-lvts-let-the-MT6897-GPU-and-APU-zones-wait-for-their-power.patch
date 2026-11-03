@@ -1,0 +1,102 @@
+From: buntOS contributors
+Subject: [PATCH] thermal/drivers/mediatek/lvts: let the MT6897 GPU and APU zones wait for their power
+
+The GPU and APU controllers of the MT6897 have no clock while their side
+is powered off, as it is when the driver probes, and the GPU side goes
+off again whenever the GPU suspends. Refusing the domain leaves those
+sensors without a zone for good. Register the zones, which return -EAGAIN
+without a word until their side is powered.
+---
+ drivers/thermal/mediatek/lvts_thermal.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/thermal/mediatek/lvts_thermal.c b/drivers/thermal/mediatek/lvts_thermal.c
+--- a/drivers/thermal/mediatek/lvts_thermal.c
++++ b/drivers/thermal/mediatek/lvts_thermal.c
+@@ -188,6 +188,8 @@
+ 	 * only reads temperatures.
+ 	 */
+ 	bool fw_managed;
++	/* Only for fw_managed domains: this side of the chip may be off */
++	bool fw_may_be_off;
+ 	/* Sensors may be calibrated at high temperature, see LVTS_CALIB_HT */
+ 	bool high_temp_calib;
+ 	const u32 *conn_cmd;
+@@ -216,6 +218,8 @@
+ 	int golden_mc;
+ 	/* Only for fw_managed domains: the last reading could not be used */
+ 	bool fw_unusable;
++	/* Only for fw_managed domains: its side of the chip may be powered off */
++	bool fw_may_be_off;
+ };
+ 
+ struct lvts_ctrl {
+@@ -696,6 +700,11 @@
+ 	u32 raw = readl(lvts_sensor->msr) & GENMASK(15, 0);
+ 	int t = INT_MIN;
+ 
++	/* Its side is off, which is normal. There is nothing to read, or to say. */
++	if (lvts_sensor->fw_may_be_off &&
++	    (!(readl(LVTS_CLKEN(lvts_sensor->base)) & BIT(0)) || !raw))
++		return -EAGAIN;
++
+ 	if (raw)
+ 		t = (int)div_u64((u64)lvts_sensor->coeff << 14, raw) +
+ 		    lvts_sensor->golden_mc - lvts_sensor->coeff;
+@@ -1073,6 +1082,8 @@
+ 	u32 scale = ht ? LVTS_COEFF_CONST_HT_MT6897 : LVTS_COEFF_CONST_MT6897;
+ 	u32 nominal = ht ? LVTS_COUNT_R_HT_MT6897 : LVTS_COUNT_R_MT6897;
+ 	u32 delta = nominal / LVTS_COUNT_R_DELTA_MT6897;
++	bool off = lvts_data->fw_may_be_off &&
++		   !(readl(LVTS_CLKEN(lvts_ctrl->base)) & BIT(0));
+ 	int i, ret;
+ 
+ 	if (golden < golden_min || golden > golden_max)
+@@ -1085,7 +1096,9 @@
+ 		const char *problem = lvts_fw_sensor_problem(sensor);
+ 		u32 hw, count = 0;
+ 
+-		if (problem)
++		sensor->fw_may_be_off = lvts_data->fw_may_be_off;
++
++		if (problem && !off)
+ 			return dev_err_probe(dev, -ENODATA, "Sensor %d: %s\n",
+ 					     sensor->dt_id, problem);
+ 
+@@ -1110,12 +1123,19 @@
+ 		 * the fuses may not be the right ones for this sensor.
+ 		 */
+ 		hw = readl(edata[i]);
+-		if (hw != count)
++		if (!off && hw != count)
+ 			dev_warn(dev, "sensor %d: fuse count %u, firmware has %u\n",
+ 				 sensor->dt_id, count, hw);
+ 
+ 		dev_dbg(dev, "sensor %d: count %u, coefficient %d, MSR 0x%x\n",
+ 			sensor->dt_id, count, sensor->coeff, readl(sensor->msr));
++	}
++
++	/* The GPU and APU sides have no clock until they are powered */
++	if (off) {
++		dev_info(dev, "controller at 0x%x has no clock for now\n",
++			 ctrl_data->offset);
++		return 0;
+ 	}
+ 
+ 	/* PROTCTL, PROTTC and MONINT tell whether a hardware reset is armed */
+@@ -2478,6 +2498,7 @@
+ 	.num_lvts_ctrl	= ARRAY_SIZE(mt6897_lvts_apu_data_ctrl),
+ 	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT6897,
+ 	.fw_managed	= true,
++	.fw_may_be_off	= true,
+ };
+ 
+ static const struct lvts_data mt6897_lvts_gpu_data = {
+@@ -2485,6 +2506,7 @@
+ 	.num_lvts_ctrl	= ARRAY_SIZE(mt6897_lvts_gpu_data_ctrl),
+ 	.num_cal_offsets = LVTS_NUM_CAL_OFFSETS_MT6897,
+ 	.fw_managed	= true,
++	.fw_may_be_off	= true,
+ };
+ 
+ static const struct lvts_data mt7987_lvts_ap_data = {

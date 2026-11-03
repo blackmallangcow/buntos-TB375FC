@@ -381,6 +381,14 @@
 	};
 };
 
+&keypad {
+	/* The stock tree maps key 0 to volume down and debounces for 1024 ticks */
+	keypad,num-rows = <1>;
+	keypad,num-columns = <1>;
+	linux,keymap = <MATRIX_KEY(0, 0, KEY_VOLUMEDOWN)>;
+	debounce-delay-ms = <32>;
+};
+
 &pio {
 	hall_pins: hall-pins {
 		pins-hall {
@@ -432,9 +440,13 @@
 	spi2_pins: spi2-pins {
 		pins-bus {
 			pinmux = <PINMUX_GPIO11__FUNC_SPI2_CLK>,
-				 <PINMUX_GPIO12__FUNC_SPI2_CSB>,
 				 <PINMUX_GPIO13__FUNC_SPI2_MI>,
 				 <PINMUX_GPIO14__FUNC_SPI2_MO>;
+			drive-strength = <6>;
+		};
+
+		pins-cs {
+			pinmux = <PINMUX_GPIO12__FUNC_GPIO12>;
 			drive-strength = <6>;
 		};
 	};
@@ -542,6 +554,12 @@
 &spi2 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi2_pins>;
+	/*
+	 * Through the controller's own chip select the NT36532 only reads back
+	 * zeros. The same transfers answer with the trim ID when GPIO12 is
+	 * driven by software, at every speed tried up to 4 MHz.
+	 */
+	cs-gpios = <&pio 12 GPIO_ACTIVE_LOW>;
 
 	/*
 	 * The touch and stylus side of the NT36532 TDDI. The firmware is tuned
@@ -550,8 +568,7 @@
 	 * 1840-pixel side and Y along the 2944-pixel side, both in tenths of a
 	 * pixel and up to 18400 and 29440, while the panel scans out
 	 * 2944x1840. The active area is 273.6 x 171.0 mm (12.7", 16:10).
-	 * TODO(2c): check the direction of both axes with evtest and add
-	 * touchscreen-inverted-x/y where needed.
+	 * The controller's X runs against the panel's lines.
 	 */
 	touchscreen@0 {
 		compatible = "novatek,nt36532-ts";
@@ -569,6 +586,7 @@
 		touchscreen-size-y = <29441>;
 		touchscreen-x-mm = <171>;
 		touchscreen-y-mm = <273>;
+		touchscreen-inverted-x;
 		touchscreen-swapped-x-y;
 	};
 };

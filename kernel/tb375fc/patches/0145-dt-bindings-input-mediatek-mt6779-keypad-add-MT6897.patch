@@ -1,0 +1,20 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: input: mediatek,mt6779-keypad: add MT6897
+
+The MT6897 keypad controller works with the MT6779 driver. Lenovo's
+TB375FC tablet has its volume down key on it.
+---
+ Documentation/devicetree/bindings/input/mediatek,mt6779-keypad.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/input/mediatek,mt6779-keypad.yaml b/Documentation/devicetree/bindings/input/mediatek,mt6779-keypad.yaml
+--- a/Documentation/devicetree/bindings/input/mediatek,mt6779-keypad.yaml
++++ b/Documentation/devicetree/bindings/input/mediatek,mt6779-keypad.yaml
+@@ -27,6 +27,7 @@
+       - items:
+           - enum:
+               - mediatek,mt6873-keypad
++              - mediatek,mt6897-keypad
+               - mediatek,mt8183-keypad
+               - mediatek,mt8365-keypad
+               - mediatek,mt8516-keypad
