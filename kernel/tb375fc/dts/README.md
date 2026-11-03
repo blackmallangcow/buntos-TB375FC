@@ -137,6 +137,7 @@ dtschema는 VM의 venv(`~/buntos-build/tb375fc/venv-dtschema`)에만 설치했�
 | `&dsi0` `panel@0` | `lenovo,tb375fc-nt36532`, 리셋 GPIO41, ID GPIO184, `vddio_1v8`, `lcd_avdd`, `lcd_avee`, 273×171mm | 펌웨어, 미러, 스톡 모듈, LK | `disabled`. 패널 셋을 스트랩으로 가른다. 순정의 `panel1@0`~`panel3@2`는 따르지 않았다. 형제 노드로 두면 Tianma에서 dsi1이 영원히 기다리고, LK가 고친 트리를 받지 않는 길에서 BOE로 잘못 고른다 |
 | `&dsi0`·`&dsi1` `ports/port@1` | 패널의 `port@0`·`port@1`로 | 업스트림 `mediatek,dsi.yaml`(번호) | `disabled`. 입력 포트 `port@0`도 있다. `&dsi1`은 `mediatek,dual-dsi-slave`다 |
 | `lcd_avdd`, `lcd_avee` | regulator-fixed, GPIO187·186, `regulator-boot-on`, `off-on-delay-us = <80000>` | 펌웨어(`bias_p`·`bias_n`), 미러 | `disabled`. SM5109의 켜기 핀이다. 전압 5.8V는 TPS65132 식으로 읽은 값이고 소프트웨어는 쓰지 않는다. 80ms는 벤더가 끈 뒤 기다리는 시간이다 |
+| `framebuffer0`의 `clocks` | 시험 층에서 `mmpll` | 실측 | LK가 돌리는 화면과 UFS가 같은 PLL을 쓴다. 클럭 컨트롤러가 꺼진 보드 dts에 그대로 넣으면 simpledrm이 뜨지 않으니, 클럭 컨트롤러를 보드에서 켤 때 함께 옮긴다 |
 | `framebuffer0`의 `panel` | `&panel0` | 미러(셋 다 273615×171009µm) | simpledrm이 `width-mm`·`height-mm`를 읽는다. 파이프라인을 켤 때 뺀다 |
 | `conn_pins_off`, `conn_pins_on` | GPIO192~202 | 펌웨어, 벤더 | consys가 쓴다(2d) |
 | 레일 `mt6363_vcn13`, `mt6363_vrfio18`, `mt6368_vant18`, `mt6368_vcn33_1`, `mt6368_vcn33_2` | 1.35 V, 1.7 V(벤더가 쓰는 값), 나머지는 범위 없음 | 펌웨어, 벤더 | `disabled`(2d). of_regulator가 사용 가능한 자식만 보므로 리눅스가 건드리지 않는다 |

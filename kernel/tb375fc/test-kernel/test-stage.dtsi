@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 // 시험용: 2b에서 하나씩 켜는 노드. 기기에서 확인한 뒤 보드 dts로 옮긴다.
 
+// LK가 켜 둔 화면은 mmpll에서 나오는 클럭으로 돈다. 커널에는 화면 드라이버가 없어 이 사용자를 모르므로,
+// 같은 PLL을 쓰는 UFS가 클럭을 내리면 사용자가 0이 되어 PLL을 끈다. simpledrm이 잡아 둔다.
+&framebuffer0 {
+	clocks = <&apmixedsys CLK_APMIXED_MMPLL>;
+};
+
 // 6.1 핀, 6.2 클럭
 &pio {
 	status = "okay";
