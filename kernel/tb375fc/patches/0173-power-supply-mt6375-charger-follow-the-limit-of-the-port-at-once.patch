@@ -1,0 +1,81 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: follow the limit of the port at once
+
+TCPM reports a new limit through its power supply, which has no link to
+this one, so this driver only found out at its next look, up to 10
+seconds later. After going from 5 V 3 A to 9 V 2 A the input limit read
+3 A for at least 7 seconds on the device, over the contract.
+
+A link in the device tree does not work here: power_supply_register()
+would wait for the port, and the port waits for the boost of this chip.
+So listen for changes of any USB power supply. An extra look does no
+harm.
+
+On the device the limit now reads 2 A at the first sample after the
+contract.
+
+---
+ drivers/power/supply/mt6375-charger.c | 36 +++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+index 31e36fb..0d2c6f4 100644
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -237,6 +237,7 @@ struct mt6375_chg {
+ 	struct gpio_desc *vbus_protect;
+ 
+ 	struct delayed_work work;
++	struct notifier_block port_nb;
+ 	struct mutex lock;		/* the fields below */
+ 	bool taken_over;
+ 	bool boost;			/* the boost parameters may be set */
+@@ -861,6 +862,32 @@ static const enum power_supply_property mt6375_chg_properties[] = {
+ 	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
+ };
+ 
++/*
++ * TCPM changes the limit of its port with nothing to tell this driver, and a
++ * link in the device tree would have this chip wait for the port, and the port
++ * for the boost of this chip. A new contract must not wait for the next look:
++ * the input stays at what 5 V could give with the source at 9 V by then.
++ */
++static int mt6375_chg_port_changed(struct notifier_block *nb,
++				   unsigned long event, void *data)
++{
++	struct mt6375_chg *chg = container_of(nb, struct mt6375_chg, port_nb);
++	struct power_supply *psy = data;
++
++	if (event == PSY_EVENT_PROP_CHANGED && psy != chg->psy &&
++	    psy->desc->type == POWER_SUPPLY_TYPE_USB)
++		mod_delayed_work(system_freezable_wq, &chg->work, 0);
++
++	return NOTIFY_OK;
++}
++
++static void mt6375_chg_port_unwatch(void *data)
++{
++	struct mt6375_chg *chg = data;
++
++	power_supply_unreg_notifier(&chg->port_nb);
++}
++
+ static const struct power_supply_desc mt6375_chg_psy_desc = {
+ 	.name = "mt6375-charger",
+ 	.type = POWER_SUPPLY_TYPE_USB,
+@@ -1587,6 +1614,15 @@ static int mt6375_chg_init_control(struct mt6375_chg *chg)
+ 	if (ret)
+ 		return ret;
+ 
++	chg->port_nb.notifier_call = mt6375_chg_port_changed;
++	ret = power_supply_reg_notifier(&chg->port_nb);
++	if (ret)
++		return ret;
++
++	ret = devm_add_action_or_reset(dev, mt6375_chg_port_unwatch, chg);
++	if (ret)
++		return ret;
++
+ 	mutex_lock(&chg->lock);
+ 	chg->can_control = true;
+ 	mutex_unlock(&chg->lock);

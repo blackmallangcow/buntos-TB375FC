@@ -1,0 +1,83 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: do not end a charge far under the voltage limit
+
+The chip ends a charge on a current under IEOC anywhere above where
+charging comes back. That is CV - VREC, 4.14 V here, or about 73 % on
+this battery. It does not wait for the voltage limit. The low current as
+a source comes up is enough. The chip then goes through EOC and
+background charging to DONE, which reads as Full, and the source carries
+the system with nothing going into the battery. The voltage then has no
+reason to fall under 4.14 V.
+
+On the device this came 9 seconds after a hard reset, at 4.16 V and 73
+%, with the battery current at 0 from then on. EOC_RST, which the
+MediaTek driver has as reset_eoc_state, brought it back at once to +1.86
+A from a 9 V 2 A contract.
+
+A charge that really ended did so at the voltage limit. Reset the state
+when the battery is more than 100 mV under that, at the next look of
+this driver. That is also the vrec of the MediaTek driver, so a battery
+that really was full can come back there rather than at 200 mV down.
+
+At a real full charge the chip ended at 4.335 V and +0.34 A, and it
+stayed in DONE for the 15 minutes watched.
+
+---
+ drivers/power/supply/mt6375-charger.c | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+index c1347b6..31e36fb 100644
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -136,6 +136,8 @@
+ /* vrec: how far under the voltage limit charging comes back */
+ #define MT6375_CHG_VREC_UV		200000
+ #define MT6375_CHG_VREC_200MV		1
++/* A charge ending further than this under the voltage limit did not end */
++#define MT6375_CHG_EOC_MARGIN_UV	100000
+ /* chg-tmr, chg-tmr-en: 5 hours from 0 in steps of 5 hours */
+ #define MT6375_CHG_TMR_10H		1
+ /* The stock charger thread looks every 10 seconds */
+@@ -152,8 +154,8 @@
+ 
+ enum mt6375_chg_field {
+ 	F_CHG_EN, F_BUCK_EN, F_HZ, F_IAICR, F_ILIM_EN, F_VMIVR, F_CV, F_VREC,
+-	F_CC, F_CHG_TMR, F_CHG_TMR_EN, F_TE, F_IEOC, F_BLEED_DIS_EN, F_WDT_EN,
+-	F_IC_STAT, F_ST_PWR_RDY, F_MAX,
++	F_CC, F_CHG_TMR, F_CHG_TMR_EN, F_EOC_RST, F_TE, F_IEOC, F_BLEED_DIS_EN,
++	F_WDT_EN, F_IC_STAT, F_ST_PWR_RDY, F_MAX,
+ };
+ 
+ static const struct reg_field mt6375_chg_reg_fields[F_MAX] = {
+@@ -168,6 +170,7 @@ static const struct reg_field mt6375_chg_reg_fields[F_MAX] = {
+ 	[F_CC] = REG_FIELD(MT6375_REG_CHG_ICHG, 0, 5),
+ 	[F_CHG_TMR] = REG_FIELD(MT6375_REG_CHG_TMR, 4, 5),
+ 	[F_CHG_TMR_EN] = REG_FIELD(MT6375_REG_CHG_TMR, 7, 7),
++	[F_EOC_RST] = REG_FIELD(MT6375_REG_CHG_EOC, 0, 0),
+ 	[F_TE] = REG_FIELD(MT6375_REG_CHG_EOC, 1, 1),
+ 	[F_IEOC] = REG_FIELD(MT6375_REG_CHG_EOC, 4, 7),
+ 	[F_BLEED_DIS_EN] = REG_FIELD(MT6375_REG_CHG_VSYS, 7, 7),
+@@ -1382,6 +1385,22 @@ static void mt6375_chg_control(struct mt6375_chg *chg,
+ 		ret = regmap_field_write(chg->fields[F_CHG_EN], 1);
+ 		if (ret)
+ 			goto stop;
++
++		/*
++		 * The chip ends a charge on a low current alone, anywhere above
++		 * where charging comes back. The current as a source comes up
++		 * does that, at 73 % here, and it then stays "full" with the
++		 * source carrying the system. A charge that ended for real did
++		 * so at the voltage limit.
++		 */
++		if (!now->err && now->vbat_uv < cv - MT6375_CHG_EOC_MARGIN_UV &&
++		    (stat == MT6375_CHG_STAT_EOC ||
++		     stat == MT6375_CHG_STAT_BKGND ||
++		     stat == MT6375_CHG_STAT_DONE)) {
++			ret = regmap_field_write(chg->fields[F_EOC_RST], 1);
++			if (ret)
++				goto stop;
++		}
+ 	}
+ 
+ 	ret = stop_ret;

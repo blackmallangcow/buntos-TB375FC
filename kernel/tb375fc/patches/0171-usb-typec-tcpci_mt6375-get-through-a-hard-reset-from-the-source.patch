@@ -1,0 +1,119 @@
+From: buntOS contributors
+Subject: [PATCH] usb: typec: tcpci_mt6375: get through a hard reset from the source
+
+A hard reset from the source left this port dead until the plug or the
+driver was pulled, with the input of the charger at the USB default. A
+PPS source sends one when requests stop coming, and any source can.
+
+On receiving a hard reset the chip puts ALERT_MASK and POWER_STATUS_MASK
+back to their defaults and clears RECEIVE_DETECT. The rest of its
+registers stay as they were. That goes wrong in three steps:
+
+ - FAULT_STATUS says ALL_REG_RST_TO_DEFAULT from the reset in
+   mt6375_tcpc_init(), as tcpci_init() clears it just before calling
+   that. With the FAULT alert now unmasked the interrupt line stays up,
+   and the PD event of the chip comes on an edge, so no alert gets here
+   any more. TCPM runs out of tries and waits in SNK_UNATTACHED for
+   good.
+
+ - With the fault cleared by hand, the next alert finds
+   POWER_STATUS_MASK at 0xff and tcpci_irq() has TCPM start over, in the
+   middle of its recovery from the hard reset.
+
+ - Starting over runs mt6375_tcpc_init() again, and its software reset
+   also masks the PD event on the PMU side of the chip: 0x1ff goes from
+   0xfe back to 0xff. regmap-irq does not look again, so alerts then
+   only arrive when another interrupt of the chip happens to read the
+   event. TCPM ends up with the wrong polarity, no messages and a limit
+   of 0 mA.
+
+So clear the fault after the reset, put the masks back at the start of
+the interrupt handler unless the fault status says that the chip was
+reset, and reset the chip only while the interrupt is not in use yet.
+
+On the device with a 68 W charger in PPS and no more requests: hard
+reset 14.1 s after the last one, VBUS gone 30 ms later and back after
+0.84 s, Source_Capabilities after another 170 ms, and the contract back
+1.14 s after the hard reset, through SNK_HARD_RESET_SINK_OFF, _WAIT_VBUS
+and _SINK_ON as TCPM means it. Seven times out of seven. Before this it
+took a new plug.
+
+---
+ drivers/usb/typec/tcpm/tcpci_mt6375.c | 50 +++++++++++++++++++++++++--
+ 1 file changed, 47 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/usb/typec/tcpm/tcpci_mt6375.c b/drivers/usb/typec/tcpm/tcpci_mt6375.c
+index 09cf181..87ca3a5 100644
+--- a/drivers/usb/typec/tcpm/tcpci_mt6375.c
++++ b/drivers/usb/typec/tcpm/tcpci_mt6375.c
+@@ -163,9 +163,26 @@ static int mt6375_tcpc_init(struct tcpci *tcpci, struct tcpci_data *data)
+ 	u8 mask[MT6375_NUM_VEND_INT] = { };
+ 	int ret;
+ 
+-	ret = mt6375_tcpc_reset(regmap);
+-	if (ret)
+-		return ret;
++	/*
++	 * Not once the interrupt is in use. The reset also masks the PD event
++	 * on the PMU side of the chip, where regmap-irq does not look again,
++	 * and alerts then stop for good.
++	 */
++	if (!priv->irq_ready) {
++		ret = mt6375_tcpc_reset(regmap);
++		if (ret)
++			return ret;
++
++		/*
++		 * tcpci_init() cleared this before the reset set it. Left set
++		 * it keeps the FAULT alert up, which holds the interrupt line
++		 * high once a hard reset has unmasked that alert.
++		 */
++		ret = regmap_write(regmap, TCPC_FAULT_STATUS,
++				   TCPC_FAULT_STATUS_ALL_REG_RST_TO_DEFAULT);
++		if (ret)
++			return ret;
++	}
+ 
+ 	/* Rd on both, at once: a USB host must not see the pins open long */
+ 	ret = mt6375_tcpc_set_rd(regmap);
+@@ -312,6 +329,31 @@ static int mt6375_tcpc_set_vbus(struct tcpci *tcpci, struct tcpci_data *data,
+ 	return 1;
+ }
+ 
++/*
++ * A hard reset from the source puts the alert masks back to their defaults,
++ * with the rest of the chip as it was. tcpci_irq() takes that for a chip that
++ * lost its state and has TCPM start over, in the middle of the recovery from
++ * the hard reset. So put them back first. A reset of the chip says so in the
++ * fault status, and stays for tcpci_irq() to find.
++ */
++static void mt6375_tcpc_keep_masks(struct regmap *regmap)
++{
++	unsigned int fault;
++	u16 mask;
++
++	if (regmap_raw_read(regmap, TCPC_ALERT_MASK, &mask, sizeof(mask)) ||
++	    mask == MT6375_ALERT_MASK)
++		return;
++
++	if (regmap_read(regmap, TCPC_FAULT_STATUS, &fault) ||
++	    (fault & TCPC_FAULT_STATUS_ALL_REG_RST_TO_DEFAULT))
++		return;
++
++	mt6375_tcpc_write16(regmap, TCPC_ALERT_MASK, MT6375_ALERT_MASK);
++	regmap_write(regmap, TCPC_POWER_STATUS_MASK,
++		     TCPC_POWER_STATUS_VBUS_PRES);
++}
++
+ static irqreturn_t mt6375_tcpc_irq(int irq, void *dev_id)
+ {
+ 	struct mt6375_tcpc *priv = dev_id;
+@@ -319,6 +361,8 @@ static irqreturn_t mt6375_tcpc_irq(int irq, void *dev_id)
+ 	irqreturn_t ret;
+ 	bool present;
+ 
++	mt6375_tcpc_keep_masks(priv->tcpci_data.regmap);
++
+ 	ret = tcpci_irq(priv->tcpci);
+ 
+ 	/*

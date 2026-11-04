@@ -1,0 +1,64 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: power: supply: add the references for direct charging
+
+A UPM6720 can charge directly from a PPS source. It needs the port and
+the fuel gauge for that, and its limits are written at probe once they
+are there, which a 9 V contract needs as well: from reset its input FETs
+open above 6.5 V.
+
+The MT6375 charger decides when that happens, so it needs to know the
+charge pump.
+
+---
+ .../power/supply/mediatek,mt6375-charger.yaml     |  7 +++++++
+ .../bindings/power/supply/nuvolta,nu2115.yaml     | 15 +++++++++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml b/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
+index 4eba260..1df598d 100644
+--- a/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
++++ b/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
+@@ -39,6 +39,13 @@ properties:
+       The power supply of the USB port controller, which tells how much current
+       the port can give. Without it the input stays at the USB default.
+ 
++  mediatek,charge-pump:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      A charge pump to charge through directly from a PPS source, within the
++      limits of this charger's policy. Used only when the direct_charge module
++      parameter is on.
++
+   mediatek,connector-thermal-zone:
+     $ref: /schemas/types.yaml#/definitions/string
+     description:
+diff --git a/Documentation/devicetree/bindings/power/supply/nuvolta,nu2115.yaml b/Documentation/devicetree/bindings/power/supply/nuvolta,nu2115.yaml
+index 8537e7c..d81b502 100644
+--- a/Documentation/devicetree/bindings/power/supply/nuvolta,nu2115.yaml
++++ b/Documentation/devicetree/bindings/power/supply/nuvolta,nu2115.yaml
+@@ -33,10 +33,25 @@ properties:
+     description: The FETs at the VAC1 input, closed by hand.
+     unevaluatedProperties: false
+ 
++  unisemi,usb-port:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      The USB Type-C port controller whose power supply gives PPS. With this
++      and unisemi,fuel-gauge a UPM6720 charges directly when its main charger
++      asks for it, and its limits are written at probe.
++
++  unisemi,fuel-gauge:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: The fuel gauge of the battery behind the charge pump.
++
+ required:
+   - compatible
+   - reg
+ 
++dependencies:
++  unisemi,usb-port: [ "unisemi,fuel-gauge" ]
++  unisemi,fuel-gauge: [ "unisemi,usb-port" ]
++
+ additionalProperties: false
+ 
+ examples:

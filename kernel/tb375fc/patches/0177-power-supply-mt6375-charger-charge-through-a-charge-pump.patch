@@ -1,0 +1,422 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: charge through a charge pump
+
+With mediatek,charge-pump in the device tree and the direct_charge
+module parameter on, this driver decides when charging goes through the
+charge pump from a PPS source: 3.5 to 4.15 V on the gauge, 16 to 36 C on
+the battery and at most 45 C at the connector to start, 15 to 38 C and
+50 C to go on, 8 hours for one source, and only with no user limit under
+the maximum. All that stops charging here stops that as well, and
+inhibit-charge does so at once.
+
+This chip stays out of the way meanwhile with charging off and 200 mA at
+the input. A charge pump that stopped goes for a retry after a minute,
+three times for one source. One that finished waits for the battery to
+fall under 3.9 V.
+
+Off by default.
+
+---
+ drivers/power/supply/mt6375-charger.c | 251 +++++++++++++++++++++++++-
+ 1 file changed, 243 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+index 8a8625e..5fae6db 100644
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -2,11 +2,11 @@
+ /*
+  * MediaTek MT6375 charger: battery charging and the boost that sources USB VBUS
+  *
+- * The USB switch, BC1.2 and the charge pumps stay as the bootloader left them,
+- * and neither probing nor reading the state writes to the chip, apart from
+- * unmasking the interrupts when the core driver has them. The first write to
+- * the charger comes when the regulator is enabled, when charging is taken over
+- * or when it has to stop.
++ * The USB switch and BC1.2 stay as the bootloader left them, and neither
++ * probing nor reading the state writes to the chip, apart from unmasking the
++ * interrupts when the core driver has them. The first write to the charger
++ * comes when the regulator is enabled, when charging is taken over or when it
++ * has to stop.
+  *
+  * Charging is only taken over with a description of the battery and a fuel
+  * gauge in the device tree, and once the gauge has given a good temperature and
+@@ -20,6 +20,12 @@
+  * Lenovo TB375FC. The chip's own safety timer, overvoltage and thermal
+  * protections are never turned off here. Its watchdog is, as on stock.
+  *
++ * With a charge pump in the device tree and direct_charge on, this driver also
++ * decides when charging goes through that instead, from a PPS source, within a
++ * narrower range of temperature and voltage. All that stops charging here stops
++ * that as well, and inhibit-charge does so at once. This chip then stays out of
++ * the way with charging off and a low input, and takes over again afterwards.
++ *
+  * Copyright (c) 2026 buntOS contributors
+  */
+ 
+@@ -27,6 +33,7 @@
+ #include <linux/bits.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/interrupt.h>
++#include <linux/jiffies.h>
+ #include <linux/kernel.h>
+ #include <linux/linear_range.h>
+ #include <linux/mod_devicetable.h>
+@@ -152,6 +159,35 @@
+ #define MT6375_CHG_CONN_HOT_MC		75000
+ #define MT6375_CHG_CONN_COOL_MC		65000
+ #define MT6375_CHG_CONN_OPEN_MC		-40000
++/*
++ * Direct charging. The input stays just enough for this chip to keep going. The
++ * temperatures are inside of the 15 to 45 C where stock takes its 9 A
++ * (jeita-temp-t2-to-t3-fcc), and under the limits of the charge-guard service.
++ * Above the voltage that it starts from, this chip does the rest.
++ */
++#define MT6375_CHG_DC_AICR_UA		200000
++#define MT6375_CHG_DC_VBAT_START_UV	4150000
++#define MT6375_CHG_DC_VBAT_AGAIN_UV	3900000
++/* Under this the battery gets the gentle start of this chip first */
++#define MT6375_CHG_DC_VBAT_MIN_UV	3500000
++#define MT6375_CHG_DC_TEMP_MIN		15
++#define MT6375_CHG_DC_TEMP_START_MIN	16
++#define MT6375_CHG_DC_TEMP_START_MAX	36
++#define MT6375_CHG_DC_TEMP_MAX		38
++#define MT6375_CHG_DC_CONN_START_MC	45000
++#define MT6375_CHG_DC_CONN_MAX_MC	50000
++#define MT6375_CHG_DC_RETRY_MS		60000
++#define MT6375_CHG_DC_MAX_FAILS		3
++#define MT6375_CHG_DC_POLL_MS		5000
++/* chg-time-max of stock, here for all of one source together */
++#define MT6375_CHG_DC_TIME_MAX_MS	(8 * 60 * 60 * 1000)
++/* A source that goes away for less than this and comes back is the same one */
++#define MT6375_CHG_DC_GONE_MS		5000
++
++static bool direct_charge;
++module_param(direct_charge, bool, 0644);
++MODULE_PARM_DESC(direct_charge,
++		 "Charge directly through the charge pump from a PPS source");
+ 
+ enum mt6375_chg_field {
+ 	F_CHG_EN, F_BUCK_EN, F_HZ, F_IAICR, F_ILIM_EN, F_VMIVR, F_CV, F_VREC,
+@@ -216,6 +252,9 @@ struct mt6375_chg_reading {
+ 	int port_ua;
+ 	int conn_err;
+ 	int conn_temp;
++	bool dc_active;			/* the charge pump is at it */
++	int dc_health;			/* how it stopped the last time */
++	bool port_pps;
+ };
+ 
+ struct mt6375_chg {
+@@ -260,6 +299,15 @@ struct mt6375_chg {
+ 	int user_cv_uv;
+ 	int user_cc_ua;
+ 	int user_aicr_ua;
++	bool dc_hold;			/* out of the way of direct charging */
++	bool dc_started;		/* asked for, not seen stopping yet */
++	bool dc_done;			/* not again until the battery fell */
++	unsigned int dc_fails;		/* since the source came */
++	unsigned long dc_retry_at;
++	bool dc_timing;			/* the source has had direct charging */
++	unsigned long dc_first_at;	/* since then */
++	bool dc_no_source;
++	unsigned long dc_no_source_at;
+ };
+ 
+ /* The chip wants these set differently for the boost than for charging */
+@@ -528,6 +576,11 @@ static int mt6375_chg_get_status(struct mt6375_chg *chg, int *val)
+ 	if (ret)
+ 		return ret;
+ 
++	if (READ_ONCE(chg->dc_hold) && stat != MT6375_CHG_STAT_FAULT) {
++		*val = POWER_SUPPLY_STATUS_CHARGING;
++		return 0;
++	}
++
+ 	switch (stat) {
+ 	case MT6375_CHG_STAT_VBUS_RDY:
+ 	case MT6375_CHG_STAT_TRICKLE:
+@@ -558,6 +611,11 @@ static int mt6375_chg_get_charge_type(struct mt6375_chg *chg, int *val)
+ 	unsigned int stat;
+ 	int ret;
+ 
++	if (READ_ONCE(chg->dc_hold)) {
++		*val = POWER_SUPPLY_CHARGE_TYPE_FAST;
++		return 0;
++	}
++
+ 	ret = regmap_field_read(chg->fields[F_IC_STAT], &stat);
+ 	if (ret)
+ 		return ret;
+@@ -774,6 +832,24 @@ static int mt6375_chg_set_behaviour(struct mt6375_chg *chg, int behaviour)
+ 	}
+ }
+ 
++/* Waits for the charge pump to stop, so not with the lock held */
++static int mt6375_chg_dc_set(struct mt6375_chg *chg, bool on)
++{
++	union power_supply_propval val = { .intval = on };
++	struct power_supply *pump;
++	int ret;
++
++	pump = power_supply_get_by_reference(dev_fwnode(chg->dev),
++					     "mediatek,charge-pump");
++	if (IS_ERR_OR_NULL(pump))
++		return -ENODEV;
++
++	ret = power_supply_set_property(pump, POWER_SUPPLY_PROP_ONLINE, &val);
++	power_supply_put(pump);
++
++	return ret;
++}
++
+ /*
+  * User space can only ask for less than the limits, or stop charging. Without a
+  * description of the battery the chip is not ours to change.
+@@ -822,6 +898,15 @@ static int mt6375_chg_set_property(struct power_supply *psy,
+ 	}
+ 	mutex_unlock(&chg->lock);
+ 
++	/* This one is for emergencies, and does not wait for the work either */
++	if (psp == POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR &&
++	    val->intval == POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE) {
++		mt6375_chg_dc_set(chg, false);
++		mutex_lock(&chg->lock);
++		chg->dc_started = false;
++		mutex_unlock(&chg->lock);
++	}
++
+ 	/* Also after a failed write: the work tries it again */
+ 	if (ret != -EINVAL)
+ 		mod_delayed_work(system_freezable_wq, &chg->work, 0);
+@@ -863,6 +948,14 @@ static const enum power_supply_property mt6375_chg_properties[] = {
+ 	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
+ };
+ 
++/* The charge pump has something to say, usually that it stopped */
++static void mt6375_chg_external_power_changed(struct power_supply *psy)
++{
++	struct mt6375_chg *chg = power_supply_get_drvdata(psy);
++
++	mod_delayed_work(system_freezable_wq, &chg->work, 0);
++}
++
+ /*
+  * TCPM changes the limit of its port with nothing to tell this driver, and a
+  * link in the device tree would have this chip wait for the port, and the port
+@@ -899,6 +992,7 @@ static const struct power_supply_desc mt6375_chg_psy_desc = {
+ 	.get_property = mt6375_chg_get_property,
+ 	.set_property = mt6375_chg_set_property,
+ 	.property_is_writeable = mt6375_chg_property_is_writeable,
++	.external_power_changed = mt6375_chg_external_power_changed,
+ };
+ 
+ /*
+@@ -1089,7 +1183,7 @@ static int mt6375_chg_input_limit(struct mt6375_chg *chg)
+ 
+ 	if (!power_supply_get_property(port, POWER_SUPPLY_PROP_ONLINE, &val) &&
+ 	    val.intval &&
+-	    !power_supply_get_property(port, POWER_SUPPLY_PROP_CURRENT_MAX,
++	    !power_supply_get_property(port, POWER_SUPPLY_PROP_CURRENT_NOW,
+ 				       &val))
+ 		limit = clamp(val.intval, MT6375_CHG_USB_UA,
+ 			      MT6375_CHG_AICR_MAX_UA);
+@@ -1373,10 +1467,13 @@ static void mt6375_chg_control(struct mt6375_chg *chg,
+ 		  chg->temp == MT6375_CHG_TEMP_WARM_RANGE) &&
+ 		 !chg->gauge_lost && !chg->overvoltage && !chg->fault &&
+ 		 !chg->conn_hot &&
+-		 chg->behaviour == POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
++		 chg->behaviour == POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO &&
++		 !chg->dc_hold;
+ 
+ 	aicr = pwr_rdy ? now->port_ua : MT6375_CHG_USB_UA;
+ 	aicr = min(aicr, chg->user_aicr_ua);
++	if (chg->dc_hold)
++		aicr = min(aicr, MT6375_CHG_DC_AICR_UA);
+ 	if (chg->conn_hot)
+ 		aicr = MT6375_CHG_AICR_MIN_UA;
+ 	else if (chg->conn_unknown)
+@@ -1450,28 +1547,162 @@ stop:
+ 	mt6375_chg_stop_charging(chg);
+ }
+ 
++/* Looked up each time, as these are modules that come and go */
++static void mt6375_chg_read_dc(struct mt6375_chg *chg,
++			       struct mt6375_chg_reading *now)
++{
++	union power_supply_propval val;
++	struct power_supply *psy;
++
++	psy = power_supply_get_by_reference(dev_fwnode(chg->dev),
++					    "mediatek,charge-pump");
++	if (IS_ERR_OR_NULL(psy))
++		return;
++
++	if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_ONLINE, &val))
++		now->dc_active = val.intval;
++	now->dc_health = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_HEALTH, &val))
++		now->dc_health = val.intval;
++	power_supply_put(psy);
++
++	psy = power_supply_get_by_reference(dev_fwnode(chg->dev),
++					    "mediatek,usb-port");
++	if (IS_ERR_OR_NULL(psy))
++		return;
++
++	if (!power_supply_get_property(psy, POWER_SUPPLY_PROP_ONLINE, &val) &&
++	    val.intval &&
++	    !power_supply_get_property(psy, POWER_SUPPLY_PROP_USB_TYPE, &val))
++		now->port_pps =
++			val.intval == POWER_SUPPLY_USB_TYPE_PD_PPS ||
++			val.intval == POWER_SUPPLY_USB_TYPE_PD_PPS_SPR_AVS;
++	power_supply_put(psy);
++}
++
++/*
++ * Whether charging should go through the charge pump. Anyone who wants less
++ * than the limits does not get it. A charge pump that stopped by itself can
++ * come back once it has cooled or after a while, and not a few times over for
++ * one source. After it has finished with the voltage it waits for the battery
++ * to go down, as the voltage falls a lot by itself once the current stops.
++ */
++static bool mt6375_chg_dc_want(struct mt6375_chg *chg,
++			       const struct mt6375_chg_reading *now)
++{
++	if (chg->dc_started && !now->dc_active) {
++		chg->dc_started = false;
++		if (now->dc_health == POWER_SUPPLY_HEALTH_GOOD) {
++			chg->dc_done = true;
++		} else if (now->dc_health != POWER_SUPPLY_HEALTH_UNKNOWN) {
++			chg->dc_retry_at = jiffies +
++				msecs_to_jiffies(MT6375_CHG_DC_RETRY_MS);
++			if (now->dc_health != POWER_SUPPLY_HEALTH_OVERHEAT)
++				chg->dc_fails++;
++		}
++	}
++
++	/* A hard reset takes VBUS away too, and must not clear the count */
++	if (chg->pwr_rdy) {
++		chg->dc_no_source = false;
++	} else if (!chg->dc_no_source) {
++		chg->dc_no_source = true;
++		chg->dc_no_source_at = jiffies;
++	} else if (time_after_eq(jiffies, chg->dc_no_source_at +
++				 msecs_to_jiffies(MT6375_CHG_DC_GONE_MS))) {
++		chg->dc_done = false;
++		chg->dc_fails = 0;
++		chg->dc_timing = false;
++	}
++	if (!now->err && now->vbat_uv < MT6375_CHG_DC_VBAT_AGAIN_UV)
++		chg->dc_done = false;
++
++	if (!READ_ONCE(direct_charge) || !chg->conn_zone || !chg->taken_over ||
++	    !chg->pwr_rdy || !now->port_pps || now->err || now->conn_err ||
++	    chg->boost || chg->fault || chg->overvoltage || chg->gauge_lost ||
++	    chg->conn_hot || chg->conn_unknown ||
++	    chg->temp != MT6375_CHG_TEMP_NORMAL ||
++	    chg->behaviour != POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO ||
++	    chg->user_aicr_ua < MT6375_CHG_AICR_MAX_UA ||
++	    chg->user_cc_ua < chg->cc_max_ua ||
++	    chg->user_cv_uv < chg->cv_max_uv)
++		return false;
++
++	if (now->temp < MT6375_CHG_DC_TEMP_MIN ||
++	    now->temp >= MT6375_CHG_DC_TEMP_MAX ||
++	    now->conn_temp >= MT6375_CHG_DC_CONN_MAX_MC)
++		return false;
++
++	if (chg->dc_timing &&
++	    time_after_eq(jiffies, chg->dc_first_at +
++			  msecs_to_jiffies(MT6375_CHG_DC_TIME_MAX_MS)))
++		return false;
++
++	if (now->dc_active)
++		return true;
++
++	return now->temp >= MT6375_CHG_DC_TEMP_START_MIN &&
++	       now->temp <= MT6375_CHG_DC_TEMP_START_MAX &&
++	       now->conn_temp <= MT6375_CHG_DC_CONN_START_MC &&
++	       now->vbat_uv >= MT6375_CHG_DC_VBAT_MIN_UV &&
++	       now->vbat_uv < MT6375_CHG_DC_VBAT_START_UV &&
++	       !chg->dc_done && chg->dc_fails < MT6375_CHG_DC_MAX_FAILS &&
++	       time_after_eq(jiffies, chg->dc_retry_at);
++}
++
+ static void mt6375_chg_work(struct work_struct *work)
+ {
+ 	struct mt6375_chg *chg = container_of(to_delayed_work(work),
+ 					      struct mt6375_chg, work);
+ 	struct mt6375_chg_reading now = { };
++	bool want, hold, start, stopped = false;
+ 	int health;
+ 
+ 	/* A slow gauge must not hold up inhibit-charge or the boost */
+ 	now.err = mt6375_chg_read_battery(chg, &now.temp, &now.vbat_uv);
+ 	now.port_ua = mt6375_chg_input_limit(chg);
+ 	now.conn_err = mt6375_chg_read_connector(chg, &now.conn_temp);
++	mt6375_chg_read_dc(chg, &now);
+ 
+ 	mutex_lock(&chg->lock);
+ 	health = mt6375_chg_health(chg);
+ 	mt6375_chg_update_connector(chg, &now);
++	want = mt6375_chg_dc_want(chg, &now);
++	mutex_unlock(&chg->lock);
++
++	/* The charge pump is off before this chip starts charging again */
++	if (now.dc_active && !want) {
++		now.dc_active = mt6375_chg_dc_set(chg, false) != 0;
++		stopped = !now.dc_active;
++	}
++
++	/* If it did not stop this chip stays out of the way */
++	hold = want || now.dc_active;
++
++	mutex_lock(&chg->lock);
++	if (stopped)
++		chg->dc_started = false;
++	WRITE_ONCE(chg->dc_hold, hold);
+ 	mt6375_chg_control(chg, &now);
+ 	if (health != mt6375_chg_health(chg))
+ 		power_supply_changed(chg->psy);
++	start = want && !now.dc_active && !chg->setup_failed;
+ 	mutex_unlock(&chg->lock);
+ 
++	/* And this one is out of the way before the charge pump starts */
++	if (start && !mt6375_chg_dc_set(chg, true)) {
++		mutex_lock(&chg->lock);
++		chg->dc_started = true;
++		if (!chg->dc_timing) {
++			chg->dc_timing = true;
++			chg->dc_first_at = jiffies;
++		}
++		mutex_unlock(&chg->lock);
++	}
++
+ 	queue_delayed_work(system_freezable_wq, &chg->work,
+-			   msecs_to_jiffies(MT6375_CHG_POLL_MS));
++			   msecs_to_jiffies(hold ? MT6375_CHG_DC_POLL_MS :
++					    MT6375_CHG_POLL_MS));
+ }
+ 
+ /* What the bootloader left. It is the first thing to know about a new board */
+@@ -1568,8 +1799,11 @@ static int mt6375_chg_init_irqs(struct platform_device *pdev)
+ static void mt6375_chg_stop_control(struct mt6375_chg *chg)
+ {
+ 	disable_delayed_work_sync(&chg->work);
++	mt6375_chg_dc_set(chg, false);
+ 
+ 	mutex_lock(&chg->lock);
++	WRITE_ONCE(chg->dc_hold, false);
++	chg->dc_started = false;
+ 	if (mt6375_chg_check_boost(chg) <= 0 && chg->taken_over)
+ 		mt6375_chg_set_unsupervised(chg);
+ 	mutex_unlock(&chg->lock);
+@@ -1651,6 +1885,7 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+ 	chg->behaviour = POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
+ 	chg->cv_max_uv = MT6375_CHG_CV_MAX_UV;
+ 	chg->cc_max_ua = MT6375_CHG_CC_MAX_UA;
++	chg->dc_retry_at = jiffies;
+ 	chg->regmap = dev_get_regmap(dev->parent, NULL);
+ 	if (!chg->regmap)
+ 		return dev_err_probe(dev, -ENODEV, "Failed to get regmap\n");

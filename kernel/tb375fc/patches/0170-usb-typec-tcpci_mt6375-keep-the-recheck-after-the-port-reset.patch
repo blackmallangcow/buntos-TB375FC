@@ -1,0 +1,29 @@
+From: buntOS contributors
+Subject: [PATCH] usb: typec: tcpci_mt6375: keep the recheck after the port reset
+
+Patch 0151 asks TCPM to look at the pins as soon as VBUS comes back.
+When the driver comes up with a source already on the port, the first
+alert reports VBUS while TCPM still ignores the pins in its port reset,
+and mod_delayed_work() takes the place of the recheck that was due after
+that reset. TCPM then stays in SNK_UNATTACHED with the input at the USB
+default. Seen on reloading the driver with PD on. Wait as long as the
+recheck does, which is also soon enough for a source that comes back.
+
+---
+ drivers/usb/typec/tcpm/tcpci_mt6375.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/typec/tcpm/tcpci_mt6375.c b/drivers/usb/typec/tcpm/tcpci_mt6375.c
+index 42a8b7e..09cf181 100644
+--- a/drivers/usb/typec/tcpm/tcpci_mt6375.c
++++ b/drivers/usb/typec/tcpm/tcpci_mt6375.c
+@@ -333,7 +333,8 @@ static irqreturn_t mt6375_tcpc_irq(int irq, void *dev_id)
+ 
+ 	present = power & TCPC_POWER_STATUS_VBUS_PRES;
+ 	if (present && !priv->vbus_present && !priv->vbus_on)
+-		mod_delayed_work(system_wq, &priv->cc_work, 0);
++		mod_delayed_work(system_wq, &priv->cc_work,
++				 msecs_to_jiffies(MT6375_CC_RECHECK_MS));
+ 	priv->vbus_present = present;
+ 
+ 	return ret;

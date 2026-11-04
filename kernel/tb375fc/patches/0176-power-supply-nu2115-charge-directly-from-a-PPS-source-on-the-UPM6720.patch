@@ -1,0 +1,1189 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: nu2115: charge directly from a PPS source on the UPM6720
+
+With references to the USB port and the fuel gauge the driver sets the
+limits of the chip at probe and gives a power supply for the main
+charger to start and stop direct charging with. Nothing makes it
+writable from user space.
+
+A loop runs once a second while it charges. The source sits in its
+current limit a little above the voltage that the current needs, so a
+path with too much resistance gets less current. The current goes up in
+steps of 250 mA from 1 A and comes down as the voltage reaches the
+limit, and under the idvchg-term of stock the main charger takes over.
+The order and values follow the PE5 algorithm of the OnePlus MT6897
+kernel and the stock tree of the TB375FC, at a lower voltage and with
+the thermal shutdown of the chip left on.
+
+Stops, in the order they are checked: battery at 38 C, chip at 85 C,
+4.28 V on the gauge or 4.34 V on the chip, 9.5 A into the battery, input
+over-voltage, the chip having stopped by itself, 30 % more current than
+set, and the charge pump not switching. Stopping reads the enable bit
+back. Only when it reads off does the watchdog go off too, and if it
+does not the watchdog of the chip stops it after 5 seconds.
+
+On the device with a 68 W charger: on within 12 seconds of the charger,
+1 A in gave +0.6 A with the screen on and 2.5 A gave +3.45 A, at most 32
+C on the battery, 31 C at the connector and 39 C on the chip. Stopping
+and starting with inhibit-charge works within 3 seconds. With the driver
+held off for 12 seconds the watchdog stopped the pump (FLAG4 0x41) and
+the driver noticed. With a script in place of this loop the same path
+took 4.2 A in for +6.9 A at 56 %.
+
+---
+ drivers/power/supply/nu2115_charger.c | 1043 ++++++++++++++++++++++++-
+ 1 file changed, 1032 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/power/supply/nu2115_charger.c b/drivers/power/supply/nu2115_charger.c
+index a3ff033..ee0c1ae 100644
+--- a/drivers/power/supply/nu2115_charger.c
++++ b/drivers/power/supply/nu2115_charger.c
+@@ -1,28 +1,55 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * Nuvolta NU2115 and Unisemi UPM6720 charge pumps: the VBUS input switch
++ * Nuvolta NU2115 and Unisemi UPM6720 charge pumps: the VBUS input switch, and
++ * direct charging through the UPM6720
+  *
+  * These chips drive the back-to-back FETs between the USB connector and the rest
+  * of the VBUS rail. The FETs close by themselves when a source on the connector
+  * brings up VAC1. To source VBUS from the charger's boost they have to be closed
+- * by hand first, and this driver only does that: the charge pump itself stays
+- * unused, and probing only reads. The two chips do the same job with different
+- * registers. The MediaTek stock kernel of the Lenovo TB375FC does these writes in
+- * the same order around its VBUS regulator, with the watchdog of the chip off,
+- * which it turns on only while charging through the chip.
++ * by hand first. The two chips do the same job with different registers. The
++ * MediaTek stock kernel of the Lenovo TB375FC does these writes in the same
++ * order around its VBUS regulator, with the watchdog of the chip off, which it
++ * turns on only while charging through the chip.
++ *
++ * With references to the USB port and the fuel gauge in the device tree, a
++ * UPM6720 also charges directly from a PPS source when the main charger asks
++ * for it through this power supply, which is not writable from user space. The
++ * main charger decides whether charging is allowed at all, and this driver runs
++ * the loop that needs looking at every second. The order and the values follow
++ * the MediaTek PE5 algorithm in the OnePlus MT6897 kernel and the stock tree of
++ * the Lenovo TB375FC, at a lower voltage and with the thermal shutdown of the
++ * chip left on. The source sits in its current limit, a little above the
++ * voltage that the current needs, so a path with too much resistance simply
++ * gets less current: about 0.3 V / (R - 0.25 Ohm), close to the table that
++ * stock has for its cables.
++ *
++ * Should this driver stop looking, the watchdog of the chip stops the charge
++ * pump after 5 seconds, and the source goes back to 5 V when PPS requests stop
++ * coming. Without those references probing only reads, and the charge pump
++ * stays unused.
+  *
+  * Copyright (c) 2026 buntOS contributors
+  */
+ 
++#include <linux/bitfield.h>
+ #include <linux/bits.h>
++#include <linux/delay.h>
+ #include <linux/i2c.h>
++#include <linux/jiffies.h>
+ #include <linux/kernel.h>
++#include <linux/math.h>
++#include <linux/minmax.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
++#include <linux/pm.h>
++#include <linux/power_supply.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/driver.h>
++#include <linux/unaligned.h>
++#include <linux/workqueue.h>
+ 
+ #define NU2115_REG_CONTROL		0x0d
+ #define NU2115_WDT_DIS			BIT(2)
+@@ -35,21 +62,129 @@
+ #define NU2115_DEV_ID_MASK		GENMASK(7, 4)
+ #define NU2115_DEV_ID			0x90
+ 
++#define UPM6720_REG_VBATOVP		0x00
++#define UPM6720_REG_VBATOVP_ALM		0x01
++#define UPM6720_REG_IBATOCP		0x02
++#define UPM6720_REG_IBATOCP_ALM		0x03
++#define UPM6720_IBAT_DIS		BIT(7)
++#define UPM6720_REG_CTRL1		0x05
++#define UPM6720_IBUSUCP_DIS		BIT(7)
++#define UPM6720_CHG_CONFIG		BIT(3)
+ #define UPM6720_REG_VBUSOVP		0x06
+ #define UPM6720_BUS_PD_EN		BIT(7)
++#define UPM6720_REG_VBUSOVP_ALM		0x07
++#define UPM6720_REG_IBUSOCP		0x08
++#define UPM6720_REG_IBUSOCP_ALM		0x09
++#define UPM6720_IBUSOCP_ALM_DIS		BIT(7)
++#define UPM6720_REG_TEMP_CTRL		0x0a
++#define UPM6720_TSBUS_FLT_DIS		BIT(3)
++#define UPM6720_TSBAT_FLT_DIS		BIT(2)
+ #define UPM6720_REG_VAC_CTRL		0x0e
+ #define UPM6720_VAC1_PD_EN		BIT(1)
+ #define UPM6720_REG_CTRL2		0x0f
+ #define UPM6720_OTG_EN			BIT(5)
++#define UPM6720_CHG_EN			BIT(4)
+ #define UPM6720_DIS_ACDRV_BOTH		BIT(2)
+ #define UPM6720_ACDRV1_STAT		BIT(1)
+ #define UPM6720_REG_CTRL3		0x10
++#define UPM6720_WDT_TIMER		GENMASK(4, 3)
+ #define UPM6720_WDT_DIS			BIT(2)
++#define UPM6720_REG_CTRL4		0x11
++#define UPM6720_IBAT_RSENSE_5MOHM	BIT(7)
++#define UPM6720_UCP_DEGLITCH		GENMASK(3, 2)
++#define UPM6720_REG_STAT1		0x13
++#define UPM6720_STAT1_VOUT_OVP		BIT(5)
++#define UPM6720_STAT1_VBUS_OVP		(BIT(1) | BIT(0))
+ #define UPM6720_REG_STAT3		0x15
++#define UPM6720_VAC_OVP			(BIT(7) | BIT(6))
++#define UPM6720_VOUT_PRESENT		BIT(5)
+ #define UPM6720_VAC1_PRESENT		BIT(4)
++#define UPM6720_REG_STAT5		0x17
++#define UPM6720_CP_SWITCHING		BIT(6)
++#define UPM6720_VBUS_ERR_HI		BIT(4)
++#define UPM6720_REG_FLAG1		0x18
+ #define UPM6720_REG_PART_INFO		0x22
+ #define UPM6720_DEV_ID_MASK		GENMASK(3, 0)
+ #define UPM6720_DEV_ID			0x00
++#define UPM6720_REG_ADC_CTRL		0x23
++#define UPM6720_ADC_EN			BIT(7)
++#define UPM6720_REG_IBUS_ADC		0x25
++#define UPM6720_REG_VBUS_ADC		0x27
++#define UPM6720_REG_VOUT_ADC		0x2d
++#define UPM6720_REG_VBAT_ADC		0x2f
++#define UPM6720_REG_TDIE_ADC		0x37
++
++/*
++ * From the stock tree: 4.39 V is what the chip comes up with and under the
++ * vbatovp of stock, the alarm goes with the 4.34 V of the main charger, 11 V
++ * and 10.5 V for VBUS, 12 V for VAC1 and VAC2, a 5 mOhm sense resistor, and
++ * 5 ms of deglitch. Stock turns off the current limits of the battery, because
++ * the current reading of this chip does not follow the battery on this board,
++ * and the faults of the two temperature inputs, which have no NTC. It also
++ * turns off the thermal shutdown, which stays on here.
++ */
++#define UPM6720_VBATOVP_4390MV		0x5a
++#define UPM6720_VBATOVP_ALM_4340MV	0x54
++#define UPM6720_VBUSOVP_11V		0x50
++#define UPM6720_VBUSOVP_ALM_10500MV	0x46
++#define UPM6720_VAC_OVP_12V		0x48
++#define UPM6720_UCP_DEGLITCH_5MS	1
++#define UPM6720_WDT_5S			2
++/* 1075 mA and steps of 250 mA. Stock goes no higher than step 14 either */
++#define UPM6720_IBUSOCP_MIN_MA		1075
++#define UPM6720_IBUSOCP_STEP_MA		250
++#define UPM6720_IBUSOCP_MAX_SEL		14
++#define UPM6720_IBUSOCP_MARGIN_MA	500
++
++/* The values of the online property of the power supply of TCPM */
++#define UPM6720_PORT_FIXED		1
++#define UPM6720_PORT_PPS		2
++
++#define UPM6720_DC_TICK_MS		1000
++/* PD wants a new request within 10 seconds */
++#define UPM6720_DC_KEEP_ALIVE_MS	4000
++/* idvchg-ss-init, idvchg-ss-step, idvchg-term */
++#define UPM6720_DC_IBUS_START_MA	1000
++#define UPM6720_DC_IBUS_STEP_MA		250
++#define UPM6720_DC_IBUS_TERM_MA		1150
++#define UPM6720_DC_TAPER_STEP_MA	100
++/*
++ * The setting of the source. It delivers some 5% over this: 4.2 A came as 4.4 A
++ * with 4.575 A as the limit of the chip, and it is the 4.5 A of ita-level.
++ */
++#define UPM6720_DC_IBUS_MAX_MA		4200
++#define UPM6720_DC_VTA_MIN_MV		9000
++/* vta-cap-max is 11 V. An open output must stay under the 11 V of VBUS OVP */
++#define UPM6720_DC_VTA_MAX_MV		10500
++#define UPM6720_DC_VTA_MARGIN_MV	300
++#define UPM6720_DC_RCABLE_MOHM		250
++/* What VOUT asks of the source at most, with this much for the path */
++#define UPM6720_DC_RPATH_MOHM		300
++/*
++ * On the chip the voltage carries the drop of the board, which at 7 A reads
++ * some 100 mV above the gauge. force-ta-cv-vbat of stock is 4.25 V there, its
++ * vbat-cv with battery maintenance 4.34 V, which is also the limit of the main
++ * charger.
++ */
++#define UPM6720_DC_VBAT_TAPER_MV	4280
++#define UPM6720_DC_VBAT_RESUME_MV	4250
++#define UPM6720_DC_VBAT_STOP_MV		4340
++#define UPM6720_DC_GAUGE_STOP_MV	4280
++/* jeita-temp-t2-to-t3-fcc */
++#define UPM6720_DC_IBAT_REDUCE_MA	9000
++#define UPM6720_DC_IBAT_STOP_MA		9500
++/* In tenths of a degree. The main charger comes back a little lower */
++#define UPM6720_DC_TBAT_STOP		380
++#define UPM6720_DC_TDIE_STOP_C		85
++#define UPM6720_DC_IBUS_LOW_MA		100
++#define UPM6720_DC_MAX_FAILS		3
++#define UPM6720_DC_STOP_TRIES		5
++
++/* What the source is set to at most, for going up step by step */
++static unsigned int direct_charge_max_ma = UPM6720_DC_IBUS_MAX_MA;
++module_param(direct_charge_max_ma, uint, 0644);
++MODULE_PARM_DESC(direct_charge_max_ma,
++		 "Limit of the current asked from a PPS source in mA");
+ 
+ struct nu2115_reg_op {
+ 	u8 reg;
+@@ -71,11 +206,57 @@ struct nu2115_info {
+ 	const struct regulator_desc *rdesc;
+ };
+ 
++enum upm6720_dc_state {
++	UPM6720_DC_OFF,
++	UPM6720_DC_START,
++	UPM6720_DC_PPS,
++	UPM6720_DC_SETTLE,
++	UPM6720_DC_RUN,
++	UPM6720_DC_STOPPING,
++};
++
++struct upm6720_reading {
++	int ibus_ma;
++	int vbus_mv;
++	int vout_mv;
++	int vbat_mv;
++	int tdie_c;
++	unsigned int ctrl2;
++	unsigned int stat1;
++	unsigned int stat3;
++	unsigned int stat5;
++	int gauge_mv;
++	int gauge_ma;
++	int gauge_temp;
++};
++
+ struct nu2115 {
+ 	struct device *dev;
+ 	struct regmap *regmap;
+ 	struct regulator_dev *rdev;
+ 	const struct nu2115_info *info;
++
++	/* Direct charging. Only with the references in the device tree */
++	struct power_supply *psy;
++	struct delayed_work dc_work;
++	struct mutex dc_lock;		/* for the fields below */
++	enum upm6720_dc_state dc_state;
++	bool dc_pps;			/* the source is in PPS */
++	int dc_vset_mv;
++	int dc_iset_ma;
++	int dc_vta_max_mv;
++	int dc_ibus_max_ma;
++	unsigned long dc_last_request;
++	unsigned int dc_low;		/* ticks with next to no current */
++	unsigned int dc_idle;		/* ticks without it switching */
++	unsigned int dc_read_fails;	/* ticks in a row without a reading */
++	unsigned int dc_request_fails;	/* or with no request taken */
++	bool dc_gone;			/* no more starting, on the way out */
++	int dc_stop_health;		/* for after a stop to be tried again */
++	int dc_health;			/* why it stopped the last time */
++	int dc_vbus_mv;			/* the last reading, for the supply */
++	int dc_ibus_ma;
++	int dc_tdie_c;
+ };
+ 
+ /* Goes through all of them whatever fails, to leave the FETs open if it can */
+@@ -207,8 +388,10 @@ static const struct regmap_config nu2115_regmap_config = {
+ };
+ 
+ static const struct regmap_range upm6720_wr_ranges[] = {
+-	regmap_reg_range(UPM6720_REG_VBUSOVP, UPM6720_REG_VBUSOVP),
+-	regmap_reg_range(UPM6720_REG_VAC_CTRL, UPM6720_REG_CTRL3),
++	regmap_reg_range(UPM6720_REG_VBATOVP, UPM6720_REG_IBATOCP_ALM),
++	regmap_reg_range(UPM6720_REG_CTRL1, UPM6720_REG_TEMP_CTRL),
++	regmap_reg_range(UPM6720_REG_VAC_CTRL, UPM6720_REG_CTRL4),
++	regmap_reg_range(UPM6720_REG_ADC_CTRL, UPM6720_REG_ADC_CTRL),
+ };
+ 
+ static const struct regmap_access_table upm6720_wr_table = {
+@@ -219,7 +402,7 @@ static const struct regmap_access_table upm6720_wr_table = {
+ static const struct regmap_config upm6720_regmap_config = {
+ 	.reg_bits = 8,
+ 	.val_bits = 8,
+-	.max_register = UPM6720_REG_PART_INFO,
++	.max_register = UPM6720_REG_TDIE_ADC + 1,
+ 	.wr_table = &upm6720_wr_table,
+ };
+ 
+@@ -251,6 +434,827 @@ static const struct nu2115_info upm6720_info = {
+ 	.rdesc = &upm6720_switch_desc,
+ };
+ 
++/*
++ * What direct charging needs from the chip, and also what a 9 V contract needs:
++ * with its values from reset the input FETs open above 6.5 V. All of these only
++ * move limits and leave the charge pump off. Read back, as the limits are what
++ * the rest relies on. It also clears the pull-downs that the boost leaves on.
++ */
++static const struct nu2115_reg_op upm6720_dc_setup[] = {
++	{ UPM6720_REG_CTRL3, UPM6720_WDT_DIS, UPM6720_WDT_DIS },
++	{ UPM6720_REG_VBATOVP, 0xff, UPM6720_VBATOVP_4390MV },
++	{ UPM6720_REG_VBATOVP_ALM, 0xff, UPM6720_VBATOVP_ALM_4340MV },
++	{ UPM6720_REG_IBATOCP, UPM6720_IBAT_DIS, UPM6720_IBAT_DIS },
++	{ UPM6720_REG_IBATOCP_ALM, UPM6720_IBAT_DIS, UPM6720_IBAT_DIS },
++	{ UPM6720_REG_CTRL1, UPM6720_IBUSUCP_DIS, UPM6720_IBUSUCP_DIS },
++	{ UPM6720_REG_VBUSOVP, 0xff, UPM6720_VBUSOVP_11V },
++	{ UPM6720_REG_VBUSOVP_ALM, 0xff, UPM6720_VBUSOVP_ALM_10500MV },
++	{ UPM6720_REG_IBUSOCP_ALM, UPM6720_IBUSOCP_ALM_DIS,
++	  UPM6720_IBUSOCP_ALM_DIS },
++	{ UPM6720_REG_TEMP_CTRL, UPM6720_TSBUS_FLT_DIS | UPM6720_TSBAT_FLT_DIS,
++	  UPM6720_TSBUS_FLT_DIS | UPM6720_TSBAT_FLT_DIS },
++	{ UPM6720_REG_VAC_CTRL, 0xff, UPM6720_VAC_OVP_12V },
++	{ UPM6720_REG_CTRL4, UPM6720_IBAT_RSENSE_5MOHM | UPM6720_UCP_DEGLITCH,
++	  UPM6720_IBAT_RSENSE_5MOHM |
++	  FIELD_PREP_CONST(UPM6720_UCP_DEGLITCH, UPM6720_UCP_DEGLITCH_5MS) },
++};
++
++/*
++ * Comes first in all ways out and does not wait for anything else. The
++ * watchdog goes off only when the charge pump is known to be off, as it is what
++ * stops the charge pump when nothing else can reach it any more.
++ */
++static int upm6720_dc_chip_off(struct nu2115 *chip)
++{
++	unsigned int val;
++	int i, ret = -EIO;
++
++	for (i = 0; i < UPM6720_DC_STOP_TRIES; i++) {
++		ret = regmap_update_bits(chip->regmap, UPM6720_REG_CTRL2,
++					 UPM6720_CHG_EN, 0);
++		if (ret)
++			continue;
++
++		ret = regmap_read(chip->regmap, UPM6720_REG_CTRL2, &val);
++		if (ret)
++			continue;
++
++		if (!(val & UPM6720_CHG_EN))
++			break;
++
++		ret = -EIO;
++	}
++	if (ret) {
++		dev_err(chip->dev, "Failed to stop the charge pump: %d\n", ret);
++		return ret;
++	}
++
++	regmap_update_bits(chip->regmap, UPM6720_REG_CTRL3, UPM6720_WDT_DIS,
++			   UPM6720_WDT_DIS);
++
++	return 0;
++}
++
++static int upm6720_dc_apply_limits(struct nu2115 *chip)
++{
++	unsigned int i, val;
++	int ret;
++
++	/* It may have been left on, by a kernel that went down */
++	ret = upm6720_dc_chip_off(chip);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < ARRAY_SIZE(upm6720_dc_setup); i++) {
++		const struct nu2115_reg_op *op = &upm6720_dc_setup[i];
++
++		ret = regmap_update_bits(chip->regmap, op->reg, op->mask,
++					 op->val);
++		if (ret)
++			return ret;
++
++		ret = regmap_read(chip->regmap, op->reg, &val);
++		if (ret)
++			return ret;
++
++		if ((val & op->mask) != op->val) {
++			dev_err(chip->dev,
++				"Register 0x%02x reads 0x%02x after the write\n",
++				op->reg, val);
++			return -EIO;
++		}
++	}
++
++	return 0;
++}
++
++static int upm6720_set_ibus_limit(struct nu2115 *chip, int iset_ma)
++{
++	int ma = max(iset_ma + UPM6720_IBUSOCP_MARGIN_MA,
++		     UPM6720_IBUSOCP_MIN_MA + UPM6720_IBUSOCP_STEP_MA);
++	unsigned int sel = DIV_ROUND_UP(ma - UPM6720_IBUSOCP_MIN_MA,
++					UPM6720_IBUSOCP_STEP_MA);
++
++	return regmap_write(chip->regmap, UPM6720_REG_IBUSOCP,
++			    min(sel, UPM6720_IBUSOCP_MAX_SEL));
++}
++
++static int upm6720_dc_chip_on(struct nu2115 *chip)
++{
++	int ret;
++
++	ret = regmap_update_bits(chip->regmap, UPM6720_REG_CTRL3,
++				 UPM6720_WDT_TIMER | UPM6720_WDT_DIS,
++				 FIELD_PREP(UPM6720_WDT_TIMER, UPM6720_WDT_5S));
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(chip->regmap, UPM6720_REG_CTRL1,
++				 UPM6720_CHG_CONFIG, UPM6720_CHG_CONFIG);
++	if (ret)
++		return ret;
++
++	usleep_range(1000, 2000);
++
++	return regmap_update_bits(chip->regmap, UPM6720_REG_CTRL2,
++				  UPM6720_CHG_EN, UPM6720_CHG_EN);
++}
++
++static int upm6720_port_get(struct nu2115 *chip, enum power_supply_property psp,
++			    int *out)
++{
++	union power_supply_propval val;
++	struct power_supply *port;
++	int ret;
++
++	port = power_supply_get_by_reference(dev_fwnode(chip->dev),
++					     "unisemi,usb-port");
++	if (IS_ERR_OR_NULL(port))
++		return -ENODEV;
++
++	ret = power_supply_get_property(port, psp, &val);
++	power_supply_put(port);
++	if (!ret)
++		*out = val.intval;
++
++	return ret;
++}
++
++static int upm6720_port_set(struct nu2115 *chip, enum power_supply_property psp,
++			    int in)
++{
++	union power_supply_propval val = { .intval = in };
++	struct power_supply *port;
++	int ret;
++
++	port = power_supply_get_by_reference(dev_fwnode(chip->dev),
++					     "unisemi,usb-port");
++	if (IS_ERR_OR_NULL(port))
++		return -ENODEV;
++
++	ret = power_supply_set_property(port, psp, &val);
++	power_supply_put(port);
++
++	return ret;
++}
++
++static int upm6720_read_gauge(struct nu2115 *chip, struct upm6720_reading *r)
++{
++	union power_supply_propval val;
++	struct power_supply *gauge;
++	int ret;
++
++	gauge = power_supply_get_by_reference(dev_fwnode(chip->dev),
++					      "unisemi,fuel-gauge");
++	if (IS_ERR_OR_NULL(gauge))
++		return -ENODEV;
++
++	ret = power_supply_get_property(gauge, POWER_SUPPLY_PROP_TEMP, &val);
++	if (ret)
++		goto out;
++	r->gauge_temp = val.intval;
++
++	ret = power_supply_get_property(gauge, POWER_SUPPLY_PROP_VOLTAGE_NOW,
++					&val);
++	if (ret)
++		goto out;
++	r->gauge_mv = val.intval / 1000;
++
++	ret = power_supply_get_property(gauge, POWER_SUPPLY_PROP_CURRENT_NOW,
++					&val);
++	if (ret)
++		goto out;
++	r->gauge_ma = val.intval / 1000;
++out:
++	power_supply_put(gauge);
++
++	return ret;
++}
++
++/* With the corrections that stock applies to these readings */
++static int upm6720_read_adc(struct nu2115 *chip, unsigned int reg, int num,
++			    int den, int *out)
++{
++	u8 buf[2];
++	int ret;
++
++	ret = regmap_bulk_read(chip->regmap, reg, buf, sizeof(buf));
++	if (ret)
++		return ret;
++
++	*out = (s16)get_unaligned_be16(buf) * num / den;
++
++	return 0;
++}
++
++static int upm6720_read(struct nu2115 *chip, struct upm6720_reading *r)
++{
++	int ret;
++
++	ret = upm6720_read_adc(chip, UPM6720_REG_IBUS_ADC, 9972, 10000,
++			       &r->ibus_ma) ?:
++	      upm6720_read_adc(chip, UPM6720_REG_VBUS_ADC, 1002, 1000,
++			       &r->vbus_mv) ?:
++	      upm6720_read_adc(chip, UPM6720_REG_VOUT_ADC, 1003, 1000,
++			       &r->vout_mv) ?:
++	      upm6720_read_adc(chip, UPM6720_REG_VBAT_ADC, 1017, 1000,
++			       &r->vbat_mv) ?:
++	      upm6720_read_adc(chip, UPM6720_REG_TDIE_ADC, 5079, 10000,
++			       &r->tdie_c) ?:
++	      regmap_read(chip->regmap, UPM6720_REG_CTRL2, &r->ctrl2) ?:
++	      regmap_read(chip->regmap, UPM6720_REG_STAT1, &r->stat1) ?:
++	      regmap_read(chip->regmap, UPM6720_REG_STAT3, &r->stat3) ?:
++	      regmap_read(chip->regmap, UPM6720_REG_STAT5, &r->stat5) ?:
++	      upm6720_read_gauge(chip, r);
++	if (ret)
++		return ret;
++
++	WRITE_ONCE(chip->dc_vbus_mv, r->vbus_mv);
++	WRITE_ONCE(chip->dc_ibus_ma, r->ibus_ma);
++	WRITE_ONCE(chip->dc_tdie_c, r->tdie_c);
++
++	return 0;
++}
++
++/* -EBUSY and -EAGAIN only mean that TCPM has something else going on */
++static int upm6720_dc_request(struct nu2115 *chip,
++			      enum power_supply_property psp, int val)
++{
++	int ret = upm6720_port_set(chip, psp, val);
++
++	if (ret == -EBUSY || ret == -EAGAIN) {
++		if (++chip->dc_request_fails < UPM6720_DC_MAX_FAILS)
++			return -EAGAIN;
++		return -EBUSY;
++	}
++	if (!ret) {
++		chip->dc_request_fails = 0;
++		chip->dc_last_request = jiffies;
++	}
++
++	return ret;
++}
++
++/* 0 to go on, or the health to stop with, none of which is 0 here */
++static int upm6720_dc_check(struct nu2115 *chip,
++			    const struct upm6720_reading *r, bool on)
++{
++	unsigned int flag[5], i;
++
++	if (r->gauge_temp >= UPM6720_DC_TBAT_STOP) {
++		dev_info(chip->dev, "Battery at %d, stopping direct charging\n",
++			 r->gauge_temp);
++		return POWER_SUPPLY_HEALTH_OVERHEAT;
++	}
++	if (r->tdie_c >= UPM6720_DC_TDIE_STOP_C) {
++		dev_warn(chip->dev, "Charge pump at %d C, stopping\n",
++			 r->tdie_c);
++		return POWER_SUPPLY_HEALTH_HOT;
++	}
++	if (r->gauge_mv >= UPM6720_DC_GAUGE_STOP_MV ||
++	    r->vbat_mv >= UPM6720_DC_VBAT_STOP_MV) {
++		dev_info(chip->dev,
++			 "Battery at %d mV and %d mV on the chip, stopping direct charging\n",
++			 r->gauge_mv, r->vbat_mv);
++		return POWER_SUPPLY_HEALTH_OVERVOLTAGE;
++	}
++	if (r->gauge_ma >= UPM6720_DC_IBAT_STOP_MA) {
++		dev_warn(chip->dev, "Battery takes %d mA, stopping\n",
++			 r->gauge_ma);
++		return POWER_SUPPLY_HEALTH_OVERCURRENT;
++	}
++	if (r->stat3 & UPM6720_VAC_OVP) {
++		dev_warn(chip->dev, "VAC over voltage, stat3 0x%02x\n",
++			 r->stat3);
++		return POWER_SUPPLY_HEALTH_OVERVOLTAGE;
++	}
++	if (!on)
++		return 0;
++
++	if (!(r->ctrl2 & UPM6720_CHG_EN)) {
++		/* Reading clears them, and nothing else looks at them */
++		for (i = 0; i < ARRAY_SIZE(flag); i++)
++			if (regmap_read(chip->regmap, UPM6720_REG_FLAG1 + i,
++					&flag[i]))
++				flag[i] = 0xff;
++		dev_warn(chip->dev,
++			 "Charge pump stopped by itself, flags %02x %02x %02x %02x %02x\n",
++			 flag[0], flag[1], flag[2], flag[3], flag[4]);
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++	if (r->ibus_ma > chip->dc_iset_ma * 13 / 10 + 200) {
++		dev_warn(chip->dev,
++			 "%d mA from the source at a setting of %d mA, stopping\n",
++			 r->ibus_ma, chip->dc_iset_ma);
++		return POWER_SUPPLY_HEALTH_OVERCURRENT;
++	}
++	if (r->stat5 & UPM6720_CP_SWITCHING) {
++		chip->dc_idle = 0;
++	} else if (++chip->dc_idle >= 2) {
++		dev_warn(chip->dev,
++			 "Charge pump on and not switching, stat5 0x%02x\n",
++			 r->stat5);
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++
++	return 0;
++}
++
++static void upm6720_dc_finish(struct nu2115 *chip, int health)
++{
++	int ret;
++
++	/*
++	 * As far as anyone knows it is still on. The watchdog stays on and
++	 * stops it, the source stays in PPS and falls back to 5 V as the
++	 * requests stop, and this comes round again. Everyone still sees it as
++	 * online.
++	 */
++	if (upm6720_dc_chip_off(chip)) {
++		chip->dc_stop_health = health;
++		WRITE_ONCE(chip->dc_state, UPM6720_DC_STOPPING);
++		queue_delayed_work(system_freezable_wq, &chip->dc_work,
++				   msecs_to_jiffies(UPM6720_DC_TICK_MS));
++		return;
++	}
++
++	regmap_update_bits(chip->regmap, UPM6720_REG_ADC_CTRL, UPM6720_ADC_EN,
++			   0);
++
++	if (chip->dc_pps) {
++		ret = upm6720_port_set(chip, POWER_SUPPLY_PROP_ONLINE,
++				       UPM6720_PORT_FIXED);
++		if (ret && ret != -ENODEV)
++			dev_warn(chip->dev, "Source stays in PPS: %d\n", ret);
++		chip->dc_pps = false;
++	}
++
++	WRITE_ONCE(chip->dc_state, UPM6720_DC_OFF);
++	WRITE_ONCE(chip->dc_health, health);
++	WRITE_ONCE(chip->dc_vset_mv, 0);
++	WRITE_ONCE(chip->dc_iset_ma, 0);
++	WRITE_ONCE(chip->dc_vbus_mv, 0);
++	WRITE_ONCE(chip->dc_ibus_ma, 0);
++	power_supply_changed(chip->psy);
++}
++
++/* 0 to go on, -EAGAIN to try again next tick, or the health to stop with */
++static int upm6720_dc_start_source(struct nu2115 *chip)
++{
++	struct upm6720_reading r;
++	int ret, type, online;
++
++	ret = upm6720_dc_apply_limits(chip) ?:
++	      upm6720_set_ibus_limit(chip, UPM6720_DC_IBUS_START_MA) ?:
++	      regmap_update_bits(chip->regmap, UPM6720_REG_ADC_CTRL,
++				 UPM6720_ADC_EN, UPM6720_ADC_EN);
++	if (ret)
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	msleep(70);
++
++	ret = upm6720_read(chip, &r);
++	if (ret)
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	ret = upm6720_dc_check(chip, &r, false);
++	if (ret)
++		return ret;
++
++	if ((r.stat3 & (UPM6720_VOUT_PRESENT | UPM6720_VAC1_PRESENT)) !=
++	    (UPM6720_VOUT_PRESENT | UPM6720_VAC1_PRESENT) ||
++	    r.ctrl2 & UPM6720_OTG_EN)
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	if (upm6720_port_get(chip, POWER_SUPPLY_PROP_ONLINE, &online) ||
++	    !online ||
++	    upm6720_port_get(chip, POWER_SUPPLY_PROP_USB_TYPE, &type) ||
++	    (type != POWER_SUPPLY_USB_TYPE_PD_PPS &&
++	     type != POWER_SUPPLY_USB_TYPE_PD_PPS_SPR_AVS))
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	/* Whatever comes back from this, it is worth asking to go back */
++	chip->dc_pps = true;
++	ret = upm6720_dc_request(chip, POWER_SUPPLY_PROP_ONLINE,
++				 UPM6720_PORT_PPS);
++	if (ret == -EAGAIN)
++		return ret;
++	if (ret) {
++		dev_warn(chip->dev, "No PPS from the source: %d\n", ret);
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++
++	if (upm6720_port_get(chip, POWER_SUPPLY_PROP_VOLTAGE_MAX,
++			     &chip->dc_vta_max_mv) ||
++	    upm6720_port_get(chip, POWER_SUPPLY_PROP_CURRENT_MAX,
++			     &chip->dc_ibus_max_ma))
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	chip->dc_vta_max_mv = min(chip->dc_vta_max_mv / 1000,
++				  UPM6720_DC_VTA_MAX_MV);
++	chip->dc_ibus_max_ma = min(chip->dc_ibus_max_ma / 1000,
++				   UPM6720_DC_IBUS_MAX_MA);
++	if (chip->dc_vta_max_mv < UPM6720_DC_VTA_MIN_MV ||
++	    chip->dc_ibus_max_ma < UPM6720_DC_IBUS_START_MA) {
++		dev_info(chip->dev,
++			 "PPS of the source goes to %d mV and %d mA, too little\n",
++			 chip->dc_vta_max_mv, chip->dc_ibus_max_ma);
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++
++	WRITE_ONCE(chip->dc_iset_ma, UPM6720_DC_IBUS_START_MA);
++	WRITE_ONCE(chip->dc_vset_mv, min(roundup(r.vout_mv * 210 / 100, 20),
++					 chip->dc_vta_max_mv));
++
++	return 0;
++}
++
++/* TCPM can be busy right after the last request. Each is fine to repeat */
++static int upm6720_dc_set_source(struct nu2115 *chip)
++{
++	int ret;
++
++	ret = upm6720_dc_request(chip, POWER_SUPPLY_PROP_CURRENT_NOW,
++				 chip->dc_iset_ma * 1000);
++	if (!ret)
++		ret = upm6720_dc_request(chip, POWER_SUPPLY_PROP_VOLTAGE_NOW,
++					 chip->dc_vset_mv * 1000);
++	if (ret == -EAGAIN)
++		return ret;
++	if (ret) {
++		dev_warn(chip->dev,
++			 "The source does not take the setting: %d\n", ret);
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++
++	return 0;
++}
++
++/* The source has had a second. The pump starts at VOUT times 2.1 as on stock */
++static int upm6720_dc_enable(struct nu2115 *chip)
++{
++	struct upm6720_reading r;
++	int ret;
++
++	ret = upm6720_read(chip, &r);
++	if (ret)
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	ret = upm6720_dc_check(chip, &r, false);
++	if (ret)
++		return ret;
++
++	if (abs(r.vbus_mv - chip->dc_vset_mv) > 400) {
++		dev_warn(chip->dev,
++			 "VBUS at %d mV with the source set to %d mV\n",
++			 r.vbus_mv, chip->dc_vset_mv);
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++
++	ret = upm6720_dc_request(chip, POWER_SUPPLY_PROP_VOLTAGE_NOW,
++				 min(roundup(r.vout_mv * 210 / 100, 20),
++				     chip->dc_vta_max_mv) * 1000);
++	if (ret == -EAGAIN)
++		return ret;
++	if (ret)
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	WRITE_ONCE(chip->dc_vset_mv, min(roundup(r.vout_mv * 210 / 100, 20),
++					 chip->dc_vta_max_mv));
++
++	msleep(300);
++
++	ret = upm6720_read(chip, &r);
++	if (ret)
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	ret = upm6720_dc_check(chip, &r, false);
++	if (ret)
++		return ret;
++
++	if (r.stat1 & (UPM6720_STAT1_VBUS_OVP | UPM6720_STAT1_VOUT_OVP) ||
++	    r.stat5 & UPM6720_VBUS_ERR_HI ||
++	    (r.stat3 & (UPM6720_VOUT_PRESENT | UPM6720_VAC1_PRESENT)) !=
++	    (UPM6720_VOUT_PRESENT | UPM6720_VAC1_PRESENT)) {
++		dev_warn(chip->dev,
++			 "Not starting the charge pump: stat1 0x%02x stat3 0x%02x stat5 0x%02x\n",
++			 r.stat1, r.stat3, r.stat5);
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++
++	ret = upm6720_dc_chip_on(chip);
++	if (ret)
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++	chip->dc_low = 0;
++	chip->dc_idle = 0;
++	dev_info(chip->dev, "Direct charging from %d mV, VOUT %d mV\n",
++		 chip->dc_vset_mv, r.vout_mv);
++
++	return 0;
++}
++
++/*
++ * Once a second. The current goes up as long as the source delivers what it is
++ * set to, and comes down as the voltage reaches the limit. Below idvchg-term
++ * the main charger takes over again. 0 to go on, or the health to stop with.
++ */
++static int upm6720_dc_run(struct nu2115 *chip)
++{
++	struct upm6720_reading r;
++	int ret, target, want, iset = chip->dc_iset_ma, vset = chip->dc_vset_mv;
++
++	ret = upm6720_read(chip, &r);
++	if (ret) {
++		if (++chip->dc_read_fails < UPM6720_DC_MAX_FAILS)
++			return 0;
++		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++	chip->dc_read_fails = 0;
++
++	ret = upm6720_dc_check(chip, &r, true);
++	if (ret)
++		return ret;
++
++	if (r.ibus_ma < UPM6720_DC_IBUS_LOW_MA) {
++		if (++chip->dc_low > 6) {
++			dev_warn(chip->dev,
++				 "No current from the source at %d mV\n",
++				 r.vbus_mv);
++			return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++		}
++	} else {
++		chip->dc_low = 0;
++	}
++
++	target = clamp_t(int, READ_ONCE(direct_charge_max_ma),
++			 UPM6720_DC_IBUS_START_MA, chip->dc_ibus_max_ma);
++
++	if (r.vbat_mv >= UPM6720_DC_VBAT_TAPER_MV ||
++	    r.gauge_ma >= UPM6720_DC_IBAT_REDUCE_MA) {
++		iset -= UPM6720_DC_TAPER_STEP_MA;
++		if (iset < UPM6720_DC_IBUS_TERM_MA) {
++			dev_info(chip->dev,
++				 "Direct charging done at %d mV and %d mV on the chip\n",
++				 r.gauge_mv, r.vbat_mv);
++			return POWER_SUPPLY_HEALTH_GOOD;
++		}
++	} else if (iset > target) {
++		iset = max(target, iset - UPM6720_DC_TAPER_STEP_MA);
++	} else if (r.vbat_mv < UPM6720_DC_VBAT_RESUME_MV && iset < target &&
++		   r.ibus_ma > iset * 7 / 10) {
++		iset = min(target, iset + UPM6720_DC_IBUS_STEP_MA);
++	}
++
++	if (iset != chip->dc_iset_ma) {
++		/* Over the current that comes next first, under it last */
++		ret = upm6720_set_ibus_limit(chip, max(iset, chip->dc_iset_ma));
++		if (ret)
++			return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++		ret = upm6720_dc_request(chip, POWER_SUPPLY_PROP_CURRENT_NOW,
++					 iset * 1000);
++		if (ret == -EAGAIN)
++			return 0;
++		if (ret)
++			return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++
++		WRITE_ONCE(chip->dc_iset_ma, iset);
++		ret = upm6720_set_ibus_limit(chip, iset);
++		if (ret)
++			return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++	}
++
++	want = r.vbus_mv + r.ibus_ma * UPM6720_DC_RCABLE_MOHM / 1000 +
++	       UPM6720_DC_VTA_MARGIN_MV;
++	want = min(want, r.vout_mv * 212 / 100 +
++			 r.ibus_ma * UPM6720_DC_RPATH_MOHM / 1000 +
++			 UPM6720_DC_VTA_MARGIN_MV);
++	if (r.ibus_ma > iset * 115 / 100 + 150)
++		want = vset - 100;
++	want = min(roundup(want, 20), chip->dc_vta_max_mv);
++
++	if (abs(want - vset) >= 40 ||
++	    time_after(jiffies, chip->dc_last_request +
++		       msecs_to_jiffies(UPM6720_DC_KEEP_ALIVE_MS))) {
++		ret = upm6720_dc_request(chip, POWER_SUPPLY_PROP_VOLTAGE_NOW,
++					 want * 1000);
++		if (ret == -EAGAIN)
++			return 0;
++		if (ret)
++			return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++		WRITE_ONCE(chip->dc_vset_mv, want);
++	}
++
++	return 0;
++}
++
++static void upm6720_dc_work(struct work_struct *work)
++{
++	struct nu2115 *chip = container_of(to_delayed_work(work), struct nu2115,
++					   dc_work);
++	int ret = 0;
++
++	mutex_lock(&chip->dc_lock);
++	switch (chip->dc_state) {
++	case UPM6720_DC_START:
++		ret = upm6720_dc_start_source(chip);
++		if (!ret)
++			WRITE_ONCE(chip->dc_state, UPM6720_DC_PPS);
++		else if (ret == -EAGAIN)
++			ret = 0;
++		break;
++	case UPM6720_DC_PPS:
++		ret = upm6720_dc_set_source(chip);
++		if (!ret)
++			WRITE_ONCE(chip->dc_state, UPM6720_DC_SETTLE);
++		else if (ret == -EAGAIN)
++			ret = 0;
++		break;
++	case UPM6720_DC_SETTLE:
++		ret = upm6720_dc_enable(chip);
++		if (!ret)
++			WRITE_ONCE(chip->dc_state, UPM6720_DC_RUN);
++		else if (ret == -EAGAIN)
++			ret = 0;
++		break;
++	case UPM6720_DC_RUN:
++		ret = upm6720_dc_run(chip);
++		break;
++	case UPM6720_DC_STOPPING:
++		upm6720_dc_finish(chip, chip->dc_stop_health);
++		goto out;
++	case UPM6720_DC_OFF:
++		goto out;
++	}
++
++	/* POWER_SUPPLY_HEALTH_GOOD is the normal way to stop. It is not 0 */
++	if (ret)
++		upm6720_dc_finish(chip, ret);
++	else
++		queue_delayed_work(system_freezable_wq, &chip->dc_work,
++				   msecs_to_jiffies(UPM6720_DC_TICK_MS));
++out:
++	mutex_unlock(&chip->dc_lock);
++}
++
++static int upm6720_dc_begin(struct nu2115 *chip)
++{
++	int ret = 0;
++
++	mutex_lock(&chip->dc_lock);
++	if (chip->dc_gone) {
++		ret = -ENODEV;
++	} else if (chip->dc_state == UPM6720_DC_OFF) {
++		chip->dc_read_fails = 0;
++		chip->dc_request_fails = 0;
++		WRITE_ONCE(chip->dc_state, UPM6720_DC_START);
++		WRITE_ONCE(chip->dc_health, POWER_SUPPLY_HEALTH_UNKNOWN);
++		queue_delayed_work(system_freezable_wq, &chip->dc_work, 0);
++	}
++	mutex_unlock(&chip->dc_lock);
++
++	return ret;
++}
++
++/*
++ * The chip goes off before waiting for anything, as a request to the source can
++ * take its time. The tick that may be running turns it on at most once more,
++ * and what follows that turns it off again. Unknown is how a stop looks that
++ * somebody asked for, as it says nothing about the charge pump or the battery.
++ * Returns whether it is really off: if not, the tick keeps trying.
++ */
++static int upm6720_dc_end(struct nu2115 *chip)
++{
++	int ret = 0;
++
++	if (READ_ONCE(chip->dc_state) == UPM6720_DC_OFF)
++		return 0;
++
++	upm6720_dc_chip_off(chip);
++	cancel_delayed_work_sync(&chip->dc_work);
++
++	mutex_lock(&chip->dc_lock);
++	if (chip->dc_state != UPM6720_DC_OFF)
++		upm6720_dc_finish(chip, POWER_SUPPLY_HEALTH_UNKNOWN);
++	if (chip->dc_state != UPM6720_DC_OFF)
++		ret = -EBUSY;
++	mutex_unlock(&chip->dc_lock);
++
++	return ret;
++}
++
++static int upm6720_psy_get(struct power_supply *psy,
++			   enum power_supply_property psp,
++			   union power_supply_propval *val)
++{
++	struct nu2115 *chip = power_supply_get_drvdata(psy);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		val->intval = READ_ONCE(chip->dc_state) != UPM6720_DC_OFF;
++		return 0;
++	case POWER_SUPPLY_PROP_HEALTH:
++		val->intval = READ_ONCE(chip->dc_health);
++		return 0;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		val->intval = READ_ONCE(chip->dc_vbus_mv) * 1000;
++		return 0;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		val->intval = READ_ONCE(chip->dc_ibus_ma) * 1000;
++		return 0;
++	case POWER_SUPPLY_PROP_TEMP:
++		val->intval = READ_ONCE(chip->dc_tdie_c) * 10;
++		return 0;
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		val->intval = READ_ONCE(chip->dc_iset_ma) * 1000;
++		return 0;
++	case POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT:
++		val->intval = READ_ONCE(chip->dc_vset_mv) * 1000;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++/* For the main charger only: nothing makes this writable from user space */
++static int upm6720_psy_set(struct power_supply *psy,
++			   enum power_supply_property psp,
++			   const union power_supply_propval *val)
++{
++	struct nu2115 *chip = power_supply_get_drvdata(psy);
++
++	if (psp != POWER_SUPPLY_PROP_ONLINE)
++		return -EINVAL;
++
++	if (val->intval)
++		return upm6720_dc_begin(chip);
++
++	return upm6720_dc_end(chip);
++}
++
++static const enum power_supply_property upm6720_psy_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_TEMP,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT,
++};
++
++static const struct power_supply_desc upm6720_psy_desc = {
++	.name = "upm6720-direct",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.properties = upm6720_psy_props,
++	.num_properties = ARRAY_SIZE(upm6720_psy_props),
++	.get_property = upm6720_psy_get,
++	.set_property = upm6720_psy_set,
++};
++
++static char *upm6720_supplied_to[] = { "mt6375-charger" };
++
++static void upm6720_dc_release(void *data)
++{
++	struct nu2115 *chip = data;
++
++	mutex_lock(&chip->dc_lock);
++	chip->dc_gone = true;
++	mutex_unlock(&chip->dc_lock);
++
++	upm6720_dc_end(chip);
++	disable_delayed_work_sync(&chip->dc_work);
++}
++
++static int upm6720_dc_init(struct nu2115 *chip)
++{
++	struct device *dev = chip->dev;
++	struct power_supply_config cfg = { };
++	int ret;
++
++	if (chip->info != &upm6720_info ||
++	    !fwnode_property_present(dev_fwnode(dev), "unisemi,usb-port") ||
++	    !fwnode_property_present(dev_fwnode(dev), "unisemi,fuel-gauge"))
++		return 0;
++
++	ret = upm6720_dc_apply_limits(chip);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to set the limits\n");
++
++	mutex_init(&chip->dc_lock);
++	INIT_DELAYED_WORK(&chip->dc_work, upm6720_dc_work);
++	chip->dc_health = POWER_SUPPLY_HEALTH_UNKNOWN;
++
++	cfg.drv_data = chip;
++	cfg.fwnode = dev_fwnode(dev);
++	cfg.supplied_to = upm6720_supplied_to;
++	cfg.num_supplicants = ARRAY_SIZE(upm6720_supplied_to);
++	chip->psy = devm_power_supply_register(dev, &upm6720_psy_desc, &cfg);
++	if (IS_ERR(chip->psy))
++		return dev_err_probe(dev, PTR_ERR(chip->psy),
++				     "Failed to register the power supply\n");
++
++	return devm_add_action_or_reset(dev, upm6720_dc_release, chip);
++}
++
+ static int nu2115_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+@@ -290,13 +1294,16 @@ static int nu2115_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, PTR_ERR(chip->rdev),
+ 				     "Failed to register the switch\n");
+ 
+-	return 0;
++	return upm6720_dc_init(chip);
+ }
+ 
+ static void nu2115_shutdown(struct i2c_client *client)
+ {
+ 	struct nu2115 *chip = i2c_get_clientdata(client);
+ 
++	if (chip->psy)
++		upm6720_dc_end(chip);
++
+ 	if (regulator_is_enabled_regmap(chip->rdev) > 0)
+ 		nu2115_switch_open(chip);
+ }
+@@ -308,15 +1315,29 @@ static const struct of_device_id nu2115_of_match[] = {
+ };
+ MODULE_DEVICE_TABLE(of, nu2115_of_match);
+ 
++/* The main charger stops first. This is for a system going down without that */
++static int nu2115_suspend(struct device *dev)
++{
++	struct nu2115 *chip = dev_get_drvdata(dev);
++
++	/* The system stays up if the charge pump is still on */
++	return chip->psy ? upm6720_dc_end(chip) : 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(nu2115_pm_ops, nu2115_suspend, NULL);
++
+ static struct i2c_driver nu2115_driver = {
+ 	.driver = {
+ 		.name = "nu2115",
+ 		.of_match_table = nu2115_of_match,
++		.pm = pm_sleep_ptr(&nu2115_pm_ops),
++		/* A consumer of the switch would go on to use freed memory */
++		.suppress_bind_attrs = true,
+ 	},
+ 	.probe = nu2115_probe,
+ 	.shutdown = nu2115_shutdown,
+ };
+ module_i2c_driver(nu2115_driver);
+ 
+-MODULE_DESCRIPTION("Nuvolta NU2115 and Unisemi UPM6720 VBUS input switch driver");
++MODULE_DESCRIPTION("Nuvolta NU2115 and Unisemi UPM6720 charge pump driver");
+ MODULE_LICENSE("GPL");
