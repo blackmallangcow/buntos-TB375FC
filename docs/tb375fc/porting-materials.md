@@ -133,6 +133,7 @@
 - 업스트림 견본: https://github.com/MT6895-Mainline/linux , https://github.com/MT6878-mainline/linux , https://wiki.postmarketos.org/wiki/MediaTek_MT6878
 - 업스트림 소스: https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/ (`drivers/gpu/drm/panel/panel-novatek-nt36532.c`, `drivers/ufs/host/ufs-mediatek.h`, `drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c`, `drivers/iio/proximity/hx9023s.c`, `drivers/input/touchscreen/novatek-nvt-ts.c` 등)
 - linux-firmware Mali: https://gitlab.com/kernel-firmware/linux-firmware/-/tree/main/arm/mali
+- LED 드라이버 SGM37604A 데이터시트(제조사 SG Micro, Rev. A.1, 2019-01): https://sg-micro.com/product/SGM37604A
 - 진행 중 패치(○):
   - NT36532 v3: https://patchew.org/linux/20260804073419.84727-1-junjie.cao@linux.dev/
   - DSC/WDMA v9: https://lore.kernel.org/all/20260916110825.102631-1-angelogioacchino.delregno@collabora.com/
