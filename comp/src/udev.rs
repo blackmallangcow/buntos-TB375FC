@@ -22,7 +22,7 @@ use smithay::{
         },
         drm::{
             DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
-            compositor::FrameFlags,
+            compositor::{FrameFlags, PrimaryPlaneElement},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
@@ -1198,6 +1198,16 @@ impl BuntState {
         let rendered = surface
             .drm_output
             .render_frame(renderer, &elements, CLEAR_COLOR, flags);
+        // 렌더 펜스를 커밋에 실을 수 없으면(simpledrm처럼 DRM syncobj가 없는 드라이버) 커널이 렌더링을
+        // 기다려 주지 않는다. llvmpipe는 스레드에서 그리고 simpledrm은 커밋 때 버퍼를 화면으로 한 번 복사하므로,
+        // 기다리지 않으면 덜 그린 버퍼가 화면에 남는다
+        if let Ok(frame) = &rendered
+            && frame.needs_sync()
+            && let PrimaryPlaneElement::Swapchain(primary) = &frame.primary_element
+            && let Err(err) = primary.sync.wait()
+        {
+            tracing::warn!("failed to wait for rendering: {err:?}");
+        }
         let elapsed = started.elapsed();
         if elapsed > interval {
             tracing::debug!("slow frame on {}: {elapsed:?}", output.name());
