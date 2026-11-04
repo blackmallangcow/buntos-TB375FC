@@ -16,21 +16,21 @@ use std::{
 use smithay::{
     backend::{
         allocator::{
-            Fourcc,
+            Format, Fourcc, Modifier,
+            dmabuf::AsDmabuf,
             format::FormatSet,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
-            compositor::{FrameFlags, PrimaryPlaneElement},
-            exporter::gbm::GbmFramebufferExporter,
-            output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
+            DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, NodeType, Planes,
+            compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement},
+            exporter::{ExportFramebuffer, gbm::GbmFramebufferExporter},
         },
         egl::{EGLContext, EGLDisplay, context::ContextPriority},
         input::InputEvent,
         libinput::LibinputSessionInterface,
         renderer::{
-            ImportDma, ImportMemWl,
+            Color32F, ImportDma, ImportMemWl,
             element::{
                 Element, Id, Kind, RenderElementStates, default_primary_scanout_output_compare,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
@@ -59,7 +59,9 @@ use smithay::{
         },
         drm::{
             ClientCapability, Device as _,
-            control::{Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, connector, crtc},
+            control::{
+                Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, connector, crtc, plane,
+            },
         },
         input::{Device as InputDevice, DeviceCapability, Libinput},
         rustix::fs::OFlags,
@@ -81,6 +83,7 @@ use crate::{
     dbus::{Command, OutputInfo, PointerDevice},
     dmabuf::{self, Dmabufs},
     gpu::{GSK_RENDERER, Rendering, renderer_name},
+    handover::{self, Wanted},
     prefs::{ModePref, PointerPrefs},
     render::{self, OutputRenderElements},
     screenshot,
@@ -90,7 +93,18 @@ use crate::{
 
 type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
+type Compositor = DrmCompositor<Allocator, Exporter, (), DrmDeviceFd>;
+type Buffer = <Allocator as smithay::backend::allocator::Allocator>::Buffer;
+/// `Compositor`의 오류
+type CompositorError = FrameError<
+    <Allocator as smithay::backend::allocator::Allocator>::Error,
+    <Buffer as AsDmabuf>::Error,
+    <Exporter as ExportFramebuffer<Buffer>>::Error,
+>;
 type Elements = OutputRenderElements;
+
+/// 화면 버퍼의 색 형식. 앞의 것부터 시험한다
+const COLOR_FORMATS: [Fourcc; 2] = [Fourcc::Abgr8888, Fourcc::Argb8888];
 
 /// 화면의 주사율을 모를 때 프레임 사이의 간격 (60Hz)
 const DEFAULT_FRAME: Duration = Duration::from_micros(16_667);
@@ -126,7 +140,14 @@ const EXTERNAL_PPI: f64 = 110.0;
 pub struct UdevData {
     pub session: LibSeatSession,
     renderer: GlesRenderer,
-    output_manager: DrmOutputManager<Allocator, Exporter, (), DrmDeviceFd>,
+    /// 화면 장치. 전에는 smithay의 DrmOutputManager가 가졌는데, 그것은 출력을 만들 때 검은 프레임을 바로
+    /// 화면에 올려서 앞 세션의 마지막 화면이 사라졌다 (handover.rs)
+    drm: DrmDevice,
+    allocator: Allocator,
+    exporter: Exporter,
+    gbm: GbmDevice<DrmDeviceFd>,
+    /// 렌더러가 그릴 수 있는 형식
+    render_formats: Vec<Format>,
     outputs: HashMap<crtc::Handle, OutputSurface>,
     cursor: Cursor,
     /// 컴포지터가 그리는 커서(기본 화살표, 앱이 모양으로 고른 커서). 모양, 출력 배율, 크기가 바뀌면
@@ -162,6 +183,149 @@ impl UdevData {
     pub fn client_env(&self) -> &[(&'static str, &'static str)] {
         &self.client_env
     }
+
+    /// 출력 하나를 만든다. 화면에는 아직 아무것도 올리지 않는다: 첫 프레임을 그릴 때까지 앞 세션이 남긴 화면이
+    /// 그대로 있다. 형식과 모드는 커널에 시험해 보므로 쓸 수 없는 조합이면 여기서 실패한다
+    fn new_compositor(
+        &mut self,
+        crtc: crtc::Handle,
+        mode: DrmMode,
+        connector: connector::Handle,
+        output: &Output,
+        planes: Option<Planes>,
+    ) -> Result<Compositor, CompositorError> {
+        let create = |backend: &mut Self, implicit: bool| {
+            let surface = backend
+                .drm
+                .create_surface(crtc, mode, &[connector])
+                .map_err(FrameError::DrmError)?;
+            let formats: Vec<Format> = backend
+                .render_formats
+                .iter()
+                .copied()
+                .filter(|format| !implicit || format.modifier == Modifier::Invalid)
+                .collect();
+            Compositor::new(
+                output,
+                surface,
+                planes.clone(),
+                backend.allocator.clone(),
+                backend.exporter.clone(),
+                COLOR_FORMATS,
+                formats,
+                backend.drm.cursor_size(),
+                Some(backend.gbm.clone()),
+            )
+        };
+        create(self, false).or_else(|err| {
+            tracing::warn!("failed to set up crtc {crtc:?}, lowering the bandwidth: {err:?}");
+            self.with_less_bandwidth(create)
+        })
+    }
+
+    /// 출력의 모드를 바꾼다. 다음 프레임에 화면에 오른다
+    fn use_mode(&mut self, crtc: crtc::Handle, mode: DrmMode) -> Result<(), CompositorError> {
+        let change = |backend: &mut Self, _implicit: bool| match backend.outputs.get_mut(&crtc) {
+            Some(surface) => surface.compositor.use_mode(mode),
+            None => Ok(()),
+        };
+        match change(self, false) {
+            Err(err @ FrameError::DrmError(DrmError::TestFailed(_))) => {
+                tracing::warn!("failed to set the mode of {crtc:?}, lowering the bandwidth: {err}");
+                self.with_less_bandwidth(change)
+            }
+            result => result,
+        }
+    }
+
+    /// 화면을 켜거나 모드를 바꾸는 `attempt`가 실패했을 때 대역폭을 줄이고 다시 해 본다. 평면과 커서를 내려 보고,
+    /// 그래도 안 되면 모두 암묵적 modifier로 바꿔 본다(`attempt`의 둘째 인자). 전에 smithay의 DrmOutputManager가
+    /// 하던 차례 그대로다
+    fn with_less_bandwidth<T>(
+        &mut self,
+        attempt: impl Fn(&mut Self, bool) -> Result<T, CompositorError>,
+    ) -> Result<T, CompositorError> {
+        for surface in self.outputs.values_mut() {
+            blank_frame(&mut surface.compositor, &mut self.renderer);
+        }
+        match attempt(self, false) {
+            Ok(value) => return Ok(value),
+            Err(err) => tracing::warn!("still failing, trying implicit modifiers: {err:?}"),
+        }
+        self.set_implicit_modifiers(true);
+        let result = attempt(self, true);
+        if result.is_err() {
+            self.set_implicit_modifiers(false);
+        }
+        result
+    }
+
+    /// 모든 화면의 버퍼를 암묵적 modifier로, 또는 렌더러가 고를 수 있는 modifier로 다시 만든다
+    fn set_implicit_modifiers(&mut self, implicit: bool) {
+        for surface in self.outputs.values_mut() {
+            let code = surface.compositor.format();
+            let modifiers: Vec<Modifier> = if implicit {
+                vec![Modifier::Invalid]
+            } else {
+                self.render_formats
+                    .iter()
+                    .filter(|format| format.code == code)
+                    .map(|format| format.modifier)
+                    .collect()
+            };
+            if let Err(err) = surface
+                .compositor
+                .set_format(self.allocator.clone(), code, modifiers)
+            {
+                tracing::warn!("failed to change the buffer modifiers: {err:?}");
+                continue;
+            }
+            blank_frame(&mut surface.compositor, &mut self.renderer);
+        }
+    }
+
+    /// 세션이 끝날 때 화면을 다음 컴포지터에 넘긴다. CRTC를 켜 둔 채 끝나고, `keep_last_frame`이면 마지막 화면도
+    /// 남겨 둔다 (handover.rs). 다른 VT에 가 있으면 화면이 이미 다른 세션의 것이므로 아무것도 하지 않는다
+    fn hand_over_screens(&mut self, keep_last_frame: bool) {
+        if !self.drm.is_active() {
+            return;
+        }
+        if keep_last_frame {
+            for surface in self.outputs.values() {
+                // 6.8보다 오래된 커널에서는 실패한다. 그때는 다음 세션이 그릴 때까지 화면이 검다
+                if let Err(err) = handover::keep_last_frame(&self.drm, surface.compositor.plane()) {
+                    tracing::warn!("failed to keep the last frame: {err}");
+                }
+            }
+        }
+        // 꺼 두면 smithay가 끝날 때 CRTC를 끄지 않고, 처음 본 상태로 되돌리지도 않는다
+        self.drm.pause();
+        // 닫은 프레임버퍼를 smithay가 다시 지우면 경고만 남는다. 곧 프로세스가 끝나고 커널이 나머지를 치운다
+        std::mem::forget(std::mem::take(&mut self.outputs));
+    }
+}
+
+/// 화면 버퍼 하나에 검은 화면을 그려 바로 올린다. 평면을 쓰지 않아 대역폭이 가장 적다
+fn blank_frame(compositor: &mut Compositor, renderer: &mut GlesRenderer) {
+    let frame =
+        compositor.render_frame::<_, Elements>(renderer, &[], Color32F::BLACK, FrameFlags::empty());
+    match frame {
+        Ok(frame) => {
+            if frame.needs_sync()
+                && let PrimaryPlaneElement::Swapchain(primary) = frame.primary_element
+            {
+                let _ = primary.sync.wait();
+            }
+        }
+        Err(err) => {
+            tracing::warn!("failed to render a blank frame: {err:?}");
+            return;
+        }
+    }
+    match compositor.commit_frame() {
+        Ok(()) | Err(FrameError::EmptyFrame) => {}
+        Err(err) => tracing::warn!("failed to show a blank frame: {err:?}"),
+    }
 }
 
 /// 뒤에 있는 창에 마지막으로 프레임 알림을 보낸 때 (BACKGROUND_FRAME)
@@ -171,7 +335,7 @@ struct OutputSurface {
     output: Output,
     /// 화면 크기로 고른 기본 배율 (recommended_scale)
     preferred_scale: f64,
-    drm_output: DrmOutput<Allocator, Exporter, (), DrmDeviceFd>,
+    compositor: Compositor,
     connector: connector::Handle,
     /// 커넥터가 알려 준 모드. 화면이 권하는 모드가 먼저다 (sorted_modes)
     modes: Vec<DrmMode>,
@@ -260,7 +424,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     {
         tracing::info!("virtual cursor plane enabled");
     }
-    let (drm, drm_notifier) = DrmDevice::new(fd.clone(), true)?;
+    // 켜진 CRTC를 끄지 않는다. 쓰지 않을 것은 출력을 만들 때 끈다 (take_over_screens, handover.rs)
+    let (drm, drm_notifier) = DrmDevice::new(fd.clone(), false)?;
     let gbm = GbmDevice::new(fd)?;
 
     // 안전: GBM 장치는 EGL 디스플레이보다 오래 산다 (둘 다 UdevData가 끝까지 가진다)
@@ -300,19 +465,13 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let background_effects =
         BackgroundEffectState::new::<BuntState>(&display.handle(), config.effects.blur);
 
-    let output_manager = DrmOutputManager::new(
-        drm,
-        GbmAllocator::new(
-            gbm.clone(),
-            GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-        ),
-        // 앱 버퍼(dmabuf)를 화면 평면에 바로 올리지 않는다 (dmabuf.rs). 전에는 카드 노드를 주었지만
-        // 앱 버퍼가 없어 쓰이지 않았다
-        GbmFramebufferExporter::new(gbm.clone(), None),
-        Some(gbm),
-        [Fourcc::Abgr8888, Fourcc::Argb8888],
-        render_formats,
+    let allocator = GbmAllocator::new(
+        gbm.clone(),
+        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
     );
+    // 앱 버퍼(dmabuf)를 화면 평면에 바로 올리지 않는다 (dmabuf.rs). 전에는 카드 노드를 주었지만
+    // 앱 버퍼가 없어 쓰이지 않았다
+    let exporter = GbmFramebufferExporter::new(gbm.clone(), None);
 
     let cursor = Cursor::load(&config.cursor.theme, config.cursor.size);
     let (cursor_buffer, cursor_hotspot) = cursor.buffer(CursorIcon::Default, 1);
@@ -320,7 +479,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let backend = UdevData {
         session,
         renderer,
-        output_manager,
+        drm,
+        allocator,
+        exporter,
+        gbm,
+        render_formats: render_formats.into_iter().collect(),
         outputs: HashMap::new(),
         cursor,
         cursor_buffer,
@@ -351,7 +514,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         })
         .map_err(|err| err.error)?;
 
-    state.scan_connectors();
+    state.take_over_screens();
     if state.backend.outputs.is_empty() {
         return Err("no connected display".into());
     }
@@ -399,17 +562,20 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         .insert_source(session_notifier, move |event, _, state| match event {
             SessionEvent::PauseSession => {
                 libinput.suspend();
-                state.backend.output_manager.pause();
+                state.backend.drm.pause();
             }
             SessionEvent::ActivateSession => {
                 if libinput.resume().is_err() {
                     tracing::warn!("failed to resume libinput");
                 }
                 wake_input.ping();
-                if let Err(err) = state.backend.output_manager.activate(false) {
+                if let Err(err) = state.backend.drm.activate(false) {
                     tracing::warn!("failed to activate DRM device: {err}");
                 }
                 for surface in state.backend.outputs.values_mut() {
+                    if let Err(err) = surface.compositor.reset_state() {
+                        tracing::warn!("failed to reset DRM surface state: {err}");
+                    }
                     surface.frame_pending = false;
                 }
                 state.render_all();
@@ -438,28 +604,89 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             tracing::warn!("failed to flush clients: {err}");
         }
     })?;
+    state.hand_over_screens();
     Ok(())
 }
 
 impl BuntState {
+    /// 컴포지터가 끝날 때. 창이 남은 채 끝나면(⌃⌥⌫) 앱의 내용을 다음 세션까지 화면에 두지 않는다. 잠긴 동안에는
+    /// 잠금 화면이 보이므로 남겨도 된다 (handover.rs)
+    fn hand_over_screens(&mut self) {
+        let keep_last_frame = self.session_lock.is_locked() || self.all_windows().next().is_none();
+        self.backend.hand_over_screens(keep_last_frame);
+    }
+
+    /// 컴포지터가 뜰 때: 앞 컴포지터가 켜 둔 화면을 끄지 않고 넘겨받고, 쓰지 않을 것만 끈다 (handover.rs)
+    fn take_over_screens(&mut self) {
+        let connected = self.connected_screens();
+        let UdevData { drm, .. } = &mut self.backend;
+        let result = if drm.is_atomic() {
+            let mut kept: Vec<plane::Handle> = Vec::new();
+            let keep: Vec<_> = connected
+                .iter()
+                .filter_map(|(info, crtc)| {
+                    let planes = drm.planes(crtc).ok()?;
+                    let primary = planes
+                        .primary
+                        .iter()
+                        .map(|plane| plane.handle)
+                        .find(|plane| !kept.contains(plane))?;
+                    kept.push(primary);
+                    Some((info.handle(), *crtc, primary))
+                })
+                .collect();
+            handover::turn_off_unused(drm, &keep).map_err(|err| err.to_string())
+        } else {
+            Err("this driver has no atomic modesetting".to_owned())
+        };
+        // 켜진 것을 하나하나 끄지 못하면 전처럼 다 끄고 시작한다. 패널이 다시 켜지지만 화면은 맞다
+        if let Err(err) = result {
+            tracing::warn!("resetting the display: {err}");
+            if let Err(err) = drm.reset_state() {
+                tracing::warn!("failed to reset the display: {err}");
+            }
+        }
+        for (info, crtc) in connected {
+            self.connector_connected(info, crtc);
+        }
+        // 커널 콘솔이 있으면 앞 세션의 마지막 화면은 이미 없다: 앞 세션의 파일이 닫힐 때 콘솔이 화면을 가져갔다.
+        // 첫 화면을 낼 때까지 콘솔 글자가 보이지 않게 검게 덮는다. CRTC는 끄지 않는다
+        if handover::kernel_console_present() {
+            let UdevData {
+                outputs, renderer, ..
+            } = &mut self.backend;
+            for surface in outputs.values_mut() {
+                blank_frame(&mut surface.compositor, renderer);
+            }
+        }
+    }
+
     /// 연결된 커넥터 가운데 아직 출력이 없는 것에 출력을 만든다
     fn scan_connectors(&mut self) {
-        let device = self.backend.output_manager.device();
+        for (info, crtc) in self.connected_screens() {
+            self.connector_connected(info, crtc);
+        }
+    }
+
+    /// 연결된 커넥터 가운데 아직 출력이 없는 것과 쓸 CRTC
+    fn connected_screens(&self) -> Vec<(connector::Info, crtc::Handle)> {
+        let device = &self.backend.drm;
         let resources = match device.resource_handles() {
             Ok(resources) => resources,
             Err(err) => {
                 tracing::warn!("failed to read DRM resources: {err}");
-                return;
+                return Vec::new();
             }
         };
-        let mut used: Vec<crtc::Handle> = self.backend.outputs.keys().copied().collect();
+        let used: Vec<crtc::Handle> = self.backend.outputs.keys().copied().collect();
         let known: Vec<connector::Handle> = self
             .backend
             .outputs
             .values()
             .map(|surface| surface.connector)
             .collect();
-        let mut connected = Vec::new();
+        let mut infos = Vec::new();
+        let mut wanted = Vec::new();
         for handle in resources.connectors() {
             if known.contains(handle) {
                 continue;
@@ -470,20 +697,22 @@ impl BuntState {
             if info.state() != connector::State::Connected || info.modes().is_empty() {
                 continue;
             }
-            let crtc = info
-                .encoders()
-                .iter()
-                .filter_map(|encoder| device.get_encoder(*encoder).ok())
-                .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
-                .find(|crtc| !used.contains(crtc));
-            if let Some(crtc) = crtc {
-                used.push(crtc);
-                connected.push((info, crtc));
-            }
+            wanted.push(Wanted {
+                connector: infos.len(),
+                current: handover::current_crtc(device, &info),
+                possible: info
+                    .encoders()
+                    .iter()
+                    .filter_map(|encoder| device.get_encoder(*encoder).ok())
+                    .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
+                    .collect(),
+            });
+            infos.push(info);
         }
-        for (info, crtc) in connected {
-            self.connector_connected(info, crtc);
-        }
+        handover::assign_crtcs(&wanted, &used)
+            .into_iter()
+            .map(|(index, crtc)| (infos[index].clone(), crtc))
+            .collect()
     }
 
     fn connector_connected(&mut self, info: connector::Info, crtc: crtc::Handle) {
@@ -514,7 +743,7 @@ impl BuntState {
             .and_then(|prefs| prefs.scale)
             .unwrap_or(preferred_scale);
         let scale = nearest_scale(&scales_for(wl_mode.size.w, wl_mode.size.h), scale);
-        let (make, model) = edid_blob(self.backend.output_manager.device(), info.handle())
+        let (make, model) = edid_blob(&self.backend.drm, info.handle())
             .map(|edid| parse_edid(&edid))
             .unwrap_or_default();
         let description = if model.is_empty() {
@@ -557,39 +786,38 @@ impl BuntState {
         );
         self.space.map_output(&output, (x, 0));
 
-        let planes = self.backend.output_manager.device().planes(&crtc).ok();
+        let planes = self.backend.drm.planes(&crtc).ok();
         if let Some(planes) = &planes {
             tracing::info!(
                 "output {name}: planes primary {}, cursor {}, overlay {}; cursor size {:?}",
                 planes.primary.len(),
                 planes.cursor.len(),
                 planes.overlay.len(),
-                self.backend.output_manager.device().cursor_size()
+                self.backend.drm.cursor_size()
             );
         }
-        let UdevData {
-            renderer,
-            output_manager,
-            outputs,
-            ..
-        } = &mut self.backend;
-        let drm_output = match output_manager.initialize_output::<_, Elements>(
-            crtc,
-            drm_mode,
-            &[info.handle()],
-            &output,
-            planes,
-            renderer,
-            &DrmOutputRenderElements::default(),
-        ) {
-            Ok(drm_output) => drm_output,
-            Err(err) => {
-                tracing::warn!("failed to set up output {name}: {err:?}");
-                self.space.unmap_output(&output);
-                self.display_handle.remove_global::<BuntState>(global);
-                return;
+        let compositor =
+            match self
+                .backend
+                .new_compositor(crtc, drm_mode, info.handle(), &output, planes)
+            {
+                Ok(compositor) => compositor,
+                Err(err) => {
+                    tracing::warn!("failed to set up output {name}: {err:?}");
+                    self.space.unmap_output(&output);
+                    self.display_handle.remove_global::<BuntState>(global);
+                    return;
+                }
+            };
+        // 앞 컴포지터의 모드를 그대로 쓰면 첫 프레임이 페이지 플립이다. e2e 1번이 이 기록을 본다
+        tracing::info!(
+            "output {name}: {}",
+            if compositor.surface().commit_pending() {
+                "the first frame sets the mode"
+            } else {
+                "keeping the mode of the previous compositor"
             }
-        };
+        );
 
         let wallpaper = self.config.wallpaper_buffer(wl_mode);
         tracing::info!(
@@ -598,12 +826,12 @@ impl BuntState {
             wl_mode.size.h,
             wl_mode.refresh
         );
-        outputs.insert(
+        self.backend.outputs.insert(
             crtc,
             OutputSurface {
                 output,
                 preferred_scale,
-                drm_output,
+                compositor,
                 connector: info.handle(),
                 modes,
                 mode: drm_mode,
@@ -629,12 +857,7 @@ impl BuntState {
         let crtcs: Vec<crtc::Handle> = self.backend.outputs.keys().copied().collect();
         for crtc in crtcs {
             let connector = self.backend.outputs[&crtc].connector;
-            let info = match self
-                .backend
-                .output_manager
-                .device()
-                .get_connector(connector, true)
-            {
+            let info = match self.backend.drm.get_connector(connector, true) {
                 Ok(info)
                     if info.state() == connector::State::Connected && !info.modes().is_empty() =>
                 {
@@ -699,23 +922,21 @@ impl BuntState {
 
     /// 출력의 모드를 바꾼다. 실패하면 false
     fn apply_mode(&mut self, crtc: crtc::Handle, mode: DrmMode) -> bool {
-        let UdevData {
-            renderer, outputs, ..
-        } = &mut self.backend;
-        let Some(surface) = outputs.get_mut(&crtc) else {
+        let Some(name) = self
+            .backend
+            .outputs
+            .get(&crtc)
+            .map(|surface| surface.output.name())
+        else {
             return false;
         };
-        if let Err(err) = surface.drm_output.use_mode(
-            mode,
-            renderer,
-            &DrmOutputRenderElements::<GlesRenderer, Elements>::default(),
-        ) {
-            tracing::warn!(
-                "failed to change the mode of {}: {err:?}",
-                surface.output.name()
-            );
+        if let Err(err) = self.backend.use_mode(crtc, mode) {
+            tracing::warn!("failed to change the mode of {name}: {err:?}");
             return false;
         }
+        let Some(surface) = self.backend.outputs.get_mut(&crtc) else {
+            return false;
+        };
         surface.mode = mode;
         let wl_mode = WlMode::from(mode);
         surface
@@ -852,7 +1073,7 @@ impl BuntState {
         let Some(surface) = self.backend.outputs.get_mut(&crtc) else {
             return;
         };
-        if let Err(err) = surface.drm_output.frame_submitted() {
+        if let Err(err) = surface.compositor.frame_submitted() {
             tracing::warn!("frame submission failed: {err:?}");
         }
         surface.frame_pending = false;
@@ -1257,7 +1478,7 @@ impl BuntState {
         let interval = surface.frame_interval(rendering.cpu_composited);
         let started = std::time::Instant::now();
         let rendered = surface
-            .drm_output
+            .compositor
             .render_frame(renderer, &elements, CLEAR_COLOR, flags);
         // 렌더 펜스를 커밋에 실을 수 없으면(simpledrm처럼 DRM syncobj가 없는 드라이버) 커널이 렌더링을
         // 기다려 주지 않는다. llvmpipe는 스레드에서 그리고 simpledrm은 커밋 때 버퍼를 화면으로 한 번 복사하므로,
@@ -1280,7 +1501,7 @@ impl BuntState {
         let (queued, states) = match rendered {
             Ok(frame) => {
                 let queued = !frame.is_empty
-                    && match surface.drm_output.queue_frame(()) {
+                    && match surface.compositor.queue_frame(()) {
                         Ok(()) => true,
                         Err(err) => {
                             tracing::warn!("failed to queue frame: {err:?}");
