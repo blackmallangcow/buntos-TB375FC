@@ -1,0 +1,113 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt7921: do not remove a station the SoC firmware lost
+
+A chip reset of the MT6897 during a connection gets the firmware running
+again, but the connection doesn't come back. The next scan doesn't finish,
+and the first command that waits for an answer times out and starts
+another reset, at the latest the one from taking the interface down.
+
+The reset work makes mac80211 disconnect, and that removes the station. The
+power cycle of the reset took the station from the firmware already, and
+told to remove a station it doesn't have, the firmware stops answering. A
+query for its capabilities after each command of the disconnection shows
+the place:
+
+  command                     the query after it
+  BSS activate (0x11)         answered
+  EDCA (0x1d, 0xb0)           answered
+  channel (0x1c), both        answered
+  station removal (0x14)      no answer in 2 seconds
+
+It is that command and not the state around it. It stops a firmware that
+has had no connection since its start, and one that is connected, told to
+remove another station. A query after each of the other commands of the
+disconnection is answered, with the frames that go out meanwhile under the
+old wcid. Why it stops is not known, no event comes after it.
+
+The disconnection of the vendor driver doesn't name a station. A reset
+there keeps the station records, and going idle deactivates the network,
+which removes all stations of the BSS with another action of this command,
+in cnmStaFreeAllStaByNetwork(). That action does no harm to a firmware
+without stations, but has not been tried in a disconnection here.
+
+Keep track of whether the firmware has the station, and leave the removal
+out if not. The RX filter, lost with the firmware too, comes back without
+help: mac80211 sets it again during the disconnection and the next
+connection.
+
+Seen on the device with a connection at 2.4 GHz and at 5 GHz, three resets
+through debugfs on each, one of the three during HTTP requests: connected
+again after 9.1 to 9.4 seconds, then DHCP and HTTP work. At 5 GHz, with a
+second reset 3.4 to 7 seconds after the first, it took 9.2 to 18.2 seconds
+from the second. At 2.4 GHz, a reset from a command that timed out during a
+connection took 9.2 seconds. A disconnection without a reset still sends
+the removal, and the firmware answers after it.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+@@ -967,6 +967,9 @@
+ 	bool owned = powered;
+ 	int i, err;
+ 
++	/* The power cycle below takes it from the firmware */
++	mt7921_soc_of(dev)->fw_sta = false;
++
+ 	/*
+ 	 * With this set the NAPI leaves all replies to the wake work, which has
+ 	 * to wait for this work on the same queue. And here it stands for
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+@@ -32,6 +32,8 @@
+ 	struct mtk_connsys *connsys;
+ 	/* The WF side and the WFDMA hang the bus if touched without this */
+ 	bool wf_on;
++	/* Whether the running firmware has been told about the access point */
++	bool fw_sta;
+ 	/* Where the ring registers point meanwhile */
+ 	struct mt76_queue_regs ring_scratch;
+ 	/* Rings short of window memory hear of nothing that would fill them */
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+@@ -1157,6 +1157,7 @@
+ {
+ 	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
+ 	enum nl80211_band band = mt7921_soc_vif_band(dev, mvif);
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
+ 	struct ieee80211_sta_ht_cap *ht;
+ 	struct ieee80211_sta_vht_cap *vht;
+ 	struct ieee80211_sta_he_cap *he;
+@@ -1182,9 +1183,20 @@
+ 		return -EOPNOTSUPP;
+ 
+ 	msta = (struct mt792x_sta *)sta->drv_priv;
+-	if (!enable)
++	if (!enable) {
++		/*
++		 * After a chip reset mac80211 still has the station to remove.
++		 * The firmware stops answering when told to remove one it
++		 * doesn't have.
++		 */
++		if (!soc->fw_sta)
++			return 0;
++
++		soc->fw_sta = false;
++
+ 		return mt7921_soc_mcu_sta_remove(dev, mvif,
+ 						 &msta->deflink.wcid);
++	}
+ 
+ 	req = kzalloc_obj(*req, GFP_KERNEL);
+ 	if (!req)
+@@ -1265,6 +1277,9 @@
+ 				sizeof(*req), assoc);
+ 	kfree(req);
+ 
++	if (!ret && !assoc)
++		soc->fw_sta = true;
++
+ 	return ret;
+ }
+ 
