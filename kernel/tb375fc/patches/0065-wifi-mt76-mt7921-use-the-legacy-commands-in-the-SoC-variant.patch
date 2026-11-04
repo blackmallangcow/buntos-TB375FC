@@ -30,10 +30,12 @@ internet, up to 138 Mbit/s down and 87 Mbit/s up, a scan while connected,
 and an orderly end. The statistics show the firmware aggregating on TX,
 and no frame came in with its header translated.
 
-An access point on 5 GHz has not been tried. Whether RX reordering follows
-the BA events has not been seen, and TCP did see frames out of order. What
-the firmware does with the authentication mode and encryption status of CE
-0x12 is not known.
+A short connection to an access point on 5 GHz (5745 MHz, 80 MHz) reached
+the internet too. Its speed has not been measured.
+
+Whether RX reordering follows the BA events has not been seen, and TCP did
+see frames out of order. What the firmware does with the authentication
+mode and encryption status of CE 0x12 is not known.
 ---
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/Makefile b/drivers/net/wireless/mediatek/mt76/mt7921/Makefile
 --- a/drivers/net/wireless/mediatek/mt76/mt7921/Makefile
