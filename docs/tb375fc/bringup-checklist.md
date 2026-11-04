@@ -1508,7 +1508,22 @@ QEMU에서 본 것은 드라이버의 차례뿐이다. 실제 SoC에서는 저�
 
 ### 9.5 2c 2차 화면 파이프라인
 
-아래는 코드와 자료로 짠 차례다. 기기에서 돌린 적이 없다. 위에서 아래로 하고, 앞 단계를 채운 뒤 다음으로 간다. 켜지 못해도 앞 단계의 dtb로 돌아가면 simple-framebuffer 데스크톱이 그대로다.
+**결과(2026-11-04).** 기기가 mediatek-drm으로 부팅해 로그인과 세션까지 뜨고, CPU 화면 복사가 없어졌다. 사람이 사진과 눈으로 확인했다(양쪽 절반이 맞고, 가로줄과 어긋남과 왼쪽 검은 줄이 없다). 시험 패치 0999는 필요 없어졌다. 복사가 없다는 근거: simpledrm 장치가 사라지고, 컴포지터가 GPU로 그린 선형 버퍼 둘이 CMA에 있고, OVL 주소 레지스터가 그 물리 주소를 가리킨다.
+
+| 항목(로그인 화면의 키보드, 표본 하나) | simpledrm + 0999 | mediatek-drm |
+|---|---|---|
+| 커밋 간격 중앙값 | 약 65 ms | 약 7 ms |
+| fps | 15.6~18.6 | 68~128 |
+| 커밋 하나당 kworker 시간 | 약 62 ms | 약 2 ms |
+| vsync | 없음 | 있음, 143.88 Hz. 119.34, 59.67, 29.83 Hz도 돈다 |
+
+- 부팅 순서: `buntos-display.service`(PHY, mtk-mmsys, 패널, mediatek-drm 차례로 올리고 DSI 커넥터를 기다린다) → `buntos-gpu.service`(panthor) → 로그인 화면 → `buntos-wifi.service`, `buntos-charge.service`. 드라이버는 명령줄의 `modprobe.blacklist`로 자동 적재를 막고 서비스가 올린다. 전력 시험 전이라 부팅 때 켜는 값은 시험 커널 기준이다.
+- 고친 것: 패치 0153(CRTC를 끄면 OVL 도메인의 투표만 지워지고 전원 끄기가 끝나지 않아, 다시 켠 뒤 기기가 멈췄다. 한 번 봤고 원인은 추정이다. 화면 전원 도메인을 끄지 않게 한 임시 고침이다). 컴포지터는 커넥터가 있는 카드를 고른다.
+- 달라진 것: 커넥터가 `DSI-1`이라 내장 화면으로 계산해 UI 배율이 2.5에서 2.25가 됐다.
+- 남은 것: 화면 전원 도메인을 실제로 끄는 길(suspend와 대기 전력이 여기서 막힌다), 밝기(DCS `0x51`로 화면이 바뀌지 않는다), 로그인 때 패널이 다시 켜지며 잠깐 꺼지는 것, 커서 평면, 앱 버퍼마다 뜨는 `swiotlb` 경고(화면에는 영향이 없다).
+- 시험 안 한 것: 긴 시간 사용, 전력, suspend, 144 Hz 언더런을 레지스터로 보기.
+
+아래는 코드와 자료로 짠 차례다. 위 결과에 이르기까지 기기에서 차례로 돌렸다. 위에서 아래로 하고, 앞 단계를 채운 뒤 다음으로 간다. 켜지 못해도 앞 단계의 dtb로 돌아가면 simple-framebuffer 데스크톱이 그대로다.
 
 > **위험: 멈춤.** 전원이나 클럭이 꺼진 화면 블록을 건드리면 버스가 멈춘다. 전원 키와 볼륨(홈) 키를 길게 눌러 다시 켠다(순정 트리의 PMIC 초기화). 명령줄의 블랙리스트 때문에 다시 켜면 셸까지 온다.
 
@@ -1558,7 +1573,7 @@ LK가 화면을 켠 채로 `tools/hw/read-display-regs.sh > lk-regs.txt`를 돌�
 
 #### 3. 노드 켜기
 
-1. [ ] `disp_mutex0`, `disp_mutex1`, `ovl_mutex0`, `ovl_mutex1`, `dsc0`, `dsc1`, `ovl_2l0`, `ovl_2l1`, `dsi0`, `dsi1`, `panel0`, `lcd_avdd`, `lcd_avee`를 켠다. `framebuffer0`의 `panel`을 뺀다(fw_devlink가 simpledrm을 붙든다). `gpio-shared-proxy`가 있어야 한다(GPIO184).
+1. [ ] `disp_mutex0`, `disp_mutex1`, `ovl_mutex0`, `ovl_mutex1`, `dsc0`, `dsc1`, `ovl_2l0`, `ovl_2l1`, `dsi0`, `dsi1`, `panel0`, `lcd_avdd`, `lcd_avee`를 켠다. `framebuffer0`의 `panel`은 꺼진 크기 노드(`panel_size`)를 가리키게 한다. 패널 노드를 가리키면 fw_devlink가 simpledrm을 붙들고, 빼면 simpledrm이 화면 크기를 잃어 배율이 1이 된다. `gpio-shared-proxy`가 있어야 한다(GPIO184).
 2. [ ] 부팅이 끝까지 간다. `mtk-mutex`가 붙고 DRM 드라이버는 아직 없다. 화면이 그대로다.
 
 #### 4. 첫 모드 설정 (손으로)
