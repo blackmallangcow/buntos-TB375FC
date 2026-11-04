@@ -260,6 +260,9 @@ fn follow_pointer(content: &gtk::Box) {
 
 /// 메뉴 막대에 놓는 단추
 pub fn button(child: &impl IsA<gtk::Widget>, menu: &Menu, tooltip: &str) -> gtk::MenuButton {
+    // 항목이 내용보다 넓어도(터치 모드) 내용은 가운데에 둔다. gtk::Box는 남는 자리를 뒤에 둬 배터리 아이콘이
+    // 왼쪽으로 치우쳤다
+    child.set_halign(gtk::Align::Center);
     let button = gtk::MenuButton::builder()
         .child(child)
         .popover(menu.popover())

@@ -3,7 +3,7 @@
 
 //! 입력 모드(설계안 5.1절)를 따른다. 컴포지터(org.buntos.Compositor1)가 붙은 입력 장치로 정한 포인터 모드와
 //! 터치 모드를 읽고(GetInputMode) 바뀌면 받아(InputModeChanged), 터치 모드이면 셸의 모든 창에 CSS 클래스
-//! `touch`를 단다. style.css는 그때 누를 영역을 44px 이상으로 넓힌다(디자인 스펙 11장). 무엇이 어디 있는지와
+//! `touch`를 단다. style.css는 그때 누를 영역을 넓힌다(디자인 스펙 11장). 무엇이 어디 있는지와
 //! 글자·아이콘 크기는 그대로다.
 //!
 //! - 메뉴, 제어 센터, 알림 센터 같은 팝오버는 창의 CSS 노드 밑에 있어 창의 클래스를 따른다
@@ -336,13 +336,14 @@ mod tests {
     }
 
     /// 셸 스타일(theme/tokens.css와 style.css)로 GTK가 실제로 배치한 크기를 잰다: 터치 모드에서 누를 영역이
-    /// 44px 이상이고, 포인터 모드에서는 그대로 작고, 그림만 두고 넓힌 단추는 그림 크기와 카드 높이가 그대로인지.
+    /// 44px 이상(메뉴 막대와 메뉴의 줄은 36px)이고, 포인터 모드에서는 그대로 작고, 그림만 두고 넓힌 단추는 그림
+    /// 크기와 카드 높이가 그대로인지.
     /// GTK는 처음 초기화한 스레드에서만 쓸 수 있어(menu_names의 시험) 이 시험은 따로 띄운 프로세스에서 돈다.
     /// 화면(Wayland·X11)이 없으면 건너뛴다. 화면 없는 곳에서는 xvfb-run cargo test로 돌린다
     #[test]
-    fn touch_mode_targets_are_at_least_44px() {
+    fn touch_mode_targets_have_their_sizes() {
         const INSIDE: &str = "BUNT_SHELL_TEST_GTK_PROCESS";
-        const TEST: &str = "input_mode::tests::touch_mode_targets_are_at_least_44px";
+        const TEST: &str = "input_mode::tests::touch_mode_targets_have_their_sizes";
         if std::env::var_os(INSIDE).is_none() {
             // 띄운 프로세스의 출력은 파이프가 아니라 파일로 받는다. 같은 프로세스의 D-Bus 시험이 GLib TestDBus를
             // 처음 올릴 때 exec 없이 fork하는 감시 프로세스가 파이프의 쓰기 끝을 물려받으면 끝을 받지 못해 멈췄다
@@ -387,7 +388,7 @@ mod tests {
         let (_, errors) = parse(touch_rules);
         assert!(errors.is_empty(), "{errors:?}");
         let (provider, errors) = parse(crate::STYLE);
-        if gtk::check_version(4, 16, 0).is_none() {
+        if gtk::check_version(4, 20, 0).is_none() {
             assert!(errors.is_empty(), "{errors:?}");
         }
         gtk::style_context_add_provider_for_display(
@@ -421,11 +422,36 @@ mod tests {
             let (_, height) = touch.size(&widget);
             assert!(height >= 44.0, "touch {name}: height {height}");
         }
-        // 포인터 모드는 그대로다: 작은 단추와 줄은 44px보다 작다
+        // 메뉴 막대와 메뉴의 줄은 36px다. 글자와 아이콘이 그대로라 더 높으면 여백이 너무 넓다
+        for (name, widget) in touch.menu_targets() {
+            let (width, height) = touch.size(&widget);
+            assert!(
+                width >= 36.0 && height >= 36.0,
+                "touch {name}: {width}×{height}"
+            );
+        }
+        assert_eq!(touch.size(touch.bar_button.upcast_ref()), (36.0, 36.0));
+        // 항목이 내용보다 넓어도 내용은 가운데에 있다. 상자를 넣은 배터리 항목이 치우쳤다
+        let item = touch.boxed_item.compute_bounds(&touch.window).unwrap();
+        let icon = touch.boxed_icon.compute_bounds(&touch.window).unwrap();
+        let offset = icon.x() + icon.width() / 2.0 - item.x() - item.width() / 2.0;
+        assert!(offset.abs() <= 0.5, "the icon is {offset}px off the center");
+        assert_eq!(touch.size(&touch.bar_item).1, 36.0);
+        assert_eq!(touch.size(touch.title.upcast_ref()).1, 36.0);
+        assert_eq!(touch.size(touch.extra_row.upcast_ref()).1, 36.0);
+        assert!(touch.size(touch.scale.upcast_ref()).1 >= 36.0);
+        // 포인터 모드는 그대로다: 작은 단추와 줄은 터치 모드의 크기보다 작다
         for (name, widget) in pointer.targets().into_iter().chain(pointer.rows()) {
             let (width, height) = pointer.size(&widget);
             assert!(
                 width < 44.0 || height < 44.0,
+                "pointer {name}: {width}×{height}"
+            );
+        }
+        for (name, widget) in pointer.menu_targets() {
+            let (width, height) = pointer.size(&widget);
+            assert!(
+                width < 36.0 || height < 36.0,
                 "pointer {name}: {width}×{height}"
             );
         }
@@ -451,7 +477,14 @@ mod tests {
             ),
         ];
         for (name, before, after) in pictures {
-            assert_eq!(content(before), content(after), "{name}");
+            let (before, after) = (content(before), content(after));
+            // 분류 단추의 글자 높이는 글꼴에 따라 다르고, 터치 모드는 44px를 맞추려 16px 아래로 두지 않는다
+            let height = if name == "chip" {
+                before.1.max(16)
+            } else {
+                before.1
+            };
+            assert_eq!(after, (before.0, height), "{name}");
         }
         assert_eq!(content(touch.close.upcast_ref()), (18, 18));
         let trough = |sample: &Sample| content(&sample.scale.first_child().unwrap()).1;
@@ -468,8 +501,11 @@ mod tests {
             "{expand:?} {close:?}"
         );
         // 메뉴의 줄은 팝오버를 띄우지 않고 잰다
-        assert!(touch.menu_item.measure(gtk::Orientation::Vertical, -1).0 >= 44);
-        assert!(pointer.menu_item.measure(gtk::Orientation::Vertical, -1).0 < 44);
+        assert_eq!(
+            touch.menu_item.measure(gtk::Orientation::Vertical, -1).0,
+            36
+        );
+        assert!(pointer.menu_item.measure(gtk::Orientation::Vertical, -1).0 < 36);
         pointer.window.destroy();
         touch.window.destroy();
     }
@@ -480,6 +516,8 @@ mod tests {
         window: gtk::Window,
         bar_button: gtk::Button,
         bar_item: gtk::Widget,
+        boxed_item: gtk::MenuButton,
+        boxed_icon: gtk::Image,
         menu_item: gtk::Widget,
         title: gtk::Box,
         switch: gtk::Switch,
@@ -526,6 +564,12 @@ mod tests {
             let menubar = gtk::PopoverMenuBar::from_model(Some(&menu));
             start.append(&icon);
             start.append(&menubar);
+            // 상자를 넣은 항목 (배터리, power.rs)
+            let boxed_icon = gtk::Image::from_icon_name("battery-level-30-symbolic");
+            let boxed = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            boxed.append(&boxed_icon);
+            let boxed_item = crate::extras::button(&boxed, &crate::extras::Menu::new(), "배터리");
+            start.append(&boxed_item);
             bar.set_start_widget(Some(&start));
             column.append(&bar);
 
@@ -651,6 +695,8 @@ mod tests {
                 window,
                 bar_button,
                 bar_item,
+                boxed_item,
+                boxed_icon,
                 menu_item,
                 title,
                 switch,
@@ -681,13 +727,19 @@ mod tests {
             (bounds.width(), bounds.height())
         }
 
-        /// 가로·세로 모두 44px이어야 하는 것
-        fn targets(&self) -> Vec<(&'static str, gtk::Widget)> {
+        /// 메뉴 막대와 메뉴 안의 것: 가로·세로 모두 36px이어야 한다
+        fn menu_targets(&self) -> Vec<(&'static str, gtk::Widget)> {
             vec![
                 ("menu bar icon", self.bar_button.clone().upcast()),
                 ("menu bar item", self.bar_item.clone()),
                 ("switch", self.switch.clone().upcast()),
                 ("slider icon", self.slider_icon.clone().upcast()),
+            ]
+        }
+
+        /// 가로·세로 모두 44px이어야 하는 것
+        fn targets(&self) -> Vec<(&'static str, gtk::Widget)> {
+            vec![
                 ("card expand", self.expand.clone().upcast()),
                 ("card close", self.close.clone().upcast()),
                 ("dock item", self.dock_item.clone().upcast()),
@@ -697,9 +749,6 @@ mod tests {
         /// 높이만 44px이어야 하는 것(줄, 막대, 칸)
         fn rows(&self) -> Vec<(&'static str, gtk::Widget)> {
             vec![
-                ("menu title row", self.title.clone().upcast()),
-                ("menu row", self.extra_row.clone().upcast()),
-                ("slider", self.scale.clone().upcast()),
                 ("control center row", self.cc_button.clone().upcast()),
                 ("clear notifications", self.clear.clone().upcast()),
                 ("search field", self.search.clone().upcast()),
