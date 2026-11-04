@@ -81,6 +81,7 @@ use crate::{
     render::{self, OutputRenderElements},
     screenshot,
     state::BuntState,
+    texture_shader,
 };
 
 type Allocator = GbmAllocator<DrmDeviceFd>;
@@ -1188,6 +1189,8 @@ impl BuntState {
             let scene: Vec<&Elements> = elements.iter().collect();
             recording.capture(renderer, &scene);
         }
+
+        let elements = texture_shader::precise(renderer, &elements);
 
         // 한 프레임 간격보다 오래 걸린 프레임은 디버그 기록에 남긴다 (RUST_LOG=bunt_comp=debug)
         let interval = surface.frame_interval(rendering.cpu_composited);

@@ -37,6 +37,7 @@ use crate::{
     render::{OutputRenderElements, SpaceElement},
     screenshot,
     state::{BuntState, ClientState},
+    texture_shader,
 };
 
 /// 지니 효과의 시간 (macOS에서 0.5초쯤)
@@ -844,6 +845,7 @@ fn window_texture(
     let elements: Vec<OutputRenderElements> =
         window.render_elements(renderer, origin, Scale::from(scale), 1.0);
     let mut framebuffer = renderer.bind(&mut texture).map_err(|err| err.to_string())?;
+    let elements = texture_shader::precise(renderer, &elements);
     OutputDamageTracker::new(size, scale, Transform::Normal)
         .render_output(renderer, &mut framebuffer, 0, &elements, [0.0; 4])
         .map_err(|err| format!("{err:?}"))?;

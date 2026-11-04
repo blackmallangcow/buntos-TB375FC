@@ -24,6 +24,7 @@ mod shortcuts;
 mod state;
 #[cfg(test)]
 mod testing;
+mod texture_shader;
 mod toplevels;
 mod udev;
 mod windows;

@@ -91,9 +91,13 @@ pub fn gl_lock() -> MutexGuard<'static, ()> {
     GL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// llvmpipe GLES 렌더러. 소프트웨어 EGL 장치가 없으면 None
+/// llvmpipe GLES 렌더러. 소프트웨어 EGL 장치가 없으면 None. BUNT_TEST_GPU를 주면 실제 GPU로 돈다.
+/// 드라이버마다 다른 것(mediump의 크기 같은)은 그렇게 돌려야 드러난다
 pub fn software_renderer() -> Option<GlesRenderer> {
-    let device = EGLDevice::enumerate().ok()?.find(EGLDevice::is_software)?;
+    let gpu = std::env::var_os("BUNT_TEST_GPU").is_some();
+    let device = EGLDevice::enumerate()
+        .ok()?
+        .find(|device| device.is_software() != gpu)?;
     // 안전: 장치는 디스플레이를 만드는 동안만 쓰고, 디스플레이는 컨텍스트가 붙들고 있다
     let display = unsafe { EGLDisplay::new(device) }.ok()?;
     let context = EGLContext::new(&display).ok()?;
@@ -663,13 +667,14 @@ impl Frames {
         renderer: &mut GlesRenderer,
         elements: &[OutputRenderElements],
     ) -> Vec<u8> {
+        let elements = crate::texture_shader::precise(renderer, elements);
         let mut framebuffer = renderer.bind(&mut self.target).expect("bind target");
         self.damage
             .render_output(
                 renderer,
                 &mut framebuffer,
                 self.age,
-                elements,
+                &elements,
                 [0.0, 0.0, 0.0, 1.0],
             )
             .expect("render");
