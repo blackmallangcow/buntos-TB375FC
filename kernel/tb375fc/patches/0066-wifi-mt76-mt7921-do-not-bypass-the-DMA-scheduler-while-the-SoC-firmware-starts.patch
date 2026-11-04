@@ -1,0 +1,73 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt7921: do not bypass the DMA scheduler while the SoC firmware starts
+
+A restart of the WF part of the MT6897 gets through the ROM commands and
+sees the firmware running, but the WFDMA doesn't read the command after
+that. Ten tries later the reset work gives up, and Wi-Fi stays down until
+the module is reloaded.
+
+A restart goes through mt792x_wpdma_reset(), whose mt792x_dma_disable()
+sets the bypass of the DMA scheduler and leaves it set. The probe calls
+that too, but with force, and the reset of the scheduler that comes with
+force clears the bit again. So the firmware starts with the bit clear after
+a probe and with it set after a restart. The status register of the
+scheduler shows what that does:
+
+                          after a probe     after a restart
+  before the ROM commands
+    bypass                0                 1
+    free pages            0                 0x60
+  firmware running
+    free pages            0x3e8             0
+
+With no free pages, turning the scheduler on stops the next command for
+good. This also fits what was tried earlier: a reset of the WFDMA in the
+restart made no difference, as mt792x_wpdma_reset() ran after it and set
+the bit again.
+
+Clear the bit before the ROM commands, on either way up. Once the firmware
+runs, a restart then reads the same as a probe in all the registers of the
+scheduler, free pages included, and the commands get through. Why the
+scheduler ends up without pages is not known, only that this bit makes the
+difference. The vendor driver sets this bit only for USB, with the
+scheduler turned off in its configuration, so on this bus it never has it
+on.
+
+The clear in mt7921_soc_dmashdl_init() has nothing left to do and goes
+away.
+
+Seen on the device, with a scan after each: resets through debugfs, three
+in a row, one with the interface down, one during a scan and one after a
+reload of the module, then one from a command that timed out and one from a
+firmware that stopped answering. A reset while connected has not been
+tried.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+@@ -695,7 +695,6 @@
+ 	/* Groups 0, 1, 2 and 15, and an ACK from HIF every 4 */
+ 	mt76_wr(dev, MT_DMASHDL_OPTIONAL, 0x00048007);
+ 
+-	mt76_clear(dev, MT_DMASHDL_SW_CONTROL, MT_DMASHDL_DMASHDL_BYPASS);
+ 	mt76_set(dev, MT_WFDMA0_GLO_CFG_EXT0, MT_WFDMA0_CSR_TX_DMASHDL_ENABLE);
+ }
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+@@ -619,6 +619,14 @@
+ 	mt7921_soc_read_manifest(dev, manifest, sizeof(manifest));
+ 	dev_info(dev->mt76.dev, "firmware in memory: %s\n", manifest);
+ 
++	/*
++	 * With the bypass on while the firmware starts, the DMA scheduler is
++	 * left without a free page and holds back every command once it is on.
++	 * mt792x_dma_disable() sets it, and only in the probe does a reset of
++	 * the scheduler clear it again.
++	 */
++	mt76_clear(dev, MT_DMASHDL_SW_CONTROL, MT_DMASHDL_DMASHDL_BYPASS);
++
+ 	ret = mt7921_soc_log_time_sync(dev);
+ 	if (ret)
+ 		dev_warn(dev->mt76.dev, "time sync failed: %d\n", ret);

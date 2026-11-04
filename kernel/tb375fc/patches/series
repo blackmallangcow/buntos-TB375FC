@@ -93,12 +93,13 @@
 0058-dt-bindings-net-wireless-mt76-add-the-MT6897-Wi-Fi.patch
 0059-wifi-mt76-mt7921-let-a-variant-start-firmware-it-did-not-download.patch
 0060-wifi-mt76-mt7921-add-the-MT6897-SoC-bus-variant.patch
-# 2d: 펌웨어가 uni 명령을 받지 않아 레거시 명령으로 간다. 명령 링, 채널 목록, 스캔 요청도 펌웨어에 맞춘다
+# 2d: 펌웨어가 uni 명령을 받지 않아 레거시 명령으로 간다. 명령 링, 채널 목록, 스캔 요청, 칩 리셋도 펌웨어에 맞춘다
 0061-wifi-mt76-mt7921-keep-the-DMA-scheduler-on-in-the-SoC-variant.patch
 0062-wifi-mt76-mt7921-send-the-channels-in-the-old-form-in-the-SoC-variant.patch
 0063-wifi-mt76-mt7921-lay-out-the-scan-request-like-the-SoC-firmware-does.patch
 0064-wifi-mt76-mt792x-let-a-variant-have-its-own-station-commands.patch
 0065-wifi-mt76-mt7921-use-the-legacy-commands-in-the-SoC-variant.patch
+0066-wifi-mt76-mt7921-do-not-bypass-the-DMA-scheduler-while-the-SoC-firmware-starts.patch
 # 0070~0079: 2e GPU 전원·열·게이지. 모두 꺼 둔 노드이고 기기에서 확인한 뒤 낸다. 0070·0071 GPUEB 메일박스 MT6897(채널 11개, 받는 쪽이 0xd8부터, 클럭 없음).
 # 0072·0073 mtk-mfg MT6897: GPUEB는 LK가 띄우고 멈추지 않는다(GHPM·클럭·레귤레이터 없음), 공유 메모리는 LK가 /soc/gpueb 노드에 적어 준 것, 오프셋이 다르고,
 # OPP는 CMD_COMMIT이다. 무엇을 보내기 전에 읽기만으로 MFG0·GPR을 확인한다. 0074 panthor 바인딩(드라이버는 그대로, ASN hash 없음). 0075·0076 devinfo NVMEM(LK가
