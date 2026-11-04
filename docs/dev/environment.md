@@ -113,6 +113,31 @@ VMCTL_ID=mine tools/image/vmctl.sh stop
 
 **동작 목록.** `qmp` 동작은 `tools/image/qmp.py` 머리말에 있다: 누르기, 오른쪽 누르기(`rclick`), 끌기, 단추를 누른 채 두기와 떼기(`press`, `release`), 손가락으로 누르기와 끌기(`touch`, `tdrag`), 키, 글자 입력, 화면 저장. 단축키는 `keys:meta_l+c`처럼 QEMU 키 이름으로 넣는다(⌘는 `meta_l`, ⌥는 `alt`, ⌃는 `ctrl`, ⇧는 `shift`).
 
+**가짜 배터리.** QEMU에는 배터리가 없고 Debian 커널에는 `test_power`가 없다. 게스트 커널과 같은 판의 소스와 게스트의 설정(`/boot/config-*`)으로 바깥 모듈을 빌드해 넣으면 실제 UPower를 거쳐 배터리 표시를 본다(Debian 7.2.12-1에서 확인했다. 이 커널은 `MODVERSIONS`가 꺼져 있고 서명을 강제하지 않는다). 빌드 VM에서, `SRC`는 소스, `OUT`과 `X`는 빈 디렉터리다:
+
+```bash
+cp config-7.2.12+deb14-arm64 "$OUT/.config"
+"$SRC/scripts/config" --file "$OUT/.config" -m TEST_POWER -d MODULE_SIG_ALL -u SYSTEM_TRUSTED_KEYS -u SYSTEM_REVOCATION_KEYS
+make -C "$SRC" O="$OUT" ARCH=arm64 KERNELRELEASE=7.2.12+deb14-arm64 olddefconfig modules_prepare
+cp "$SRC/drivers/power/supply/test_power.c" "$X/" && echo 'obj-m := test_power.o' > "$X/Makefile"
+make -C "$OUT" M="$X" ARCH=arm64 KERNELRELEASE=7.2.12+deb14-arm64 KBUILD_MODPOST_WARN=1 modules
+```
+
+- 설정은 그대로 둔다. `DEBUG_INFO_BTF_MODULES`를 끄면 `struct module` 크기가 달라져 게스트가 모듈을 거절한다.
+- 게스트에 넣을 때는 빌드 VM에서 `python3 -I -m http.server --bind 127.0.0.1`로 내주고 게스트에서 `curl http://10.0.2.2:<포트>/test_power.ko`로 받는다. 새 VM이 부팅 중에 멈추고 빌드 VM의 `kcompactd`가 CPU를 다 쓰면 `echo 3 | sudo tee /proc/sys/vm/drop_caches`로 풀린다.
+- `insmod test_power.ko battery_voltage=2000000000`으로 넣고, 값은 `/sys/module/test_power/parameters/`에 쓴다. `test_power`의 용량은 100 µAh뿐이고 UPower는 전력이 0.01 W를 넘어야 시간을 믿으므로, 전압을 2000 V로 주어 몇 시간짜리 값을 만든다.
+- UPower는 전원이 바뀐 뒤 잠시 전력을 믿지 않는다(남은 시간이 0). 18초쯤 뒤에 `battery_capacity`를 한 번 더 쓰면 바로 다시 읽는다.
+
+| 보이는 상태 | `battery_status` | `battery_capacity` | `battery_current` | `ac_online`, `usb_online` |
+|---|---|---|---|---|
+| 충전 중, 충전 완료까지 1시간 20분 남음 | `charging` | 40 | 45 | `on` |
+| 충전 중, 충전 완료까지 10시간 이상 남음 | `charging` | 19 | 6 | `on` |
+| 충전 중 (남은 시간 모름) | `charging` | 40 | 0 | `on` |
+| 충전 완료됨 | `full` | 100 | 0 | `on` |
+| 배터리 충전 중이 아님 | `not-charging` | 60 | 0 | `on` |
+| 배터리 사용 중, 2시간 24분 남음 | `discharging` | 60 | -25 | `off` |
+| 전원이 꽂혔는데 전류가 나간다 (`status`는 `Charging`) | `charging` | 19 | -470 | `on` |
+
 **여럿이 함께 쓸 때.**
 - 같은 이미지는 한 번에 하나만 빌드한다(`<이미지 디렉터리>.lock`). vmctl은 빌드가 끝나기를 기다렸다 띄운다.
 - 띄운 뒤에는 빌드가 이미지를 새로 만들어도 VM은 이미 연 파일을 계속 쓴다.
@@ -184,7 +209,7 @@ x86-64는 보드 이름만 `x86_64-generic`으로 바꾸면 된다. Apple Silico
 **네트워크와 장치.**
 - 네트워크는 NetworkManager가 관리하며, QEMU에서는 유선으로 연결된다.
 - 시험 VM(`vmctl.sh`)과 Mac 창(`view-mac.sh`)에는 가상 사운드 장치가 붙어 음량을 시험할 수 있다. Mac 창의 소리는 Mac 스피커로 나오고(coreaudio), 시험 VM은 버린다(`-audiodev none`). 부팅 뒤 로그인 화면이 뜰 때 시동음이 난다.
-- QEMU에는 배터리, Wi-Fi, Bluetooth 장치가 없다. 그래서 전원 항목은 전원 어댑터로 보이고, Bluetooth는 "사용할 수 없음"이다.
+- QEMU에는 배터리, Wi-Fi, Bluetooth 장치가 없다. 그래서 전원 항목은 전원 어댑터로 보이고, Bluetooth는 "사용할 수 없음"이다. 배터리 표시는 4장의 가짜 배터리로 본다.
 
 Mac에서 창으로 본다. Mac 터미널의 저장소 루트에서 실행하며, QEMU가 필요하다(`brew install qemu`):
 
@@ -367,7 +392,8 @@ VM은 메모리 8GiB를 잡으므로 쓰지 않을 때는 꺼 둔다.
 | 사운드 문구 arm64 (11-01) | 사운드 페이지 문구를 이 Mac(macOS 27.0.1)의 시스템 설정 > 사운드 한국어 문구(`/System/Library/ExtensionKit/Extensions/Sound.appex`의 `Localizable.loctable`, `plutil -p`로 읽는다)에 맞춰 이미지를 빌드했다(2분 21초). fmt, bunt-settings·bunt-shell clippy(경고 0)와 시험 통과.<br>- 시험 VM: 사운드 페이지에 `slider "알림 음량"`, `checkbox "소리 끔"`, `slider "밸런스"`, 설명 "경고음, 출력 기기와 입력 기기, 음량을 정합니다."가 보였다. 메뉴 막대 사운드 메뉴의 단추도 `button "소리 끔"`이다<br>- e2e 1·8·5·6·4·7번 통과(처음 시도). Mac이 바빠 느렸다: 로그인 화면 16초, 그래픽 셸 21초, e2e 8번 10개(36초), 5번 28개(468초), 6번 19개(507초), 4번 25개(602초), 7번 8개(617초), 전원 꺼짐까지 619초(앞 줄은 251초) |
 | 알림 센터 카드 테두리 arm64 (11-01) | 사람이 Mac 창 VM에서 알린 것(알림 센터 카드의 테두리가 잘림, 머리 줄 "알림 센터"가 흐림)을 시험 VM에서 재현했다. 흰 배경화면(`gsettings`로 흰 PNG)에서 QMP 화면을 찍어 픽셀을 보니 카드의 위·옆 1px 테두리와 그림자가 스크롤 영역 경계(x=922, y=72) 바깥에서 모두 흰색(255)이었다.<br>- 고친 셸을 빌드 VM의 HTTP로 넣어 다시 로그인해 확인했다: 카드 테두리가 위쪽까지 이어지고 그림자가 보인다. 제목은 800 굵기에 진한 윤곽으로 흰 배경에서도 읽히고, 기본 배경화면에서도 또렷하다. 셸 clippy(경고 0)와 시험 95개 통과, 이미지 빌드 2분 52초<br>- e2e는 돌리지 않았다: 처음 돌린 것은 Mac 부하(5.5)로 e2e 5번의 Firefox 단계가 접근성 요청에 3초 안에 답하지 못하는 일을 되풀이하다 전체 제한(1200초)에 걸렸고(8번까지 통과), 제한을 늘려 다시 돌린 것은 사람의 결정으로 멈췄다(UI만 바꾼 것이라 다음 변경과 함께 돌린다) |
 | 패키지 매니저 arm64 (11-03) | 맥 여유 14GB라 펌웨어를 뺀 시험 이미지로 확인했다(4장 "디스크가 빠듯할 때": 빌드 1분 30초~1분 50초, 메모리 3.6GB, 맥 디스크 2.3GB). arm64 QEMU에서 e2e 1·8·5·6·4·7·9번을 한 부팅에서 통과했다(9번 24개, 전원 꺼짐까지 220초). x86-64는 돌리지 않았다. 손으로 VS Code·`gnome-sudoku`·Obsidian·Flathub 앱을 설치, 실행, 제거했다(설계안 11장). 전체 이미지와 x86-64는 확인하지 않았다. 이 e2e는 밀려 있던 196fdd8(알림 센터 카드)도 함께 덮는다 |
-| 확인하지 않은 것 | 사용자가 쓰는 Mac 창 VM에서의 새 배너와 깜빡임 수정(시험 VM에서만 봤다). GTK3 앱(Firefox)의 신호등과 foot·Chromium 계열이 그리는 창 단추. 실제 GPU에서의 창 그림 뜨기와 앱 전환 창이 뜨는 데 걸리는 시간(시험 VM이 바빠 처음 뜰 때 1초 넘게 걸렸다). 타이머(5초, 10초)와 데스크탑·문서·클립보드 저장 위치. 미리 보기를 끌어서 다른 앱에 놓기. 밝게만 봤다(어둡게의 앱 전환 창, 도구 막대, 회색 신호등). Chromium 계열의 접근성 트리. Chromium·Electron 앱에서의 화면 밖 요소와 휠 스크롤(시험은 Firefox와 GTK4 앱으로 했다). Mac 창에 보이는 커서의 모양과 자리(QMP 화면 캡처에는 커서 평면이 나오지 않는다). 실제 USB·Bluetooth 마우스의 이름·연결 방식과 이동 속도·자연스러운 스크롤·보조 클릭(QEMU에는 가상 태블릿뿐이고 절대 좌표 장치에는 가속이 없다). `tools/devvm/buntos-dev.yaml`의 컨테이너 런타임 끄기 설정(검증한 VM은 그 설정을 넣기 전에 만들었다). Bluetooth 연결·페어링, 배터리 표시, 화면 밝기, 실제 Wi-Fi 칩(QEMU에 장치가 없다). 실제 앱이 보낸 알림(시험 알림만 썼다)과 nm-applet 밖의 실제 앱 항목(10-31에 nm-applet으로 봤다). 분수 배율의 실제 HiDPI 화면(QEMU 화면은 약 100ppi라 기본 배율은 늘 100%다). Mac 창(view-mac.sh)에서 사람이 조작한 배율 변경. 클립보드로 낸 스크린샷(⌃⇧⌘3·⌃⇧⌘4)을 붙여넣는 앱(이미지를 받는 앱이 이미지에 없다). Mac 창의 `--full-grab`(QEMU에 손쉬운 사용 권한이 필요해 사람이 확인한다)과 실제 Mac·PC 키보드의 ⌘. Firefox에서의 ⌘ 단축키와 글 입력 판단(시험은 텍스트 편집기, 시스템 설정, foot으로 했다). 여러 화면과 회전한 화면의 스크린샷. 합친 이미지(10-30)에서 보지 않은 것: GPU 경로(virgl `VMCTL_GPU=virgl`, 하드웨어 GPU), 흐림 위에 겹친 불투명한 창과 창을 옮길 때의 컴포지터 CPU, 화면 둘, Bluetooth 페어링(QEMU에 장치가 없다. Bumble 가상 컨트롤러로 볼 수 있다), 잠자기 전후의 잠금, 5번 틀린 뒤 기다리기, 사운드의 균형과 입력 레벨, 앱별 알림 시트의 설정. Mac 스피커로 들은 시동음과 경고음(11-01에는 시험 VM에서 녹음해 파형으로만 봤다), 실기기 스피커에서의 크기 |
+| 충전 표시 arm64 (11-04) | 사람이 TB375FC에서 알린 것(충전 중인데 설정과 메뉴가 "배터리 사용 중"과 남은 시간을 보인다)을 따라갔다. 게이지는 `status=Charging`인데 `current_now`가 음수이고(`mm8013`이 부호를 뒤집는다), UPower는 전류가 음수면 `status`와 상관없이 `discharging`으로 덮어쓴다. 앱은 받은 대로 적었다.<br>- 4장의 가짜 배터리로 같은 조건을 재현하고, 실제 UPower 1.91.5를 거쳐 충전 중(1시간 20분, 10시간 이상, 시간 모름), 완충, 연결됐지만 충전하지 않음, 배터리 사용 중을 메뉴와 배터리 페이지에서 봤다. 밝게·어둡게, ko·en, 100%·125%, 배터리 없음도 봤다.<br>- 문구는 이 Mac(macOS 27)의 `Battery.loctable`(제어 센터)과 `BatteryUI.loctable`(시스템 설정)에서 읽었다.<br>- 드라이버의 부호를 고치기 전까지 TB375FC는 충전 중에도 "배터리 충전 중이 아님"으로 보인다. 고침은 TB375FC 포크의 패치로 낸다.<br>- UI 변경이라 e2e는 돌리지 않았다. 다음 동작 변경의 e2e가 함께 본다. 터치 모드는 보지 않았다 |
+| 확인하지 않은 것 | 사용자가 쓰는 Mac 창 VM에서의 새 배너와 깜빡임 수정(시험 VM에서만 봤다). GTK3 앱(Firefox)의 신호등과 foot·Chromium 계열이 그리는 창 단추. 실제 GPU에서의 창 그림 뜨기와 앱 전환 창이 뜨는 데 걸리는 시간(시험 VM이 바빠 처음 뜰 때 1초 넘게 걸렸다). 타이머(5초, 10초)와 데스크탑·문서·클립보드 저장 위치. 미리 보기를 끌어서 다른 앱에 놓기. 밝게만 봤다(어둡게의 앱 전환 창, 도구 막대, 회색 신호등). Chromium 계열의 접근성 트리. Chromium·Electron 앱에서의 화면 밖 요소와 휠 스크롤(시험은 Firefox와 GTK4 앱으로 했다). Mac 창에 보이는 커서의 모양과 자리(QMP 화면 캡처에는 커서 평면이 나오지 않는다). 실제 USB·Bluetooth 마우스의 이름·연결 방식과 이동 속도·자연스러운 스크롤·보조 클릭(QEMU에는 가상 태블릿뿐이고 절대 좌표 장치에는 가속이 없다). `tools/devvm/buntos-dev.yaml`의 컨테이너 런타임 끄기 설정(검증한 VM은 그 설정을 넣기 전에 만들었다). Bluetooth 연결·페어링, 실제 배터리의 표시, 화면 밝기, 실제 Wi-Fi 칩(QEMU에 장치가 없다). 실제 앱이 보낸 알림(시험 알림만 썼다)과 nm-applet 밖의 실제 앱 항목(10-31에 nm-applet으로 봤다). 분수 배율의 실제 HiDPI 화면(QEMU 화면은 약 100ppi라 기본 배율은 늘 100%다). Mac 창(view-mac.sh)에서 사람이 조작한 배율 변경. 클립보드로 낸 스크린샷(⌃⇧⌘3·⌃⇧⌘4)을 붙여넣는 앱(이미지를 받는 앱이 이미지에 없다). Mac 창의 `--full-grab`(QEMU에 손쉬운 사용 권한이 필요해 사람이 확인한다)과 실제 Mac·PC 키보드의 ⌘. Firefox에서의 ⌘ 단축키와 글 입력 판단(시험은 텍스트 편집기, 시스템 설정, foot으로 했다). 여러 화면과 회전한 화면의 스크린샷. 합친 이미지(10-30)에서 보지 않은 것: GPU 경로(virgl `VMCTL_GPU=virgl`, 하드웨어 GPU), 흐림 위에 겹친 불투명한 창과 창을 옮길 때의 컴포지터 CPU, 화면 둘, Bluetooth 페어링(QEMU에 장치가 없다. Bumble 가상 컨트롤러로 볼 수 있다), 잠자기 전후의 잠금, 5번 틀린 뒤 기다리기, 사운드의 균형과 입력 레벨, 앱별 알림 시트의 설정. Mac 스피커로 들은 시동음과 경고음(11-01에는 시험 VM에서 녹음해 파형으로만 봤다), 실기기 스피커에서의 크기 |
 
 ## 7. 알려진 문제
 
