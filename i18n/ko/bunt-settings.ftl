@@ -264,6 +264,7 @@ default-apps-music = 음악
 default-apps-video = 동영상
 default-apps-pdf = PDF 문서
 default-apps-folders = 폴더
+default-apps-installers = 설치 파일
 default-apps-types-open = 파일 형식별 기본 앱…
 default-apps-types-title = 파일 형식별 기본 앱
 default-apps-types-description = 확장자마다 열 앱을 고릅니다. 같은 형식의 확장자는 함께 바뀝니다.

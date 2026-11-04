@@ -1,0 +1,15 @@
+// SPDX-FileCopyrightText: 2026 buntOS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 패키지 설치는 할 때마다 관리자 인증을 받는다. PackageKit의 기본값(auth_admin_keep)은 인증한 뒤 몇 분 동안 묻지 않으므로,
+// 사람이 인증한 사이에 같은 세션의 다른 프로그램(허용받은 AI 포함)이 그 인증으로 패키지를 넣을 수 있다. 접근 정책의
+// org.buntos.agent.access.change와 같은 까닭이다 (ARCHITECTURE 6.5절). 파일 이름이 org.freedesktop.packagekit.rules보다 앞선다
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.packagekit.package-install" ||
+        action.id == "org.freedesktop.packagekit.package-reinstall" ||
+        action.id == "org.freedesktop.packagekit.package-eula-accept" ||
+        action.id == "org.freedesktop.packagekit.system-sources-configure") {
+        return polkit.Result.AUTH_ADMIN;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

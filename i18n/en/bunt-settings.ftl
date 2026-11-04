@@ -270,6 +270,7 @@ default-apps-music = Music
 default-apps-video = Video
 default-apps-pdf = PDF Documents
 default-apps-folders = Folders
+default-apps-installers = Installer files
 default-apps-types-open = Default Apps by File Type…
 default-apps-types-title = Default Apps by File Type
 default-apps-types-description = Choose the app that opens each extension. Extensions of the same type change together.

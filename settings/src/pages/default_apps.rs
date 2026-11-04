@@ -49,7 +49,7 @@ pub const DEFAULT_WEB_BROWSER: Category = Category {
     ..WEB_BROWSER
 };
 
-const CATEGORIES: [&Category; 8] = [
+const CATEGORIES: [&Category; 9] = [
     &WEB_BROWSER,
     &Category {
         title: "default-apps-mail",
@@ -117,6 +117,18 @@ const CATEGORIES: [&Category; 8] = [
         icon: "folder-symbolic",
         tint: Tint::Blue,
         types: &["inode/directory"],
+    },
+    &Category {
+        title: "default-apps-installers",
+        icon: "package-x-generic-symbolic",
+        tint: Tint::Graphite,
+        types: &[
+            "application/vnd.debian.binary-package",
+            "application/vnd.appimage",
+            "application/vnd.flatpak",
+            "application/vnd.flatpak.ref",
+            "application/vnd.flatpak.repo",
+        ],
     },
 ];
 

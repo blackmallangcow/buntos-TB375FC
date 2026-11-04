@@ -41,5 +41,9 @@ app = "org.gnome.Papers.desktop"
 [[dock.items]]
 app = "org.gnome.Resources.desktop"
 
+# 앱 스토어(GNOME Software). macOS의 Dock처럼 시스템 설정 앞에 둔다
+[[dock.items]]
+app = "org.gnome.Software.desktop"
+
 [[dock.items]]
 app = "org.buntos.Settings.desktop"

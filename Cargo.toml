@@ -3,7 +3,7 @@
 
 [workspace]
 resolver = "3"
-members = ["access", "agent", "comp", "greeter", "i18n", "keyboard", "settings", "shell", "sound"]
+members = ["access", "agent", "comp", "greeter", "i18n", "keyboard", "packages", "settings", "shell", "sound"]
 
 [workspace.package]
 version = "0.1.0"

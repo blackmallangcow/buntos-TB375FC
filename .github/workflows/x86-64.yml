@@ -1,4 +1,4 @@
-# x86-64 이미지(bsp/x86_64-generic)를 자체 컴포넌트와 함께 빌드하고 e2e 1·8·5·6·4·7번(tests/e2e/boot-to-shell.sh)을
+# x86-64 이미지(bsp/x86_64-generic)를 자체 컴포넌트와 함께 빌드하고 e2e 1·8·5·6·4·7·9번(tests/e2e/boot-to-shell.sh)을
 # KVM에서 돌린다. 설계안 9.4절의 x86-64 e2e이고, Phase 0·1 종료 조건(같은 레시피로 셸 도달, 한글 입력 e2e)의
 # x86-64 쪽이다. 빌드 VM(docs/dev/environment.md 2·4장)과 같게 한다:
 # - mkosi는 tools/devvm/setup.sh에 고정한 판, 이미지 꾸러미는 image/mkosi.conf의 스냅숏
@@ -196,7 +196,7 @@ jobs:
           path: ${{ env.XDG_CACHE_HOME }}/mkosi/debian~*~x86-64
           key: ${{ steps.mkosi-cache.outputs.cache-primary-key }}
 
-      - name: e2e 1·8·5·6·4·7번
+      - name: e2e 1·8·5·6·4·7·9번
         timeout-minutes: 40
         run: |
           mkdir -p "$E2E_LOG_DIR"

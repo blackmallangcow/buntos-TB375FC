@@ -9,10 +9,10 @@
 # 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 8번(데스크탑 항목, tests/e2e/desktop.sh),
 # e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키,
 # tests/e2e/shortcuts.sh), e2e 4번(한글 입력, tests/e2e/hangul.sh), e2e 7번(화면 잠금과 VM의 잠자기,
-# tests/e2e/session-lock.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는 이미지(그래픽 세션이 없는 x86-64)에서는
-# 8·5·6·4·7번을 건너뛴다.
+# tests/e2e/session-lock.sh), e2e 9번(패키지 매니저, tests/e2e/packages.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는
+# 이미지(그래픽 세션이 없는 x86-64)에서는 8·5·6·4·7·9번을 건너뛴다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
-# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 8·5·6·4·7번에 10분 넘게 걸린다)
+# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 8·5·6·4·7·9번에 10분 넘게 걸린다)
 #            BUNTOS_IMAGE_DIR 띄울 이미지의 디렉터리 (tools/image/build.sh·vmctl.sh와 같다. 기본
 #            $BUNTOS_BUILD_DIR/<보드>, BUNTOS_BUILD_DIR의 기본은 ~/buntos-build)
 #            E2E_LOG_DIR 기록을 남길 디렉터리. 주면 끝날 때(실패해도) 직렬 콘솔 기록(console.log)과 게스트의 저널
@@ -207,7 +207,7 @@ else
 	fail "에이전트가 읽은 셸에 메뉴 막대 항목과 Dock이 없다 (요소 ${agent_refs}개)"
 fi
 
-# e2e 8·6·4·7번은 키와 포인터를 QMP로 넣고, 결과는 게스트 쪽 도우미가 읽는다. begin <번호> <도우미>로
+# e2e 8·6·4·7·9번은 키와 포인터를 QMP로 넣고, 결과는 게스트 쪽 도우미가 읽는다. begin <번호> <도우미>로
 # 시작한다. guest는 도우미를 돌려 마지막 줄을 answer에 받는다. 답 줄은 입력 줄의 에코와 구분되도록 번호와
 # 차례 표시를 붙인다. 차례가 이어지도록 명령 치환($(...), 하위 셸) 없이 부른다. 답을 받은 뒤에야 다음 키를 넣는다
 scenario=
@@ -524,6 +524,84 @@ if [[ "$agent_refs" != NONE ]]; then
 	check "풀린 뒤에는 에이전트가 다시 읽는다" "$answer" 0
 	((failed == 0)) || fail "e2e 7번(화면 잠금): ${failed}개 실패"
 	echo "e2e 7번(화면 잠금): ${SECONDS}초, ${passed}개 통과"
+fi
+
+# e2e 9번: 패키지 매니저(ARCHITECTURE 5.5). 받은 .deb와 AppImage를 기본 앱으로 열어 설치하고, 실행하고, 목록 창에서 지운다.
+# 창은 에이전트로 읽고 누른다. .deb의 관리자 인증 창은 사람만 답하므로 암호를 QMP로 친다. 처음 열 때 apt 목록을 받으므로
+# 오래 걸릴 수 있고, 인터넷이 없어도 의존성 없는 패키지는 설치된다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/packages.sh /tmp/e2e-packages.sh
+	begin 9 /tmp/e2e-packages.sh
+	guest prepare
+	check "시험 설치 파일 둘을 만든다" "$answer" 2
+	guest base-hidden
+	check "이미지에 든 패키지를 제거 목록의 기준으로 적어 둔다" "$answer" 1
+	guest default deb
+	check ".deb의 기본 앱이 패키지 매니저다" "$answer" org.buntos.PackageManager.desktop
+	guest default appimage
+	check "AppImage의 기본 앱이 패키지 매니저다" "$answer" org.buntos.PackageManager.desktop
+
+	guest open deb
+	guest ready install-enabled
+	check ".deb를 열면 읽고 의존성을 본 뒤 설치 단추가 켜진다" "$answer" yes
+	guest ready deb-title
+	check "창에 패키지 안 .desktop의 이름이 보인다" "$answer" yes
+	guest click 설치
+	guest asked package-install-untrusted
+	check "설치를 누르면 관리자 인증을 묻는다" "$answer" yes
+	# 인증 창이 뜨고 키보드를 받을 틈을 준다
+	keys sleep:2 "type:$password" sleep:0.5 keys:ret
+	guest ready success
+	check "암호를 치면 설치가 끝난다" "$answer" yes
+	guest deb-installed
+	check "패키지가 설치되었다" "$answer" yes
+	guest click 열기
+	guest ran deb
+	check "[열기]가 설치한 앱을 실행한다" "$answer" yes
+
+	guest list-open
+	guest ready list-deb
+	check "목록 창에 설치한 앱이 보인다" "$answer" yes
+	guest list
+	check "목록에는 직접 설치한 것만 보인다" "$answer" "E2E Hello"
+	guest click 제거…
+	guest ready sheet
+	check "제거를 누르면 확인 시트가 뜬다" "$answer" yes
+	guest sheet 제거
+	guest asked package-remove
+	check "제거도 관리자 인증을 묻는다" "$answer" yes
+	keys sleep:2 "type:$password" sleep:0.5 keys:ret
+	guest ready empty
+	check "암호를 치면 목록에서 사라진다" "$answer" yes
+	guest deb-installed
+	check "패키지가 지워졌다" "$answer" no
+
+	# AppImage: 관리자 암호 없이 이 사용자의 폴더에 푼다
+	guest open appimage
+	guest ready install-enabled
+	check "AppImage를 열면 설치 단추가 켜진다" "$answer" yes
+	guest ready appimage-title
+	check "창에 AppImage 안 .desktop의 이름이 보인다" "$answer" yes
+	guest click 설치
+	guest ready success
+	check "AppImage는 암호 없이 설치된다" "$answer" yes
+	guest appimage-installed
+	check "응용 프로그램 폴더에 풀고 메뉴 항목을 만든다" "$answer" yes
+	guest click 열기
+	guest ran appimage
+	check "[열기]가 푼 앱을 실행한다" "$answer" yes
+	guest ready list-appimage
+	check "떠 있는 목록 창이 새로 설치한 앱을 보인다" "$answer" yes
+	guest click 제거…
+	guest ready sheet
+	guest sheet 제거
+	guest ready empty
+	check "AppImage를 목록에서 지운다" "$answer" yes
+	guest appimage-installed
+	check "폴더와 메뉴 항목이 지워졌다" "$answer" no
+	keys keys:esc sleep:1
+	((failed == 0)) || fail "e2e 9번(패키지 매니저): ${failed}개 실패"
+	echo "e2e 9번(패키지 매니저): ${SECONDS}초, ${passed}개 통과"
 fi
 
 echo 'systemctl poweroff' >&3
