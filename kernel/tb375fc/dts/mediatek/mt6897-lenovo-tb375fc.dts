@@ -104,10 +104,10 @@
 	 * The enables of the panel's bias chip, an SM5109 at 0x3e on i2c13 (stock
 	 * bias_p-gpios and bias_n-gpios). The bootloader turns them on and writes
 	 * 0x12 to its two voltage registers, and the stock kernel does too. Stock
-	 * also waits 80 ms after the panel goes off. TODO(2c display): check that
-	 * the chip keeps the voltages while off; else it needs a driver. 5.8 V is
-	 * the value by the formula of the TPS65132, which has the same two
-	 * registers; the SM5109's is not known.
+	 * also waits 80 ms after the panel goes off. The chip does not keep the
+	 * voltages while off: it reads 0x0e after the panel comes back. TODO: write
+	 * them again at every power on. 5.8 V is the value by the formula of the
+	 * TPS65132, which has the same two registers; the SM5109's is not known.
 	 */
 	lcd_avdd: regulator-lcd-avdd {
 		compatible = "regulator-fixed";
@@ -130,6 +130,38 @@
 		enable-active-high;
 		regulator-boot-on;
 		off-on-delay-us = <80000>;
+		status = "disabled";
+	};
+
+	/*
+	 * The display PWM of the SoC sets the brightness, as in the stock tree
+	 * (mtk-leds, led-mode 5) and the bootloader's log. Its one output dims the
+	 * two SGM37604A LED drivers together, at 0x36 on i2c13 and i2c3. The panel
+	 * does nothing with DCS 0x51. The bootloader sets up both LED drivers:
+	 * current = I2C code x PWM, with their ramp on, and code 0xdb6, which makes
+	 * 21.4 mA per string at full duty. They keep it, so they need no driver.
+	 *
+	 * The period is the one of the stock tree and of the bootloader, which runs
+	 * the PWM at 104 MHz. The LED drivers take 20 to 100 kHz. The levels are
+	 * percent of lightness by CIE 1931, as in the default table of pwm-backlight.
+	 * Level 1 is about the stock minimum of 4, and the default about the
+	 * bootloader's 1945.
+	 */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&disp_pwm0 0 39380>;
+		brightness-levels = <0 5 9 14 18 23 27 32 36 41
+				     46 52 58 64 71 78 86 94 103 112
+				     122 133 144 156 168 181 194 209 223 239
+				     255 272 290 309 328 348 369 391 413 436
+				     461 486 512 539 567 595 625 656 688 720
+				     754 789 825 862 900 939 979 1021 1063 1107
+				     1152 1198 1245 1293 1343 1394 1447 1500 1555 1611
+				     1669 1728 1788 1849 1913 1977 2043 2110 2179 2249
+				     2321 2394 2469 2546 2623 2703 2784 2867 2951 3037
+				     3125 3214 3305 3397 3492 3588 3686 3785 3887 3990
+				     4095>;
+		default-brightness-level = <75>;
 		status = "disabled";
 	};
 
@@ -370,7 +402,6 @@
  * property off framebuffer0 at the same time: fw_devlink would hold simpledrm
  * back until the panel binds. Until then the display runs on simple-framebuffer.
  * The two links make one panel: dsi1 only follows dsi0.
- * The two LED drivers (SGM37604A at 0x36 on i2c13 and i2c3) have no driver yet.
  */
 &dsi0 {
 	panel0: panel@0 {
@@ -383,6 +414,7 @@
 		vddio-supply = <&vddio_1v8>;
 		avdd-supply = <&lcd_avdd>;
 		avee-supply = <&lcd_avee>;
+		backlight = <&backlight>;
 		status = "disabled";
 
 		ports {
@@ -582,11 +614,22 @@
 	debounce-delay-ms = <32>;
 };
 
+&disp_pwm0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&disp_pwm0_pins>;
+};
+
 &pio {
 	hall_pins: hall-pins {
 		pins-hall {
 			pinmux = <PINMUX_GPIO1__FUNC_GPIO1>;
 			input-enable;
+		};
+	};
+
+	disp_pwm0_pins: disp-pwm0-pins {
+		pins-pwm {
+			pinmux = <PINMUX_GPIO131__FUNC_DISP_PWM>;
 		};
 	};
 

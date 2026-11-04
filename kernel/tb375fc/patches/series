@@ -194,6 +194,9 @@
 0139-drm-panel-novatek-nt36532-unbind-before-the-host-of-the-second-link.patch
 # 0153 mediatek-drm: MT6897의 전원 도메인을 CRTC가 꺼져도 잡아 둔다. HW voter가 OVL 도메인의 투표만 지우고 끝나지 않아, 다시 켠 뒤 멈췄다(기기, 2026-11-04). 원인을 찾으면 뺀다
 0153-drm-mediatek-keep-the-display-power-domains-on.patch
+# 0154, 0155 밝기: 패널의 DCS 0x51은 듣지 않는다. SoC의 disp_pwm0이 SGM37604A 둘을 움직인다(기기, 2026-11-04). 0155는 0084의 DCS 밝기를 뺀다. 업스트림에 낼 때 0084와 합친다
+0154-dt-bindings-pwm-mediatek-pwm-disp-add-MT6897.patch
+0155-drm-panel-novatek-nt36532-take-an-external-backlight-on-the-TB375FC-panels.patch
 # 2a: LK가 앞에 넣는 framebuffer 노드에 no-map이 없어 트리의 no-map 노드가 실패한다(기기의 살아 있는 트리로 확인)
 0140-of-reserved_mem-mark-no-map-regions-before-other-reservations.patch
 # 2b: 가젯이 묶이고 D+를 올려도 컨트롤러가 인터럽트를 내지 않는다. 벤더처럼 VBUS 입력을 덮어쓴다(mediatek,force-vbus)

@@ -1,0 +1,93 @@
+From: buntOS contributors
+Subject: [PATCH] drm/panel: novatek-nt36532: take an external backlight on the TB375FC panels
+
+The vendor's panel drivers have a callback that sets the brightness with
+DCS 0x51, and this driver copied that. It does nothing: writing 0x51 does
+not change anything on the screen of the tablet. The stock device tree
+picks the display PWM of the SoC instead, and the bootloader's log says the
+same. Changing the duty of that PWM by hand dims the whole screen.
+
+So do as the CSOT panel does and take the backlight from the device tree.
+---
+ drivers/gpu/drm/panel/panel-novatek-nt36532.c | 36 +++----------------------------
+ 1 file changed, 3 insertions(+), 33 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -9,7 +9,6 @@
+  * vendor's panel drivers, Copyright (c) 2021 MediaTek Inc.
+  */
+ 
+-#include <linux/backlight.h>
+ #include <linux/delay.h>
+ #include <linux/device-id/of.h>
+ #include <linux/gpio/consumer.h>
+@@ -70,8 +69,6 @@
+ 	/* Send the commands to the first DSI link */
+ 	bool cmds_on_first_link;
+ 	bool has_bias_supplies;
+-	/* The panel dims over DCS instead of with an external backlight */
+-	bool has_dcs_backlight;
+ 	/* The panel to use instead when the panel ID strap reads high */
+ 	const struct panel_info *panel_id_high;
+ };
+@@ -707,22 +704,6 @@
+ 	return drm_dsc_compute_rc_parameters(dsc);
+ }
+ 
+-static int nt36532_bl_update_status(struct backlight_device *bl)
+-{
+-	struct nt36532 *ctx = bl_get_data(bl);
+-
+-	/* drm_panel_enable() sets the brightness once the link is up */
+-	if (!ctx->panel.enabled)
+-		return 0;
+-
+-	return mipi_dsi_dcs_set_display_brightness_large(to_primary_dsi(ctx),
+-							 backlight_get_brightness(bl));
+-}
+-
+-static const struct backlight_ops nt36532_bl_ops = {
+-	.update_status = nt36532_bl_update_status,
+-};
+-
+ /*
+  * The touch side of the controller reads this strap as well, to pick its
+  * firmware, so do not hold on to it.
+@@ -844,24 +825,9 @@
+ 
+ 	ctx->panel.prepare_prev_first = true;
+ 
+-	if (panel_info->has_dcs_backlight) {
+-		const struct backlight_properties props = {
+-			.type = BACKLIGHT_RAW,
+-			.brightness = 0x7ff,
+-			.max_brightness = 0xfff,
+-		};
+-
+-		ctx->panel.backlight =
+-			devm_backlight_device_register(dev, dev_name(dev), dev, ctx,
+-						       &nt36532_bl_ops, &props);
+-		if (IS_ERR(ctx->panel.backlight))
+-			return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
+-					     "Failed to register backlight\n");
+-	} else {
+-		ret = drm_panel_of_backlight(&ctx->panel);
+-		if (ret)
+-			return dev_err_probe(dev, ret, "Failed to get backlight\n");
+-	}
++	ret = drm_panel_of_backlight(&ctx->panel);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to get backlight\n");
+ 
+ 	ret = devm_drm_panel_add(dev, &ctx->panel);
+ 	if (ret < 0)
+@@ -915,7 +881,6 @@
+ 		.is_dual_dsi = true,						\
+ 		.cmds_on_first_link = true,					\
+ 		.has_bias_supplies = true,					\
+-		.has_dcs_backlight = true,					\
+ 		.panel_id_high = _panel_id_high,				\
+ 	}
+ 
