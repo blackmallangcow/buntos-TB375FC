@@ -1,0 +1,145 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt7921: restart the SoC firmware when no frames come back
+
+The firmware on the MT6897 can stop sending while it goes on receiving and
+answering commands. Seen twice, within minutes of the charge pump of the
+tablet starting, why is not known. Nothing is logged and no frame counts as
+failed or retried. Associating again and blocking the radio don't help, a
+chip reset through debugfs does. Where the frames were at that time has not
+been recorded.
+
+Check on every round of the MAC work whether frames wait, in the rings or
+with the firmware, while no TX free event has come for 10 seconds, and restart
+if so. A scan doesn't count, it may hold frames for longer. One restart a
+minute at most, and mt7921_soc_may_restart() still has the last word.
+
+Seen on the device at 5 GHz, with the maximum quota of the data groups of the
+DMA scheduler down to one page, which holds back the data frames and leaves
+commands and RX alone: detected after 10.1 seconds and connected again 18
+seconds after the start, with NetworkManager in "connected" all along. It
+also brings back a connection that mac80211 has given up on already, unless
+NetworkManager has stopped trying for the moment. No false restart: a
+disconnection left alone for 30 seconds, the radio off and on, three scans
+during traffic, 49906 frames of 1200 bytes in 30 seconds, a 38 MB download
+and 15 minutes of light use. A stall of the real kind has not been tried with this.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt792x.h b/drivers/net/wireless/mediatek/mt76/mt792x.h
+--- a/drivers/net/wireless/mediatek/mt76/mt792x.h
++++ b/drivers/net/wireless/mediatek/mt76/mt792x.h
+@@ -274,6 +274,8 @@
+ 	/* For a chip whose firmware the bootloader has already loaded */
+ 	void (*dma_prefetch)(struct mt792x_dev *dev);
+ 	int (*load_firmware)(struct mt792x_dev *dev);
++	/* For a firmware that can stop sending without saying so */
++	void (*tx_watch)(struct mt792x_dev *dev);
+ 	int (*set_eeprom)(struct mt792x_dev *dev);
+ 	/* For a firmware that doesn't take unified commands for these */
+ 	int (*add_dev)(struct mt792x_dev *dev, struct ieee80211_vif *vif,
+@@ -323,6 +325,9 @@
+ 
+ 	u8 fw_debug;
+ 	u8 fw_features;
++
++	/* When the firmware last gave frames back */
++	unsigned long last_tx_free;
+ 
+ 	struct mt76_connac_pm pm;
+ 	struct mt76_connac_coredump coredump;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt792x_mac.c b/drivers/net/wireless/mediatek/mt76/mt792x_mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt792x_mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt792x_mac.c
+@@ -27,6 +27,8 @@
+ 	mt792x_mutex_release(phy->dev);
+ 
+ 	mt76_tx_status_check(mphy->dev, false);
++	if (phy->dev->hif_ops->tx_watch)
++		phy->dev->hif_ops->tx_watch(phy->dev);
+ 	ieee80211_queue_delayed_work(phy->mt76->hw, &mphy->mac_work,
+ 				     MT792x_WATCHDOG_TIME);
+ }
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mac.c b/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
+@@ -496,6 +496,8 @@
+ 	bool wake = false;
+ 	u8 i, count;
+ 
++	WRITE_ONCE(dev->last_tx_free, jiffies);
++
+ 	/* clean DMA queues and unmap buffers first */
+ 	mt76_queue_tx_cleanup(dev, dev->mphy.q_tx[MT_TXQ_PSD], false);
+ 	mt76_queue_tx_cleanup(dev, dev->mphy.q_tx[MT_TXQ_BE], false);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+@@ -41,6 +41,9 @@
+ 	/* The firmware decides on block ack and these say what it decided */
+ 	struct sk_buff_head ba_events;
+ 	struct work_struct ba_work;
++	/* When no frames were waiting, and the last restart for a stall */
++	unsigned long tx_watch_start;
++	unsigned long tx_stall_restart;
+ 	/* Restarts of the WF part in a row, and when the last one was */
+ 	unsigned long last_restart;
+ 	unsigned int restarts;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+@@ -140,6 +140,10 @@
+ 
+ #define MT_SOC_RX_RETRY_DELAY		(HZ / 10)
+ 
++/* Frames waiting and none back for this long, and how far apart to restart */
++#define MT_SOC_TX_STALL_TIME		(10 * HZ)
++#define MT_SOC_TX_STALL_GAP		(60 * HZ)
++
+ static const struct mt76_connac_reg_map mt7921_soc_map[] = {
+ 	{ 0x830c0000, 0x400000, 0x1000 },	/* WF_MCU_BUS_CR_REMAP */
+ 	{ 0x54000000, 0x402000, 0x1000 },	/* WFDMA PCIE0 MCU DMA0 */
+@@ -1251,7 +1255,46 @@
+ 	.set_channel = mt7921_set_channel,
+ };
+ 
++/*
++ * The firmware can stop sending and go on receiving and answering commands,
++ * with nothing in the log, and only a restart brings it back. Seen twice within
++ * minutes of the charge pump of the TB375FC starting, cause unknown. It comes to
++ * light only if frames wait and none come back. A scan may hold them for longer.
++ */
++static void mt7921_soc_tx_watch(struct mt792x_dev *dev)
++{
++	struct mt76_queue *be = dev->mphy.q_tx[MT_TXQ_BE];
++	struct mt76_queue *psd = dev->mphy.q_tx[MT_TXQ_PSD];
++	struct mt7921_soc *soc = mt7921_soc_of(dev);
++	u16 tokens = READ_ONCE(dev->mt76.token_count);
++	unsigned long now = jiffies;
++	unsigned long since;
++
++	if (test_bit(MT76_HW_SCANNING, &dev->mphy.state) ||
++	    (!tokens && !be->queued && !psd->queued)) {
++		soc->tx_watch_start = now;
++		return;
++	}
++
++	since = READ_ONCE(dev->last_tx_free);
++	if (time_before(since, soc->tx_watch_start))
++		since = soc->tx_watch_start;
++	if (time_before(now, since + MT_SOC_TX_STALL_TIME))
++		return;
++
++	if (soc->tx_stall_restart &&
++	    time_before(now, soc->tx_stall_restart + MT_SOC_TX_STALL_GAP))
++		return;
++	soc->tx_stall_restart = now;
++
++	dev_warn(dev->mt76.dev,
++		 "TX stalled: none back in %u ms, %u tokens, %d and %d queued\n",
++		 jiffies_to_msecs(now - since), tokens, be->queued, psd->queued);
++	mt792x_reset(&dev->mt76);
++}
++
+ static const struct mt792x_hif_ops mt7921_soc_hif_ops = {
++	.tx_watch = mt7921_soc_tx_watch,
+ 	.reset = mt7921_soc_mac_reset,
+ 	.mcu_init = mt7921_soc_mcu_init,
+ 	.drv_own = mt7921_soc_drv_own,

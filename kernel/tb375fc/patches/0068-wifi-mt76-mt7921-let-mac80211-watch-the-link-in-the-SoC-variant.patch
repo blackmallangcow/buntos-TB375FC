@@ -1,0 +1,42 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt7921: let mac80211 watch the link in the SoC variant
+
+mt792x_init_wiphy() sets IEEE80211_HW_CONNECTION_MONITOR, which says the
+firmware watches the connection. mac80211 then stops asking the access point
+after 30 seconds without a frame from it. The chips that take the unified
+commands have the firmware watch the beacons. The SoC variant has its own
+bss_info_changed without that command, so nothing watches.
+
+On the MT6897 the firmware can stop sending and go on receiving. Through
+such a stall the kernel, wpa_supplicant and NetworkManager all stayed
+connected, for 12 minutes until someone touched the connection, with nothing
+in any log. The firmware would not have noticed either, the beacons kept
+coming.
+
+Clear the flag. mac80211 sends a null frame after 30 seconds without traffic
+and disconnects if no ack comes. IEEE80211_VIF_BEACON_FILTER stays, so
+mac80211 still doesn't count beacons.
+
+Seen on the device at 5 GHz, with the next patch out of the way and the data
+frames held back at the DMA scheduler: mac80211 disconnects 33 seconds after
+that starts, with reason 4, and NetworkManager leaves "connected" 16 seconds
+later, at the end of its link timeout. No false disconnection in 15 minutes
+of light use. An access point that goes away has not been tried.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/init.c b/drivers/net/wireless/mediatek/mt76/mt7921/init.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/init.c
+@@ -234,6 +234,13 @@
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * This firmware is not asked to watch the beacons, and stays connected
++	 * when it stops sending. mac80211 has to find out by asking the AP.
++	 */
++	if (dev->hif_ops->load_firmware)
++		__clear_bit(IEEE80211_HW_CONNECTION_MONITOR, hw->flags);
++
+ 	hw->wiphy->reg_notifier = mt7921_regd_notifier;
+ 	dev->mphy.sband_2g.sband.ht_cap.cap |=
+ 			IEEE80211_HT_CAP_LDPC_CODING |
