@@ -200,7 +200,7 @@ impl BuntState {
     }
 
     /// 표면 왼쪽 위의 전역 위치와 그 표면이 있는 출력 영역. 창과 레이어 표면만 안다
-    fn surface_origin(
+    pub(crate) fn surface_origin(
         &self,
         surface: &WlSurface,
     ) -> Option<(Point<i32, Logical>, Rectangle<i32, Logical>)> {
@@ -331,10 +331,25 @@ impl Dispatch<ZwpTextInputV3, TextInputUserData> for BuntState {
             .is_some_and(|focus| focus.id().same_client_as(&resource.id()))
         {
             state.preedit.reset();
-            // 이미 켜진 칸을 다시 눌러도 GTK가 다시 켠다. 가린 화면 키보드를 다시 띄우도록 셸에 알린다 (osk.rs)
+            // 사람이 글 칸을 눌렀는지 누르기와 함께 본다 (osk.rs)
             if matches!(request, zwp_text_input_v3::Request::Enable) {
-                state.osk.enable_requested();
+                state.enable_requested(resource);
             }
+        }
+        match &request {
+            zwp_text_input_v3::Request::SetContentType { purpose, .. } => {
+                state.osk.content_purpose(resource, *purpose);
+            }
+            zwp_text_input_v3::Request::SetCursorRectangle { y, height, .. }
+                if state
+                    .seat
+                    .text_input()
+                    .focus()
+                    .is_some_and(|focus| focus.id().same_client_as(&resource.id())) =>
+            {
+                state.cursor_rectangle_requested(*y, *height);
+            }
+            _ => {}
         }
         <TextInputManagerState as Dispatch<ZwpTextInputV3, TextInputUserData, Self>>::request(
             state, client, resource, request, data, dhandle, data_init,

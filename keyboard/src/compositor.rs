@@ -7,7 +7,7 @@
 //!
 //! - 키: 누른 키를 `press`로 보낸다. 컴포지터가 실제 키보드처럼 넣어 입력기(fcitx5)의 키보드 잡기를 거치므로 한글이
 //!   조합된다. 요청은 보낸 차례로 처리되므로 답을 기다리지 않는다.
-//! - 글 입력 상태: 셸만 받는다([`CompositorKeyboard::watch_text_input`]). 로그인 화면은 제 창의 글 칸 포커스를
+//! - 글 입력 상태와 눌린 칸: 셸만 받는다([`CompositorKeyboard::watch_text_input`]). 로그인 화면은 제 창의 글 칸을
 //!   본다(embed.rs).
 //! - GTK와 같은 Wayland 연결을 쓴다. 소켓은 GTK가 읽고, 이 객체의 이벤트는 따로 둔 큐에 쌓인다.
 //!   [`CompositorKeyboard::take_text_input`]이 그 큐를 처리한다(shell/src/toplevels.rs와 같은 방법).
@@ -49,6 +49,15 @@ mod protocol {
 /// 이 크레이트가 아는 판
 const VERSION: u32 = 1;
 
+/// 컴포지터가 셸에 알린 글 입력 소식
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextInputEvent {
+    /// 키보드 포커스를 가진 앱의 글 입력이 켜졌거나 꺼졌다
+    Changed(bool),
+    /// 사람이 그 앱의 글 칸을 눌렀다
+    Tapped,
+}
+
 /// 컴포지터의 화면 키보드. 복제해도 같은 연결을 가리킨다. 버릴 때 destroy를 보내지 않는다: 연결은 GTK의 것이라
 /// 프로그램이 끝날 때 이미 닫혔을 수 있고, 연결이 끊기면 컴포지터가 객체를 치운다(toplevels.rs와 같다)
 #[derive(Clone)]
@@ -66,8 +75,8 @@ struct Inner {
 struct Events {
     /// 레지스트리에서 찾은 전역
     osk: Option<BuntOskV1>,
-    /// 받은 글 입력 상태 (받은 차례)
-    text_input: Vec<bool>,
+    /// 받은 글 입력 소식 (받은 차례)
+    text_input: Vec<TextInputEvent>,
 }
 
 impl CompositorKeyboard {
@@ -99,8 +108,8 @@ impl CompositorKeyboard {
         self.flush();
     }
 
-    /// GTK가 소켓에서 읽어 둔 이벤트를 처리하고, 그사이 받은 글 입력 상태를 받은 차례로 돌려준다
-    pub fn take_text_input(&self) -> Vec<bool> {
+    /// GTK가 소켓에서 읽어 둔 이벤트를 처리하고, 그사이 받은 글 입력 소식을 받은 차례로 돌려준다
+    pub fn take_text_input(&self) -> Vec<TextInputEvent> {
         let mut events = self.0.events.borrow_mut();
         if let Err(err) = self.0.queue.borrow_mut().dispatch_pending(&mut events) {
             eprintln!("bunt-keyboard: the on-screen keyboard protocol: {err}");
@@ -153,8 +162,10 @@ impl Dispatch<BuntOskV1, ()> for Events {
         _connection: &Connection,
         _handle: &QueueHandle<Self>,
     ) {
-        let bunt_osk_v1::Event::TextInput { active } = event;
-        state.text_input.push(active != 0);
+        state.text_input.push(match event {
+            bunt_osk_v1::Event::TextInput { active } => TextInputEvent::Changed(active != 0),
+            bunt_osk_v1::Event::Tapped => TextInputEvent::Tapped,
+        });
     }
 }
 
@@ -241,8 +252,8 @@ mod tests {
 
     impl wayland_server::backend::ClientData for TestClient {}
 
-    /// 시험이 컴포지터에 시키는 것: 지켜보는 셸에 글 입력 상태를 보내고, 다 보냈으면 알린다
-    type Announce = (bool, mpsc::Sender<()>);
+    /// 시험이 컴포지터에 시키는 것: 지켜보는 셸에 글 입력 소식을 보내고, 다 보냈으면 알린다
+    type Announce = (TextInputEvent, mpsc::Sender<()>);
 
     /// 다른 스레드에서 도는 시험용 컴포지터. 클라이언트의 roundtrip이 답을 받으려면 따로 돌아야 한다
     struct Server {
@@ -274,9 +285,14 @@ mod tests {
                     };
                     while !stop.load(Ordering::Relaxed) {
                         display.dispatch_clients(&mut state).unwrap();
-                        while let Ok((active, done)) = announced.try_recv() {
+                        while let Ok((event, done)) = announced.try_recv() {
                             for watcher in &state.watchers {
-                                watcher.text_input(u32::from(active));
+                                match event {
+                                    TextInputEvent::Changed(active) => {
+                                        watcher.text_input(u32::from(active));
+                                    }
+                                    TextInputEvent::Tapped => watcher.tapped(),
+                                }
                             }
                             let _ = done.send(());
                         }
@@ -293,10 +309,10 @@ mod tests {
             }
         }
 
-        /// 지켜보는 셸에 글 입력 상태를 보낸다. 보낸 뒤에 돌아온다
-        fn announce(&self, active: bool) {
+        /// 지켜보는 셸에 글 입력 소식을 보낸다. 보낸 뒤에 돌아온다
+        fn announce(&self, event: TextInputEvent) {
             let (done, sent) = mpsc::channel();
-            self.announce.send((active, done)).unwrap();
+            self.announce.send((event, done)).unwrap();
             sent.recv_timeout(Duration::from_secs(10))
                 .expect("the test compositor did not announce");
         }
@@ -346,7 +362,7 @@ mod tests {
             .unwrap();
     }
 
-    /// 셸·로그인 화면의 키가 컴포지터에 누른 차례로 닿고, 셸은 컴포지터가 알린 글 입력 상태를 받은 차례로 받는다
+    /// 셸·로그인 화면의 키가 컴포지터에 누른 차례로 닿고, 셸은 컴포지터가 알린 글 입력 소식을 받은 차례로 받는다
     #[test]
     fn keys_and_text_input_go_over_the_shell_protocol() {
         let Some((server, connection)) = connect(true) else {
@@ -367,18 +383,29 @@ mod tests {
             ["a", "B", " ", "BackSpace", "Return"]
         );
 
-        // 지켜보기 전에는 글 입력 상태를 받지 않는다 (로그인 화면은 지켜보지 않는다)
-        server.announce(true);
+        use TextInputEvent::{Changed, Tapped};
+        // 지켜보기 전에는 글 입력 소식을 받지 않는다 (로그인 화면은 지켜보지 않는다)
+        server.announce(Changed(true));
         read_socket(&keyboard);
         assert!(keyboard.take_text_input().is_empty());
-        // 지켜보면 지금 상태가 바로 오고, 그 뒤로 바뀐 것이 차례로 온다
+        // 지켜보면 지금 상태가 바로 오고, 그 뒤로 바뀐 것과 눌린 칸이 차례로 온다
         keyboard.watch_text_input();
         read_socket(&keyboard);
-        server.announce(true);
-        server.announce(false);
-        server.announce(true);
+        server.announce(Changed(true));
+        server.announce(Tapped);
+        server.announce(Changed(false));
+        server.announce(Changed(true));
         read_socket(&keyboard);
-        assert_eq!(keyboard.take_text_input(), [false, true, false, true]);
+        assert_eq!(
+            keyboard.take_text_input(),
+            [
+                Changed(false),
+                Changed(true),
+                Tapped,
+                Changed(false),
+                Changed(true)
+            ]
+        );
         assert!(keyboard.take_text_input().is_empty());
     }
 
