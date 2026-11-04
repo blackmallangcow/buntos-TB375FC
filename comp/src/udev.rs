@@ -9,7 +9,7 @@ use std::{
     cmp::Reverse,
     collections::HashMap,
     error::Error,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -221,14 +221,14 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let seat_name = session.seat();
 
     let udev = UdevBackend::new(&seat_name)?;
+    // SoC에서는 화면 장치와 GPU가 따로라서 카드가 둘이다. 그리기만 하는 GPU(panthor 등)에는 커넥터가 없으므로
+    // 커넥터가 있는 카드를 먼저 고른다. Mesa가 화면 장치에서 렌더 노드를 찾아 준다
+    let gpus = all_gpus(&seat_name).unwrap_or_default();
     let gpu = primary_gpu(&seat_name)?
+        .filter(|path| has_connectors(path))
+        .or_else(|| gpus.iter().find(|path| has_connectors(path)).cloned())
+        .or_else(|| gpus.first().cloned())
         .and_then(|path| DrmNode::from_path(path).ok())
-        .or_else(|| {
-            all_gpus(&seat_name)
-                .ok()?
-                .into_iter()
-                .find_map(|path| DrmNode::from_path(path).ok())
-        })
         .ok_or("no GPU found")?;
     let primary = gpu
         .node_with_type(NodeType::Primary)
@@ -1518,6 +1518,23 @@ fn nearest_scale(scales: &[f64], scale: f64) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// 이 카드 노드(`/dev/dri/cardN`)에 커넥터가 있는지. 커널은 sysfs의 `cardN/cardN-<커넥터>`로 알린다. 장치를 열지 않고 본다
+fn has_connectors(card: &Path) -> bool {
+    has_connectors_in(Path::new("/sys/class/drm"), card)
+}
+
+fn has_connectors_in(class_drm: &Path, card: &Path) -> bool {
+    let Some(name) = card.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let prefix = format!("{name}-");
+    std::fs::read_dir(class_drm.join(name)).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+    })
+}
+
 /// 화면의 실제 크기(mm)로 고른 기본 배율. 논리 밀도가 BUILTIN_PPI나 EXTERNAL_PPI에 가깝게 한다.
 /// 크기를 모르거나(0) 믿기 어려우면(프로젝터의 센티미터 값, 가로세로 비가 픽셀과 다름) 1배
 fn recommended_scale(pixels: Size<i32, Physical>, millimeters: (i32, i32), builtin: bool) -> f64 {
@@ -1755,6 +1772,21 @@ mod tests {
             vec![1.0, 1.75, 2.0, 2.75, 3.25]
         );
         assert_eq!(scale_choices(&[1.0, 1.25], &[1.0]), vec![1.0, 1.25]);
+    }
+
+    #[test]
+    fn only_a_card_with_connectors_can_show_anything() {
+        let sys = std::env::temp_dir().join(format!("bunt-comp-drm-{}", std::process::id()));
+        // 화면 드라이버는 커넥터가 있고, 그리기만 하는 GPU(panthor)는 카드 폴더에 다른 것만 있다
+        std::fs::create_dir_all(sys.join("card2/card2-DSI-1")).unwrap();
+        std::fs::create_dir_all(sys.join("card1/device")).unwrap();
+        assert!(has_connectors_in(&sys, Path::new("/dev/dri/card2")));
+        assert!(!has_connectors_in(&sys, Path::new("/dev/dri/card1")));
+        // 이름이 앞부분만 같은 다른 카드의 폴더에 속지 않고, 없는 카드도 없는 것으로 본다
+        std::fs::create_dir_all(sys.join("card1/card10-DSI-1")).unwrap();
+        assert!(!has_connectors_in(&sys, Path::new("/dev/dri/card1")));
+        assert!(!has_connectors_in(&sys, Path::new("/dev/dri/card9")));
+        std::fs::remove_dir_all(&sys).unwrap();
     }
 
     #[test]
