@@ -1,0 +1,69 @@
+From: buntOS contributors
+Subject: [PATCH] drm/mediatek: keep the power domains of MT6897 on while the CRTC is off
+
+When the CRTC of the Lenovo TB375FC turned off, the hardware voter took
+the votes of the two OVL domains, but genpd kept them as on, so their
+power off must have failed, without a message. genpd then did not vote
+again. The next enable worked, and the system stopped soon after without
+a log, until a reset about 40 seconds later. That happened once, and not
+since the domains stay on.
+
+Do not turn the domains off until that is understood. The panel still
+goes off and on, and only this path keeps its power domains.
+---
+ drivers/gpu/drm/mediatek/mtk_crtc.c | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/mediatek/mtk_crtc.c b/drivers/gpu/drm/mediatek/mtk_crtc.c
+--- a/drivers/gpu/drm/mediatek/mtk_crtc.c
++++ b/drivers/gpu/drm/mediatek/mtk_crtc.c
+@@ -43,7 +43,8 @@
+  * @second_pipe: first component of the second pipe in ddp_comp, or 0 if none
+  * @pipe_width: width of the screen that each pipe has, with a second pipe
+  * @boot_power: this holds the power domains of the bootloader's display, which still
+- *              runs until the first commit
++ *              runs until the first commit, and keeps them on from there: the hardware
++ *              voter of MT6897 does not finish turning them off
+  * @ddp_comp_nr: number of components in ddp_comp
+  * @ddp_comp: array of pointers the mtk_ddp_comp structures used by this crtc
+  *
+@@ -1105,9 +1106,7 @@
+ 
+ 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
+ 
+-	if (mtk_crtc->boot_power) {
+-		mtk_crtc->boot_power = false;
+-	} else {
++	if (!mtk_crtc->boot_power) {
+ 		ret = mtk_crtc_power_on(mtk_crtc);
+ 		if (ret < 0)
+ 			return;
+@@ -1117,7 +1116,8 @@
+ 
+ 	ret = mtk_crtc_ddp_hw_init(mtk_crtc);
+ 	if (ret) {
+-		mtk_crtc_power_off(mtk_crtc, mtk_crtc_num_power_comps(mtk_crtc));
++		if (!mtk_crtc->boot_power)
++			mtk_crtc_power_off(mtk_crtc, mtk_crtc_num_power_comps(mtk_crtc));
+ 		return;
+ 	}
+ 
+@@ -1191,7 +1191,8 @@
+ 		mtk_crtc_forget_pending(mtk_crtc);
+ 
+ 	mtk_crtc_ddp_hw_fini(mtk_crtc);
+-	mtk_crtc_power_off(mtk_crtc, mtk_crtc_num_power_comps(mtk_crtc));
++	if (!mtk_crtc->boot_power)
++		mtk_crtc_power_off(mtk_crtc, mtk_crtc_num_power_comps(mtk_crtc));
+ 
+ 	mtk_crtc->enabled = false;
+ }
+@@ -1497,7 +1498,7 @@
+ 	/*
+ 	 * The bootloader's display keeps running on these domains, and a framebuffer
+ 	 * driver that goes away would take them away from under its DMA. Nothing stops
+-	 * it before the first commit.
++	 * it before the first commit. The hold stays after that, see boot_power.
+ 	 */
+ 	if (mtk_crtc->num_controllers && !mtk_crtc_power_on(mtk_crtc))
+ 		mtk_crtc->boot_power = true;

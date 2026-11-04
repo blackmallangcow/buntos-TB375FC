@@ -270,3 +270,145 @@
 		mediatek,vbus-protect-gpios = <&pio 179 GPIO_ACTIVE_HIGH>;
 	};
 };
+
+// 9.5 2c 2차 화면. 드라이버 넷은 명령줄의 modprobe.blacklist로 막고 손으로 올린다(체크리스트 9.5의 1~4단계).
+// 화면 도메인은 첫 소비자 전에 simple-framebuffer가 잡는다. 패널 노드를 켜므로 fw_devlink가 simpledrm을 붙들지 않게 panel을 꺼진 노드로 돌린다.
+/ {
+	// simpledrm은 화면의 실제 크기(mm)를 panel이 가리키는 노드에서 읽는다. 꺼진 노드에는 fw_devlink가 걸리지 않으므로 크기만 적어 둔다
+	panel_size: tb375fc-panel-size {
+		status = "disabled";
+		width-mm = <273>;
+		height-mm = <171>;
+	};
+};
+
+&framebuffer0 {
+	panel = <&panel_size>;
+	power-domains = <&scpsys MT6897_POWER_DOMAIN_DIS0_SHUTDOWN>,
+			<&scpsys MT6897_POWER_DOMAIN_DIS1_SHUTDOWN>,
+			<&scpsys MT6897_POWER_DOMAIN_OVL0_SHUTDOWN>,
+			<&scpsys MT6897_POWER_DOMAIN_OVL1_SHUTDOWN>;
+};
+
+&scpsys {
+	power-domain@MT6897_POWER_DOMAIN_MM_INFRA {
+		reg = <MT6897_POWER_DOMAIN_MM_INFRA>;
+		clocks = <&topckgen CLK_TOP_MMINFRA>;
+		clock-names = "mm_infra";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		#power-domain-cells = <1>;
+
+		power-domain@MT6897_POWER_DOMAIN_DIS0_SHUTDOWN {
+			reg = <MT6897_POWER_DOMAIN_DIS0_SHUTDOWN>;
+			clocks = <&topckgen CLK_TOP_DISP0>;
+			clock-names = "disp";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#power-domain-cells = <1>;
+
+			power-domain@MT6897_POWER_DOMAIN_OVL0_SHUTDOWN {
+				reg = <MT6897_POWER_DOMAIN_OVL0_SHUTDOWN>;
+				clocks = <&topckgen CLK_TOP_OVL0>;
+				clock-names = "ovl";
+				#power-domain-cells = <0>;
+			};
+		};
+
+		power-domain@MT6897_POWER_DOMAIN_DIS1_SHUTDOWN {
+			reg = <MT6897_POWER_DOMAIN_DIS1_SHUTDOWN>;
+			clocks = <&topckgen CLK_TOP_DISP1>;
+			clock-names = "disp1";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#power-domain-cells = <1>;
+
+			power-domain@MT6897_POWER_DOMAIN_OVL1_SHUTDOWN {
+				reg = <MT6897_POWER_DOMAIN_OVL1_SHUTDOWN>;
+				clocks = <&topckgen CLK_TOP_OVL1>;
+				clock-names = "ovl1";
+				#power-domain-cells = <0>;
+			};
+		};
+	};
+};
+
+&mminfra {
+	status = "okay";
+};
+
+&dispsys0 {
+	status = "okay";
+};
+
+&dispsys1 {
+	status = "okay";
+};
+
+&ovlsys0 {
+	status = "okay";
+};
+
+&ovlsys1 {
+	status = "okay";
+};
+
+&mipi_tx0 {
+	status = "okay";
+};
+
+&mipi_tx1 {
+	status = "okay";
+};
+
+&disp_mutex0 {
+	status = "okay";
+};
+
+&disp_mutex1 {
+	status = "okay";
+};
+
+&ovl_mutex0 {
+	status = "okay";
+};
+
+&ovl_mutex1 {
+	status = "okay";
+};
+
+&dsc0 {
+	status = "okay";
+};
+
+&dsc1 {
+	status = "okay";
+};
+
+&ovl_2l0 {
+	status = "okay";
+};
+
+&ovl_2l1 {
+	status = "okay";
+};
+
+&dsi0 {
+	status = "okay";
+};
+
+&dsi1 {
+	status = "okay";
+};
+
+&panel0 {
+	status = "okay";
+};
+
+&lcd_avdd {
+	status = "okay";
+};
+
+&lcd_avee {
+	status = "okay";
+};

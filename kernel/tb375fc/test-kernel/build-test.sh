@@ -18,6 +18,8 @@ trap restore EXIT
 kernel/tb375fc/build.sh prepare 2>&1 | tail -n 1 | cut -c1-100
 cpp -nostdinc -I "$repo/.handoff/tb375fc-test-kernel" -I "$T/arch/arm64/boot/dts/mediatek" -I "$T/arch/arm64/boot/dts" -I "$T/include" -I "$T/scripts/dtc/include-prefixes" \
 	-undef -D__DTS__ -x assembler-with-cpp "$here/mt6897-lenovo-tb375fc-test.dts" 2>/dev/null >"$W/test.pre.dts"
+# TEST_ROOTFLAGS를 주면 명령줄에 rootflags=로 넣는다. 같은 파티션의 다른 서브볼륨으로 켤 때 쓴다
+[ -z "${TEST_ROOTFLAGS:-}" ] || sed -i "s/root=PARTLABEL=buntos /root=PARTLABEL=buntos rootflags=$TEST_ROOTFLAGS /" "$W/test.pre.dts"
 dtc -q -I dts -O dtb -i "$T/arch/arm64/boot/dts/mediatek" -o "$W/test.dtb" "$W/test.pre.dts"
 fdtget -t s "$W/test.dtb" /chosen bootargs
 python3 -I "$here/builtin-dtb.py" "$T" "$W/test.dtb"

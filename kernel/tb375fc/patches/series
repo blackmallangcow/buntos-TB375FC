@@ -116,6 +116,8 @@
 0077-dt-bindings-thermal-mediatek-lvts-thermal-add-MT6897.patch
 0078-thermal-drivers-mediatek-lvts-add-MT6897.patch
 0079-power-supply-mm8013-pace-accesses-add-a-battery-ID.patch
+# 0152 mm8013: current_now의 부호를 ABI대로 둔다. 반대라 UPower가 충전 중인 배터리를 방전으로 덮어쓴다
+0152-power-supply-mm8013-report-the-current-with-the-documented-sign.patch
 # 0080~0084: NT36532 패널. 0080~0082는 업스트림 백포트다(ffa88de8ddb6은 7.3, 1c523f0a9301·47b823940e38은 7.4 병합 창. 더 새 커널로 가면
 # 뺀다). 드라이버를 쓰는 DSI 호스트가 대기열에 없어 지금은 돌 곳이 없다. 0083·0084는 이 기기의 패널 셋(BOE, Tianma, Tianma 무광)이다: 모드
 # 넷과 주사율 레지스터, DSC 1.1, 편향 전원, DCS 밝기, GPIO184로 고르기. 표는 벤더 드라이버에서 옮겨 순정 모듈·LK 표와 맞댔다. 기기에서 확인한 뒤 낸다
@@ -190,6 +192,8 @@
 0137-drm-mediatek-run-a-path-through-several-controllers-and-two-pipes.patch
 0138-drm-panel-novatek-nt36532-use-low-power-mode-on-the-TB375FC-panels.patch
 0139-drm-panel-novatek-nt36532-unbind-before-the-host-of-the-second-link.patch
+# 0153 mediatek-drm: MT6897의 전원 도메인을 CRTC가 꺼져도 잡아 둔다. HW voter가 OVL 도메인의 투표만 지우고 끝나지 않아, 다시 켠 뒤 멈췄다(기기, 2026-11-04). 원인을 찾으면 뺀다
+0153-drm-mediatek-keep-the-display-power-domains-on.patch
 # 2a: LK가 앞에 넣는 framebuffer 노드에 no-map이 없어 트리의 no-map 노드가 실패한다(기기의 살아 있는 트리로 확인)
 0140-of-reserved_mem-mark-no-map-regions-before-other-reservations.patch
 # 2b: 가젯이 묶이고 D+를 올려도 컨트롤러가 인터럽트를 내지 않는다. 벤더처럼 VBUS 입력을 덮어쓴다(mediatek,force-vbus)

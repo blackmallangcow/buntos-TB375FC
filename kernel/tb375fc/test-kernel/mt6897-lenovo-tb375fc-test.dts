@@ -7,7 +7,7 @@
 / {
 	chosen {
 		/delete-property/ stdout-path;
-		bootargs = "console=tty0 ignore_loglevel log_buf_len=1M root=PARTLABEL=buntos rootfstype=btrfs rw systemd.firstboot=no buntos.usbdebug=1 buntos.wait=10 buntos.telnet=1 buntos.autoreboot=30 modprobe.blacklist=mt7921soc,mtk_connsys,btmtkbeif,panthor,mt6375,mt6375_charger,tcpci_mt6375 buntos.dump=1 panic=30 clk_ignore_unused pd_ignore_unused regulator_ignore_unused arm64.nomte";
+		bootargs = "console=tty0 ignore_loglevel log_buf_len=1M root=PARTLABEL=buntos rootflags=subvol=buntos-full rootfstype=btrfs rw systemd.firstboot=no drm_client_lib.active= buntos.usbdebug=1 buntos.wait=10 buntos.telnet=1 buntos.autoreboot=30 modprobe.blacklist=mt7921soc,mtk_connsys,btmtkbeif,panthor,mt6375,mt6375_charger,tcpci_mt6375,mediatek_drm,mtk_mmsys,phy_mtk_mipi_dsi_drv,panel_novatek_nt36532 buntos.dump=1 panic=30 clk_ignore_unused pd_ignore_unused regulator_ignore_unused arm64.nomte";
 	};
 
 	memory@40000000 {

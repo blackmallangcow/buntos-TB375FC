@@ -1,0 +1,37 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mm8013: report the current with the documented sign
+
+The power supply ABI says that current_now is negative while a battery
+discharges and positive while it charges. This driver negates the
+register and reports the opposite.
+
+On a Lenovo TB375FC charging from a USB port, with status reading
+Charging, current_now stays between -376000 and -488000 while charge_now
+rises by 515 mAh in 4011 seconds, or 462 mA, and capacity goes from 19
+to 25.
+
+UPower takes a negative current_now for a battery that discharges,
+whatever status says, unless the battery is full. Desktops built on it
+then show this battery as discharging all the time it charges, with the
+time left until it is empty.
+
+The register needs no change of sign. CURRENT_MAX keeps its negation:
+that register holds the largest load as a negative number, and the
+result reads 4784000 on the same device.
+
+With this change the same device reads 510000 with status Charging and
+-585000 with status Discharging.
+
+---
+diff --git a/drivers/power/supply/mm8013.c b/drivers/power/supply/mm8013.c
+--- a/drivers/power/supply/mm8013.c
++++ b/drivers/power/supply/mm8013.c
+@@ -147,7 +147,7 @@
+ 		if (ret < 0)
+ 			return ret;
+ 
+-		val->intval = -1000 * (s16)regval;
++		val->intval = 1000 * (s16)regval;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+ 		ret = regmap_read(chip->regmap, REG_CYCLE_COUNT, &regval);
