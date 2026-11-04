@@ -1,0 +1,35 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: power: supply: mt6375-charger: add the connector protection
+
+The stock charger framework of the Lenovo TB375FC watches a sensor at the
+USB connector and raises a GPIO when that gets too hot. Describe the sensor
+by the name of its thermal zone, and the GPIO.
+
+---
+ Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml b/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
+index 0b149d87a0b14e904ac3dc76862579c5c73c4965..4eba260a2770b894b01544ae9e86021ae33586ed 100644
+--- a/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
++++ b/Documentation/devicetree/bindings/power/supply/mediatek,mt6375-charger.yaml
+@@ -39,6 +39,19 @@ properties:
+       The power supply of the USB port controller, which tells how much current
+       the port can give. Without it the input stays at the USB default.
+ 
++  mediatek,connector-thermal-zone:
++    $ref: /schemas/types.yaml#/definitions/string
++    description:
++      The name of the thermal zone of the sensor at the USB connector. While
++      that cannot be read the input stays at the USB default. When it reads too
++      hot charging stops and the input goes down until it has cooled down.
++
++  mediatek,vbus-protect-gpios:
++    maxItems: 1
++    description:
++      What the board has to protect VBUS when the USB connector gets too hot.
++      It is asserted for as long as that lasts.
++
+   usb-otg-vbus-regulator:
+     type: object
+     $ref: /schemas/regulator/regulator.yaml#

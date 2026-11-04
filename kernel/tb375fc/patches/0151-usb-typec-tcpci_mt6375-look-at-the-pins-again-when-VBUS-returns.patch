@@ -1,0 +1,62 @@
+From: buntOS contributors
+Subject: [PATCH] usb: typec: tcpci_mt6375: look at the pins again when VBUS returns
+
+With PD off a wall charger took VBUS away for under a second some 20
+seconds after it was plugged in, and brought it back. The pins stayed as
+they were, so the chip gave no alert for them. TCPM had gone to
+SNK_UNATTACHED on the loss of VBUS and stayed there, with the input of the
+charger at the USB default until the plug was pulled. At 500 mA that is
+less than the tablet uses.
+
+A sink port does not toggle here, so nothing else would make it look. Ask
+it to when VBUS comes back while this port is not sourcing it.
+
+On the device TCPM now attaches again as soon as VBUS is back, and the
+charger driver follows at its next poll.
+
+---
+ drivers/usb/typec/tcpm/tcpci_mt6375.c | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/typec/tcpm/tcpci_mt6375.c b/drivers/usb/typec/tcpm/tcpci_mt6375.c
+index 5cd0bb1923dcf6df84d97a7f84ac7c9589942ef2..42a8b7e16b743ad1203d4d957351c40eea103b0b 100644
+--- a/drivers/usb/typec/tcpm/tcpci_mt6375.c
++++ b/drivers/usb/typec/tcpm/tcpci_mt6375.c
+@@ -99,6 +99,7 @@ struct mt6375_tcpc {
+ 	int irq;
+ 	bool irq_ready;
+ 	bool vbus_on;
++	bool vbus_present;
+ };
+ 
+ /* What the MediaTek driver clears at probe */
+@@ -314,8 +315,28 @@ static int mt6375_tcpc_set_vbus(struct tcpci *tcpci, struct tcpci_data *data,
+ static irqreturn_t mt6375_tcpc_irq(int irq, void *dev_id)
+ {
+ 	struct mt6375_tcpc *priv = dev_id;
++	unsigned int power;
++	irqreturn_t ret;
++	bool present;
++
++	ret = tcpci_irq(priv->tcpci);
++
++	/*
++	 * A source can take VBUS away and bring it back with the pins as they
++	 * were. A charger that wants PD and gets no answer does that with a
++	 * hard reset. TCPM takes the loss of VBUS for a detach, and with no
++	 * toggling here and no change on the pins it would wait for good. So
++	 * tell it to look, as at the start.
++	 */
++	if (regmap_read(priv->tcpci_data.regmap, TCPC_POWER_STATUS, &power))
++		return ret;
++
++	present = power & TCPC_POWER_STATUS_VBUS_PRES;
++	if (present && !priv->vbus_present && !priv->vbus_on)
++		mod_delayed_work(system_wq, &priv->cc_work, 0);
++	priv->vbus_present = present;
+ 
+-	return tcpci_irq(priv->tcpci);
++	return ret;
+ }
+ 
+ /*

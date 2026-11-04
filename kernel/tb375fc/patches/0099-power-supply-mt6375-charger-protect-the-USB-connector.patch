@@ -1,0 +1,288 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: protect the USB connector
+
+The contacts of the USB connector heat up with the current, and a worn plug
+can make them hot where the battery cannot notice. The stock charger
+framework reads a sensor at the connector every 10 seconds and raises a
+GPIO above 75 C. Do the same in the work.
+
+What the GPIO does to VBUS is not known without a schematic. So charging
+stops as well and the input limit goes to its lowest, which takes the
+current through the contacts down whatever the GPIO does. Stock comes back
+below 74 C, which would keep switching the input. This waits for three
+readings below 65 C, with VBUS or without. The input stays low through
+suspend and removal too. Before charging is taken over the limits are not
+written, so only the GPIO and CHG_EN change, and CHG_EN then stays off
+until charging is taken over.
+
+Unlike stock a sensor that cannot be read, or reads as if it came open,
+keeps the input at the USB default: at 500 mA the contacts carry a
+sixteenth of the heat of 2 A. The zone is looked up on every read as its
+sensor is a module, and it is not there yet at the first reads.
+
+During the boost nothing looks at the sensor, as on stock, but the boost
+does not start on a connector that is too hot.
+
+Without the two properties nothing changes.
+
+On the device a warm hand takes the reading from 22 C to 26 C with the
+battery staying at 23 C. With values forced through emul_temp, a sensor
+that cannot be read or reads as open took the input to 500 mA within 10
+seconds and back again. Forcing 80 C raised the GPIO and stopped charging,
+and neither the charger nor the TCPC saw VBUS any more. It all came back
+25 to 30 seconds after the reading did. 10 minutes at 2 A left the
+connector at 23.5 C, so nothing here has seen a connector that was really
+hot. Whether the GPIO cuts or shorts VBUS is still not known.
+
+In one of the two forced runs CC went away for 14 seconds with the GPIO up,
+the reading rose to 33 C in that time, and the wall charger gave no VBUS
+afterwards until it was plugged in again. That has not been explained.
+
+---
+ drivers/power/supply/mt6375-charger.c | 130 ++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 128 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+index aac302512d7e24e25f4f8a2b8575abcd3c7020d0..c1347b687788a4bc76c8be39e132586c2b7f9f75 100644
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -25,6 +25,7 @@
+ 
+ #include <linux/bitfield.h>
+ #include <linux/bits.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/interrupt.h>
+ #include <linux/kernel.h>
+ #include <linux/linear_range.h>
+@@ -37,6 +38,7 @@
+ #include <linux/property.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/driver.h>
++#include <linux/thermal.h>
+ #include <linux/workqueue.h>
+ 
+ #define MT6375_REG_TM_PAS_CODE1		0x107
+@@ -139,6 +141,14 @@
+ /* The stock charger thread looks every 10 seconds */
+ #define MT6375_CHG_POLL_MS		10000
+ #define MT6375_CHG_MAX_READ_FAILS	3
++/*
++ * The USB connector, in millidegrees. Stock acts above the first like this
++ * and comes back below 74 C, which would keep switching the input. A sensor
++ * that has come open reads as the coldest of its table.
++ */
++#define MT6375_CHG_CONN_HOT_MC		75000
++#define MT6375_CHG_CONN_COOL_MC		65000
++#define MT6375_CHG_CONN_OPEN_MC		-40000
+ 
+ enum mt6375_chg_field {
+ 	F_CHG_EN, F_BUCK_EN, F_HZ, F_IAICR, F_ILIM_EN, F_VMIVR, F_CV, F_VREC,
+@@ -200,6 +210,8 @@ struct mt6375_chg_reading {
+ 	int temp;
+ 	int vbat_uv;
+ 	int port_ua;
++	int conn_err;
++	int conn_temp;
+ };
+ 
+ struct mt6375_chg {
+@@ -218,6 +230,8 @@ struct mt6375_chg {
+ 	int ovp_uv;
+ 	int temp_cold;
+ 	int temp_hot;
++	const char *conn_zone;		/* of the sensor at the USB connector */
++	struct gpio_desc *vbus_protect;
+ 
+ 	struct delayed_work work;
+ 	struct mutex lock;		/* the fields below */
+@@ -227,6 +241,9 @@ struct mt6375_chg {
+ 	unsigned int ovp_clear;		/* low readings since then */
+ 	bool pwr_rdy;
+ 	bool fault;			/* no charging until the source goes */
++	bool conn_hot;			/* until the connector has cooled */
++	unsigned int conn_clear;	/* low readings since then */
++	bool conn_unknown;		/* its sensor cannot be read */
+ 	enum mt6375_chg_temp temp;	/* the last one known, for hysteresis */
+ 	bool gauge_lost;
+ 	bool gauge_warned;
+@@ -303,6 +320,11 @@ static int mt6375_otg_start(struct mt6375_chg *chg, struct regulator_dev *rdev)
+ 	unsigned int stat;
+ 	int ret;
+ 
++	if (chg->conn_hot) {
++		dev_err(chg->dev, "USB connector too hot, no boost\n");
++		return -EBUSY;
++	}
++
+ 	/*
+ 	 * Without the TCPC nothing else knows what is on the port. Do not start
+ 	 * the boost against a charger or a USB host that already drives VBUS.
+@@ -554,6 +576,9 @@ static int mt6375_chg_get_charge_type(struct mt6375_chg *chg, int *val)
+ /* What the driver knows. Called with the lock held */
+ static int mt6375_chg_health(struct mt6375_chg *chg)
+ {
++	if (chg->conn_hot)
++		return POWER_SUPPLY_HEALTH_OVERHEAT;
++
+ 	if (chg->gauge_lost)
+ 		return POWER_SUPPLY_HEALTH_UNKNOWN;
+ 
+@@ -697,7 +722,7 @@ static bool mt6375_chg_must_stop(struct mt6375_chg *chg)
+ 	       chg->read_fails >= MT6375_CHG_MAX_READ_FAILS ||
+ 	       chg->temp == MT6375_CHG_TEMP_HOT ||
+ 	       chg->temp == MT6375_CHG_TEMP_COLD ||
+-	       chg->overvoltage;
++	       chg->overvoltage || chg->conn_hot;
+ }
+ 
+ /* Not taken over yet: back to what the chip did before inhibit-charge */
+@@ -932,12 +957,17 @@ static int mt6375_chg_set_limit(struct mt6375_chg *chg,
+ /* Back to what the bootloader sets, for when nobody is watching the battery */
+ static void mt6375_chg_set_unsupervised(struct mt6375_chg *chg)
+ {
++	unsigned int input = MT6375_CHG_USB_UA;
+ 	int i, cc, aicr;
+ 
++	/* A connector that is too hot stays at the lowest */
++	if (chg->conn_hot)
++		input = MT6375_CHG_AICR_MIN_UA;
++
+ 	/* Either one helps without the other, and nothing comes back later */
+ 	for (i = 0; i < 2; i++) {
+ 		cc = mt6375_chg_set_limit(chg, F_CC, MT6375_CHG_USB_UA);
+-		aicr = mt6375_chg_set_limit(chg, F_IAICR, MT6375_CHG_USB_UA);
++		aicr = mt6375_chg_set_limit(chg, F_IAICR, input);
+ 		if (!cc && !aicr)
+ 			return;
+ 	}
+@@ -1156,6 +1186,86 @@ static void mt6375_chg_update_battery(struct mt6375_chg *chg, int temp,
+ 		chg->overvoltage = false;
+ }
+ 
++/*
++ * Outside of the lock, as the ADC takes its time. The sensor is a module, so
++ * the zone is looked up each time. As on stock nothing holds it between these
++ * two calls, so its driver must not go away at just that moment.
++ */
++static int mt6375_chg_read_connector(struct mt6375_chg *chg, int *temp)
++{
++	struct thermal_zone_device *tz;
++	int ret;
++
++	if (!chg->conn_zone)
++		return 0;
++
++	tz = thermal_zone_get_zone_by_name(chg->conn_zone);
++	if (IS_ERR(tz))
++		return PTR_ERR(tz);
++
++	ret = thermal_zone_get_temp(tz, temp);
++	if (ret)
++		return ret;
++
++	return *temp <= MT6375_CHG_CONN_OPEN_MC ? -ERANGE : 0;
++}
++
++/*
++ * The contacts of the connector heat up with the current, and the battery is
++ * too far away to notice. Too hot raises the GPIO as on stock. What that does
++ * to VBUS is not known without a schematic, so charging stops and the input
++ * goes down as well. That holds until the connector has cooled down, with
++ * VBUS or without. A sensor that cannot be read keeps this as it was, and
++ * the input at the USB default. As on stock nothing looks at it during the
++ * boost.
++ */
++static void mt6375_chg_update_connector(struct mt6375_chg *chg,
++					const struct mt6375_chg_reading *now)
++{
++	bool hot = chg->conn_hot;
++
++	if (!chg->conn_zone || chg->boost)
++		return;
++
++	if (now->conn_err) {
++		if (!chg->conn_unknown)
++			dev_warn(chg->dev, "Cannot read the USB connector temperature: %d, keeping the input at the USB default\n",
++				 now->conn_err);
++		chg->conn_unknown = true;
++		chg->conn_clear = 0;
++		return;
++	}
++
++	if (chg->conn_unknown)
++		dev_info(chg->dev, "USB connector temperature is back: %d mC\n",
++			 now->conn_temp);
++	chg->conn_unknown = false;
++
++	/* One low value is not enough, as with the overvoltage */
++	if (now->conn_temp >= MT6375_CHG_CONN_COOL_MC)
++		chg->conn_clear = 0;
++	else if (hot)
++		chg->conn_clear++;
++
++	if (now->conn_temp > MT6375_CHG_CONN_HOT_MC)
++		hot = true;
++	else if (chg->conn_clear >= MT6375_CHG_MAX_READ_FAILS)
++		hot = false;
++
++	if (hot == chg->conn_hot)
++		return;
++
++	chg->conn_hot = hot;
++	chg->conn_clear = 0;
++	gpiod_set_value_cansleep(chg->vbus_protect, hot);
++	if (hot)
++		dev_err(chg->dev, "USB connector at %d mC, cutting the input\n",
++			now->conn_temp);
++	else
++		dev_info(chg->dev, "USB connector down to %d mC, input back\n",
++			 now->conn_temp);
++}
++
+ static void mt6375_chg_control(struct mt6375_chg *chg,
+ 			       const struct mt6375_chg_reading *now)
+ {
+@@ -1231,10 +1341,15 @@ static void mt6375_chg_control(struct mt6375_chg *chg,
+ 	charge = (chg->temp == MT6375_CHG_TEMP_NORMAL ||
+ 		  chg->temp == MT6375_CHG_TEMP_WARM_RANGE) &&
+ 		 !chg->gauge_lost && !chg->overvoltage && !chg->fault &&
++		 !chg->conn_hot &&
+ 		 chg->behaviour == POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
+ 
+ 	aicr = pwr_rdy ? now->port_ua : MT6375_CHG_USB_UA;
+ 	aicr = min(aicr, chg->user_aicr_ua);
++	if (chg->conn_hot)
++		aicr = MT6375_CHG_AICR_MIN_UA;
++	else if (chg->conn_unknown)
++		aicr = min(aicr, MT6375_CHG_USB_UA);
+ 
+ 	/* Stays low with charging off, in case turning it off fails */
+ 	cc = MT6375_CHG_USB_UA;
+@@ -1298,9 +1413,11 @@ static void mt6375_chg_work(struct work_struct *work)
+ 	/* A slow gauge must not hold up inhibit-charge or the boost */
+ 	now.err = mt6375_chg_read_battery(chg, &now.temp, &now.vbat_uv);
+ 	now.port_ua = mt6375_chg_input_limit(chg);
++	now.conn_err = mt6375_chg_read_connector(chg, &now.conn_temp);
+ 
+ 	mutex_lock(&chg->lock);
+ 	health = mt6375_chg_health(chg);
++	mt6375_chg_update_connector(chg, &now);
+ 	mt6375_chg_control(chg, &now);
+ 	if (health != mt6375_chg_health(chg))
+ 		power_supply_changed(chg->psy);
+@@ -1438,6 +1555,15 @@ static int mt6375_chg_init_control(struct mt6375_chg *chg)
+ 		return 0;
+ 	}
+ 
++	device_property_read_string(dev, "mediatek,connector-thermal-zone",
++				    &chg->conn_zone);
++	chg->vbus_protect = devm_gpiod_get_optional(dev,
++						    "mediatek,vbus-protect",
++						    GPIOD_OUT_LOW);
++	if (IS_ERR(chg->vbus_protect))
++		return dev_err_probe(dev, PTR_ERR(chg->vbus_protect),
++				     "Failed to get the VBUS GPIO\n");
++
+ 	ret = devm_add_action_or_reset(dev, mt6375_chg_release_control, chg);
+ 	if (ret)
+ 		return ret;

@@ -254,3 +254,19 @@
 &charge_pump_65 {
 	status = "okay";
 };
+
+// 9.3 F USB 커넥터 과열 보호. 센서는 모듈이고 충전 드라이버가 10초마다 읽는다
+&mt6363_adc {
+	status = "okay";
+};
+
+&usb_conn_ntc {
+	status = "okay";
+};
+
+&mt6375 {
+	charger {
+		mediatek,connector-thermal-zone = "usb-conn-thermal";
+		mediatek,vbus-protect-gpios = <&pio 179 GPIO_ACTIVE_HIGH>;
+	};
+};

@@ -1,0 +1,79 @@
+From: buntOS contributors
+Subject: [PATCH] iio: adc: mt6359-auxadc: read the MT6363 from the right registers
+
+Reading a VIN channel of the MT6363 writes to the wrong register. Its
+description asks for PMIC_AUXADC_SDMADC_CON0, which mt6363_auxadc_regs does
+not have. The index is one past the end of the table, and in this build
+what comes back from there is 0x0005, whose low bits then change on every
+read. The input and the pull-up are never selected. That register is
+0x11c4.
+
+Some results are read from the wrong place too. The vendor names ADC38 to
+ADC40 are not an index from ADC0, and the others have their own names:
+
+                 here     vendor
+  VSYSSNS        0x1094   0x10d8  ADC_CH14
+  VCORE_TEMP     0x10d4   0x10c4  ADC38
+  VPROC_TEMP     0x10d6   0x10c6  ADC39
+  VGPU_TEMP      0x10d8   0x10c8  ADC40
+  VIN1 to VIN7   0x10e2   0x10d2  ADC_CH12
+
+The values come from the MT6363 headers and the AUXADC driver in the
+OnePlus MT6897 kernel. The MT6373 shares the table of registers and has the
+same numbers in its channels. Nothing here says what they should be for it,
+so its channels stay as they are.
+
+Seen on the device. Before this every read of VIN4 timed out, and 0x0005
+still read 0 afterwards as it does on the other PMICs, so the write did
+nothing there. After this VIN4, VIN5 and VIN6 read as 21.6 C, 23.6 C and
+22.8 C through the NTC table of the stock tree, with the fuel gauge at
+23.1 C, and VSYSSNS as 3.78 V with the battery at 3.80 V.
+
+---
+ drivers/iio/adc/mt6359-auxadc.c | 23 ++++++++++++----------
+ 1 file changed, 12 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/iio/adc/mt6359-auxadc.c b/drivers/iio/adc/mt6359-auxadc.c
+index 88b0e26309e5d30d34fb54937f2dfdbdbc34999f..f45abe03a73c52d90ed076f1e917ccad4d6c5bb0 100644
+--- a/drivers/iio/adc/mt6359-auxadc.c
++++ b/drivers/iio/adc/mt6359-auxadc.c
+@@ -353,20 +353,20 @@ static const struct iio_chan_spec mt6363_auxadc_channels[] = {
+ 	MTK_PMIC_IIO_CHAN(MT6363, cdt_v, VCDT, 2, 12, IIO_TEMP),
+ 	MTK_PMIC_IIO_CHAN(MT6363, batt_temp, BAT_TEMP, 3, 12, IIO_TEMP),
+ 	MTK_PMIC_IIO_CHAN(MT6363, chip_temp, CHIP_TEMP, 4, 12, IIO_TEMP),
+-	MTK_PMIC_IIO_CHAN(MT6363, sys_sns_v, VSYSSNS, 6, 15, IIO_VOLTAGE),
++	MTK_PMIC_IIO_CHAN(MT6363, sys_sns_v, VSYSSNS, 40, 15, IIO_VOLTAGE),
+ 	MTK_PMIC_IIO_CHAN(MT6363, tref_v, VTREF, 11, 12, IIO_VOLTAGE),
+-	MTK_PMIC_IIO_CHAN(MT6363, vcore_temp, VCORE_TEMP, 38, 12, IIO_TEMP),
+-	MTK_PMIC_IIO_CHAN(MT6363, vproc_temp, VPROC_TEMP, 39, 12, IIO_TEMP),
+-	MTK_PMIC_IIO_CHAN(MT6363, vgpu_temp, VGPU_TEMP, 40, 12, IIO_TEMP),
++	MTK_PMIC_IIO_CHAN(MT6363, vcore_temp, VCORE_TEMP, 30, 12, IIO_TEMP),
++	MTK_PMIC_IIO_CHAN(MT6363, vproc_temp, VPROC_TEMP, 31, 12, IIO_TEMP),
++	MTK_PMIC_IIO_CHAN(MT6363, vgpu_temp, VGPU_TEMP, 32, 12, IIO_TEMP),
+ 
+ 	/* For VIN, ADC12 holds the result depending on which GPIO was activated */
+-	MTK_PMIC_IIO_CHAN(MT6363, in1_v, VIN1, 45, 15, IIO_VOLTAGE),
+-	MTK_PMIC_IIO_CHAN(MT6363, in2_v, VIN2, 45, 15, IIO_VOLTAGE),
+-	MTK_PMIC_IIO_CHAN(MT6363, in3_v, VIN3, 45, 15, IIO_VOLTAGE),
+-	MTK_PMIC_IIO_CHAN(MT6363, in4_v, VIN4, 45, 15, IIO_VOLTAGE),
+-	MTK_PMIC_IIO_CHAN(MT6363, in5_v, VIN5, 45, 15, IIO_VOLTAGE),
+-	MTK_PMIC_IIO_CHAN(MT6363, in6_v, VIN6, 45, 15, IIO_VOLTAGE),
+-	MTK_PMIC_IIO_CHAN(MT6363, in7_v, VIN7, 45, 15, IIO_VOLTAGE),
++	MTK_PMIC_IIO_CHAN(MT6363, in1_v, VIN1, 37, 15, IIO_VOLTAGE),
++	MTK_PMIC_IIO_CHAN(MT6363, in2_v, VIN2, 37, 15, IIO_VOLTAGE),
++	MTK_PMIC_IIO_CHAN(MT6363, in3_v, VIN3, 37, 15, IIO_VOLTAGE),
++	MTK_PMIC_IIO_CHAN(MT6363, in4_v, VIN4, 37, 15, IIO_VOLTAGE),
++	MTK_PMIC_IIO_CHAN(MT6363, in5_v, VIN5, 37, 15, IIO_VOLTAGE),
++	MTK_PMIC_IIO_CHAN(MT6363, in6_v, VIN6, 37, 15, IIO_VOLTAGE),
++	MTK_PMIC_IIO_CHAN(MT6363, in7_v, VIN7, 37, 15, IIO_VOLTAGE),
+ };
+ 
+ static const struct mtk_pmic_auxadc_chan mt6363_auxadc_ch_desc[] = {
+@@ -410,6 +410,7 @@ static const u16 mt6363_auxadc_regs[] = {
+ 	[PMIC_AUXADC_ADC0]	= 0x1088,
+ 	[PMIC_AUXADC_IMP0]	= 0x1208,
+ 	[PMIC_AUXADC_IMP1]	= 0x1209,
++	[PMIC_AUXADC_SDMADC_CON0] = 0x11c4,
+ };
+ 
+ static const struct iio_chan_spec mt6373_auxadc_channels[] = {

@@ -140,6 +140,13 @@
 0095-mfd-mt6375-add-the-interrupts-and-the-TCPC.patch
 0096-usb-typec-tcpci_mt6375-add-MediaTek-MT6375.patch
 0097-power-supply-mt6375-charger-use-the-interrupts.patch
+# 0150: MT6363 AUXADC가 VIN을 읽을 때 엉뚱한 레지스터에 쓰고 결과도 다른 곳에서 읽는다
+0150-iio-adc-mt6359-auxadc-read-the-MT6363-from-the-right-registers.patch
+# 0098·0099: USB 커넥터 과열 보호(순정의 usb_temp_protect). 0098은 바인딩이다
+0098-dt-bindings-power-supply-mt6375-charger-add-the-connector-protection.patch
+0099-power-supply-mt6375-charger-protect-the-USB-connector.patch
+# 0151: PD 없이 쓰는 동안 충전기가 VBUS만 내렸다 올리면 TCPM이 분리됨에 머문다
+0151-usb-typec-tcpci_mt6375-look-at-the-pins-again-when-VBUS-returns.patch
 # 0100~0104: MT6897 화면(dispsys, ovlsys, mminfra), MDP, 코덱(vdec, venc)의 클럭 게이트. 0100은 바인딩과 번호다. 0101은 상태를 읽지 않는 게이트 ops와 벤더 순서의 투표, HW voter 한도 5ms다: 이 블록은 전원 도메인이
 # 켜져 있을 때만 답하는데, VEN·MDP 도메인이 자기 블록의 게이트를 써서 런타임 PM을 쓸 수 없다(MT8196과 다른 점). 0102~0104가 표다(OnePlus 공식 MT6897 커널과 순정 모듈에 맞댔다).
 # 0102의 화면 블록은 mtk-mmsys에 MT6897 데이터가 들어오면 그 자식으로 옮긴다. 모두 꺼 둔 노드이고, 기기에서 확인한 뒤 낸다
