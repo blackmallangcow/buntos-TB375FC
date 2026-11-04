@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.44
+# buntOS TB375FC 포팅 최종 설계안 v1.45
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -45,6 +45,7 @@
 - v1.42(2026-11-04): 5 GHz AP(5745 MHz, 80 MHz, WPA2-PSK) 연결도 인터넷까지 된다. 짧은 시험이라 속도는 재지 않았다. 결과는 [Wi-Fi 문서](wifi-soc7_0.md) 7절이다.
 - v1.43(2026-11-04): Wi-Fi 칩 리셋이 첫 시도에 돌아오고 리셋 뒤 스캔이 된다(패치 0066). 연결 중 리셋은 못 봤다. 결과는 [Wi-Fi 문서](wifi-soc7_0.md) 7절이다.
 - v1.44(2026-11-04): USB 커넥터 과열 보호를 넣었다(패치 0098·0099). 업스트림 AUXADC가 MT6363의 VIN을 읽지 못해 고쳤고(패치 0150), 벽 충전기가 VBUS를 내렸다 올리면 입력이 500 mA에 머물던 것을 고쳤다(패치 0151). 벽 충전기 2A 10분에 커넥터가 그대로다. 차단 시험의 이상은 구형 케이블 문제로 보고 종결했고 3단계에서 다시 본다. 결과는 [체크리스트](bringup-checklist.md) 9.3절 F다.
+- v1.45(2026-11-04): 연결 중 칩 리셋 뒤 약 9초에 다시 붙는다(패치 0067). 결과는 [Wi-Fi 문서](wifi-soc7_0.md) 7절이다.
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -102,7 +103,7 @@
 | D2 | **업스트림 꼴로 짠다.** `mt6897.dtsi` + `mt6897-lenovo-tb375fc.dts`. 핀은 업스트림 `pinctrl-mt6878`을, clk·pmdomain·SPMI는 MT8196을 틀로 삼는다. MT6897 데이터는 OEM 공식 소스(OnePlus·OPPO·Motorola, GPL-2.0)에서 가져온다 | 제출할 수 있어야 유지할 수 있다. 커뮤니티 포트는 클럭·핀 드라이버 없이 fixed-clock과 부트로더 상태에 기대고, 장치 트리를 커널에 넣어 LK가 준 트리를 바꿔 끼우는 구조다. 그래서 사실 확인용과 협력 상대로 쓰고, 기반으로는 쓰지 않는다([분석](community-port.md)) |
 | D3 | **처음에는 LK가 직접 띄운다.** boot v4 + vendor_boot v4(DT 표) + 빈 dtbo, 비운 슬롯 `_b`에 구워서(처음에는 `fastboot boot`로 RAM에서 띄우려 했으나 LK에 `boot` 명령이 없었다). 2b부터는 U-Boot 체인로드로 EFI(systemd-boot, UKI) 부팅을 검토한다 | 안드로이드 슬롯을 건드리지 않는 첫 부팅. EFI가 되면 원본 buntOS(데스크톱 라인)의 arm64 이미지 꼴과 같아진다. MT6878-mainline도 U-Boot를 권한다 |
 | D4 | **첫 데스크톱은 simple-framebuffer다.** LK가 dual-DSI + DSC로 켜 둔 화면을 그대로 받는다(`clk_ignore_unused`, `pd_ignore_unused`, `regulator_ignore_unused`). 화면 파이프라인(mediatek-drm의 MT6897 데이터, dual-DSI, DSC)은 7.2.12 위의 작은 패치(0120~0139)로 만들어 두었고, 켜는 것은 뒤에 한다 | 화면이 가장 큰 막힘이다. 그 사이에 나머지(저장장치, USB, 터치, Wi-Fi, GPU)를 진행할 수 있다. `pd_ignore_unused`는 늦은 정리(`genpd_power_off_unused`)만 막고 sync_state는 막지 못한다. 화면 도메인을 지키는 것은 표의 기본 꺼짐과, 장치 트리에 화면 도메인을 적지 않는 것이다. MM_INFRA 아래 소비자(ISP, 카메라, VDE, VEN, MDP, DP)를 처음 붙이기 전에는 `simple-framebuffer`가 `power-domains`로 화면 도메인을 잡아야 한다. genpd는 MM_INFRA를 마지막 사용자와 함께 끈다.. 화면·코덱 클럭 노드(패치 0100~0104)는 도메인의 소비자가 아니다. `power-domains`가 없고 probe가 블록과 도메인에 닿지 않으므로, 켜도 MM_INFRA 규칙에 걸리지 않는다. 그 게이트의 소비자가 규칙에 걸린다. `clk_ignore_unused`를 빼면 이 게이트는 그대로지만 topckgen 먹스가 닫힌다. `simple-framebuffer`가 화면 도메인을 잡으면 그 기본 클럭(`mminfra`, `disp0`, `disp1`, `ovl0`, `ovl1`)은 genpd가 잡아 남는다. |
-| D5 | **Wi-Fi는 mt76에 "MT7921의 SoC 변형"을 더한다.** 펌웨어는 LK가 실은 것을 쓰고, conninfra 전원은 TF-A SIP 호출로 켜고, nvdata 보정값은 NVRAM 명령으로 넘긴다. 그 전에는 USB 동글로 우회한다(USB 호스트는 MT6375 OTG가 먼저다). 코드는 패치 0055~0066이다. DMA는 맵 없는 LK 칸 안에서 자기 `dma_map_ops`로 복사한다(업스트림 꼴은 아니다, 6절) | 칩 ID와 구조가 MT7921과 같고, 명령 머리와 레거시 명령 번호도 같다. SoC Wi-Fi 선례(mt7915/soc.c)가 있다([설계](wifi-soc7_0.md)) |
+| D5 | **Wi-Fi는 mt76에 "MT7921의 SoC 변형"을 더한다.** 펌웨어는 LK가 실은 것을 쓰고, conninfra 전원은 TF-A SIP 호출로 켜고, nvdata 보정값은 NVRAM 명령으로 넘긴다. 그 전에는 USB 동글로 우회한다(USB 호스트는 MT6375 OTG가 먼저다). 코드는 패치 0055~0067이다. DMA는 맵 없는 LK 칸 안에서 자기 `dma_map_ops`로 복사한다(업스트림 꼴은 아니다, 6절) | 칩 ID와 구조가 MT7921과 같고, 명령 머리와 레거시 명령 번호도 같다. SoC Wi-Fi 선례(mt7915/soc.c)가 있다([설계](wifi-soc7_0.md)) |
 | D6 | **펌웨어는 설치할 때 기기에서 뽑는다.** Mali CSF만 linux-firmware에서 온다. GPUEB와 Wi-Fi·BT는 LK가 올리므로, 그 파티션(GPUEB, `connsys_wifi`, `connsys_bt`)을 지킨다 | 재배포할 수 있는지 모른다(buntOS ADR-012). 안드로이드 슬롯 하나를 남긴다 |
 | D7 | **GPU는 panthor + MT6897 GPUEB 변형이다.** 이미지에 Mesa 26.3 이상이 필요하다 | panthor·펌웨어·Mesa가 이미 G615를 안다. GPUEB는 LK가 띄우고 멈추지 않으며 전원·클럭·전압을 모두 맡는다. 커널은 메일박스로 켜고 끄기와 OPP만 요청한다. MFG1~14 도메인과 MFG PLL은 커널이 건드리지 않는다 |
 | D8 | **이 기기에서는 가상화를 포기한다.** 커널이 EL1로 시작해 KVM을 쓸 수 없다(2a 판정, 2026-11-03). 일반 개발 환경에는 EL1로 충분해 이 기기로 그대로 진행한다(사용자 결정, 2026-11-04). 다른 태블릿을 매입하면 그때 사용자가 말해서 KVM을 다시 시도한다. gzvm(미병합)은 나중에 검토한다. TEE를 고쳐 EL2를 빼앗는 실험(`mtk-mod-tee-nogz`)은 쓰지 않는다 | 서명 우회가 필요하고 벽돌 위험이 크다 |
@@ -408,7 +409,7 @@ buntos-TB375FC/                 태블릿 라인의 첫 포크 (원격 buntos = 
 | Mesa 26.3 의존 | GPU 가속이 늦어진다 | 26.1은 G615를 모르고 26.3.0-rc3은 기기에서 맞게 그린다(2026-11-04). Debian forky는 26.1.6, sid는 26.2.6이다. 이미지의 Mesa 판 확인, 그 전에는 CPU 렌더링(buntOS는 이미 llvmpipe에서 돈다) |
 | CPU 유휴 상태와 절전 | 대기 전력, 서스펜드 깊이 | PSCI CPU_SUSPEND가 cpu-off, cluster-off를 거절한다(2026-11-04). 벤더 LPM 초기화와 SPM을 조사한다 |
 | Wi-Fi 펌웨어가 uni cmd를 받지 않음 | 2d 지연 | **판정: 받지 않는다(2026-11-04).** 레거시 명령 길(패치 0061~0065)로 2.4 GHz와 5 GHz 연결이 인터넷까지 된다 |
-| Wi-Fi 칩 리셋이 실패함 | 답을 기다리는 명령이 시간 초과되면 모듈을 다시 올릴 때까지 Wi-Fi가 죽는다. 패닉은 없다 | **판정: 고쳤다(2026-11-04, 패치 0066).** 첫 시도에 돌아오고 리셋 뒤 스캔이 된다. 연결 중 리셋 뒤에는 다시 붙지 않아 조사 중이다. 부팅 블랙리스트(`modprobe.blacklist=mt7921soc`)를 풀려면 자동 연결 설정과 `regulatory.db` 거부가 남았다 |
+| Wi-Fi 칩 리셋이 실패함 | 답을 기다리는 명령이 시간 초과되면 모듈을 다시 올릴 때까지 Wi-Fi가 죽는다. 패닉은 없다 | **판정: 고쳤다(2026-11-04, 패치 0066).** 첫 시도에 돌아오고 리셋 뒤 스캔이 된다. 연결 중 리셋 뒤에는 약 9초에 다시 붙는다(패치 0067). 부팅 블랙리스트(`modprobe.blacklist=mt7921soc`)를 풀려면 자동 연결 설정과 `regulatory.db` 거부가 남았다 |
 | Wi-Fi 펌웨어가 벤더 표에 없는 명령(EXT 0x3e, 0x46)에 답하지 않음 | wlan0이 생기지 않거나 올라오지 않는다. 버스는 멈추지 않는다 | **판정: 막히지 않는다(2026-11-04).** EXT 0x46·0x4e·0x08은 상태 0, 0x3e·0x05는 상태 0xfe로 답한다 |
 | LK가 mainline 트리의 connsys 노드에 `emi-addr`·`memory-region`을 써 주지 않음 | Wi-Fi·BT가 펌웨어를 찾지 못한다 | LK(`platform_load_connsys`)는 compatible이 아니라 경로 `/soc/consys`→`/consys`, `/soc/gps`→`/gps`, `/soc/wifi`→`/wifi`, `/soc/connscp`→`/connscp`로 찾는다(유닛 주소 무관, status 안 봄). 하나라도 없거나 크기가 0이면 -2로 돌아오고 아무것도 싣지 않는다. 복구(b_mode 2)와 전원 끈 충전(8)에서는 부르지 않는다. 그래서 mainline 트리가 이 이름과 크기를 그대로 두면 값을 써 준다고 본다(역어셈블). 실제 기기에서 확인한다. 2d 전까지는 `gps`·`connscp`를 트리에서 빼 두어 LK가 싣지 않게 한다 |
 | Bluetooth 첫 보정이 Wi-Fi에 기댐 | 벤더 주석: pre-cal 없이 BT를 먼저 켜면 보정이 실패하기 쉽다 | 2d에서 Wi-Fi 없이와 함께 켠 경우를 견준다. 차이가 크면 Wi-Fi 뒤에 켜거나 보정값 복원을 옮긴다 |
