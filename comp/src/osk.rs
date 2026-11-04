@@ -89,9 +89,18 @@ const TAP_SLOP: f64 = 10.0;
 /// 앱이 글 입력을 켜는 것을 뗀 뒤 얼마까지 그 누르기의 결과로 볼지. 앱은 바쁘면 늦는다: 메모리가 빠듯한 시험 VM에서 GTK가
 /// 3초, Firefox가 4초 걸렸다. 뗀 뒤 곧 켜는 것만으로 보지 않으므로(누른 칸의 글 커서를 본다) 넉넉히 둔다
 const TAP_WINDOW: Duration = Duration::from_secs(10);
-/// 칸이 켜질 때 글 커서가 누른 자리의 위아래로 이만큼(논리 픽셀) 안에 있으면 그 칸을 누른 것으로 본다. 글 커서는 줄 하나의
-/// 높이이고 칸은 더 크다. 웹의 댓글 칸처럼 여러 줄 칸의 빈 곳을 눌러도 글 커서는 윗줄에 있다
-const CURSOR_REACH: i32 = 100;
+/// 글 칸의 위아래 여백 (논리 픽셀). 글 커서는 줄 하나의 높이이고 칸은 더 크다. 이보다 위는 칸이 아니다: Firefox의 탭 줄과 창
+/// 닫기 단추는 글 커서 위 32px다. 윗줄을 누르면 글 커서가 그리로 옮겨 오므로 더 멀 일이 없다
+const CURSOR_MARGIN: i32 = 20;
+/// 꺼진 칸을 눌러 켰을 때 글 커서 아래로 이만큼 안이면 그 칸을 누른 것으로 본다. 웹의 댓글 칸처럼 여러 줄 칸의 빈 곳을 눌러도
+/// 글 커서는 윗줄에 있다
+const CURSOR_BELOW: i32 = 100;
+/// 켜진 칸을 다시 켰을 때 글 커서의 왼쪽으로 이만큼 안이면 그 칸을 누른 것으로 본다. 글이 없는 칸의 글 커서는 칸의 왼쪽 끝이다.
+/// Firefox의 뒤로·다시 읽기 단추는 주소 칸의 글 커서 왼쪽 150px 넘게 떨어져 있다
+const CURSOR_LEFT: i32 = 44;
+/// 켜진 칸을 다시 켰을 때 글 커서의 오른쪽으로 이만큼 안이면 그 칸을 누른 것으로 본다. 1280px 화면에서 Firefox의 주소 칸은 글
+/// 커서 오른쪽 794px까지이고, 그 옆의 단추(메뉴 단추 993px)는 칸이 아니다
+const CURSOR_RIGHT: i32 = 800;
 
 /// 화면 키보드의 키 하나. 글자는 지금 키 배열(us)에 있는 것만 친다. 한글 자모는 셸이 2벌식 자리의 라틴 글자로
 /// 보내고(ㅂ은 q, ㅃ은 Q) 입력기가 조합한다
@@ -184,20 +193,40 @@ struct Pressing {
     start: Point<f64, Logical>,
     /// 뗀 시각. 없으면 아직 누르는 중이다
     released: Option<Instant>,
-    /// 누른 표면이 글 입력을 켰다. 글 커서가 누른 자리 근처에 나오면 그 칸을 누른 것이다
-    enabled: bool,
+    /// 이 누르기로 키보드 포커스가 그 앱으로 왔다. 포커스를 받은 앱은 누른 곳과 상관없이 전에 포커스를 가진 칸의 글 입력을
+    /// 켜므로, 누르는 동안의 첫 enable은 세지 않는다
+    focus_arrived: bool,
+    /// 눌린 앱이 글 입력을 켜지 않은 채 글 상태를 보냈다. GTK의 글 칸은 눌리면 입력기를 초기화해 이렇게 보낸다
+    reset: bool,
+    /// 글 입력을 켰다. 글 커서가 누른 자리에 나오는지 본다
+    enabled: Enabled,
     /// 글 칸을 누른 것으로 알아봤다. 뗀 뒤에 알린다
     on_field: bool,
+}
+
+/// 앱이 글 입력을 어떻게 켰는지
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Enabled {
+    /// 켜지 않았다
+    No,
+    /// 켜진 글 입력을 초기화 없이 다시 켰다. 창의 어디를 눌러도 이렇게 켜는 앱이 있어 글 커서 바로 옆만 칸이다
+    Again,
+    /// 누른 표면이 꺼진 글 입력을 켰다. 켠 칸이므로 글 커서가 어느 줄에 있든 그 칸의 빈 곳일 수 있다
+    TurnedOn,
 }
 
 /// 사람이 글 칸을 눌렀는지 안다. 앱은 칸의 자리를 알리지 않으므로(text-input-v3는 글 커서 자리뿐이다) 누르기와 앱의 글
 /// 입력 요청을 함께 본다. 끌기와 스크롤은 누르기가 아니다. 아래가 누른 칸이다.
 ///
-/// - 켜진 글 입력을 다시 켠다: GTK는 칸을 눌렀다 떼면 다시 켠다(gtk_text_click_gesture_released. 이 판의 text-input-v3에는
-///   show_input_panel이 없어 gtk_im_context_activate_osk가 enable을 보낸다). 칸이 저절로 포커스를 받을 때는 한 번만 켠다.
-/// - 누른 표면이 꺼진 글 입력을 켜고 글 커서가 누른 자리 근처에 나온다: Firefox는 뗀 뒤에 칸에 포커스를 주고 다시 켜지
-///   않는다. 포커스를 받아 스스로 켠 칸(누른 창이 전에 포커스를 가진 칸, 누른 뒤 뜬 페이지의 자동 포커스 칸)의 글 커서는
-///   보통 누른 자리에 없다. 새 창이나 팝업의 칸은 누른 표면이 아니다.
+/// - 입력기를 초기화한 뒤 켜진 글 입력을 다시 켠다: GTK의 글 칸은 눌리면 입력기를 초기화해 enable 없는 commit을 보내고, 떼면
+///   다시 켠다(gtk_text_click_gesture_released. 이 판의 text-input-v3에는 show_input_panel이 없어 gtk_im_context_activate_osk가
+///   enable을 보낸다). 글 커서가 먼 곳이어도(문서의 빈 곳) 칸을 누른 것이다.
+/// - 글 입력을 켜고 글 커서가 누른 자리 근처에 있다:
+///   - Firefox는 뗀 뒤에 칸에 포커스를 주며 켠다. 포커스를 받아 스스로 켠 칸(누른 뒤 뜬 페이지의 자동 포커스 칸)의 글 커서는
+///     보통 누른 자리에 없다. 새 창이나 팝업의 칸은 누른 표면이 아니다.
+///   - GTK3 앱(Firefox)은 칸이 켜진 동안 창의 어디를 눌러도 다시 켠다(입력기 모듈의 released_cb). 초기화가 없으므로 글
+///     커서로 가린다. 그래서 칸 위의 창 닫기 단추와 탭 줄, 칸 옆의 단추, 먼 곳은 칸을 누른 것이 아니다. 글 커서가 나중에 그
+///     자리로 옮겨 오면(여러 줄 칸의 다른 줄) 칸을 누른 것이다.
 /// - 터미널(foot): 창 전체가 글 칸이고 다시 켜지 않는다. 글 입력이 켜진 창을 누르면 칸을 누른 것이다.
 ///
 /// 한 누르기에 여러 번 알려도 된다. Firefox는 다른 칸을 누르면 먼저 다시 켜고, 칸을 옮기며 끈 뒤 또 켠다(숨으려던 키보드를
@@ -205,13 +234,15 @@ struct Pressing {
 #[derive(Debug, Default)]
 struct TapWatch {
     press: Option<Pressing>,
+    /// 이번 commit 주기에 글 입력을 켰다
+    enable_in_cycle: bool,
     /// 사람이 칸을 눌렀다. 다음 알림에서 알린다
     tapped: bool,
 }
 
 impl TapWatch {
     /// 누르기가 시작됐다. 이미 누르는 중이면(둘째 손가락, 다른 단추) 여러 손가락의 제스처이므로 그 누르기를 그만둔다
-    fn press(&mut self, start: Point<f64, Logical>) {
+    fn press(&mut self, start: Point<f64, Logical>, focus_arrived: bool) {
         self.press = if self
             .press
             .as_ref()
@@ -222,7 +253,9 @@ impl TapWatch {
             Some(Pressing {
                 start,
                 released: None,
-                enabled: false,
+                focus_arrived,
+                reset: false,
+                enabled: Enabled::No,
                 on_field: false,
             })
         };
@@ -248,29 +281,57 @@ impl TapWatch {
         self.settle(now);
     }
 
-    /// 포커스를 가진 앱이 켜진 글 입력을 다시 켰다. 누른 표면의 앱이다
+    /// 눌린 앱이 켜진 글 입력을 다시 켰다
     fn enabled_again(&mut self, now: Instant) {
         if let Some(press) = self.press.as_mut() {
-            press.on_field = true;
-            self.settle(now);
+            if press.reset {
+                press.on_field = true;
+                self.settle(now);
+            } else if press.enabled == Enabled::No {
+                press.enabled = Enabled::Again;
+            }
         }
     }
 
     /// 누른 표면이 꺼진 글 입력을 켰다
     fn enabled(&mut self) {
         if let Some(press) = self.press.as_mut() {
-            press.enabled = true;
+            if press.released.is_none() && std::mem::take(&mut press.focus_arrived) {
+                return;
+            }
+            press.enabled = Enabled::TurnedOn;
         }
     }
 
-    /// 앱이 글 커서의 자리를 알렸다 (전역 y, 아래쪽 끝은 뺀다)
-    fn cursor(&mut self, top: i32, bottom: i32, now: Instant) {
-        if let Some(press) = self.press.as_mut().filter(|press| press.enabled) {
-            let y = press.start.y;
-            press.on_field |=
-                f64::from(top - CURSOR_REACH) <= y && y < f64::from(bottom + CURSOR_REACH);
-            self.settle(now);
+    /// 앱이 글 상태를 보냈다(commit). `pressed_app`이면 눌린 앱이다
+    fn committed(&mut self, pressed_app: bool) {
+        let enabled = std::mem::take(&mut self.enable_in_cycle);
+        if let Some(press) = self.press.as_mut() {
+            press.reset |= pressed_app && !enabled;
         }
+    }
+
+    /// 앱이 글 커서의 자리를 알렸다 (전역 좌표)
+    fn cursor(&mut self, rect: Rectangle<i32, Logical>, now: Instant) {
+        let Some(press) = self.press.as_mut() else {
+            return;
+        };
+        let (top, bottom) = (rect.loc.y, rect.loc.y + rect.size.h);
+        let within =
+            |start: f64, from: i32, to: i32| f64::from(from) <= start && start < f64::from(to);
+        press.on_field |= match press.enabled {
+            Enabled::No => false,
+            Enabled::Again => {
+                within(press.start.y, top - CURSOR_MARGIN, bottom + CURSOR_MARGIN)
+                    && within(
+                        press.start.x,
+                        rect.loc.x - CURSOR_LEFT,
+                        rect.loc.x + CURSOR_RIGHT,
+                    )
+            }
+            Enabled::TurnedOn => within(press.start.y, top - CURSOR_MARGIN, bottom + CURSOR_BELOW),
+        };
+        self.settle(now);
     }
 
     /// 칸을 누른 것으로 알아봤고 뗐으면 알린다. 뗀 지 오래됐으면 앱이 스스로 한 일이다
@@ -489,9 +550,21 @@ impl BuntState {
         }
     }
 
-    /// 손가락이나 단추가 `surface`의 `start`(전역 좌표)를 눌렀다
-    pub(crate) fn note_press(&mut self, start: Point<f64, Logical>, surface: Option<&WlSurface>) {
-        self.osk.tap.press(start);
+    /// 지금 키보드 포커스를 가진 표면
+    pub(crate) fn keyboard_focus(&self) -> Option<WlSurface> {
+        self.seat.get_keyboard()?.current_focus()
+    }
+
+    /// 손가락이나 단추가 `surface`의 `start`(전역 좌표)를 눌렀다. `focus_before`는 누르기 전에 키보드 포커스를 가졌던
+    /// 표면이다
+    pub(crate) fn note_press(
+        &mut self,
+        start: Point<f64, Logical>,
+        surface: Option<&WlSurface>,
+        focus_before: Option<&WlSurface>,
+    ) {
+        let focus_arrived = self.keyboard_focus().as_ref() != focus_before;
+        self.osk.tap.press(start, focus_arrived);
         self.osk.pressed = surface.cloned();
     }
 
@@ -525,6 +598,7 @@ impl BuntState {
 
     /// 포커스를 가진 앱이 글 입력을 켜는 요청(enable)을 보냈다 (ime.rs)
     pub(crate) fn enable_requested(&mut self, text_input: &ZwpTextInputV3) {
+        self.osk.tap.enable_in_cycle = true;
         let handle = self.seat.text_input();
         let mut again = false;
         handle.with_active_text_input(|active, _| again = active == text_input);
@@ -532,7 +606,7 @@ impl BuntState {
             return;
         };
         if again {
-            // 키보드 포커스가 앱의 다른 표면에 있어도(팝업의 칸) 다시 켜는 것은 그 칸을 누른 것이다
+            // 키보드 포커스가 앱의 다른 표면에 있어도(팝업의 칸) 다시 켜는 것은 그 칸을 누른 것일 수 있다
             if pressed.id().same_client_as(&text_input.id()) {
                 self.osk.tap.enabled_again(Instant::now());
             }
@@ -544,8 +618,18 @@ impl BuntState {
         }
     }
 
-    /// 포커스를 가진 앱이 글 커서의 자리를 알렸다 (`y`는 그 표면 안, ime.rs). GTK는 칸을 그리기 전에 높이 0으로 먼저 알린다
-    pub(crate) fn cursor_rectangle_requested(&mut self, y: i32, height: i32) {
+    /// 포커스를 가진 앱이 글 상태를 보냈다(commit, ime.rs)
+    pub(crate) fn commit_requested(&mut self, text_input: &ZwpTextInputV3) {
+        let pressed_app = self
+            .osk
+            .pressed
+            .as_ref()
+            .is_some_and(|pressed| pressed.id().same_client_as(&text_input.id()));
+        self.osk.tap.committed(pressed_app);
+    }
+
+    /// 포커스를 가진 앱이 글 커서의 자리를 알렸다 (그 표면 안, ime.rs). GTK는 칸을 그리기 전에 높이 0으로 먼저 알린다
+    pub(crate) fn cursor_rectangle_requested(&mut self, x: i32, y: i32, width: i32, height: i32) {
         if height <= 0 {
             return;
         }
@@ -555,8 +639,8 @@ impl BuntState {
             .focus()
             .and_then(|focus| self.surface_origin(&focus));
         if let Some((origin, _)) = origin {
-            let top = origin.y + y;
-            self.osk.tap.cursor(top, top + height, Instant::now());
+            let rect = Rectangle::new((origin.x + x, origin.y + y).into(), (width, height).into());
+            self.osk.tap.cursor(rect, Instant::now());
         }
     }
 
@@ -803,7 +887,7 @@ mod tests {
         assert!(!may_use(None));
     }
 
-    /// 누르기와 글 입력 요청을 차례로 넣고 칸을 눌렀다고 본 수를 돌려준다
+    /// 누르기와 글 입력 요청을 차례로 넣고 칸을 눌렀다고 봤는지 돌려준다
     struct Tap {
         watch: TapWatch,
         now: Instant,
@@ -819,7 +903,13 @@ mod tests {
 
         /// y 300을 누른다
         fn press(&mut self) -> &mut Self {
-            self.watch.press(Point::from((100.0, 300.0)));
+            self.watch.press(Point::from((100.0, 300.0)), false);
+            self
+        }
+
+        /// y 300을 눌러 키보드 포커스를 그 앱으로 가져온다
+        fn press_bringing_focus(&mut self) -> &mut Self {
+            self.watch.press(Point::from((100.0, 300.0)), true);
             self
         }
 
@@ -834,19 +924,33 @@ mod tests {
             self
         }
 
+        /// 꺼진 글 입력을 켠다
         fn enable(&mut self) -> &mut Self {
+            self.watch.enable_in_cycle = true;
             self.watch.enabled();
             self
         }
 
+        /// 켜진 글 입력을 다시 켠다
         fn enable_again(&mut self) -> &mut Self {
+            self.watch.enable_in_cycle = true;
             self.watch.enabled_again(self.now);
             self
         }
 
-        /// 글 커서가 그 y에 나온다
+        /// 글 커서가 그 y에 나온다 (x는 누른 자리와 같다)
         fn cursor(&mut self, y: i32) -> &mut Self {
-            self.watch.cursor(y, y + 20, self.now);
+            self.cursor_at(100, y)
+        }
+
+        fn cursor_at(&mut self, x: i32, y: i32) -> &mut Self {
+            self.watch
+                .cursor(Rectangle::new((x, y).into(), (0, 20).into()), self.now);
+            self
+        }
+
+        fn commit(&mut self) -> &mut Self {
+            self.watch.committed(true);
             self
         }
 
@@ -855,30 +959,35 @@ mod tests {
         }
     }
 
-    /// GTK: 이미 포커스를 가진 칸을 누르면 뗀 뒤에 글 입력을 다시 켠다. 글 커서가 먼 곳이어도(문서의 빈 곳) 칸을 누른 것이다
+    /// GTK: 칸을 누르면 입력기를 초기화하고(enable 없는 commit) 뗀 뒤에 다시 켠다. 글 커서가 먼 곳이어도(문서의 빈 곳) 칸을
+    /// 누른 것이다
     #[test]
-    fn enabling_again_after_a_tap_is_a_tapped_field() {
+    fn enabling_again_after_a_reset_is_a_tapped_field() {
         let mut tap = Tap::new();
-        assert!(!tap.press().release().tapped());
+        assert!(!tap.press().commit().release().tapped());
         // 바쁜 앱은 한참 뒤에 켠다
         assert!(tap.wait(Duration::from_secs(3)).enable_again().tapped());
+        tap.commit();
+        // 앱이 바쁘면 손가락을 뗀 뒤에야 초기화와 다시 켜기를 차례로 보낸다
+        assert!(tap.press().release().commit().enable_again().tapped());
         // 너무 늦으면 누른 것과 상관없다
         assert!(!tap.wait(TAP_WINDOW * 2).enable_again().tapped());
     }
 
-    /// GTK: 포커스가 없는 칸을 누르면 누르는 동안 켜고, 뗀 뒤에 다시 켠다
+    /// GTK: 포커스가 없는 칸을 누르면 누르는 동안 켜고 초기화한 뒤, 뗀 뒤에 다시 켠다. 뗄 때까지는 끌기일 수 있다
     #[test]
-    fn enabling_during_a_tap_counts_when_released() {
+    fn a_field_tapped_without_focus_counts_when_released() {
         let mut tap = Tap::new();
-        assert!(!tap.press().enable().cursor(290).tapped());
+        tap.press().enable().commit().cursor(290).commit();
+        assert!(!tap.tapped());
         assert!(tap.release().tapped());
         assert!(tap.enable_again().tapped());
-        // 뗄 때까지는 끌기일 수 있다: 칸에서 시작한 스크롤은 누른 것이 아니다
+        // 칸에서 시작한 스크롤은 누른 것이 아니다
         tap.press().enable().cursor(290);
         tap.watch
             .release(Point::from((100.0, 360.0)), false, tap.now);
         assert!(!tap.tapped());
-        assert!(!tap.enable_again().tapped());
+        assert!(!tap.commit().enable_again().tapped());
     }
 
     /// Firefox: 뗀 뒤에 칸에 포커스를 주며 켠다. 바쁘면 글 커서를 나중에 알린다
@@ -893,16 +1002,18 @@ mod tests {
             tap.press()
                 .release()
                 .enable()
-                .cursor(300 - CURSOR_REACH)
+                .cursor(300 + CURSOR_MARGIN)
                 .tapped()
         );
         assert!(
             tap.press()
                 .release()
                 .enable()
-                .cursor(300 + CURSOR_REACH - 20)
+                .cursor(300 - CURSOR_BELOW - 19)
                 .tapped()
         );
+        // 글이 가운데에 있는 칸은 글 커서가 옆으로 멀어도 그 칸이다
+        assert!(tap.press().release().enable().cursor_at(900, 290).tapped());
         // 칸을 옮기며 끈 뒤 또 켜도 그 누르기의 결과다
         assert!(
             tap.wait(Duration::from_secs(1))
@@ -915,42 +1026,112 @@ mod tests {
         assert!(!tap.enable().cursor(290).tapped());
     }
 
-    /// 포커스를 받아 스스로 켠 칸: 누른 창이 전에 포커스를 가진 칸, 누른 뒤 뜬 페이지의 자동 포커스 칸
+    /// 누른 뒤 뜬 페이지의 자동 포커스 칸처럼 스스로 켠 칸의 글 커서는 누른 자리에 없다. 칸 위의 단추(탭 줄)를 누른 뒤 켠 칸도
+    /// 그렇다
     #[test]
     fn a_cursor_appearing_elsewhere_is_not_a_tapped_field() {
         let mut tap = Tap::new();
-        assert!(!tap.press().enable().cursor(600).release().tapped());
         assert!(!tap.press().release().enable().cursor(600).tapped());
         assert!(
             !tap.press()
                 .release()
                 .enable()
-                .cursor(300 - CURSOR_REACH - 21)
+                .cursor(300 + CURSOR_MARGIN + 1)
                 .tapped()
         );
         assert!(
             !tap.press()
                 .release()
                 .enable()
-                .cursor(300 + CURSOR_REACH + 1)
+                .cursor(300 - CURSOR_BELOW - 20)
                 .tapped()
         );
-        // 그 칸을 눌렀으면 GTK가 뗀 뒤에 다시 켠다
+    }
+
+    /// GTK3(Firefox)는 칸이 켜진 동안 창의 어디를 눌러도 초기화 없이 다시 켠다. 글 커서로 가린다
+    #[test]
+    fn enabling_again_without_a_reset_needs_the_cursor_nearby() {
+        let mut tap = Tap::new();
+        // 칸 위의 창 닫기 단추와 탭 줄 (Firefox에서 글 커서 위 32px)
+        assert!(!tap.press().release().enable_again().cursor(332).tapped());
+        // 칸 아래: 칸을 켤 때와 달리 줄 바로 옆만 칸이다 (빈 곳이면 켠 앱이 이미 초기화했다)
         assert!(
-            tap.press()
-                .enable()
-                .cursor(600)
+            !tap.press()
                 .release()
                 .enable_again()
+                .cursor(300 - CURSOR_MARGIN - 20)
                 .tapped()
         );
+        assert!(!tap.press().release().enable_again().cursor(100).tapped());
+        // 같은 줄의 옆 단추: 왼쪽의 다시 읽기, 오른쪽의 메뉴 단추
+        assert!(
+            !tap.press()
+                .release()
+                .enable_again()
+                .cursor_at(100 + CURSOR_LEFT + 1, 290)
+                .tapped()
+        );
+        assert!(
+            !tap.press()
+                .release()
+                .enable_again()
+                .cursor_at(100 - CURSOR_RIGHT, 290)
+                .tapped()
+        );
+        // 그 칸을 눌렀다: 글 커서 줄이고, 글 커서 오른쪽의 빈 곳이어도 그 칸이다
+        assert!(tap.press().release().enable_again().cursor(290).tapped());
+        assert!(
+            tap.press()
+                .release()
+                .enable_again()
+                .cursor_at(100 - CURSOR_RIGHT + 1, 290)
+                .tapped()
+        );
+        // 여러 줄 칸의 다른 줄을 눌렀다: 다시 켠 뒤에 글 커서가 그리로 옮겨 온다
+        tap.press().release().enable_again().cursor(600);
+        assert!(!tap.tapped());
+        assert!(tap.wait(Duration::from_secs(1)).cursor(295).tapped());
+    }
+
+    /// 글 입력을 켜는 commit은 초기화가 아니다. 다른 앱의 commit도 아니다
+    #[test]
+    fn only_a_commit_without_enabling_from_the_pressed_app_is_a_reset() {
+        let mut tap = Tap::new();
+        tap.press().release().enable().commit().enable_again();
+        assert!(!tap.cursor(600).tapped());
+        tap.press().release();
+        tap.watch.committed(false);
+        assert!(!tap.enable_again().cursor(600).tapped());
+    }
+
+    /// 다른 창을 눌러 포커스가 왔다: 앱은 전에 포커스를 가진 칸의 글 입력을 켠다. 글 커서가 근처여도 그 칸을 누른 것이 아니다
+    #[test]
+    fn enabling_because_the_tap_brought_the_focus_is_not_a_tapped_field() {
+        let mut tap = Tap::new();
+        tap.press_bringing_focus().enable().commit().cursor(290);
+        assert!(!tap.release().tapped());
+        // 누르는 동안 칸을 옮겼으면(끄고 켰다) 칸을 누른 것이다
+        tap.press_bringing_focus().enable().commit();
+        tap.enable().cursor(290);
+        assert!(tap.release().tapped());
+        // Firefox: 포커스를 받은 창의 칸을 누르면 뗀 뒤에 켠다
+        assert!(
+            tap.press_bringing_focus()
+                .release()
+                .enable()
+                .cursor(290)
+                .tapped()
+        );
+        // GTK: 뗀 뒤에 다시 켠다
+        tap.press_bringing_focus().enable().commit().commit();
+        assert!(tap.release().enable_again().tapped());
     }
 
     /// 켜지 않았으면 글 커서가 움직여도(친 글) 누른 것이 아니다
     #[test]
     fn a_cursor_moving_without_enabling_is_not_a_tapped_field() {
         let mut tap = Tap::new();
-        assert!(!tap.press().release().cursor(290).tapped());
+        assert!(!tap.press().release().commit().cursor(290).tapped());
     }
 
     /// 누르기 없이 창이 열리며 칸이 포커스를 받거나 앱이 스스로 다시 켠 것은 누른 것이 아니다
@@ -958,17 +1139,17 @@ mod tests {
     fn enabling_without_a_tap_is_not_a_tapped_field() {
         let mut tap = Tap::new();
         assert!(!tap.enable().cursor(290).tapped());
-        assert!(!tap.enable_again().tapped());
+        assert!(!tap.commit().enable_again().cursor(290).tapped());
     }
 
     #[test]
     fn several_fingers_and_cancelled_presses_are_not_a_tap() {
         let mut tap = Tap::new();
         // 둘째 손가락
-        tap.press().press().enable().cursor(290).release();
+        tap.press().press().commit().enable().cursor(290).release();
         assert!(!tap.enable_again().tapped());
         // 앱에서 거둔 손가락
-        tap.press().enable().cursor(290);
+        tap.press().commit().enable().cursor(290);
         tap.watch.cancel();
         assert!(!tap.release().enable_again().tapped());
     }

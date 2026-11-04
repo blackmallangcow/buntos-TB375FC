@@ -319,37 +319,35 @@ impl Dispatch<ZwpTextInputV3, TextInputUserData> for BuntState {
         dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        // 키보드 포커스를 가진 앱이 글 입력을 켜거나 끄면 입력기는 그 칸과의 조합을 새로 시작한다.
         // 포커스가 없는 앱의 요청은 smithay가 버리므로 세지 않는다
-        if matches!(
-            request,
-            zwp_text_input_v3::Request::Enable | zwp_text_input_v3::Request::Disable
-        ) && state
+        if state
             .seat
             .text_input()
             .focus()
             .is_some_and(|focus| focus.id().same_client_as(&resource.id()))
         {
-            state.preedit.reset();
-            // 사람이 글 칸을 눌렀는지 누르기와 함께 본다 (osk.rs)
-            if matches!(request, zwp_text_input_v3::Request::Enable) {
-                state.enable_requested(resource);
+            match &request {
+                // 키보드 포커스를 가진 앱이 글 입력을 켜거나 끄면 입력기는 그 칸과의 조합을 새로 시작한다.
+                // 사람이 글 칸을 눌렀는지는 누르기와 함께 본다 (osk.rs)
+                zwp_text_input_v3::Request::Enable => {
+                    state.preedit.reset();
+                    state.enable_requested(resource);
+                }
+                zwp_text_input_v3::Request::Disable => state.preedit.reset(),
+                zwp_text_input_v3::Request::SetCursorRectangle {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    state.cursor_rectangle_requested(*x, *y, *width, *height);
+                }
+                zwp_text_input_v3::Request::Commit => state.commit_requested(resource),
+                _ => {}
             }
         }
-        match &request {
-            zwp_text_input_v3::Request::SetContentType { purpose, .. } => {
-                state.osk.content_purpose(resource, *purpose);
-            }
-            zwp_text_input_v3::Request::SetCursorRectangle { y, height, .. }
-                if state
-                    .seat
-                    .text_input()
-                    .focus()
-                    .is_some_and(|focus| focus.id().same_client_as(&resource.id())) =>
-            {
-                state.cursor_rectangle_requested(*y, *height);
-            }
-            _ => {}
+        if let zwp_text_input_v3::Request::SetContentType { purpose, .. } = &request {
+            state.osk.content_purpose(resource, *purpose);
         }
         <TextInputManagerState as Dispatch<ZwpTextInputV3, TextInputUserData, Self>>::request(
             state, client, resource, request, data, dhandle, data_init,

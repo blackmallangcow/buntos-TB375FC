@@ -647,6 +647,7 @@ impl BuntState {
         // 다른 손가락이 닿으면 가장자리 스와이프가 아니다. 여러 손가락의 제스처는 앱의 것이다
         self.touch.swipe = None;
         self.queue_redraw_all();
+        let focus_before = self.keyboard_focus();
         let serial = SERIAL_COUNTER.next_serial();
         let mut finger = Finger {
             slot,
@@ -688,7 +689,7 @@ impl BuntState {
         // 화면 키보드는 사람이 글 칸을 눌렀는지 본다(osk.rs). 여러 손가락의 제스처는 글 칸을 누른 것이 아니다
         if finger.route == Route::Client && self.touch.fingers.is_empty() {
             let surface = finger.focus.as_ref().map(|(surface, _)| surface);
-            self.note_press(pos, surface);
+            self.note_press(pos, surface, focus_before.as_ref());
         } else {
             self.note_press_cancelled();
         }

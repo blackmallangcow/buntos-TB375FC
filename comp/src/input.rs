@@ -582,6 +582,7 @@ impl BuntState {
         }
         let serial = SERIAL_COUNTER.next_serial();
         let location = pointer.current_location();
+        let focus_before = self.keyboard_focus();
 
         // 잠긴 동안에는 누른 화면의 잠금 표면에 키보드를 준다. 아래의 창·레이어 포커스 바꾸기는 잠긴 동안
         // 아무 일도 하지 않는다 (session_lock.rs)
@@ -597,7 +598,7 @@ impl BuntState {
         match state {
             ButtonState::Pressed => {
                 let surface = self.surface_under(location).map(|(surface, _)| surface);
-                self.note_press(location, surface.as_ref());
+                self.note_press(location, surface.as_ref(), focus_before.as_ref());
             }
             ButtonState::Released => self.note_release(location),
         }
