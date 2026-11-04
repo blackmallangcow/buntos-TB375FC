@@ -7,10 +7,11 @@
 //! - 창: overlay 레이어로 아래·왼쪽·오른쪽에 붙고, 배타 영역 없이(-1) Dock 위를 덮는다. 키보드 포커스를 받지 않는다
 //!   (포커스를 가진 글 칸이 포커스를 지킨다). 판 위에는 글자 미리 보기가 뜰 투명한 띠가 있다. 창의 입력 영역은 판뿐이라
 //!   띠를 누르면 아래 창이 받는다. 컴포지터는 입력 영역 위까지만 창 자리로 준다(comp/src/osk.rs).
-//! - 뜬다: 입력 모드가 터치이고, 컴포지터가 키보드 포커스를 가진 앱이 글 입력을 켰다고 알릴 때(셸 전용 프로토콜
-//!   bunt_osk_v1의 text_input 1. 켠 칸을 다시 눌렀을 때도 온다).
+//! - 뜬다: 입력 모드가 터치이고, 컴포지터가 사람이 키보드 포커스를 가진 앱의 글 칸을 눌렀다고 알릴 때(셸 전용 프로토콜
+//!   bunt_osk_v1의 tapped. 켜진 칸을 다시 눌렀을 때도 온다). 칸이 저절로 포커스를 받은 것(text_input 1)만으로는 뜨지
+//!   않는다.
 //! - 숨는다: 글 입력이 꺼지면 0.25초 뒤(칸을 옮기면 꺼졌다 바로 켜진다), 포인터 모드가 되거나 키보드 가리기 키를 누르면
-//!   바로. 가리기 키로 숨기면 칸을 다시 눌러야 뜬다.
+//!   바로. 숨은 뒤에는 칸을 다시 눌러야 뜬다.
 //! - 키: 같은 프로토콜의 press로 컴포지터가 실제 키보드처럼 넣어 입력기(fcitx5)가 한글을 조합한다. 키와 글 입력 상태는
 //!   셸의 Wayland 연결로만 오간다(keyboard/src/compositor.rs). 전에는 세션 버스로 오가 같은 사용자의 프로그램이 엿볼 수
 //!   있었다.
@@ -24,7 +25,7 @@ use std::{
 };
 
 use bunt_keyboard::{
-    CompositorKeyboard, InputMode, Keyboard, Room,
+    CompositorKeyboard, InputMode, Keyboard, Room, TextInputEvent,
     fcitx::script_of,
     mode,
     rules::{Decision, Rules},
@@ -191,10 +192,13 @@ impl Osk {
         });
     }
 
-    /// 컴포지터가 알린 글 입력 상태를 받은 차례로 규칙에 넣는다 (꺼졌다 바로 켜지면 숨기려던 것을 그만둔다)
+    /// 컴포지터가 알린 글 입력 소식을 받은 차례로 규칙에 넣는다 (꺼졌다 바로 켜지면 숨기려던 것을 그만둔다)
     fn read_text_input(&self) {
-        for active in self.0.compositor.take_text_input() {
-            self.decide(|rules| rules.text_input(active));
+        for event in self.0.compositor.take_text_input() {
+            self.decide(|rules| match event {
+                TextInputEvent::Changed(active) => rules.text_input(active),
+                TextInputEvent::Tapped => rules.tapped(),
+            });
         }
     }
 
@@ -249,7 +253,7 @@ impl Osk {
         let timer = glib::timeout_add_local_once(HIDE_DELAY, move || {
             if let Some(inner) = weak.upgrade() {
                 inner.hide_timer.take();
-                Osk(inner).hide();
+                Osk(inner).decide(Rules::hide_delay_passed);
             }
         });
         inner.hide_timer.replace(Some(timer));

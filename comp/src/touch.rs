@@ -647,6 +647,7 @@ impl BuntState {
         // 다른 손가락이 닿으면 가장자리 스와이프가 아니다. 여러 손가락의 제스처는 앱의 것이다
         self.touch.swipe = None;
         self.queue_redraw_all();
+        let focus_before = self.keyboard_focus();
         let serial = SERIAL_COUNTER.next_serial();
         let mut finger = Finger {
             slot,
@@ -684,6 +685,13 @@ impl BuntState {
                 },
             );
             finger.forwarded = true;
+        }
+        // 화면 키보드는 사람이 글 칸을 눌렀는지 본다(osk.rs). 여러 손가락의 제스처는 글 칸을 누른 것이 아니다
+        if finger.route == Route::Client && self.touch.fingers.is_empty() {
+            let surface = finger.focus.as_ref().map(|(surface, _)| surface);
+            self.note_press(pos, surface, focus_before.as_ref());
+        } else {
+            self.note_press_cancelled();
         }
         self.touch.fingers.push(finger);
     }
@@ -772,8 +780,10 @@ impl BuntState {
         };
         let finger = self.touch.fingers.remove(index);
         self.forget_swipe(slot);
-        if finger.route == Route::Screenshot {
-            self.screenshot_touch_up(finger.position);
+        match finger.route {
+            Route::Screenshot => self.screenshot_touch_up(finger.position),
+            Route::Client => self.note_release(finger.position),
+            Route::Gesture | Route::Cancelled | Route::Ignored => {}
         }
         self.end_finger(&finger, time);
     }
@@ -848,6 +858,7 @@ impl BuntState {
     /// 앱이 받던 손가락 가운데 받던 표면이 `which`에 맞는 것을 앱에서 거둔다(wl_touch.cancel). 거둔 손가락은 뗄 때까지
     /// 아무에게도 보내지 않는다
     fn cancel_fingers(&mut self, which: impl Fn(&WlSurface) -> bool) {
+        self.note_press_cancelled();
         let mut cancelled = Vec::new();
         for finger in &mut self.touch.fingers {
             if finger.route != Route::Client {

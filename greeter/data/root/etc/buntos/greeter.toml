@@ -5,7 +5,7 @@
 # BUNT_COMP_CONFIG로 이 파일을 준다. 사용자 세션의 기본값은 comp/data/comp.toml이다
 
 [wallpaper]
-# 로그인 화면이 흐린 배경화면을 그리기 전에 잠깐 보인다
+# 로그인 화면이 5초 안에 뜨지 않을 때만 보인다
 top = "#1d2433"
 bottom = "#3b3550"
 

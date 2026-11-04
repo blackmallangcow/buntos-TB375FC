@@ -53,6 +53,7 @@ use crate::{
     render::OutputRenderElements,
     selection::{self, Drag, Grip, Overlay},
     state::{BuntState, ClientState},
+    texture_shader,
 };
 
 pub(crate) const TRANSLATIONS: &Sources = &[
@@ -970,10 +971,11 @@ pub fn capture_scene(
         )
         .map_err(|err| err.to_string())?;
     let mapping = {
+        let elements = texture_shader::precise(renderer, elements);
         let mut framebuffer = renderer.bind(&mut texture).map_err(|err| err.to_string())?;
         let mut damage = OutputDamageTracker::new(size, scale, Transform::Normal);
         damage
-            .render_output(renderer, &mut framebuffer, 0, elements, clear)
+            .render_output(renderer, &mut framebuffer, 0, &elements, clear)
             .map_err(|err| format!("{err:?}"))?;
         // 고른 영역(창 하나)만 되읽는다. 전에는 화면 전체를 되읽고 CPU에서 잘랐다
         renderer

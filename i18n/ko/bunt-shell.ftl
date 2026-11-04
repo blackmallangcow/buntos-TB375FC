@@ -73,15 +73,23 @@ wifi-settings = Wi-Fi 설정…
 power-title = 전원
 power-battery = 배터리
 power-battery-percent = 배터리 { $percent }%
+power-battery-percent-charging = 배터리 { $percent }%, 충전 중
+power-battery-percent-connected = 배터리 { $percent }%, 전원 연결됨
 power-adapter = 전원 어댑터 사용 중
-power-source-adapter = 전원: 전원 어댑터
-power-source-battery = 전원: 배터리
-power-fully-charged = 완전히 충전됨
-power-until-full = 완전히 충전될 때까지 { $time }
+power-source-adapter = 전원 공급원: 전원 어댑터
+power-source-battery = 전원 공급원: 배터리
+power-fully-charged = 충전 완료됨
+power-charging = 충전 중
+power-charging-time = 충전 중, 충전 완료까지 { $time } 남음
+power-charging-long = 충전 중, 충전 완료까지 10시간 이상 남음
+power-not-charging = 배터리 충전 중이 아님
 power-remaining = 남은 시간 { $time }
 power-duration = { $hours ->
     [0] { $minutes }분
-   *[other] { $hours }시간 { $minutes }분
+   *[other] { $minutes ->
+        [0] { $hours }시간
+       *[other] { $hours }시간 { $minutes }분
+    }
 }
 power-mode = 전원 모드
 power-mode-low = 저전력 모드

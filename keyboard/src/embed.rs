@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 다른 창 안의 화면 키보드 (잠금 화면, 로그인 화면). 셸이 그려지지 않을 때 뜨는 창이라 셸의 bunt-osk 창을 쓸 수
-//! 없다(잠긴 동안 컴포지터는 잠금 표면만 그린다). 키보드를 그 창의 아래쪽에 넣고, 그 창의 글 칸에 포커스가 있고
-//! 입력 모드가 터치일 때 띄운다(rules.rs). 키보드가 나오면 그 창의 내용이 위로 올라간다.
+//! 없다(잠긴 동안 컴포지터는 잠금 표면만 그린다). 키보드를 그 창의 아래쪽에 넣고, 입력 모드가 터치일 때 그 창의 글
+//! 칸을 누르면 띄운다(rules.rs). 키보드가 나오면 그 창의 내용이 위로 올라간다.
 //!
 //! - 키보드는 배경화면 위라 늘 어두운 모양이다.
 //! - 글 칸에서 다른 위젯(단추)으로 포커스가 가면 숨고, 포커스가 없어지면(칸을 막았다) 그대로 둔다. 잠금 화면은 암호를
@@ -59,9 +59,12 @@ pub fn embed(
         }
     });
     let on_focus = state.clone();
-    focus::follow_text_focus(window, move |focused| {
-        on_focus.decide(|rules| rules.text_input(focused))
-    });
+    let on_tap = state.clone();
+    focus::follow_text_fields(
+        window,
+        move |focused| on_focus.decide(|rules| rules.text_input(focused)),
+        move || on_tap.decide(Rules::tapped),
+    );
     // 키보드가 나와 있는 동안 창에 keyboard-shown을 단다. 창은 위아래 여백을 줄여 내용이 키보드 위에 들게 한다
     let target = window.downgrade();
     keyboard.connect_reveal_changed(move |shown| {
@@ -108,7 +111,7 @@ impl State {
                 let timer = glib::timeout_add_local_once(HIDE_DELAY, move || {
                     if let Some(state) = weak.upgrade() {
                         state.hide_timer.take();
-                        state.keyboard.conceal();
+                        state.decide(Rules::hide_delay_passed);
                     }
                 });
                 self.hide_timer.replace(Some(timer));

@@ -11,9 +11,8 @@
 //! - [`KeySink`]: 누른 키를 보내는 곳. 컴포지터([`CompositorKeyboard`]: 셸 전용 Wayland 프로토콜, 입력기를 거쳐 한글
 //!   조합)나 창 안의 글 칸([`EditableKeys`]: 잠금 화면)
 //! - [`mode`]: 컴포지터의 입력 모드(포인터·터치). 키보드는 터치 모드에서만 뜬다
-//! - [`rules`]: 뜨고 숨는 규칙 (터치 모드이고 글 칸이 켜졌을 때 뜬다)
-//! - [`embed`]: 잠금·로그인 화면의 창 안에 키보드를 넣는다. [`focus`], [`fcitx`]로 창 안의 글 칸 포커스와 입력 소스를
-//!   따라간다
+//! - [`rules`]: 뜨고 숨는 규칙 (터치 모드이고 글 칸을 눌렀을 때 뜬다)
+//! - [`embed`]: 잠금·로그인 화면의 창 안에 키보드를 넣는다. [`focus`], [`fcitx`]로 창 안의 글 칸과 입력 소스를 따라간다
 
 pub mod board;
 mod compositor;
@@ -27,7 +26,7 @@ mod sink;
 mod view;
 
 pub use board::Output;
-pub use compositor::CompositorKeyboard;
+pub use compositor::{CompositorKeyboard, TextInputEvent};
 pub use embed::embed;
 pub use layout::Script;
 pub use mode::InputMode;

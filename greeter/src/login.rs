@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! 로그인 화면 (macOS 26 로그인 창): 위에 날짜와 큰 시각, 아래에 사진, 이름, 암호 칸, 맨 아래에
-//! 다시 시작·시스템 종료. 계정이 여럿이면 사진을 늘어놓고 고른다. 암호가 틀리면 칸이 흔들린다
+//! 다시 시작·시스템 종료. 계정이 여럿이면 사진을 늘어놓고 고른다. 암호가 틀리면 칸이 흔들린다.
+//! 암호가 맞으면 암호 칸과 단추가 사라지고 칸 자리에 로딩 막대가 나온다
 
 use std::{
     cell::{Cell, RefCell},
@@ -26,6 +27,8 @@ const AVATAR_SIZE: i32 = 96;
 const TILE_AVATAR_SIZE: i32 = 72;
 /// 흔들기 애니메이션 길이 (data/style.css의 @keyframes shake와 같다)
 const SHAKE: Duration = Duration::from_millis(450);
+/// 로딩 막대의 너비 (macOS처럼 사진보다 조금 넓다)
+const LOADING_WIDTH: i32 = 150;
 
 struct Login {
     shared: Rc<Shared>,
@@ -37,6 +40,10 @@ struct Login {
     details: RefCell<Vec<(String, Option<PathBuf>)>>,
     entry: gtk::PasswordEntry,
     field: gtk::Box,
+    /// 암호 칸과 로딩 막대가 번갈아 드는 자리
+    slot: gtk::Stack,
+    loading: gtk::ProgressBar,
+    power: gtk::Box,
     go: gtk::Button,
     spinner: gtk::Spinner,
     message: gtk::Label,
@@ -80,6 +87,16 @@ pub fn build(shared: &Rc<Shared>, users: Vec<User>) -> gtk::Widget {
         .css_classes(["greeter-field"])
         .build();
     field.append(&field_overlay);
+    let loading = loading_bar(shared);
+    // 칸과 막대를 같은 자리에 둔다. 막대로 바뀌어도 사진과 이름이 움직이지 않는다
+    let slot = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .transition_duration(150)
+        .halign(gtk::Align::Center)
+        .build();
+    slot.add_child(&field);
+    slot.add_child(&loading);
+    let power = power_buttons(shared);
     // 안내가 나타나도 사진과 암호 칸이 움직이지 않게 빈 글로 자리를 잡아 둔다 (macOS)
     let message = gtk::Label::builder()
         .wrap(true)
@@ -102,6 +119,9 @@ pub fn build(shared: &Rc<Shared>, users: Vec<User>) -> gtk::Widget {
         tiles: RefCell::default(),
         entry,
         field,
+        slot,
+        loading,
+        power,
         go,
         spinner,
         message,
@@ -115,14 +135,14 @@ pub fn build(shared: &Rc<Shared>, users: Vec<User>) -> gtk::Widget {
         .build();
     if count == 0 {
         login.show_message(&tr.get("login-no-accounts"));
-        login.field.set_visible(false);
+        login.slot.set_visible(false);
     } else {
         account.append(&login.user_tiles());
     }
-    account.append(&login.field);
+    account.append(&login.slot);
     account.append(&login.message);
     view.append(&account);
-    view.append(&power_buttons(shared));
+    view.append(&login.power);
 
     login.connect();
     login.load_details();
@@ -283,11 +303,27 @@ impl Login {
             .unwrap_or_else(|_| Err(LoginError::Failed("login thread panicked".into())));
             if let Some(login) = weak.upgrade() {
                 match result {
-                    Ok(()) => login.shared.finish(),
+                    Ok(()) => login.signed_in(),
                     Err(err) => login.failed(err),
                 }
             }
         });
+    }
+
+    /// 암호가 맞았다. 암호 칸과 단추를 치우고 칸 자리에 로딩 막대를 띄운 뒤 끝난다
+    fn signed_in(&self) {
+        self.spinner.set_spinning(false);
+        self.slot.set_visible_child(&self.loading);
+        self.power.set_opacity(0.0);
+        self.power.set_can_target(false);
+        let selected = self.selected.get();
+        for (index, (_, _, button)) in self.tiles.borrow().iter().enumerate() {
+            // 다른 계정의 사진을 치워, 고른 사진이 막대 위 가운데에 온다
+            if let Some(button) = button.as_ref().filter(|_| index != selected) {
+                button.set_visible(false);
+            }
+        }
+        self.shared.finish(&self.loading);
     }
 
     fn failed(&self, err: LoginError) {
@@ -394,6 +430,66 @@ impl Login {
             }
         }
     }
+}
+
+/// 로그인에 성공한 뒤 암호 칸 자리에 나오는 로딩 막대
+fn loading_bar(shared: &Shared) -> gtk::ProgressBar {
+    let bar = gtk::ProgressBar::builder()
+        .width_request(LOADING_WIDTH)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .css_classes(["greeter-loading"])
+        .build();
+    bar.update_property(&[gtk::accessible::Property::Label(
+        &shared.tr.get("setup-signing-in"),
+    )]);
+    bar
+}
+
+/// 계정을 만들고 로그인한 뒤의 화면: 로그인 화면과 같은 자리에 사진, 이름, 로딩 막대를 띄우고 끝난다
+pub fn show_signing_in(shared: &Rc<Shared>, name: &str) {
+    let view = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes(["greeter-login"])
+        .build();
+    view.append(&clock(&shared.tr));
+    view.append(&gtk::Box::builder().vexpand(true).build());
+    let account = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .css_classes(["greeter-account"])
+        .build();
+    let tile = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .halign(gtk::Align::Center)
+        .build();
+    tile.append(&avatar::avatar(name, None, AVATAR_SIZE));
+    tile.append(
+        &gtk::Label::builder()
+            .label(name)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .max_width_chars(18)
+            .css_classes(["greeter-user-name"])
+            .build(),
+    );
+    account.append(&tile);
+    let loading = loading_bar(shared);
+    let slot = gtk::Box::builder()
+        .halign(gtk::Align::Center)
+        .css_classes(["greeter-loading-slot"])
+        .build();
+    slot.append(&loading);
+    account.append(&slot);
+    view.append(&account);
+    // 맨 아래 단추 줄은 보이지 않지만 자리를 차지해, 사진과 이름이 로그인 화면과 같은 자리에 온다
+    let power = power_buttons(shared);
+    power.set_opacity(0.0);
+    power.set_can_target(false);
+    view.append(&power);
+    shared.show_view(&view);
+    shared.finish(&loading);
 }
 
 /// 맨 아래의 다시 시작·시스템 종료 (logind. 로그인 화면은 활성 세션이라 polkit이 허락한다)

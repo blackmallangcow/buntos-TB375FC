@@ -9,7 +9,7 @@ use std::{
     cmp::Reverse,
     collections::HashMap,
     error::Error,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -22,7 +22,7 @@ use smithay::{
         },
         drm::{
             DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
-            compositor::FrameFlags,
+            compositor::{FrameFlags, PrimaryPlaneElement},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
@@ -37,6 +37,7 @@ use smithay::{
                 surface::render_elements_from_surface_tree,
             },
             gles::GlesRenderer,
+            utils::with_renderer_surface_state,
         },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
@@ -66,7 +67,10 @@ use smithay::{
         wayland_server::{Display, backend::GlobalId, protocol::wl_surface::WlSurface},
     },
     utils::{DeviceFd, IsAlive, Logical, Physical, Point, Scale, Size, Transform},
-    wayland::compositor::{SurfaceAttributes, SurfaceData, with_states},
+    wayland::{
+        compositor::{SurfaceAttributes, SurfaceData, with_states},
+        shell::wlr_layer::Layer,
+    },
 };
 
 use crate::{
@@ -81,6 +85,7 @@ use crate::{
     render::{self, OutputRenderElements},
     screenshot,
     state::BuntState,
+    texture_shader,
 };
 
 type Allocator = GbmAllocator<DrmDeviceFd>;
@@ -98,6 +103,9 @@ const SOFTWARE_FRAME: Duration = Duration::from_micros(16_667);
 const BACKGROUND_FRAME: Duration = Duration::from_micros(33_333);
 /// 화면에 보이지 않은 표면(다른 창에 다 가려진 창, 숨은 막대)에 프레임 알림을 보내는 간격
 const HIDDEN_FRAME_INTERVAL: Option<Duration> = Some(Duration::from_secs(1));
+/// 세션이 시작될 때 셸이 첫 화면을 낼 때까지 기다리는 시간. 그때까지 화면을 그리지 않는다. 셸이 더 늦으면
+/// 설정의 배경화면을 그린다
+const FIRST_FRAME_WAIT: Duration = Duration::from_secs(5);
 const CLEAR_COLOR: [f32; 4] = [0.08, 0.08, 0.1, 1.0];
 const FALLBACK_TOP: [u8; 3] = [0x5b, 0x7c, 0xfa];
 const FALLBACK_BOTTOM: [u8; 3] = [0xf2, 0xa7, 0xc3];
@@ -183,6 +191,8 @@ struct OutputSurface {
     idle_frames: u32,
     /// 잡아 둔 다시 그리기와 그 시각
     redraw_timer: Option<(RegistrationToken, Instant)>,
+    /// 셸의 첫 화면을 이때까지 기다린다. 첫 프레임을 그린 뒤에는 None이다
+    first_frame_deadline: Option<Instant>,
     global: GlobalId,
 }
 
@@ -211,14 +221,14 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let seat_name = session.seat();
 
     let udev = UdevBackend::new(&seat_name)?;
+    // SoC에서는 화면 장치와 GPU가 따로라서 카드가 둘이다. 그리기만 하는 GPU(panthor 등)에는 커넥터가 없으므로
+    // 커넥터가 있는 카드를 먼저 고른다. Mesa가 화면 장치에서 렌더 노드를 찾아 준다
+    let gpus = all_gpus(&seat_name).unwrap_or_default();
     let gpu = primary_gpu(&seat_name)?
+        .filter(|path| has_connectors(path))
+        .or_else(|| gpus.iter().find(|path| has_connectors(path)).cloned())
+        .or_else(|| gpus.first().cloned())
         .and_then(|path| DrmNode::from_path(path).ok())
-        .or_else(|| {
-            all_gpus(&seat_name)
-                .ok()?
-                .into_iter()
-                .find_map(|path| DrmNode::from_path(path).ok())
-        })
         .ok_or("no GPU found")?;
     let primary = gpu
         .node_with_type(NodeType::Primary)
@@ -605,6 +615,7 @@ impl BuntState {
                 tried_at: None,
                 idle_frames: 0,
                 redraw_timer: None,
+                first_frame_deadline: Some(Instant::now() + FIRST_FRAME_WAIT),
                 global,
             },
         );
@@ -969,9 +980,60 @@ impl BuntState {
         }
     }
 
+    /// 셸의 배경화면(Background 레이어)이나 창이 버퍼를 올렸는지, 또는 화면이 잠겼는지
+    fn output_has_content(&self, output: &Output) -> bool {
+        let drawn = |surface: &WlSurface| {
+            with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+        };
+        self.session_lock.is_locked()
+            || layer_map_for_output(output)
+                .layers()
+                .any(|layer| layer.layer() == Layer::Background && drawn(layer.wl_surface()))
+            || self.space.elements().any(|window| {
+                window
+                    .toplevel()
+                    .is_some_and(|toplevel| drawn(toplevel.wl_surface()))
+            })
+    }
+
+    /// 이 화면을 지금 그릴지 정한다. 기다리는 동안 앞 세션이 남긴 화면이나 부팅 화면이 그대로 있다
+    fn hold_decision(&mut self, crtc: crtc::Handle) -> Hold {
+        let Some(output) = self
+            .backend
+            .outputs
+            .get(&crtc)
+            .map(|surface| surface.output.clone())
+        else {
+            return Hold::Draw;
+        };
+        let has_content = self.output_has_content(&output);
+        let exit_with_shell = self.config.session.exit_with_shell;
+        let Some(surface) = self.backend.outputs.get_mut(&crtc) else {
+            return Hold::Draw;
+        };
+        let hold = hold_for(
+            surface.first_frame_deadline,
+            Instant::now(),
+            has_content,
+            exit_with_shell,
+        );
+        if hold == Hold::Draw {
+            surface.first_frame_deadline = None;
+        }
+        hold
+    }
+
     fn render_output(&mut self, crtc: crtc::Handle) {
         if !self.backend.session.is_active() {
             return;
+        }
+        match self.hold_decision(crtc) {
+            Hold::Draw => {}
+            Hold::Until(wait) => {
+                self.schedule_redraw_after(crtc, wait);
+                return;
+            }
+            Hold::Stay => return,
         }
         if let CursorImageStatus::Surface(surface) = &self.cursor_status
             && !surface.alive()
@@ -1189,12 +1251,24 @@ impl BuntState {
             recording.capture(renderer, &scene);
         }
 
+        let elements = texture_shader::precise(renderer, &elements);
+
         // 한 프레임 간격보다 오래 걸린 프레임은 디버그 기록에 남긴다 (RUST_LOG=bunt_comp=debug)
         let interval = surface.frame_interval(rendering.cpu_composited);
         let started = std::time::Instant::now();
         let rendered = surface
             .drm_output
             .render_frame(renderer, &elements, CLEAR_COLOR, flags);
+        // 렌더 펜스를 커밋에 실을 수 없으면(simpledrm처럼 DRM syncobj가 없는 드라이버) 커널이 렌더링을
+        // 기다려 주지 않는다. llvmpipe는 스레드에서 그리고 simpledrm은 커밋 때 버퍼를 화면으로 한 번 복사하므로,
+        // 기다리지 않으면 덜 그린 버퍼가 화면에 남는다
+        if let Ok(frame) = &rendered
+            && frame.needs_sync()
+            && let PrimaryPlaneElement::Swapchain(primary) = &frame.primary_element
+            && let Err(err) = primary.sync.wait()
+        {
+            tracing::warn!("failed to wait for rendering: {err:?}");
+        }
         let elapsed = started.elapsed();
         if elapsed > interval {
             tracing::debug!("slow frame on {}: {elapsed:?}", output.name());
@@ -1444,6 +1518,23 @@ fn nearest_scale(scales: &[f64], scale: f64) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// 이 카드 노드(`/dev/dri/cardN`)에 커넥터가 있는지. 커널은 sysfs의 `cardN/cardN-<커넥터>`로 알린다. 장치를 열지 않고 본다
+fn has_connectors(card: &Path) -> bool {
+    has_connectors_in(Path::new("/sys/class/drm"), card)
+}
+
+fn has_connectors_in(class_drm: &Path, card: &Path) -> bool {
+    let Some(name) = card.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let prefix = format!("{name}-");
+    std::fs::read_dir(class_drm.join(name)).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+    })
+}
+
 /// 화면의 실제 크기(mm)로 고른 기본 배율. 논리 밀도가 BUILTIN_PPI나 EXTERNAL_PPI에 가깝게 한다.
 /// 크기를 모르거나(0) 믿기 어려우면(프로젝터의 센티미터 값, 가로세로 비가 픽셀과 다름) 1배
 fn recommended_scale(pixels: Size<i32, Physical>, millimeters: (i32, i32), builtin: bool) -> f64 {
@@ -1582,9 +1673,59 @@ impl BuntState {
     }
 }
 
+/// 화면을 그릴지 정한 결과
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hold {
+    Draw,
+    /// 셸의 첫 화면을 기다린다. 커밋이 오면 그때 다시 정하고, 이만큼 지나면 그냥 그린다
+    Until(Duration),
+    /// 로그인 화면이 끝나는 중이다. 다음 세션이 그릴 때까지 마지막 화면을 둔다
+    Stay,
+}
+
+/// 세션이 시작될 때 설정의 배경화면이 잠깐 보이지 않게 셸의 첫 화면을 기다린다. 로그인 화면(`exit_with_shell`)은
+/// 창이 사라지면 곧 끝나므로, 그 사이에 빈 배경화면을 내지 않는다
+fn hold_for(
+    deadline: Option<Instant>,
+    now: Instant,
+    has_content: bool,
+    exit_with_shell: bool,
+) -> Hold {
+    if has_content {
+        return Hold::Draw;
+    }
+    match deadline {
+        Some(deadline) if now < deadline => Hold::Until(deadline - now),
+        Some(_) => Hold::Draw,
+        None if exit_with_shell => Hold::Stay,
+        None => Hold::Draw,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_frame_waits_for_the_shell_until_the_deadline() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(2);
+        assert_eq!(
+            hold_for(Some(later), now, false, false),
+            Hold::Until(Duration::from_secs(2))
+        );
+        assert_eq!(hold_for(Some(later), now, true, false), Hold::Draw);
+        assert_eq!(hold_for(Some(now), later, false, false), Hold::Draw);
+    }
+
+    #[test]
+    fn the_login_screen_keeps_its_last_frame_when_its_window_goes_away() {
+        let now = Instant::now();
+        assert_eq!(hold_for(None, now, false, true), Hold::Stay);
+        assert_eq!(hold_for(None, now, true, true), Hold::Draw);
+        // 사용자 세션은 창이 다 닫혀도 배경화면을 그린다
+        assert_eq!(hold_for(None, now, false, false), Hold::Draw);
+    }
 
     #[test]
     fn edid_names() {
@@ -1631,6 +1772,21 @@ mod tests {
             vec![1.0, 1.75, 2.0, 2.75, 3.25]
         );
         assert_eq!(scale_choices(&[1.0, 1.25], &[1.0]), vec![1.0, 1.25]);
+    }
+
+    #[test]
+    fn only_a_card_with_connectors_can_show_anything() {
+        let sys = std::env::temp_dir().join(format!("bunt-comp-drm-{}", std::process::id()));
+        // 화면 드라이버는 커넥터가 있고, 그리기만 하는 GPU(panthor)는 카드 폴더에 다른 것만 있다
+        std::fs::create_dir_all(sys.join("card2/card2-DSI-1")).unwrap();
+        std::fs::create_dir_all(sys.join("card1/device")).unwrap();
+        assert!(has_connectors_in(&sys, Path::new("/dev/dri/card2")));
+        assert!(!has_connectors_in(&sys, Path::new("/dev/dri/card1")));
+        // 이름이 앞부분만 같은 다른 카드의 폴더에 속지 않고, 없는 카드도 없는 것으로 본다
+        std::fs::create_dir_all(sys.join("card1/card10-DSI-1")).unwrap();
+        assert!(!has_connectors_in(&sys, Path::new("/dev/dri/card1")));
+        assert!(!has_connectors_in(&sys, Path::new("/dev/dri/card9")));
+        std::fs::remove_dir_all(&sys).unwrap();
     }
 
     #[test]

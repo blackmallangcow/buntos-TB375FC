@@ -375,7 +375,7 @@ impl Form {
         .await
         .unwrap_or_else(|_| Err(LoginError::Failed("login thread panicked".into())));
         match result {
-            Ok(()) => self.shared.finish(),
+            Ok(()) => crate::login::show_signing_in(&self.shared, self.full_name.text().trim()),
             Err(err) => {
                 // 계정은 만들었으므로 로그인 화면에서 다시 시도한다
                 eprintln!("bunt-greeter: login after setup failed: {err}");

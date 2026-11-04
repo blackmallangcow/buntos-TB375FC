@@ -56,7 +56,11 @@ const REFRESH_DELAY: Duration = Duration::from_millis(300);
 const TYPE_BATTERY: u32 = 2;
 const STATE_CHARGING: u32 = 1;
 const STATE_DISCHARGING: u32 = 2;
+const STATE_EMPTY: u32 = 3;
 const STATE_FULL: u32 = 4;
+const STATE_PENDING_CHARGE: u32 = 5;
+/// 충전이 이보다 오래 남으면 시간 대신 "10시간 이상"이라고 적는다 (macOS와 같다)
+const LONG_CHARGE_SECONDS: i64 = 10 * 3600;
 
 #[derive(Clone, Debug, Default)]
 struct Battery {
@@ -122,17 +126,18 @@ fn menu_bar_group(context: &Context, column: &gtk::Box) {
     list.append(&row);
 }
 
-/// 초를 "2시간 15분"처럼
+/// 초를 "2시간 15분"처럼. 분으로 반올림하고 "0분"으로는 적지 않는다
 pub fn duration_text(tr: &Translations, seconds: i64) -> String {
-    let minutes = (seconds.max(0) + 30) / 60;
+    let minutes = ((seconds.max(0) + 30) / 60).max(1);
     let mut args = FluentArgs::new();
     args.set("hours", minutes / 60);
     args.set("minutes", minutes % 60);
-    if minutes >= 60 {
-        tr.get_with("duration-hours-minutes", &args)
-    } else {
-        tr.get_with("duration-minutes", &args)
-    }
+    let id = match (minutes / 60, minutes % 60) {
+        (0, _) => "duration-minutes",
+        (_, 0) => "duration-hours",
+        _ => "duration-hours-minutes",
+    };
+    tr.get_with(id, &args)
 }
 
 impl BatteryPage {
@@ -426,22 +431,29 @@ fn level_icon(battery: &Battery) -> &'static str {
     }
 }
 
+/// UPower는 전원이 꽂혀 있어도 배터리에서 전류가 나오면 State를 Discharging이라고 한다.
+/// 그래서 배터리 사용 중인지는 OnBattery로 가린다. OnBattery는 Discharging일 때만 참이라
+/// Empty는 따로 본다
 fn status_text(tr: &Translations, battery: &Battery, on_battery: bool) -> String {
     let mut args = FluentArgs::new();
-    args.set("percent", format!("{:.0}", battery.percentage));
     match battery.state {
+        STATE_CHARGING if battery.time_to_full > LONG_CHARGE_SECONDS => {
+            tr.get("battery-charging-long")
+        }
         STATE_CHARGING if battery.time_to_full > 0 => {
             args.set("time", duration_text(tr, battery.time_to_full));
             tr.get_with("battery-charging-time", &args)
         }
-        STATE_CHARGING => tr.get_with("battery-charging", &args),
-        STATE_FULL => tr.get_with("battery-full", &args),
-        STATE_DISCHARGING if battery.time_to_empty > 0 => {
+        STATE_CHARGING => tr.get("battery-charging"),
+        STATE_FULL => tr.get("battery-full"),
+        STATE_PENDING_CHARGE => tr.get("battery-not-charging"),
+        STATE_DISCHARGING if on_battery && battery.time_to_empty > 0 => {
             args.set("time", duration_text(tr, battery.time_to_empty));
             tr.get_with("battery-discharging-time", &args)
         }
-        _ if on_battery => tr.get_with("battery-discharging", &args),
-        _ => tr.get_with("battery-not-charging", &args),
+        STATE_EMPTY => tr.get("battery-discharging"),
+        _ if on_battery => tr.get("battery-discharging"),
+        _ => tr.get("battery-not-charging"),
     }
 }
 
@@ -450,12 +462,80 @@ mod tests {
     use super::*;
 
     const KO: &str = include_str!("../../../i18n/ko/bunt-settings.ftl");
+    const EN: &str = include_str!("../../../i18n/en/bunt-settings.ftl");
 
     #[test]
     fn durations_read_naturally() {
         let tr = Translations::from_source("ko", KO);
         assert_eq!(duration_text(&tr, 45 * 60), "45분");
         assert_eq!(duration_text(&tr, 2 * 3600 + 15 * 60), "2시간 15분");
+        assert_eq!(duration_text(&tr, 2 * 3600), "2시간");
+        assert_eq!(duration_text(&tr, 10), "1분");
+    }
+
+    #[test]
+    fn status_reads_like_macos() {
+        let tr = Translations::from_source("ko", KO);
+        let text = |state, on_battery, time_to_empty, time_to_full| {
+            let battery = Battery {
+                state,
+                time_to_empty,
+                time_to_full,
+                ..Battery::default()
+            };
+            status_text(&tr, &battery, on_battery)
+        };
+        assert_eq!(
+            text(STATE_CHARGING, false, 0, 80 * 60),
+            "충전 중, 충전 완료까지 1시간 20분 남음"
+        );
+        assert_eq!(
+            text(STATE_CHARGING, false, 0, 16 * 3600),
+            "충전 중, 충전 완료까지 10시간 이상 남음"
+        );
+        assert_eq!(text(STATE_CHARGING, false, 0, 0), "충전 중");
+        assert_eq!(text(STATE_FULL, false, 0, 0), "충전 완료됨");
+        assert_eq!(
+            text(STATE_DISCHARGING, true, 228 * 60, 0),
+            "배터리 사용 중, 3시간 48분 남음"
+        );
+        assert_eq!(text(STATE_DISCHARGING, true, 0, 0), "배터리 사용 중");
+        // 전원이 꽂혀 있는데 배터리에서 전류가 나온다 (입력보다 많이 쓸 때)
+        assert_eq!(
+            text(STATE_DISCHARGING, false, 3 * 3600, 0),
+            "전원 연결됨, 배터리 충전 중이 아님"
+        );
+        assert_eq!(
+            text(STATE_PENDING_CHARGE, false, 0, 0),
+            "전원 연결됨, 배터리 충전 중이 아님"
+        );
+        assert_eq!(text(STATE_EMPTY, false, 0, 0), "배터리 사용 중");
+    }
+
+    #[test]
+    fn english_status_has_every_state() {
+        let tr = Translations::from_source("en", EN);
+        let text = |state, time_to_full| {
+            let battery = Battery {
+                state,
+                time_to_full,
+                ..Battery::default()
+            };
+            status_text(&tr, &battery, false)
+        };
+        assert_eq!(
+            text(STATE_CHARGING, 80 * 60),
+            "Charging, 1 hr 20 min until fully charged"
+        );
+        assert_eq!(
+            text(STATE_CHARGING, 16 * 3600),
+            "Charging, more than 10 hours until fully charged"
+        );
+        assert_eq!(text(STATE_FULL, 0), "Fully Charged");
+        assert_eq!(
+            text(STATE_PENDING_CHARGE, 0),
+            "Power connected, battery is not charging"
+        );
     }
 
     #[test]

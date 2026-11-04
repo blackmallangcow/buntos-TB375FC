@@ -200,7 +200,7 @@ impl BuntState {
     }
 
     /// 표면 왼쪽 위의 전역 위치와 그 표면이 있는 출력 영역. 창과 레이어 표면만 안다
-    fn surface_origin(
+    pub(crate) fn surface_origin(
         &self,
         surface: &WlSurface,
     ) -> Option<(Point<i32, Logical>, Rectangle<i32, Logical>)> {
@@ -319,22 +319,35 @@ impl Dispatch<ZwpTextInputV3, TextInputUserData> for BuntState {
         dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        // 키보드 포커스를 가진 앱이 글 입력을 켜거나 끄면 입력기는 그 칸과의 조합을 새로 시작한다.
         // 포커스가 없는 앱의 요청은 smithay가 버리므로 세지 않는다
-        if matches!(
-            request,
-            zwp_text_input_v3::Request::Enable | zwp_text_input_v3::Request::Disable
-        ) && state
+        if state
             .seat
             .text_input()
             .focus()
             .is_some_and(|focus| focus.id().same_client_as(&resource.id()))
         {
-            state.preedit.reset();
-            // 이미 켜진 칸을 다시 눌러도 GTK가 다시 켠다. 가린 화면 키보드를 다시 띄우도록 셸에 알린다 (osk.rs)
-            if matches!(request, zwp_text_input_v3::Request::Enable) {
-                state.osk.enable_requested();
+            match &request {
+                // 키보드 포커스를 가진 앱이 글 입력을 켜거나 끄면 입력기는 그 칸과의 조합을 새로 시작한다.
+                // 사람이 글 칸을 눌렀는지는 누르기와 함께 본다 (osk.rs)
+                zwp_text_input_v3::Request::Enable => {
+                    state.preedit.reset();
+                    state.enable_requested(resource);
+                }
+                zwp_text_input_v3::Request::Disable => state.preedit.reset(),
+                zwp_text_input_v3::Request::SetCursorRectangle {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    state.cursor_rectangle_requested(*x, *y, *width, *height);
+                }
+                zwp_text_input_v3::Request::Commit => state.commit_requested(resource),
+                _ => {}
             }
+        }
+        if let zwp_text_input_v3::Request::SetContentType { purpose, .. } = &request {
+            state.osk.content_purpose(resource, *purpose);
         }
         <TextInputManagerState as Dispatch<ZwpTextInputV3, TextInputUserData, Self>>::request(
             state, client, resource, request, data, dhandle, data_init,

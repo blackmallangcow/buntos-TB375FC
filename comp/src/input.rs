@@ -581,15 +581,26 @@ impl BuntState {
             return;
         }
         let serial = SERIAL_COUNTER.next_serial();
+        let location = pointer.current_location();
+        let focus_before = self.keyboard_focus();
 
         // 잠긴 동안에는 누른 화면의 잠금 표면에 키보드를 준다. 아래의 창·레이어 포커스 바꾸기는 잠긴 동안
         // 아무 일도 하지 않는다 (session_lock.rs)
         if state == ButtonState::Pressed && self.session_lock.is_locked() {
-            self.focus_lock_surface_at(pointer.current_location());
+            self.focus_lock_surface_at(location);
         }
 
         if state == ButtonState::Pressed && !pointer.is_grabbed() {
-            self.focus_at(pointer.current_location(), serial);
+            self.focus_at(location, serial);
+        }
+
+        // 화면 키보드는 사람이 글 칸을 눌렀는지 본다(osk.rs). 터치 모드의 포인터(개발용 설정)도 손가락과 같다
+        match state {
+            ButtonState::Pressed => {
+                let surface = self.surface_under(location).map(|(surface, _)| surface);
+                self.note_press(location, surface.as_ref(), focus_before.as_ref());
+            }
+            ButtonState::Released => self.note_release(location),
         }
 
         pointer.button(

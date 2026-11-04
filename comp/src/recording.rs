@@ -51,7 +51,7 @@ use crate::{
     render::OutputRenderElements,
     screenshot::{self, Image},
     state::BuntState,
-    windows,
+    texture_shader, windows,
 };
 
 /// 초당 프레임 수. 소프트웨어 렌더러(VM)에서도 따로 그리기와 부호화가 따라오게 30으로 둔다
@@ -180,10 +180,11 @@ impl Recording {
             return Ok(None);
         };
         let mapping = {
+            let elements = texture_shader::precise(renderer, elements);
             let mut framebuffer = renderer.bind(texture).map_err(|err| err.to_string())?;
             let age = if first { 0 } else { 1 };
             let rendered = damage
-                .render_output(renderer, &mut framebuffer, age, elements, CLEAR)
+                .render_output(renderer, &mut framebuffer, age, &elements, CLEAR)
                 .map_err(|err| format!("{err:?}"))?;
             if !first && rendered.damage.is_none() {
                 return Ok(None);

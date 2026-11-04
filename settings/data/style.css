@@ -183,8 +183,10 @@ list.settings-group > row.activatable:active {
   color: var(--label-secondary);
 }
 
+/* 값은 골라 복사할 수 있다. 눌러도 글자 커서는 보이지 않는다(macOS의 고를 수 있는 글자와 같다) */
 .row-value {
   font-size: var(--text-body);
+  caret-color: transparent;
 }
 
 .row-symbol {

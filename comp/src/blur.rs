@@ -63,6 +63,8 @@ const SATURATION: f32 = 1.4;
 const MASK_LOW: f32 = 0.35;
 const MASK_HIGH: f32 = 0.5;
 
+/// 조각 셰이더는 좌표를 다루므로 highp로 둔다. mediump는 16비트일 수 있어 큰 화면의 텍스처 좌표를 담지 못한다
+/// (texture_shader.rs)
 const VERTEX: &str = "#version 100
 attribute vec2 position;
 varying vec2 v;
@@ -73,7 +75,11 @@ void main() {
 ";
 
 const DOWN: &str = "#version 100
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 uniform sampler2D tex;
 uniform vec2 halfpixel;
 uniform float offset;
@@ -89,7 +95,11 @@ void main() {
 ";
 
 const UP: &str = "#version 100
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 uniform sampler2D tex;
 uniform vec2 halfpixel;
 uniform float offset;
@@ -112,7 +122,11 @@ void main() {
 /// 복사한 텍스처와 표면 텍스처 모두 v=0이 표면의 위다 (위아래가 뒤집힌 dmabuf는 mask_rect로 뒤집는다).
 /// 앱이 요청한 영역은 가리지 않는다(use_mask 0)
 const COMPOSITE: &str = "#version 100
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 uniform sampler2D tex;
 uniform sampler2D mask;
 uniform float use_mask;

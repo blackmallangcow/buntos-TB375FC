@@ -127,6 +127,27 @@ button.greeter-go {
   color: var(--on-wallpaper);
 }
 
+/* 로그인에 성공한 뒤 암호 칸 자리에 나오는 로딩 막대 (macOS). 자리의 높이는 암호 칸과 같다 */
+.greeter-loading-slot {
+  min-height: 30px;
+}
+
+progressbar.greeter-loading > trough {
+  min-height: 4px;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--on-wallpaper-hover);
+  box-shadow: none;
+}
+
+progressbar.greeter-loading > trough > progress {
+  min-height: 4px;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--on-wallpaper);
+  box-shadow: none;
+}
+
 .greeter-message {
   font-size: var(--text-callout);
   text-shadow: var(--on-wallpaper-shadow);

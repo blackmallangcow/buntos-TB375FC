@@ -43,7 +43,7 @@ mod service_dialog;
 mod notification_policy;
 // 포인터 모드와 터치 모드(컴포지터가 정한다). 터치 모드에서 누를 영역을 넓힌다
 mod input_mode;
-// 화면 키보드 창 (터치 모드에서 글 칸에 포커스가 가면 뜬다)
+// 화면 키보드 창 (터치 모드에서 글 칸을 누르면 뜬다)
 mod osk;
 
 use std::rc::Rc;
