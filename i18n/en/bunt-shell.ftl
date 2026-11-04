@@ -73,15 +73,23 @@ wifi-settings = Wi-Fi Settings…
 power-title = Power
 power-battery = Battery
 power-battery-percent = Battery { $percent }%
+power-battery-percent-charging = Battery { $percent }%, charging
+power-battery-percent-connected = Battery { $percent }%, power connected
 power-adapter = Using Power Adapter
 power-source-adapter = Power Source: Power Adapter
 power-source-battery = Power Source: Battery
 power-fully-charged = Fully Charged
-power-until-full = { $time } until full
+power-charging = Charging
+power-charging-time = Charging, { $time } until fully charged
+power-charging-long = Charging, more than 10 hours until fully charged
+power-not-charging = Battery Is Not Charging
 power-remaining = { $time } remaining
 power-duration = { $hours ->
     [0] { $minutes } min
-   *[other] { $hours } hr { $minutes } min
+   *[other] { $minutes ->
+        [0] { $hours } hr
+       *[other] { $hours } hr { $minutes } min
+    }
 }
 power-mode = Power Mode
 power-mode-low = Low Power Mode
