@@ -956,7 +956,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
 
 ### 9.1 2d Wi-Fi
 
-**결과(2026-11-04).** 시험 커널은 트리를 안에 넣어 LK의 값을 받지 못하므로 `gen_dts.py`가 순정 트리의 `emi-addr`, `memory-region`을 옮겨 적는다. 1~5단계의 줄이 `firmware running`까지 나왔다. `unified command probe: -110`으로 uni 명령을 받지 않는다. 시험을 건너뛰면 CE 0x8a에 답이 온다. 레거시 경로(0061~)가 필요하다. 처음 본 EXT 0x3e 시간 초과는 명령을 몰아 보내 링이 멈춘 뒤의 일이었고, 멀쩡한 펌웨어에서는 EXT 명령에 답이 온다. 보정 파일은 기기 파티션을 열지 않고 백업에서 꺼내 넣었다.
+**결과(2026-11-04).** 시험 커널은 트리를 안에 넣어 LK의 값을 받지 못하므로 `gen_dts.py`가 순정 트리의 `emi-addr`, `memory-region`을 옮겨 적는다. 1~5단계의 줄이 `firmware running`까지 나왔다. 펌웨어가 uni 명령을 받지 않아(`unified command probe: -110`, 시험을 건너뛰면 CE 0x8a에 답이 온다) 레거시 명령 길(패치 0061~0065)로 바꾸고 시험을 없앴다. 7단계까지 간다: 스캔이 되고, 비밀번호를 사용자가 직접 넣은 2.4 GHz WPA2-PSK 연결이 4-way, DHCP, 인터넷까지 돈다. 내려받기 최고 138 Mbit/s, 올리기 87 Mbit/s, 약 10분 유지, `tx failed` 0이다. 처음 본 EXT 0x3e 시간 초과는 명령을 몰아 보내 링이 멈춘 뒤의 일이었고, 멀쩡한 펌웨어에서는 EXT 명령에 답이 온다. 보정 파일은 기기 파티션을 열지 않고 백업에서 꺼내 넣었다. 남은 것: 칩 리셋 실패, 5 GHz AP 연결, RX 순서 정리, `regulatory.db` 거부, AP 소실 감지, 6단계의 FEM 맞대기([Wi-Fi 문서](wifi-soc7_0.md) 7절). 부팅 블랙리스트는 그대로 두었다.
 
 아래는 코드와 자료로 짠 차례다. 2a(부팅, 콘솔), 2b(SPMI·PMIC·핀·USB 가젯)가 된 뒤에 한다.
 위에서 아래로 하고, 앞 단계를 채운 뒤 다음으로 간다. 장치 트리는 단계마다 적은 노드를 켠다.
@@ -1064,13 +1064,12 @@ SIP 줄에 `returned N`이 붙으면 그 값을 적는다. 0이 아니어도 벤
 | `PHY action: calibrate, N bytes of data, FEM 0x0` | 보정은 수 초 걸린다 |
 | `PHY action: event 0x81, status 0, temperature T` | event가 0x81(`FORCE_CAL_RSP`)이고 T가 그럴듯한가 |
 | `starting the firmware the bootloader loaded` → `firmware running` | `Message … timeout`이면 INIT 명령의 링이나 이벤트 링이 틀렸다. `/sys/kernel/debug/ieee80211/phy*/mt76/`의 queues, `MT_WFDMA0_HOST_INT_STA` |
-| `unified command probe: N` | **가장 중요한 답이다.** 0이나 다른 값이면 uni cmd를 받는다. `does not answer`면 레거시 길이 필요하다(아래 7) |
 
-uni 시험을 지난 뒤 답이 없을 때의 줄이다. 명령마다 답을 끊어 드라이버를 레지스터 모델 위에서 돌려 본 결과이고, 모델은 펌웨어가 어떻게 답하는지 말해 주지 않는다.
+답이 없을 때의 줄이다. 명령마다 답을 끊어 드라이버를 레지스터 모델 위에서 돌려 본 결과이고, 모델은 펌웨어가 어떻게 답하는지 말해 주지 않는다. 기기에서는 패치 0061 뒤로 첫 적재에서 링이 멈추지 않았고 연결 동안 `Message … timeout`이 없었다(2026-11-04). CE 0x8a 시간 초과는 칩 리셋에서 본다(7단계).
 
 | 줄 | 명령 | 뜻과 다음 |
 |---|---|---|
-| `Message 0004008a (seq N) timeout` 뒤 `hardware init failed` | CE `GET_NIC_CAPAB` 0x8a | 벤더 표에 있다(`GET_NIC_CAPABILITY_V2`). uni 시험을 지난 뒤라면 이벤트 꼴을 본다 |
+| `Message 0004008a (seq N) timeout` 뒤 `hardware init failed` | CE `GET_NIC_CAPAB` 0x8a | 벤더 표에 있다(`GET_NIC_CAPABILITY_V2`). 이벤트 꼴을 본다 |
 | `Message 00003eed (seq N) timeout` 뒤 `hardware init failed` | EXT `PROTECT_CTRL` 0x3e | **벤더 표에 없는 번호다.** 답을 기다리는 명령이라 wlan0이 생기지 않고, `hw_init_done` 전이라 리셋도 돌지 않는다. 버스는 멈추지 않고 `rmmod`로 내려간다. 이 명령만 건너뛰게 할지 그때 정한다 |
 | `Message 000500c0 (seq N) timeout`이 되풀이 | CE `REG_READ` 0xc0 | 벤더 표에 있다(`ACCESS_REG`). `SET_RATE_TX_POWER` 묶음마다 하나씩 기다리므로 3초씩 쌓인다. wlan0이 그만큼 늦게 생긴다(모델에서 68초). 멈춘 것이 아니다 |
 | `time sync failed: -110` | INIT 0x09 | 경고일 뿐이다. 다음 줄로 간다 |
@@ -1105,12 +1104,13 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 | up | EXT `SET_RX_PATH` 0x4e | 벤더 헤더에서 같은 번호가 `EFUSE_BUFFER_RD`다 | `Message 00004eed`, `ip`가 실패한다. 그 뒤 리셋이 돈다 |
 | up | CE `SET_RATE_TX_POWER` 0x5d, `REG_READ` 0xc0 | 있음 | 0x5d는 기다리지 않는다. 0xc0은 묶음마다 3초 기다리고, 시간 초과마다 리셋이 걸리므로 오래 걸린다(모델에서 203초) |
 | up | EXT `ID_RADIO_ON_OFF_CTRL` 0x05 | 있음 | 기다리지 않는다 |
-| up | uni `DEV_INFO`, `BSS_INFO` | 벤더는 쓰지 않는다. 5단계의 시험이 이 길을 가른다 | `Message 00020001` 또는 `00020002`, `ip`가 실패한다 |
+| up | CE 0x11(인터페이스), 0x28(DBDC 끄기) | 있음(레거시 길, 패치 0065) | 기기에서 동작했다. 0x28은 `eid 78`로 답한다 |
 | up | CE `SET_EDCA_PARMS` 0x1d, `SET_RX_FILTER` 0x0a | 있음 | 기다리지 않는다 |
 | up | EXT `CHANNEL_SWITCH` 0x08 | 있음 | `Message 000008ed`. `ip`는 성공하고 mac80211의 `ieee80211_hw_conf_init` 경고가 한 번 나온다 |
-| scan | CE `START_HW_SCAN` 0x03 | 있음(`SCAN_REQ_V2`) | 기다리지 않는다. 끝 이벤트(0x0d)가 없으면 스캔이 끝나지 않는다 |
-| 연결 | uni `DEV_INFO`, `BSS_INFO`, `STA_REC` | 벤더는 쓰지 않는다 | 모델에서 돌리지 않았다(AP가 없다) |
+| scan | CE `START_HW_SCAN` 0x03 | 있음(`SCAN_REQ_V2`) | 기다리지 않는다. 끝 이벤트(0x0d)가 없으면 스캔이 끝나지 않는다. 기기는 1186바이트를 무시해서 1192바이트로 보낸다(패치 0063) |
+| 연결 | CE 0x1c(채널 시간), 0x12(BSS), 0x13·0x14(스테이션), 0x07(키) | 있음(레거시 길, 패치 0065) | 2.4 GHz WPA2-PSK에서 동작했다. 5 GHz AP는 보지 못했다 |
 
+- **칩 리셋은 기기에서 실패한다(2026-11-04).** 아래의 되살리는 길은 모델에서 본 것이다. 기기에서는 재시도마다 `firmware running`까지 간 뒤 CE 0x8a가 시간 초과이고, 10번 뒤 `chip reset failed`다. 패닉은 없고 모듈을 다시 올리면 돌아온다. 실패한 뒤 `iw scan`은 끝나지 않는다.
 - `Message … timeout`이 나면 cmd와 함께 적는다. 그 뒤 `mt792x_reset`이 WF 전원을 다시 돌리고 보정을 다시 한다. 한 번의 리셋은 10번까지 시도한다. 켜지기는 하는데 펌웨어가 답하지 않거나 잠시 돌다 멈추면 리셋이 다시 걸려 되풀이된다. 앞 재시작에서 10분이 지나지 않은 재시작이 **20번 이어지면** `no more WF restarts: 20, under 10 minutes apart`로 멈춘다. 10분 넘게 잘 돈 뒤의 재시작은 새로 센다. WF는 꺼진 채 남고, 명령은 곧바로 거절된다(`-EIO`).
 - 멈추려면 `rmmod mt7921soc`. 지금 도는 시도만 기다리고 남은 시도는 건너뛴다. 시도는 보정과 시간 초과로 13초쯤까지이고, `REG_READ`(0xc0)에 답이 없는 시도는 1분이 넘는다(모델에서 71초). 다시 켜 보려면 `echo 1 > /sys/kernel/debug/ieee80211/phy*/mt76/chip_reset`이나 `modprobe`다. 멈춘 뒤의 `chip_reset`은 마지막 재시작에서 10분이 지나야 돈다. 그 전의 `chip_reset`은 거절되고, 이 시간을 늘리지 않는다.
 - 다시 켜기가 실패하면 `WF restart failed`가 나오고, 그 뒤로 드라이버는 WF 쪽과 WFDMA를 건드리지 않는다(`… while the WF part is off`가 찍힌다). `rmmod`로 내려도 된다(링 레지스터는 그동안 메모리를 가리킨다). 다시 올려도 안 되면 재부팅으로 되돌린다.
@@ -1118,7 +1118,7 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 - `irq N: nobody cared`와 `Disabling IRQ #N`이 나오면 이 선을 WFDMA 말고 다른 것이 올리고 있다. 벤더는 이 선을 인터럽트 컨트롤러에서 막으므로 벤더 코드로는 없다고 말할 수 없다. 커널이 선을 끄고 100 ms마다 폴링하므로 명령은 느리게라도 돌 수 있고, 모듈을 다시 올려야 풀린다. `HOST_CSR_IRQ_EN`(`0x18001600`)의 `0x3ff`를 줄여 볼 자리다. `/proc/interrupts`도 본다.
 - `DMA window full` 줄은 20 MiB 칸이 찼다는 뜻이다. 소켓이 안 읽고 쥔 RX 페이지가 칸을 차지한다. 그 동안 RX가 서고 명령과 TX가 `-ENOMEM`으로 실패할 수 있다. 드라이버는 100 ms마다 다시 채운다. 소켓이 읽으면 되살아나야 한다. `/sys/kernel/debug/ieee80211/phy*/mt76/rx-queues`로 본다.
 - debugfs `runtime-pm`은 켜도 소유권을 내주지 않는다(하드웨어에 닿지 않는다). `deep-sleep`은 쓰지 않는다. 펌웨어의 `KeepFullPwr`를 내리는 명령이고 이 길은 시험한 적이 없다.
-- CNM: 기본은 꺼 둔 길이다. 스캔과 연결이 안 되면 `modprobe mt7921soc cnm=1`로 ROC 길을 본다. 펌웨어 파일이 없어 미리 읽을 수 없다.
+- CNM: 패치 0065에서 `cnm=` 매개변수를 뺐다. 채널 시간은 레거시 CE 0x1c로 받고, 허가는 `eid 10`으로 온다.
 
 #### 끝날 때
 

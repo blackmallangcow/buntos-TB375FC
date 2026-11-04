@@ -2,6 +2,7 @@
 
 - 작성일: 2026-11-01
 - 고친 날: 2026-11-01. 오픈소스 쪽 2차 조사(MCU 명령, LK 적재, Bluetooth, conninfra)를 반영했다
+- 고친 날: 2026-11-04. 기기 결과(레거시 명령 길, 2.4 GHz 연결)를 반영했다
 - 목적: "MT6897의 내장 Wi-Fi는 칩 ID `0x7961`인 soc7_0 코어에 RF 칩 MT6637을 붙인 구성"이라는 단서(GitHub 이슈)를 기기 펌웨어와 공개 소스로 다시 확인하고, 포팅 길을 정한다
 
 ## 1. 결론
@@ -19,7 +20,8 @@
 - 그래서 포팅 길은 새 드라이버를 처음부터 쓰는 것이 아니다. mt76의 MT7921 코드에 **SoC(AXI) 버스, conninfra 전원 순서, LK 적재본 기동을 더하는** 것이다(4절).
 - MCU 명령의 머리 꼴과 레거시 명령 번호는 MT7921과 같다(6절).
   - 다른 것은 펌웨어 기동, 보정값 전달, DMA 링 배치다.
-  - 펌웨어가 uni cmd를 받는지는 아직 모른다.
+  - 펌웨어는 uni cmd를 받지 않는다(2026-11-04 기기). 인터페이스, BSS, 스테이션, 키, 채널 시간을 레거시 명령으로 보낸다.
+- **2.4 GHz WPA2-PSK 연결이 인터넷까지 된다(2026-11-04 기기).** 내려받기 최고 138 Mbit/s, 올리기 87 Mbit/s다. 5 GHz AP 연결과 칩 리셋은 아직이다(7절).
 - Bluetooth 전송은 UART(BTIF)가 아니라 EMI 안의 공유 메모리 링(BEIF)이다. HCI 위의 WMT 명령은 업스트림 btmtk와 같은 꼴이다.
 
 ## 2. 근거
@@ -100,14 +102,14 @@ Dimensity 8300 기기의 속성으로 적힌 값이다. 2.1의 기기 펌웨어�
 
 ## 4. 포팅 설계
 
-코드는 패치 0055~0060(Wi-Fi)과 0085·0086(Bluetooth)이다. 기기 시험은 없다.
+코드는 패치 0055~0065(Wi-Fi)와 0085·0086(Bluetooth)이다. 기기 결과는 7절이다.
 
 | 단계 | 할 일 | 참고 |
 |---|---|---|
 | W1 conninfra 최소 | connsys 전원 켜기. 기기 트리가 `mediatek,mt6897-consys-atf`라 init, A-die, AFE, PLL, 저전력 단계를 TF-A SIP 호출(`0xC2000534`)로 한다. 커널 몫은 셋이다: PMIC 전원(MT6363 VCN13·VRFIO18, MT6368 VCN33_1·VCN33_2·VANT18), 클럭 방식(MT6685 DCXO), CONN 전원 도메인. AP2CONN·CONN2AP sleep protect는 전원 도메인의 버스 보호가 맡는다(패치 0054). A-die MT6637은 conn_infra RF SPI 마스터와 하드웨어 세마포어로 닿는다 | 벤더 `conninfra/conn_drv/connv2/platform/mt6897`(OnePlus 공식), 업스트림 `mt7915/soc.c`(같은 RF SPI·세마포어 절차) |
 | W2 mt76 SoC 버스 | `wifi@18000000` 영역의 MMIO 매핑. AXI 표는 0x7c000000→+0, 0x830c0000→+0x400000이고 창은 7 MiB다. 인터럽트는 889(WFDMA)다. 링 배치는 명령 TX 15, RX 이벤트 2 | 업스트림 `mt7921`/`mt792x` 공통 코드, MT7902의 TXQ 15 분기(DMA 배치 선례), 벤더 `soc7_0.c`의 `_HIF_AXI` 표 |
 | W3 펌웨어 기동 | LK가 실은 것을 쓴다. EMI 주소(DT `emi-addr`)를 받아 remap하고, MCU를 기동한 뒤 시작 명령 INIT 0x42를 보낸다. 그 앞에 시간 동기(INIT 0x09)와 PHY action(INIT 0x08: FEM, NVRAM, 보정)이 있다. DMA는 LK가 연 20 MiB 칸 안에서만 한다 | 벤더 `chips/common/fw_dl.c`, `pre_cal.c` |
-| W4 MCU 명령 | 머리 꼴과 레거시 명령 번호는 mt7921과 같다(6절). 펌웨어가 uni cmd(DEV_INFO, BSS_INFO, STA_REC, ROC)를 받는지 2d에서 시험한다. 안 받으면 레거시 경로(CMD 0x11~0x14 등)를 둔다. 보정값은 NVRAM 태그를 CMD 0x48 조각으로 보낸다 | 6절 표, 벤더 `nic_cmd_event.h` |
+| W4 MCU 명령 | 머리 꼴과 레거시 명령 번호는 mt7921과 같다(6절). 펌웨어가 uni cmd를 받지 않아(2026-11-04 기기) 인터페이스는 CE 0x11, BSS는 0x12, 스테이션은 0x13·0x14, 키는 0x07, 채널 시간은 0x1c로 보낸다(패치 0064·0065). 보정값은 NVRAM 태그를 CMD 0x48 조각으로 보낸다 | 6절 표, 벤더 `nic_cmd_event.h` |
 | W5 FEM | `connfem` 표에서 이 기기의 조합을 골라 RF 앞단 설정 | 벤더 `connectivity/connfem` |
 | B1 Bluetooth | 전송은 공유 메모리 링 BEIF(EMI+0xBA0000, 32 KiB)와 IRQ 둘(SW 614, 버스 멈춤 891)이다. 펌웨어는 LK가 싣는다. hci_dev와 WMT-over-HCI(0xFC6F) 머리는 업스트림 btmtk와 같으므로 다시 쓴다. 전송 드라이버는 새로 쓴다. 업스트림의 SoC 내장 BT 선례는 btmtkuart의 MT7622(BTIF 위 serdev)뿐이다 | 벤더 `bt/mt66xx/btif`(`SUPPORT_BEIF=1`), 업스트림 `drivers/bluetooth/btmtk.h` |
 
@@ -133,7 +135,7 @@ OnePlus 공식 gen4m(MT6897 빌드)과 업스트림 mt76(7.3)을 대조했다(�
 | 펌웨어 내려받기 | 없다. LK 적재본의 manifest를 읽고 시작 명령 INIT 0x42 하나를 보낸다. 패치 세마포어, `PATCH_START_REQ`, `FW_SCATTER`, `START_REQ`를 쓰지 않는다 | 패치와 RAM 코드를 내려받는다 | 다르다. 0x42는 업스트림에 없다 |
 | 그 앞 단계 | FWDL 모드, 시간 동기(INIT 0x09), PHY action(INIT 0x08) | 없다 | 새로 쓴다 |
 | 명령 머리 | `struct WIFI_CMD`(HW TXD 32바이트와 머리, 합계 64바이트) | `mt76_connac2_mcu_txd` | 같다(CONNAC2 레거시) |
-| uni cmd | soc7_0 빌드에 uni 지원 설정이 없다. BSS·STA·키·ROC·suspend를 레거시 명령으로 보낸다 | 여러 명령을 uni로 보낸다 | 모른다. gen4m은 MT7961도 레거시로 보내므로, 펌웨어가 uni를 못 받는다는 뜻은 아니다 |
+| uni cmd | soc7_0 빌드에 uni 지원 설정이 없다. BSS·STA·키·ROC·suspend를 레거시 명령으로 보낸다 | 여러 명령을 uni로 보낸다 | 다르다. 기기에서 uni `DEV_INFO`는 멀쩡한 펌웨어에서도 시간 초과이고 바로 뒤의 CE 0x8a에는 답이 온다(2026-11-04). 레거시로 보낸다 |
 | 레거시 명령 번호 | CE 0x01·03·05·0a·0f·16·17·1b·1c·1d·33·5d·61·62·8a·a1·b0·c0·c5·ca·cd·d0과 EXT 0x05·08·21이 같은 뜻이다 | 같다 | 같다. CE 0x5c(CLC)와 EXT 0xbd(RF pin)는 없다. EXT 0x46(`MAC_INIT_CTRL`), 0x3e(`PROTECT_CTRL`)도 벤더 표에 없고, 0x4e(`SET_RX_PATH`)와 0x2c는 벤더 헤더에 다른 이름으로 있다(`EFUSE_BUFFER_RD`, `GET_SENSOR_RESULT`). 기기에서 본다. 답을 기다리는 것 가운데 벤더 표에 없거나 이름이 다른 것: `PROTECT_CTRL`은 wlan0이 생기기 전(`mt7921_mac_init`), `MAC_INIT_CTRL`과 `SET_RX_PATH`는 `ip link up`(`__mt7921_start`)에서 간다. 체크리스트 5·7단계에 답이 없을 때의 줄을 적었다. |
 | 이벤트 | `WIFI_EVENT`(RXD 24바이트와 머리). 주요 EID가 같다 | `mt76_connac2_mcu_rxd` | 같다. RSSI 알림 번호만 다르다(0xa1, 업스트림 0x96) |
 | NIC 능력(0x8a) | 0x17은 P2P, 0x20은 MLR 능력 | 0x17은 WFDMA 재할당, 0x20은 칩 능력 | 뜻이 달라 따로 읽는다 |
@@ -142,6 +144,12 @@ OnePlus 공식 gen4m(MT6897 빌드)과 업스트림 mt76(7.3)을 대조했다(�
 | INIT 이벤트 | 페이로드는 RXD 24바이트 + 8바이트 뒤다. 일반 이벤트는 + 12바이트 뒤다(`struct mt76_connac2_mcu_rxd`) | `mt7921_mcu_parse_response`는 PATCH_SEM_CONTROL에서만 이 차이를 다룬다 | 자기 함수를 얹었다 |
 | DMA | 명령 TX 링 15. RX는 0·1 데이터, 2 이벤트, 3 tx-free | 명령 링 17, 이벤트 RX 0 | 다르다. MT7902의 TXQ 15 분기가 선례다 |
 | 레지스터 | MT7921과 같은 칩 주소 공간이다 | `fixed_map` | AXI 표만 새로 쓴다 |
+| 채널 목록(CE 0x0f) | 채널 묶음을 보내는 옛 꼴. 벤더는 `TAG_CAP_SINGLE_SKU`를 보고하지 않는 펌웨어에 이 꼴을 쓴다 | `mt76_connac_mcu_set_channel_domain()`의 새 꼴 | 다르다. 새 꼴은 8채널(76바이트)부터 펌웨어가 주기 이벤트까지 멈추고 답하지 않는다(기기). 나가는 자리에서 옛 꼴로 바꾼다(패치 0062) |
+| 스캔 요청(CE 0x03) | 벤더 구조체가 packed가 아니어서 여분 SSID 앞에 2바이트가 있고 주소가 2바이트 뒤다 | `struct mt76_connac_hw_scan_req` 1186바이트 | 다르다. 1186바이트는 끝 이벤트도 없이 무시하고 1192바이트부터 스캔한다(기기). 나가는 자리에서 맞춘다(패치 0063) |
+| 연결 명령의 길이 | CE 0x12 116, 0x13 200, 0x07 64, 0x1c 24, 0x28 36바이트. 0x1d 44와 0x16 12는 mt7921과 같다 | uni로 보낸다 | 벤더 구조체와 맞췄다. 스캔에서 본 것처럼 짧으면 답 없이 무시될 수 있다 |
+| 채널 허가와 DBDC | CE 0x1c(JOIN)는 `eid 10`으로 허가하고, CE 0x28(DBDC 끄기)은 `eid 78`로 답한다(기기). 벤더도 기본 모드에서는 초기화 때 DBDC를 끈다 | uni ROC | 새로 썼다 |
+| 프레임 길 | TX free는 RX3, 관리 프레임은 펌웨어를 거쳐 RX2, 데이터 프레임은 RX0으로 온다(기기, 2.4 GHz) | 위 DMA 줄의 배치 | 자기 링 배치를 쓴다. RX1은 만들지 않았다 |
+| TX A-MPDU | 펌웨어가 묶는다(기기, `tx_stats`의 길이 분포). `ampdu_action`은 `-EOPNOTSUPP`를 돌려준다 | 드라이버가 BA 세션을 명령으로 연다 | 다르다 |
 
 다시 쓰는 꼴:
 - mt792x 위에 플랫폼 버스(AXI 표, MT7902식 DMA 배치)를 더한다.
@@ -151,7 +159,18 @@ OnePlus 공식 gen4m(MT6897 빌드)과 업스트림 mt76(7.3)을 대조했다(�
 ## 7. 남은 확인
 
 - **벤더 표에 없는 명령(2026-11-04 기기):** 멀쩡한 펌웨어에서 EXT 0x46·0x4e·0x08은 상태 0으로 답한다. EXT 0x3e·0x05는 상태 칸이 0xfe다(모르는 명령이라는 뜻으로 추정). 명령을 몰아 보내면 명령 링이 먼저 멈추니 그때의 시간 초과는 이 판단에 쓰지 않는다.
-- **uni cmd:** 받지 않는다(2026-11-04 기기). uni `DEV_INFO`는 시간 초과이고 CE `GET_NIC_CAPAB`에는 답이 온다. 레거시 경로가 필요하다.
+- **uni cmd:** 받지 않는다(2026-11-04 기기). uni `DEV_INFO`는 시간 초과이고 CE `GET_NIC_CAPAB`에는 답이 온다. 레거시 명령으로 보낸다(패치 0065).
+- **연결(2026-11-04 기기, 2.4 GHz WPA2-PSK, 비밀번호는 사용자가 직접 넣었다):** 인증부터 연결까지 0.24초, `wpa_state` `COMPLETED`까지 3초, DHCP 2초다. 내려받기 38, 107, 138 Mbit/s, 올리기 87 Mbit/s다. 신호는 −51~−41 dBm, 수신 최고 HE-MCS 11 2x2다. 약 10분 유지했고 `tx failed` 0, TCP 재전송 1, `Message … timeout`과 커널 경고가 없다. 연결 중 스캔도 된다.
+- **이 길의 범위:** station만 남는다. AP, P2P, monitor, scheduled scan, CSA, wowlan은 uni 명령이라 뺐고, TDLS 상대는 거절한다. 절전은 꺼 둔다.
+- **명령 링 멈춤:** DMASHDL을 우회한 채 명령이 몰리면 명령 링이 멈춘다. `firmware running` 뒤에 벤더 값으로 켠 뒤로 첫 적재에서 멈추지 않았다(패치 0061). 원인(이벤트 낼 자리 부족)은 추정이다.
+- **칩 리셋이 실패한다:** debugfs `chip_reset`으로 재현한다. 재시도마다 `firmware running`까지 가고 다음 CE 0x8a가 시간 초과이며, 10번 뒤 `chip reset failed`다. `tx15 7/3`으로 WFDMA가 ROM 뒤 첫 명령을 읽지 않는다. 재시작 때 DMASHDL을 켜지 않으면 0x8a를 넘어가서(1번 봄) DMASHDL 관련으로 본다. `MT_WFDMA0_RST`를 넣어도, connsys 공통 전원까지 돌려도 같았다. 패닉은 없고 모듈을 다시 올리면 돌아온다. 답을 기다리는 명령이 시간 초과되면 이 길을 타므로 그때부터 Wi-Fi가 죽는다. 연결 10분 동안에는 일어나지 않았다.
+- **5 GHz:** 스캔의 5 GHz 프레임은 RXD 밴드 칸이 1이라(DBDC를 꺼도 1) `mt7921_mac_fill_rx`가 버린다. 그 칸을 지운다. 채널은 RXD에 따로 있다. 5 GHz AP 연결은 보지 못했다. RX1 링이 없으니 데이터가 그쪽으로 가면 받지 못한다.
+- **RX 헤더 변환:** 전체 스위치 `MT_MDP_DCR0` bit 19를 끈다. `mt7921_mac_init` 전에도 켜져 있었다(리셋이 실패한 상태에서 읽었다). mac80211이 인증 전의 변환 프레임을 버리기 때문이고, 벤더는 변환된 프레임을 받아 처리한다. 켠 채로 시험하지 않아서 꺼야만 되는지는 모른다.
+- **RX 순서 정리:** 코드는 펌웨어의 BA 이벤트(0x0a, 0x0b)를 따르는데 이벤트가 오는지 보지 못했다. 첫 내려받기 구간에 `TCPOFOQueue`가 1196이고 끝까지의 `rx drop misc`가 604다. 2.4 GHz 혼잡인지 순서 정리가 안 돌아서인지 구분하지 못했다.
+- **규제 정보:** `cfg80211: loaded regulatory.db is malformed or signature is missing/invalid`로 거부되어 규제가 `00`이고 `iw reg set`이 먹지 않는다. 그래서 국가 코드가 든 CE 0x0f는 돌지 않았다. Debian이 고르는 `regulatory.db-debian`의 키가 커널에 없는 것으로 추정한다. 이미지에서 `-upstream`을 고르거나 커널에 키를 넣는 길이 있고, 기기에서 시험하지 않았다.
+- **AP 소실 감지:** common 코드가 `CONNECTION_MONITOR`를 세우는데, 펌웨어의 beacon loss를 받는 조건(`IEEE80211_VIF_BEACON_FILTER`)은 런타임 PM일 때만 선다. AP가 사라져도 모를 수 있다(코드로 읽었다).
+- **CE 0x12의 `auth_mode`, `enc_status`:** WPA2-PSK, CCMP로 적어 동작했지만 펌웨어가 어디에 쓰는지 모른다. TKIP, WPA3 망도 같은 값을 적는다.
+- **PCIe, USB 칩:** 공용 코드의 후크(패치 0064)는 그 칩에서 NULL이다. 패치 전후 기계어를 맞대어 함수 571개 가운데 543개가 같고 28개는 후크 자리, 패딩, 위치만 다른 것을 봤다. 실제 칩에서 돌리지는 않았다.
 - **LK가 트리에 쓰는 값:** LK는 노드를 경로로 찾고 status를 보지 않는다(역어셈블). mainline 트리에 실제로 값을 쓰는지는 기기에서 본다. 차례는 [체크리스트](bringup-checklist.md) 9.1절이다.
 - **LK의 펌웨어 적재:** 기기에서 EMI+0xB00024의 manifest로 확인한다.
 - **직접 레지스터 길:** `-atf` 대신 일반 세계에서 레지스터를 직접 쓸 수 있는지(DAPC). 모르면 SIP를 쓴다.
