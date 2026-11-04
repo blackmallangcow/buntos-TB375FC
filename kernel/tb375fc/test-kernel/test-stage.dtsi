@@ -412,3 +412,31 @@
 &lcd_avee {
 	status = "okay";
 };
+
+// 9.5 밝기. SoC의 disp_pwm0이 SGM37604A 둘을 함께 움직인다. i2c3과 i2c13은 두 칩과 SM5109의 레지스터를 읽으려고 켠다(드라이버는 붙지 않는다).
+/ {
+	aliases {
+		i2c3 = &i2c3;
+		i2c13 = &i2c13;
+	};
+};
+
+&disp_pwm0 {
+	status = "okay";
+};
+
+&backlight {
+	status = "okay";
+};
+
+&imp_iic_wrap_es {
+	status = "okay";
+};
+
+&i2c3 {
+	status = "okay";
+};
+
+&i2c13 {
+	status = "okay";
+};

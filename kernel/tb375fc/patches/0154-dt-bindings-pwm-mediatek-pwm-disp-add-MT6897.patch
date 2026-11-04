@@ -1,0 +1,20 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: pwm: mediatek,pwm-disp: add MT6897
+
+The display PWM of MT6897 has the registers of the MT8183 one. The driver
+of the stock kernel of the Lenovo TB375FC has the same values for both.
+---
+ Documentation/devicetree/bindings/pwm/mediatek,pwm-disp.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/pwm/mediatek,pwm-disp.yaml b/Documentation/devicetree/bindings/pwm/mediatek,pwm-disp.yaml
+--- a/Documentation/devicetree/bindings/pwm/mediatek,pwm-disp.yaml
++++ b/Documentation/devicetree/bindings/pwm/mediatek,pwm-disp.yaml
+@@ -27,6 +27,7 @@
+       - items:
+           - enum:
+               - mediatek,mt6893-disp-pwm
++              - mediatek,mt6897-disp-pwm
+               - mediatek,mt8186-disp-pwm
+               - mediatek,mt8188-disp-pwm
+               - mediatek,mt8192-disp-pwm

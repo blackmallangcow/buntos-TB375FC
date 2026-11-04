@@ -1209,6 +1209,17 @@
 			status = "disabled";
 		};
 
+		disp_pwm0: pwm@1100e000 {
+			compatible = "mediatek,mt6897-disp-pwm", "mediatek,mt8183-disp-pwm";
+			reg = <0 0x1100e000 0 0x1000>;
+			interrupts = <GIC_SPI 254 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&topckgen CLK_TOP_DISP_PWM>,
+				 <&pericfg_ao CLK_PERI_AO_DISP_PWM0>;
+			clock-names = "main", "mm";
+			#pwm-cells = <2>;
+			status = "disabled";
+		};
+
 		/*
 		 * The SPI masters take their clock from a topckgen mux behind a
 		 * pericfg_ao gate. As in the stock tree, spi0-2 run from

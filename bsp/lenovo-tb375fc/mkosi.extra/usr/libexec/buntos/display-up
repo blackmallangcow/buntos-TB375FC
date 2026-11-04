@@ -7,6 +7,9 @@
 [ "$(tr -d '\0' < /proc/device-tree/soc/dsi@1400d000/status 2>/dev/null)" = okay ] || exit 0
 modprobe phy-mtk-mipi-dsi-drv
 modprobe mtk-mmsys
+# 패널은 밝기 장치가 생길 때까지 미룬다
+modprobe pwm-mtk-disp
+modprobe pwm_bl
 modprobe panel-novatek-nt36532
 modprobe mediatek-drm
 # 컴포지터가 뜨기 전에 커넥터가 있어야 한다. 없으면 컴포지터는 simple-framebuffer로 간다
