@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 이 기기의 커널은 우리가 빌드해 boot 파티션에 굽는다. Debian 커널은 부팅되지 않고 모듈 자리만 차지한다
+Package: linux-image-* linux-headers-* linux-modules-* linux-kbuild-* linux-support-*
+Pin: release o=Debian
+Pin-Priority: -1
+
+# LK가 부팅한다. 다른 부트로더와 initramfs 도구는 할 일이 없고, 디스크를 건드리려 할 수 있다
+Package: grub* dracut* initramfs-tools* u-boot* flash-kernel
+Pin: release o=Debian
+Pin-Priority: -1
