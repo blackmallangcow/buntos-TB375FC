@@ -6,7 +6,7 @@
 //! 지원처럼 계정을 만들고(buntd-setup) 바로 그 계정으로 로그인한다. 계정이 있으면 macOS 로그인
 //! 창처럼 흐린 배경화면 위에 시각, 사진, 이름, 암호 칸을 보인다. 로그인은 greetd IPC로 한다.
 //!
-//! 개발할 때는 `bunt-greeter --preview login|create`로 greetd 없이 화면만 볼 수 있다
+//! 개발할 때는 `bunt-greeter --preview login|create|signing-in`로 greetd 없이 화면만 볼 수 있다
 
 mod accounts;
 mod avatar;
@@ -16,7 +16,7 @@ mod create;
 mod login;
 mod startup_sound;
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use bunt_greeter::account;
 use bunt_i18n::{Sources, Translations};
@@ -50,6 +50,19 @@ const SESSION_ENV: [&str; 3] = [
 pub enum View {
     Login,
     Create,
+    /// 로그인에 성공한 뒤의 로딩 막대 (--preview로만 바로 본다)
+    SigningIn,
+}
+
+/// 로그인에 성공한 뒤 로딩 막대를 채우며 기다리는 시간. 사용자 세션은 로그인 화면이 끝나야 뜬다(greetd)
+const LOADING_TIME: Duration = Duration::from_millis(450);
+/// 로그인 화면이 끝날 때 로딩 막대가 찬 비율. 마지막 화면은 세션이 뜰 때까지 그대로 남는다
+const LOADING_FILL: f64 = 0.6;
+
+/// 로딩 막대가 `elapsed` 뒤에 찬 비율. 처음에 빠르고 끝에서 느려진다
+fn loading_fraction(elapsed: Duration) -> f64 {
+    let progress = (elapsed.as_secs_f64() / LOADING_TIME.as_secs_f64()).min(1.0);
+    LOADING_FILL * (1.0 - (1.0 - progress).powi(2))
 }
 
 /// 로그인 화면이 함께 쓰는 것
@@ -61,6 +74,8 @@ pub struct Shared {
     window: gtk::ApplicationWindow,
     /// 계정을 만든 뒤 로그인 화면을 다시 만들 때 쓴다
     login: RefCell<Option<gtk::Widget>>,
+    /// 화면 키보드. 로그인에 성공하면 내린다
+    keyboard: bunt_keyboard::Keyboard,
 }
 
 impl Shared {
@@ -76,13 +91,40 @@ impl Shared {
         self.login.replace(Some(view));
     }
 
-    /// 로그인에 성공하면 끝난다. 셸이 끝나면 로그인 화면의 컴포지터도 끝나고(greeter.toml의
-    /// exit-with-shell), greetd가 예약한 사용자 세션을 연다
-    pub fn finish(&self) {
-        eprintln!("bunt-greeter: session scheduled, exiting");
-        if let Some(app) = self.window.application() {
-            app.quit();
+    /// 다른 화면으로 바꾼다
+    pub fn show_view(&self, view: &impl IsA<gtk::Widget>) {
+        self.stack.add_child(view);
+        self.stack.set_visible_child(view);
+    }
+
+    /// 로그인에 성공하면 화면 키보드를 내리고 로딩 막대를 잠깐 채운 뒤 끝난다. 셸이 끝나면 로그인 화면의
+    /// 컴포지터도 끝나고(greeter.toml의 exit-with-shell), greetd가 예약한 사용자 세션을 연다. 세션이 첫
+    /// 화면을 낼 때까지 이 마지막 화면이 남는다
+    pub fn finish(&self, loading: &gtk::ProgressBar) {
+        self.keyboard.conceal();
+        let start = std::cell::Cell::new(None);
+        loading.add_tick_callback(move |bar, clock| {
+            let now = clock.frame_time();
+            let begun = start.get().unwrap_or(now);
+            start.set(Some(begun));
+            let elapsed = Duration::from_micros((now - begun).max(0) as u64);
+            bar.set_fraction(loading_fraction(elapsed));
+            if elapsed < LOADING_TIME {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+        if self.preview {
+            return;
         }
+        let app = self.window.application();
+        glib::timeout_add_local_once(LOADING_TIME, move || {
+            eprintln!("bunt-greeter: session scheduled, exiting");
+            if let Some(app) = app {
+                app.quit();
+            }
+        });
     }
 
     pub fn window(&self) -> &gtk::ApplicationWindow {
@@ -108,8 +150,9 @@ fn main() -> glib::ExitCode {
         (None, _) => None,
         (Some("--preview"), Some("login")) => Some(View::Login),
         (Some("--preview"), Some("create")) => Some(View::Create),
+        (Some("--preview"), Some("signing-in")) => Some(View::SigningIn),
         _ => {
-            eprintln!("usage: bunt-greeter [--preview login|create]");
+            eprintln!("usage: bunt-greeter [--preview login|create|signing-in]");
             return glib::ExitCode::from(2);
         }
     };
@@ -187,6 +230,7 @@ fn build(app: &gtk::Application, tr: &Rc<Translations>, preview: Option<View>) {
         stack: stack.clone(),
         window: window.clone(),
         login: RefCell::default(),
+        keyboard: keyboard.clone(),
     });
     let view = match preview {
         Some(view) => view,
@@ -206,6 +250,7 @@ fn build(app: &gtk::Application, tr: &Rc<Translations>, preview: Option<View>) {
             stack.add_named(&view, Some("create"));
             stack.set_visible_child(&view);
         }
+        View::SigningIn => login::show_signing_in(&shared, "buntOS"),
     }
 
     if preview.is_none() {
@@ -229,6 +274,7 @@ fn build(app: &gtk::Application, tr: &Rc<Translations>, preview: Option<View>) {
             match view {
                 View::Login => "login",
                 View::Create => "create",
+                View::SigningIn => "signing-in",
             }
         );
     };
@@ -258,6 +304,15 @@ fn load_style() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_loading_bar_fills_quickly_and_stops_at_its_end() {
+        assert_eq!(loading_fraction(Duration::ZERO), 0.0);
+        let half = loading_fraction(LOADING_TIME / 2);
+        assert!(half > LOADING_FILL / 2.0 && half < LOADING_FILL);
+        assert_eq!(loading_fraction(LOADING_TIME), LOADING_FILL);
+        assert_eq!(loading_fraction(LOADING_TIME * 3), LOADING_FILL);
+    }
 
     #[test]
     fn every_language_has_the_same_messages() {
