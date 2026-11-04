@@ -1,0 +1,31 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 충전을 지켜본다. 30초마다 상태를 남기고, 배터리 40도나 커넥터 55도(ADC 값 6880 아래)를 넘으면 충전을 멈춘다.
+# 멈춘 뒤에도 기록은 이어 간다. 다시 충전하려면 서비스를 다시 시작한다
+D=/var/log/buntos-charge
+C=/sys/class/power_supply/mt6375-charger
+G=/sys/class/power_supply/mm8013
+mkdir -p "$D"
+# 부팅마다 기록 하나, 최근 다섯 개만 둔다
+ls -1t "$D"/*.log 2>/dev/null | tail -n +5 | xargs -r rm -f
+L=$D/$(date +%Y%m%d-%H%M%S).log
+stop() {
+	m="$(date +%T) GUARD STOPPED CHARGING: $1"
+	echo "$m" >>"$L"
+	echo "buntos-charge: $m" >/dev/kmsg
+	echo inhibit-charge >"$C/charge_behaviour" 2>>"$L"
+	sync
+}
+while :; do
+	line=$(/usr/libexec/buntos/charge-status)
+	echo "$line" >>"$L"
+	sync
+	bat=$(cat "$G/temp" 2>/dev/null)
+	raw=$(echo "$line" | grep -o 'raw=[0-9]*' | cut -d= -f2)
+	# 0은 못 읽은 것이다
+	[ "${bat:-0}" -ge 400 ] && stop "battery $bat"
+	[ "${raw:-0}" -gt 0 ] && [ "${raw:-0}" -lt 6880 ] && stop "connector raw $raw"
+	sleep 30
+done

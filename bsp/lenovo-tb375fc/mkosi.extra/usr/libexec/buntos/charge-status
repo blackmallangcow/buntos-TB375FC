@@ -1,0 +1,14 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 한 줄 상태. 커넥터 온도는 가짜 값(emul_temp)에 속지 않게 ADC에서 직접 읽어 계산한다.
+C=/sys/class/power_supply/mt6375-charger; G=/sys/class/power_supply/mm8013
+r() { cat "$1" 2>/dev/null || echo -; }
+A=; for d in /sys/bus/iio/devices/iio:device*; do [ "$(cat "$d/name" 2>/dev/null)" = MT6363 ] && A=$d; done
+Z=; for z in /sys/class/thermal/thermal_zone*; do [ "$(cat "$z/type" 2>/dev/null)" = usb-conn-thermal ] && Z=$z; done
+raw=$(cat "$A/in_voltage12_raw" 2>/dev/null); [ -n "$raw" ] || raw=0
+ct=$(awk -v r="$raw" 'BEGIN{if(r<=0){print "-";exit} R=r*100000/(32768-r); printf "%.1f", 1/(1/298.15+log(R/100000)/4250)-273.15}')
+top=$(i2cget -f -y 5 0x34 0x20 2>/dev/null)
+gpio=$(grep -E 'vbus-protec' /sys/kernel/debug/gpio 2>/dev/null | grep -o -E '(out|in) +(hi|lo)' | tr -s ' ' | tr ' ' '-')
+echo "$(date +%T) st=$(r $C/status) h=$(r $C/health) on=$(r $C/online) aicr=$(( $(r $C/input_current_limit | sed 's/-/0/') / 1000 )) cc=$(( $(r $C/constant_charge_current | sed 's/-/0/') / 1000 )) top=$top gpio=$gpio conn=$ct raw=$raw zone=$(r "$Z/temp") bat=$(r $G/temp) V=$(( $(r $G/voltage_now | sed 's/-/0/') / 1000 )) I=$(( $(r $G/current_now) / 1000 )) soc=$(r $G/capacity) op=$(r /sys/class/typec/port0/power_operation_mode) role=$(r /sys/class/typec/port0/power_role | tr -d '[]' | cut -c1-12)"

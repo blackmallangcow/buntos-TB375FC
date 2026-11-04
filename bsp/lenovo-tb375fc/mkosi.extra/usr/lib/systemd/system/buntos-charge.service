@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 감시를 먼저 걸고 충전 드라이버를 올린다. 끄려면 systemctl stop(이번 부팅), systemctl disable(다음 부팅부터)
+[Unit]
+Description=Charge the battery under the temperature guard
+After=greetd.service buntos-display.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/buntos/charge-guard
+ExecStartPost=/usr/libexec/buntos/charge-up
+ExecStop=-/bin/sh -c 'echo inhibit-charge > /sys/class/power_supply/mt6375-charger/charge_behaviour'
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

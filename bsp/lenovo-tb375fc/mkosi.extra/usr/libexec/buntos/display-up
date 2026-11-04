@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 화면 드라이버를 로그인 화면 전에 올린다. 명령줄의 modprobe.blacklist가 자동 적재를 막으므로 차례를 여기서
+# 정한다. 화면 노드가 꺼진 커널이면 simple-framebuffer 그대로 둔다
+[ "$(tr -d '\0' < /proc/device-tree/soc/dsi@1400d000/status 2>/dev/null)" = okay ] || exit 0
+modprobe phy-mtk-mipi-dsi-drv
+modprobe mtk-mmsys
+modprobe panel-novatek-nt36532
+modprobe mediatek-drm
+# 컴포지터가 뜨기 전에 커넥터가 있어야 한다. 없으면 컴포지터는 simple-framebuffer로 간다
+i=0
+while [ $i -lt 100 ]; do
+	ls /sys/class/drm/card*-DSI-1 >/dev/null 2>&1 && exit 0
+	sleep 0.1
+	i=$((i + 1))
+done
+echo "no DSI connector after 10 s" >&2
+exit 0

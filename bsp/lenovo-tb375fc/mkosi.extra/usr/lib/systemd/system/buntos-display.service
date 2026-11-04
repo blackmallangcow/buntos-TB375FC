@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 화면 드라이버(mediatek-drm)를 로그인 화면 전에 올린다
+[Unit]
+Description=Load the display driver before the login screen
+Before=greetd.service buntos-gpu.service
+After=systemd-udevd.service local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=25
+ExecStart=/usr/libexec/buntos/display-up
+
+[Install]
+WantedBy=greetd.service

@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 충전 드라이버를 올린다. 감시(charge-guard)가 먼저 돈다. TCPC는 충전기가 자리를 잡은 뒤에 올린다
+C=/sys/class/power_supply/mt6375-charger
+modprobe mt6375
+modprobe mt6375_charger
+sleep 3
+modprobe tcpci_mt6375
+# 서비스를 멈췄다 다시 켜면 충전이 막힌 채다
+[ -w $C/charge_behaviour ] && echo auto > $C/charge_behaviour
+exit 0
