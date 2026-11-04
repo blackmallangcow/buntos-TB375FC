@@ -54,6 +54,8 @@ use crate::{
 const LOGOUT_WAIT: Duration = Duration::from_secs(10);
 /// 창이 다 닫혔는지 다시 보는 간격
 const LOGOUT_STEP: Duration = Duration::from_millis(200);
+/// 마지막 창이 닫힌 뒤 창이 없는 화면을 낼 시간
+const LAST_FRAME_WAIT: Duration = Duration::from_millis(100);
 /// 핑에 이만큼 답하지 않은 앱은 응답하지 않는 것으로 본다 (macOS도 몇 초 뒤 "응답 없음"으로 보인다)
 const NOT_RESPONDING: Duration = Duration::from_secs(3);
 /// 특권 클라이언트(셸, 입력기, 잠금 화면)를 찾는 디렉터리. root만 쓸 수 있는 곳만 둔다
@@ -241,13 +243,28 @@ impl BuntState {
         }
     }
 
+    /// 창이 사라진 화면을 내고 끝낸다. 마지막 화면은 다음 세션이 그릴 때까지 남는다 (handover.rs)
+    fn end_session_after_last_frame(&mut self) {
+        self.queue_redraw_all();
+        let timer =
+            self.loop_handle
+                .insert_source(Timer::from_duration(LAST_FRAME_WAIT), |_, _, state| {
+                    state.loop_signal.stop();
+                    TimeoutAction::Drop
+                });
+        if let Err(err) = timer {
+            tracing::warn!("failed to wait for the last frame: {}", err.error);
+            self.loop_signal.stop();
+        }
+    }
+
     fn logout_step(&mut self) -> TimeoutAction {
         let Some(started) = self.session.logging_out else {
             return TimeoutAction::Drop;
         };
         let Some(window) = self.all_windows().next().cloned() else {
             tracing::info!("every window closed; ending the session");
-            self.loop_signal.stop();
+            self.end_session_after_last_frame();
             return TimeoutAction::Drop;
         };
         if started.elapsed() < LOGOUT_WAIT {

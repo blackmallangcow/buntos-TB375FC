@@ -12,6 +12,8 @@ mod dbus;
 mod dmabuf;
 mod gpu;
 mod grabs;
+// 컴포지터끼리 화면을 끄지 않고 넘겨주고 넘겨받기
+mod handover;
 mod ime;
 mod input;
 mod libinput_source;

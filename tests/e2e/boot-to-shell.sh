@@ -176,6 +176,12 @@ else
 	done
 	echo "로그인(로그인 화면, ${attempt}번째): ${SECONDS}초"
 
+	# 화면 넘겨받기(comp/src/handover.rs): 사용자 세션의 컴포지터가 로그인 화면의 CRTC와 모드를 끄지 않고 이어받는다
+	echo "echo \"E2E_HANDOVER_\$(journalctl -b -q -t bunt-comp | grep -c 'keeping the mode of the previous compositor')\"" >&3
+	wait_for "^E2E_HANDOVER_[0-9]+$" || fail "화면 넘겨받기를 확인하지 못했다"
+	console | grep -a -q -E "^E2E_HANDOVER_[1-9][0-9]*$" || fail "로그인할 때 컴포지터가 모드를 다시 설정했다"
+	echo "화면 넘겨받기: 로그인할 때 모드를 다시 설정하지 않았다"
+
 	# 보안: 개발용 암호 없는 sudo가 없어야 한다. sudo -n은 암호가 필요하면 바로 실패한다
 	echo "echo \"E2E_SUDO_\$(sudo -u $user sudo -n true 2>&1 | grep -c 'password is required')\"" >&3
 	wait_for "^E2E_SUDO_[0-9]+$" || fail "sudo를 확인하지 못했다"
@@ -602,6 +608,20 @@ if [[ "$agent_refs" != NONE ]]; then
 	keys keys:esc sleep:1
 	((failed == 0)) || fail "e2e 9번(패키지 매니저): ${failed}개 실패"
 	echo "e2e 9번(패키지 매니저): ${SECONDS}초, ${passed}개 통과"
+fi
+
+# 로그아웃: 로그인 화면이 다시 뜨고, 그 컴포지터도 사용자 세션의 CRTC와 모드를 끄지 않고 이어받는다 (comp/src/handover.rs)
+if [[ "$greeter" != NONE ]]; then
+	# e2e 4번이 저장하지 않은 글을 남긴 텍스트 편집기는 저장할지 물어 로그아웃을 멈춘다 (설계안 5.4절)
+	echo "pkill -f /usr/bin/gnome-text-editor; for i in \$(seq 20); do pgrep -f /usr/bin/gnome-text-editor >/dev/null || break; sleep 0.5; done; echo \"E2E_EDITOR_\$((1 + 1))\"" >&3
+	wait_for "^E2E_EDITOR_2$" || fail "텍스트 편집기를 닫지 못했다"
+	python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" keys:alt+shift+meta_l+q ||
+		fail "QMP로 로그아웃 단축키를 넣지 못했다"
+	echo "for i in \$(seq 90); do pgrep -u _greetd -x bunt-greeter >/dev/null && break; sleep 1; done; echo \"E2E_LOGOUT_\$(pgrep -c -u _greetd -x bunt-greeter)_\$(journalctl -b -q -t bunt-greeter | grep -c 'keeping the mode of the previous compositor')\"" >&3
+	wait_for "^E2E_LOGOUT_[0-9]+_[0-9]+$" || fail "로그아웃 결과를 받지 못했다"
+	console | grep -a -q -E "^E2E_LOGOUT_[1-9][0-9]*_[0-9]+$" || fail "로그아웃한 뒤 로그인 화면이 뜨지 않았다"
+	console | grep -a -q -E "^E2E_LOGOUT_[0-9]+_[1-9][0-9]*$" || fail "로그아웃할 때 컴포지터가 모드를 다시 설정했다"
+	echo "로그아웃: ${SECONDS}초, 모드를 다시 설정하지 않았다"
 fi
 
 echo 'systemctl poweroff' >&3
