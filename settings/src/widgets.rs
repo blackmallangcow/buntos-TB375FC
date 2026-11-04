@@ -270,7 +270,11 @@ pub fn info_row(title: &str, value: &str) -> gtk::ListBoxRow {
         .max_width_chars(40)
         .css_classes(["row-value"])
         .build();
-    let content = gtk::Box::builder().spacing(12).build();
+    // 줄이 글보다 높아도(터치 모드) 글은 줄 가운데에 있다. 값이 여러 줄이면 제목은 첫 줄에 맞춘다
+    let content = gtk::Box::builder()
+        .spacing(12)
+        .valign(gtk::Align::Center)
+        .build();
     content.append(
         &gtk::Label::builder()
             .label(title)

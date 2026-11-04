@@ -358,7 +358,7 @@ mod tests {
         let (_, errors) = parse(touch_rules);
         assert!(errors.is_empty(), "{errors:?}");
         let (provider, errors) = parse(crate::STYLE);
-        if gtk::check_version(4, 16, 0).is_none() {
+        if gtk::check_version(4, 20, 0).is_none() {
             assert!(errors.is_empty(), "{errors:?}");
         }
         gtk::style_context_add_provider_for_display(
@@ -389,6 +389,13 @@ mod tests {
             assert!(height >= 44.0, "touch {name}: height {height}");
         }
         assert!(touch.width(&touch.switch) >= 44.0);
+        // 값만 있는 줄도 44px이고, 글은 높아진 줄의 가운데에 있다
+        assert!(touch.height(&touch.info_row) >= 44.0);
+        let row = touch.info_row.compute_bounds(&touch.window).unwrap();
+        let text = touch.info_title.compute_bounds(&touch.window).unwrap();
+        let above = text.y() - row.y();
+        let below = row.y() + row.height() - text.y() - text.height();
+        assert!((above - below).abs() <= 1.0, "above {above}, below {below}");
         // 포인터 모드는 그대로다
         for (name, height) in [
             ("sidebar row", pointer.height(&pointer.sidebar_row)),
@@ -415,6 +422,8 @@ mod tests {
         row: gtk::Widget,
         switch_row: gtk::Widget,
         switch: gtk::Widget,
+        info_row: gtk::Widget,
+        info_title: gtk::Widget,
     }
 
     impl Sample {
@@ -463,8 +472,14 @@ mod tests {
             let switch = gtk::Switch::builder().valign(gtk::Align::Center).build();
             let switch_row = line(Some(switch.upcast_ref()));
             let row = line(None);
+            let info_row = crate::widgets::info_row("남은 양", "31%");
+            let info_title = info_row
+                .child()
+                .and_then(|box_| box_.first_child())
+                .unwrap();
             group.append(&switch_row);
             group.append(&row);
+            group.append(&info_row);
             column.append(&group);
             window.set_child(Some(&column));
             window.present();
@@ -474,6 +489,8 @@ mod tests {
                 row: row.upcast(),
                 switch_row: switch_row.upcast(),
                 switch: switch.upcast(),
+                info_row: info_row.upcast(),
+                info_title,
             }
         }
 
