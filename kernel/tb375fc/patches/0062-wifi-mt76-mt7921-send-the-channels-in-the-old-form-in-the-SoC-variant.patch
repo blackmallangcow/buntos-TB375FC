@@ -1,0 +1,231 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt7921: send the channels in the old form in the SoC variant
+
+The firmware of the MT6897 does not survive the channel list of
+mt76_connac_mcu_set_channel_domain(). Up to 7 channels it does. From 8
+channels on, which is 76 bytes, it answers nothing any more, its periodic
+events included, whatever the flags and the widths are. So a country with
+more channels than that kills it the moment the interface comes up.
+
+It does not report TAG_CAP_SINGLE_SKU, and the vendor driver sends this
+form only to a firmware that does. To the others it sends sets of
+channels, one message for the channels that need a frame heard first and
+one for all of them. That is what the firmware takes here.
+
+The callers are all in the common code, so the message is replaced where
+it goes out.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+@@ -770,16 +770,11 @@
+ 	return mt792x_dma_enable(dev);
+ }
+ 
+-static int mt7921_soc_mcu_send_message(struct mt76_dev *mdev,
+-				       struct sk_buff *skb, int cmd, int *seq)
++static int mt7921_soc_mcu_send_one(struct mt76_dev *mdev, struct sk_buff *skb,
++				   int cmd, int *seq)
+ {
+ 	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
+ 	int ret;
+-
+-	if (!READ_ONCE(mt7921_soc_of(dev)->wf_on)) {
+-		dev_kfree_skb(skb);
+-		return -EIO;
+-	}
+ 
+ 	ret = mt76_connac2_mcu_fill_message(mdev, skb, cmd, seq);
+ 	if (ret)
+@@ -792,6 +787,37 @@
+ 	mt76_queue_tx_cleanup(dev, mdev->q_mcu[MT_MCUQ_WM], false);
+ 
+ 	return mt76_tx_queue_skb_raw(dev, mdev->q_mcu[MT_MCUQ_WM], skb, 0);
++}
++
++static int mt7921_soc_mcu_send_message(struct mt76_dev *mdev,
++				       struct sk_buff *skb, int cmd, int *seq)
++{
++	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
++	int ret;
++
++	if (!READ_ONCE(mt7921_soc_of(dev)->wf_on)) {
++		dev_kfree_skb(skb);
++		return -EIO;
++	}
++
++	/* All callers are in the common code. See mt7921_soc_domain_msg() */
++	if (cmd == MCU_CE_CMD(SET_CHAN_DOMAIN)) {
++		dev_kfree_skb(skb);
++
++		skb = mt7921_soc_domain_msg(dev, true);
++		if (!skb)
++			return -ENOMEM;
++
++		ret = mt7921_soc_mcu_send_one(mdev, skb, cmd, seq);
++		if (ret)
++			return ret;
++
++		skb = mt7921_soc_domain_msg(dev, false);
++		if (!skb)
++			return -ENOMEM;
++	}
++
++	return mt7921_soc_mcu_send_one(mdev, skb, cmd, seq);
+ }
+ 
+ /* An answer of the ROM has 8 bytes after the RXD, not the 12 of an event */
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+@@ -65,5 +65,6 @@
+ void mt7921_soc_set_mac_addr(struct mt792x_dev *dev);
+ void mt7921_soc_read_manifest(struct mt792x_dev *dev, char *buf, size_t size);
+ void mt7921_soc_dmashdl_init(struct mt792x_dev *dev);
++struct sk_buff *mt7921_soc_domain_msg(struct mt792x_dev *dev, bool passive);
+ 
+ #endif /* __MT7921_SOC_H */
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+@@ -21,6 +21,36 @@
+ /* Hands the driver's copy of the calibration data to the firmware, in pieces */
+ #define MT7921_SOC_CE_CMD_SET_NVRAM \
+ 	(__MCU_CMD_FIELD_CE | FIELD_PREP(__MCU_CMD_FIELD_ID, 0x48))
++
++/*
++ * The channels of a country as this firmware knows them, by sets of channels. It
++ * does not report TAG_CAP_SINGLE_SKU, and for those the vendor driver doesn't
++ * send the list that mt76_connac_mcu_set_channel_domain() makes. That list runs
++ * past what the firmware has room for from 8 channels on, and it doesn't answer
++ * anything after that.
++ */
++#define MT7921_SOC_DOMAIN_SUBBANDS	7
++/* In channel numbers */
++#define MT7921_SOC_DOMAIN_SPAN_2G	1
++#define MT7921_SOC_DOMAIN_SPAN_5G	4
++#define MT7921_SOC_BW_20_40		0
++#define MT7921_SOC_BW_20_40_80		2
++
++struct mt7921_soc_domain {
++	__le16 country;
++	__le16 passive;
++	struct {
++		u8 reg_class;
++		u8 band;
++		u8 span;
++		u8 first;
++		u8 n_chan;
++		u8 rsv[3];
++	} __packed sub[MT7921_SOC_DOMAIN_SUBBANDS];
++	u8 bw_2g;
++	u8 bw_5g;
++	u8 rsv[2];
++} __packed;
+ 
+ #define MT7921_SOC_NVRAM_MIN_SIZE	2048
+ #define MT7921_SOC_NVRAM_MAX_SIZE	SZ_8K
+@@ -493,4 +523,103 @@
+ 	    is_valid_ether_addr(soc->nvram + MT7921_SOC_NVRAM_MAC_OFS))
+ 		ether_addr_copy(dev->mphy.macaddr,
+ 				soc->nvram + MT7921_SOC_NVRAM_MAC_OFS);
++}
++
++/* The firmware's numbers for the bands */
++static u8 mt7921_soc_band(enum nl80211_band band)
++{
++	switch (band) {
++	case NL80211_BAND_2GHZ:
++		return 1;
++	case NL80211_BAND_6GHZ:
++		return 3;
++	default:
++		return 2;
++	}
+ }
++
++static u8 mt7921_soc_domain_class(enum nl80211_band band, u16 chan)
++{
++	if (band == NL80211_BAND_2GHZ)
++		return chan == 14 ? 82 : 81;
++	if (band == NL80211_BAND_6GHZ)
++		return chan == 2 ? 136 : 131;
++	if (chan <= 48)
++		return 115;
++	if (chan <= 64)
++		return 118;
++	if (chan <= 144)
++		return 121;
++
++	return 125;
++}
++
++static void mt7921_soc_domain_add_band(struct mt792x_dev *dev,
++				       struct mt7921_soc_domain *req,
++				       struct ieee80211_supported_band *sband,
++				       bool passive, int *n)
++{
++	int span = sband->band == NL80211_BAND_2GHZ ?
++		   MT7921_SOC_DOMAIN_SPAN_2G : MT7921_SOC_DOMAIN_SPAN_5G;
++	int i, first = *n;
++
++	for (i = 0; i < sband->n_channels; i++) {
++		struct ieee80211_channel *chan = &sband->channels[i];
++		u8 reg_class = mt7921_soc_domain_class(sband->band,
++						       chan->hw_value);
++		int cur = *n - 1;
++
++		if (chan->flags & IEEE80211_CHAN_DISABLED)
++			continue;
++
++		if (passive && !(chan->flags & (IEEE80211_CHAN_NO_IR |
++						IEEE80211_CHAN_RADAR)))
++			continue;
++
++		if (*n > first && req->sub[cur].reg_class == reg_class &&
++		    chan->hw_value == req->sub[cur].first +
++				      req->sub[cur].n_chan * span) {
++			req->sub[cur].n_chan++;
++			continue;
++		}
++
++		if (*n == ARRAY_SIZE(req->sub)) {
++			dev_warn_once(dev->mt76.dev,
++				      "more sets of channels than the firmware takes\n");
++			return;
++		}
++
++		req->sub[*n].reg_class = reg_class;
++		req->sub[*n].band = mt7921_soc_band(sband->band);
++		req->sub[*n].span = span;
++		req->sub[*n].first = chan->hw_value;
++		req->sub[*n].n_chan = 1;
++		(*n)++;
++	}
++}
++
++/**
++ * mt7921_soc_domain_msg() - Make a message with the channels of the country
++ * @dev: the device
++ * @passive: only those that must not be sent on before a frame was heard
++ *
++ * Return: the message or NULL
++ */
++struct sk_buff *mt7921_soc_domain_msg(struct mt792x_dev *dev, bool passive)
++{
++	struct mt7921_soc_domain req = {
++		.country = cpu_to_le16(dev->mt76.alpha2[0] << 8 |
++				       dev->mt76.alpha2[1]),
++		.passive = cpu_to_le16(passive),
++		.bw_2g = MT7921_SOC_BW_20_40,
++		.bw_5g = MT7921_SOC_BW_20_40_80,
++	};
++	struct mt76_phy *phy = &dev->mphy;
++	int n = 0;
++
++	mt7921_soc_domain_add_band(dev, &req, &phy->sband_2g.sband, passive, &n);
++	mt7921_soc_domain_add_band(dev, &req, &phy->sband_5g.sband, passive, &n);
++	mt7921_soc_domain_add_band(dev, &req, &phy->sband_6g.sband, passive, &n);
++
++	return mt76_mcu_msg_alloc(&dev->mt76, &req, sizeof(req));
++}

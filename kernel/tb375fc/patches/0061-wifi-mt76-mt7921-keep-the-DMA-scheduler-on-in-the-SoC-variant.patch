@@ -1,0 +1,119 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt7921: keep the DMA scheduler on in the SoC variant
+
+mt792x_dma_enable() bypasses the DMA scheduler of the WFDMA, which the
+PCIe chips have no use for. On the MT6897 the WFDMA then pours commands
+into the buffers of the chip as fast as it reads them. In a burst of
+commands the command ring stops now and then, and nothing gets an answer
+after that. The 22 pieces of calibration data in a row are enough for
+that. The vendor driver has the scheduler on, with a limit on the group
+of the commands.
+
+That the firmware has nowhere to put its events with the buffers full,
+and stops reading commands to make room, is a guess. What has been seen
+is the ring stopping at different places without this, and not once in
+about 30 loads with it.
+
+Turn it on with the values of the vendor driver once the firmware runs.
+With it on before that, as the vendor driver has it, the ROM doesn't read
+the commands. Why is not known.
+
+A restart of the WF part doesn't get past this yet. The command ring stops
+at the first command after the ROM, and with the scheduler left off it
+doesn't. Resetting it there or powering the common part off as well makes
+no difference. Reloading the module works.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+@@ -640,6 +640,69 @@
+ 	mt7921_soc_wf_power_off(dev);
+ }
+ 
++/*
++ * The WFDMA pours commands into the buffers of the chip as fast as it reads
++ * them unless this keeps count. With those full the firmware has nowhere to put
++ * its events, stops reading commands to make room, and all of it stays that way.
++ * So it stays on, with the values of the vendor driver: group 15 has the
++ * commands, the others the LMAC queues as per this table.
++ */
++void mt7921_soc_dmashdl_init(struct mt792x_dev *dev)
++{
++	static const u8 queue_group[] = {
++		0, 0, 0, 2, 1, 1, 1, 2,	/* AC0x, AC1x */
++		0, 0, 0, 2, 1, 1, 1, 2,	/* AC2x, AC3x */
++		0, 0, 0, 1, 1, 1, 1, 1,	/* ALTX, BMC, BCN, reserved */
++		0, 0, 0, 1, 1, 1, 1, 1,	/* NAF, NBCN, FIXFID, reserved */
++	};
++	u32 val = 0;
++	int i;
++
++	mt76_rmw(dev, MT_DMASHDL_PKT_MAX_SIZE,
++		 MT_DMASHDL_PKT_MAX_SIZE_PLE | MT_DMASHDL_PKT_MAX_SIZE_PSE,
++		 FIELD_PREP(MT_DMASHDL_PKT_MAX_SIZE_PLE, 0x1) |
++		 FIELD_PREP(MT_DMASHDL_PKT_MAX_SIZE_PSE, 0x18));
++
++	/* The bits say no refill: groups 0 to 3 have it */
++	mt76_rmw(dev, MT_DMASHDL_REFILL, MT_DMASHDL_REFILL_MASK, 0xfff00000);
++
++	for (i = 0; i < 16; i++) {
++		u32 min = 0, max = 0;
++
++		if (i < 4) {
++			min = 0x10;
++			max = i < 3 ? 0x200 : 0x1ff;
++		} else if (i == 15) {
++			min = 0x30;
++			max = 0x30;
++		}
++
++		mt76_wr(dev, MT_DMASHDL_GROUP_QUOTA(i),
++			FIELD_PREP(MT_DMASHDL_GROUP_QUOTA_MIN, min) |
++			FIELD_PREP(MT_DMASHDL_GROUP_QUOTA_MAX, max));
++	}
++
++	for (i = 0; i < ARRAY_SIZE(queue_group); i++) {
++		val |= queue_group[i] << MT_DMASHDL_Q_MAP_SHIFT(i);
++		if (i % 8 == 7) {
++			mt76_wr(dev, MT_DMASHDL_Q_MAP(i / 8), val);
++			val = 0;
++		}
++	}
++
++	/* Priority n is group n */
++	mt76_wr(dev, MT_DMASHDL_SCHED_SET(0), 0x76543210);
++	mt76_wr(dev, MT_DMASHDL_SCHED_SET(1), 0xfedcba98);
++
++	mt76_clear(dev, MT_DMASHDL_PAGE, MT_DMASHDL_GROUP_SEQ_ORDER);
++
++	/* Groups 0, 1, 2 and 15, and an ACK from HIF every 4 */
++	mt76_wr(dev, MT_DMASHDL_OPTIONAL, 0x00048007);
++
++	mt76_clear(dev, MT_DMASHDL_SW_CONTROL, MT_DMASHDL_DMASHDL_BYPASS);
++	mt76_set(dev, MT_WFDMA0_GLO_CFG_EXT0, MT_WFDMA0_CSR_TX_DMASHDL_ENABLE);
++}
++
+ #define PREFETCH(base, depth)	((base) << 16 | (depth))
+ 
+ /* The rings of the host and of the modem, in the vendor's order */
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.h
+@@ -64,5 +64,6 @@
+ int mt7921_soc_set_nvram(struct mt792x_dev *dev);
+ void mt7921_soc_set_mac_addr(struct mt792x_dev *dev);
+ void mt7921_soc_read_manifest(struct mt792x_dev *dev, char *buf, size_t size);
++void mt7921_soc_dmashdl_init(struct mt792x_dev *dev);
+ 
+ #endif /* __MT7921_SOC_H */
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc_mcu.c
+@@ -425,6 +425,7 @@
+ 		return -EIO;
+ 	}
+ 	dev_info(dev->mt76.dev, "firmware running\n");
++	mt7921_soc_dmashdl_init(dev);
+ 
+ 	return mt7921_soc_probe_uni_cmd(dev);
+ }

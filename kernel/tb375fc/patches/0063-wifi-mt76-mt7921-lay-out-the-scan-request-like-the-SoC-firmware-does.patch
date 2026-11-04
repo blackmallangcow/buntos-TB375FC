@@ -1,0 +1,60 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt7921: lay out the scan request like the SoC firmware does
+
+The firmware of the MT6897 ignores the 1186 bytes of
+struct mt76_connac_hw_scan_req without a word, not even a scan done
+event. From 1192 bytes on it scans. The vendor's struct is not packed, so
+a padding of two bytes comes before the extra SSIDs, and the addresses
+after that sit two bytes later than here. The vendor's layout says so and
+the size agrees with it.
+
+Pad the request where it goes out, as the callers are in the common code.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/soc.c
+@@ -768,6 +768,25 @@
+ 	napi_enable(&dev->mt76.tx_napi);
+ 
+ 	return mt792x_dma_enable(dev);
++}
++
++/*
++ * The firmware's scan request is laid out by a compiler, not packed like this
++ * one: two bytes of padding before the extra SSIDs, so the addresses after them
++ * sit two bytes later, and more at the end. It ignores a shorter one without a
++ * word, not even a scan done event.
++ */
++#define MT7921_SOC_SCAN_REQ_LEN		1192
++
++static void mt7921_soc_scan_req_fixup(struct sk_buff *skb)
++{
++	struct mt76_connac_hw_scan_req *req = (void *)skb->data;
++
++	BUILD_BUG_ON(sizeof(*req) > MT7921_SOC_SCAN_REQ_LEN);
++
++	skb_put_zero(skb, MT7921_SOC_SCAN_REQ_LEN - sizeof(*req));
++	memmove(req->bssid + 2, req->bssid, 2 * ETH_ALEN);
++	memset(req->bssid, 0, 2);
+ }
+ 
+ static int mt7921_soc_mcu_send_one(struct mt76_dev *mdev, struct sk_buff *skb,
+@@ -800,6 +819,9 @@
+ 		return -EIO;
+ 	}
+ 
++	if (cmd == MCU_CE_CMD(START_HW_SCAN))
++		mt7921_soc_scan_req_fixup(skb);
++
+ 	/* All callers are in the common code. See mt7921_soc_domain_msg() */
+ 	if (cmd == MCU_CE_CMD(SET_CHAN_DOMAIN)) {
+ 		dev_kfree_skb(skb);
+@@ -844,6 +866,8 @@
+ {
+ 	static const struct mt76_mcu_ops mt7921_soc_mcu_ops = {
+ 		.headroom = sizeof(struct mt76_connac2_mcu_txd),
++		.tailroom = MT7921_SOC_SCAN_REQ_LEN -
++			    sizeof(struct mt76_connac_hw_scan_req),
+ 		.mcu_skb_send_msg = mt7921_soc_mcu_send_message,
+ 		.mcu_parse_response = mt7921_soc_mcu_parse_response,
+ 	};

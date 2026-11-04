@@ -93,6 +93,12 @@
 0058-dt-bindings-net-wireless-mt76-add-the-MT6897-Wi-Fi.patch
 0059-wifi-mt76-mt7921-let-a-variant-start-firmware-it-did-not-download.patch
 0060-wifi-mt76-mt7921-add-the-MT6897-SoC-bus-variant.patch
+# 2d: 펌웨어가 uni 명령을 받지 않아 레거시 명령으로 간다. 명령 링, 채널 목록, 스캔 요청도 펌웨어에 맞춘다
+0061-wifi-mt76-mt7921-keep-the-DMA-scheduler-on-in-the-SoC-variant.patch
+0062-wifi-mt76-mt7921-send-the-channels-in-the-old-form-in-the-SoC-variant.patch
+0063-wifi-mt76-mt7921-lay-out-the-scan-request-like-the-SoC-firmware-does.patch
+0064-wifi-mt76-mt792x-let-a-variant-have-its-own-station-commands.patch
+0065-wifi-mt76-mt7921-use-the-legacy-commands-in-the-SoC-variant.patch
 # 0070~0079: 2e GPU 전원·열·게이지. 모두 꺼 둔 노드이고 기기에서 확인한 뒤 낸다. 0070·0071 GPUEB 메일박스 MT6897(채널 11개, 받는 쪽이 0xd8부터, 클럭 없음).
 # 0072·0073 mtk-mfg MT6897: GPUEB는 LK가 띄우고 멈추지 않는다(GHPM·클럭·레귤레이터 없음), 공유 메모리는 LK가 /soc/gpueb 노드에 적어 준 것, 오프셋이 다르고,
 # OPP는 CMD_COMMIT이다. 무엇을 보내기 전에 읽기만으로 MFG0·GPR을 확인한다. 0074 panthor 바인딩(드라이버는 그대로, ASN hash 없음). 0075·0076 devinfo NVMEM(LK가
@@ -193,5 +199,4 @@
 # 2e: MT6375의 TCPC가 가진 vbus-supply를 I2C 어댑터가 자기 것으로 찾아 버스가 뜨지 않는다
 0148-i2c-mt65xx-look-for-the-bus-supply-on-the-controller-only.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 RTC까지 0110~0113에 있다):
-#  - wifi: mt76: mt7921 SoC의 레거시 명령 길(기기에서 uni cmd를 받지 않을 때)
 #  - spmi: mtk-pmif: 처리기가 있는 SID도 처리기 앞에서 지운다(벤더와 스톡의 순서). 지금은 EOI가 칩의 RCS 완료 쓰기 뒤에 와서, 그 사이 새 RCS가 지워지면 그 PMIC의 인터럽트가 재부팅까지 멈출 수 있다(창은 좁다. 코드로 본 것이다). 처리기를 뗀 SID와 직접 요청한 SID도 함께 풀린다

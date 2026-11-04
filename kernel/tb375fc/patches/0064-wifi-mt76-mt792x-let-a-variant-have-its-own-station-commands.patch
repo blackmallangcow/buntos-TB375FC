@@ -1,0 +1,167 @@
+From: buntOS contributors
+Subject: [PATCH] wifi: mt76: mt792x: let a variant have its own station commands
+
+The firmware of the MT6897 does not answer unified commands, where the
+mt7921 code sends them for interfaces, BSSes, stations, keys and channel
+time. Let hif_ops carry what such a variant takes instead.
+
+The others leave these NULL and take the same path as before.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mac.c b/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
+@@ -641,9 +641,12 @@
+ 	if (vif->type == NL80211_IFTYPE_STATION)
+ 		ieee80211_disconnect(vif, true);
+ 
+-	mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
+-				    &mvif->bss_conf.mt76,
+-				    &mvif->sta.deflink.wcid, true);
++	if (dev->hif_ops->add_dev)
++		dev->hif_ops->add_dev(dev, vif, true);
++	else
++		mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
++					    &mvif->bss_conf.mt76,
++					    &mvif->sta.deflink.wcid, true);
+ 	mt7921_mcu_set_tx(dev, vif);
+ 
+ 	if (vif->type == NL80211_IFTYPE_AP) {
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/main.c b/drivers/net/wireless/mediatek/mt76/mt7921/main.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/main.c
+@@ -320,9 +320,12 @@
+ 	mvif->bss_conf.mt76.band_idx = 0;
+ 	mvif->bss_conf.mt76.wmm_idx = mvif->bss_conf.mt76.idx % MT76_CONNAC_MAX_WMM_SETS;
+ 
+-	ret = mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
+-					  &mvif->bss_conf.mt76,
+-					  &mvif->sta.deflink.wcid, true);
++	if (dev->hif_ops->add_dev)
++		ret = dev->hif_ops->add_dev(dev, vif, true);
++	else
++		ret = mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
++						  &mvif->bss_conf.mt76,
++						  &mvif->sta.deflink.wcid, true);
+ 	if (ret)
+ 		goto out;
+ 
+@@ -559,6 +562,13 @@
+ 			goto out;
+ 	}
+ 
++	if (dev->hif_ops->add_key) {
++		err = dev->hif_ops->add_key(dev, vif, wcid, key, cmd);
++		if (!err)
++			mt76_wcid_key_setup(&dev->mt76, wcid, key);
++		goto out;
++	}
++
+ 	mt76_wcid_key_setup(&dev->mt76, wcid, key);
+ 	err = mt76_connac_mcu_add_key(&dev->mt76, vif, &msta->deflink.bip,
+ 				      key, MCU_UNI_CMD(STA_REC_UPDATE),
+@@ -870,9 +880,14 @@
+ 
+ 	mt792x_mutex_acquire(dev);
+ 
+-	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls)
+-		mt76_connac_mcu_uni_add_bss(&dev->mphy, vif, &mvif->sta.deflink.wcid,
+-					    true, mvif->bss_conf.mt76.ctx);
++	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls) {
++		if (dev->hif_ops->add_bss)
++			dev->hif_ops->add_bss(dev, vif, true);
++		else
++			mt76_connac_mcu_uni_add_bss(&dev->mphy, vif,
++						    &mvif->sta.deflink.wcid,
++						    true, mvif->bss_conf.mt76.ctx);
++	}
+ 
+ 	ewma_avg_signal_init(&msta->deflink.avg_ack_signal);
+ 
+@@ -907,7 +922,9 @@
+ 
+ 		mvif->wep_sta = NULL;
+ 		ewma_rssi_init(&mvif->bss_conf.rssi);
+-		if (!sta->tdls)
++		if (!sta->tdls && dev->hif_ops->add_bss)
++			dev->hif_ops->add_bss(dev, vif, false);
++		else if (!sta->tdls)
+ 			mt76_connac_mcu_uni_add_bss(&dev->mphy, vif,
+ 						    &mvif->sta.deflink.wcid, false,
+ 						    mvif->bss_conf.mt76.ctx);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
+@@ -839,6 +839,10 @@
+ 		},
+ 	};
+ 
++	if (dev->hif_ops->set_roc)
++		return dev->hif_ops->set_roc(phy, vif, chan, duration, type,
++					     token_id);
++
+ 	if (chan->hw_value < center_ch)
+ 		req.roc.sco = 1; /* SCA */
+ 	else if (chan->hw_value > center_ch)
+@@ -885,6 +889,9 @@
+ 			.dbdcband = 0xff, /* auto*/
+ 		},
+ 	};
++
++	if (dev->hif_ops->abort_roc)
++		return dev->hif_ops->abort_roc(phy, vif, token_id);
+ 
+ 	return mt76_mcu_send_msg(&dev->mt76, MCU_UNI_CMD(ROC),
+ 				 &req, sizeof(req), false);
+@@ -1095,6 +1102,9 @@
+ 		.rcpi = to_rcpi(rssi),
+ 	};
+ 	struct mt792x_sta *msta;
++
++	if (dev->hif_ops->sta_update)
++		return dev->hif_ops->sta_update(dev, sta, vif, enable, state);
+ 
+ 	msta = sta ? (struct mt792x_sta *)sta->drv_priv : NULL;
+ 	info.wcid = msta ? &msta->deflink.wcid : &mvif->sta.deflink.wcid;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt792x.h b/drivers/net/wireless/mediatek/mt76/mt792x.h
+--- a/drivers/net/wireless/mediatek/mt76/mt792x.h
++++ b/drivers/net/wireless/mediatek/mt76/mt792x.h
+@@ -275,6 +275,22 @@
+ 	void (*dma_prefetch)(struct mt792x_dev *dev);
+ 	int (*load_firmware)(struct mt792x_dev *dev);
+ 	int (*set_eeprom)(struct mt792x_dev *dev);
++	/* For a firmware that doesn't take unified commands for these */
++	int (*add_dev)(struct mt792x_dev *dev, struct ieee80211_vif *vif,
++		       bool enable);
++	int (*add_bss)(struct mt792x_dev *dev, struct ieee80211_vif *vif,
++		       bool enable);
++	int (*sta_update)(struct mt792x_dev *dev, struct ieee80211_sta *sta,
++			  struct ieee80211_vif *vif, bool enable,
++			  enum mt76_sta_info_state state);
++	int (*add_key)(struct mt792x_dev *dev, struct ieee80211_vif *vif,
++		       struct mt76_wcid *wcid, struct ieee80211_key_conf *key,
++		       enum set_key_cmd cmd);
++	int (*set_roc)(struct mt792x_phy *phy, struct mt792x_vif *vif,
++		       struct ieee80211_channel *chan, int duration, u8 type,
++		       u8 token_id);
++	int (*abort_roc)(struct mt792x_phy *phy, struct mt792x_vif *vif,
++			 u8 token_id);
+ };
+ 
+ struct mt792x_dev {
+diff --git a/drivers/net/wireless/mediatek/mt76/mt792x_core.c b/drivers/net/wireless/mediatek/mt76/mt792x_core.c
+--- a/drivers/net/wireless/mediatek/mt76/mt792x_core.c
++++ b/drivers/net/wireless/mediatek/mt76/mt792x_core.c
+@@ -174,8 +174,11 @@
+ 	link_conf = mt792x_vif_to_bss_conf(vif, mconf->link_id);
+ 
+ 	mt76_connac_free_pending_tx_skbs(&dev->pm, &mlink->wcid);
+-	mt76_connac_mcu_uni_add_dev(&dev->mphy, link_conf, &mconf->mt76,
+-				    &mlink->wcid, false);
++	if (dev->hif_ops->add_dev)
++		dev->hif_ops->add_dev(dev, vif, false);
++	else
++		mt76_connac_mcu_uni_add_dev(&dev->mphy, link_conf, &mconf->mt76,
++					    &mlink->wcid, false);
+ 
+ 	rcu_assign_pointer(dev->mt76.wcid[idx], NULL);
+ 
