@@ -1,0 +1,67 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 소리 드라이버를 올리고 스피커 앰프 넷의 공장 보정값을 넣는다. 명령줄의 modprobe.blacklist가 자동 적재를 막고
+# 이 스크립트가 차례를 정한다.
+#
+# 보정값은 persist 파티션의 factory/aw_cali.bin에 있다. 앰프 차례로 스피커 저항(mΩ)이 쉼표로 적혀 있고, 기기마다
+# 다르다. persist는 잃으면 되살릴 수 없으므로 읽기 전용 루프 장치로만 연다. 값을 못 읽으면 소리는 그대로 나고,
+# 드라이버가 앰프를 -30 dB 아래로 묶어 둔다(awinic,calibration-required).
+set -u
+
+card=TB375FC
+persist=/dev/disk/by-partlabel/persist
+file=factory/aw_cali.bin
+re_min=4000
+re_max=15000
+
+modprobe -a snd-soc-mt6897-afe snd-soc-mt6368 snd-soc-aw88395 mt6897-mt6368 || exit 1
+
+# 앰프가 펌웨어를 읽고 코덱이 링크를 맞추면 카드가 뜬다
+for _ in $(seq 1 100); do
+	amixer -q -c "$card" cget "name=Amp0 Calib" >/dev/null 2>&1 && break
+	sleep 0.1
+done
+if ! amixer -q -c "$card" cget "name=Amp0 Calib" >/dev/null 2>&1; then
+	echo "sound-up: no $card card" >&2
+	exit 1
+fi
+
+read_calibration() {
+	local dir loop ret=1
+	[ -e "$persist" ] || return 1
+	dir=$(mktemp -d /run/buntos-sound.XXXXXX) || return 1
+	if loop=$(losetup -r -f --show "$persist"); then
+		if mount -t ext4 -o ro,noload,nosuid,nodev,noexec "$loop" "$dir"; then
+			if [ -r "$dir/$file" ]; then
+				cat "$dir/$file" && ret=0
+			fi
+			umount "$dir"
+		fi
+		losetup -d "$loop"
+	fi
+	rmdir "$dir"
+	return "$ret"
+}
+
+if ! values=$(read_calibration); then
+	echo "sound-up: no $file, the speakers stay at -30 dB or lower" >&2
+	exit 0
+fi
+
+IFS=, read -r -a re <<<"$values"
+for n in 0 1 2 3; do
+	value=${re[$n]:-}
+	case $value in
+	'' | *[!0-9]*)
+		echo "sound-up: no value for amplifier $n" >&2
+		continue
+		;;
+	esac
+	if [ "$value" -le "$re_min" ] || [ "$value" -ge "$re_max" ]; then
+		echo "sound-up: amplifier $n: $value mOhm is out of range" >&2
+		continue
+	fi
+	amixer -q -c "$card" cset "name=Amp$n Calib" "$value" || echo "sound-up: amplifier $n: could not set" >&2
+done

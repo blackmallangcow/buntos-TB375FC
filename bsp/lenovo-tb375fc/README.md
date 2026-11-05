@@ -25,13 +25,14 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `buntos-display.service` | PHY, mtk-mmsys, 패널, mediatek-drm을 올리고 DSI 커넥터를 기다린다. 화면 노드가 꺼진 커널이면 simple-framebuffer 그대로 둔다 | 로그인 화면 전 |
 | `buntos-gpu.service` | panthor를 올리고 렌더 노드를 기다린다. 안 뜨면 CPU로 그린다 | 로그인 화면 전 |
 | `buntos-wifi.service` | mt7921soc를 올린다. NetworkManager가 wlan0을 받는다 | 로그인 화면 뒤 |
+| `buntos-sound.service` | AFE, MT6368 코덱, 앰프, 카드를 올리고 `persist`의 앰프 보정값을 읽기 전용으로 읽어 넣는다. 못 읽으면 드라이버가 앰프를 -30 dB 아래로 묶는다 | 로그인 화면 뒤 |
 | `buntos-charge.service` | 온도 감시(`charge-guard`: 배터리 40도, 커넥터 55도)를 먼저 걸고 충전 드라이버를 올린다. 끄려면 `systemctl stop`(이번 부팅), `systemctl disable`(다음 부팅부터) | 로그인 화면 뒤 |
 
-Wi-Fi와 충전은 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
+Wi-Fi, 소리, 충전은 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
 
 GPU에는 Mesa 26.3이 있어야 한다(G615는 26.3부터 돈다. 이미지의 Debian 스냅숏은 26.1이다). `mesa/build.sh`가 꾸러미 `buntos-mesa`로 만들어 `/opt/mesa`에 넣고 `/etc/ld.so.conf.d/00-opt-mesa.conf`로 Debian의 Mesa보다 먼저 찾게 한다. GPU 펌웨어(`arm/mali/arch11.8/mali_csffw.bin`)는 Debian의 `firmware-misc-nonfree`에 있다.
 
-레시피에 넣지 않은 것: 터치 펌웨어와 Wi-Fi 보정 파일(`/usr/lib/firmware/lenovo/tb375fc/`). 제조사와 기기의 파일이라 저장소에 넣지 않는다. 이미지를 구운 뒤 따로 넣는다.
+레시피에 넣지 않은 것: 터치 펌웨어, Wi-Fi 보정 파일, 스피커 앰프의 튜닝 파일(`/usr/lib/firmware/lenovo/tb375fc/`). 제조사와 기기의 파일이라 저장소에 넣지 않는다. 이미지를 구운 뒤 따로 넣는다.
 
 ## 만들기
 

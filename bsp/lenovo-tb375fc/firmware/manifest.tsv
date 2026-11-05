@@ -31,3 +31,5 @@ file	vendor/firmware/txpowerctrl.cfg	-	Wi-Fi 송신 출력 제어(2d)	확인함(
 file	vendor/firmware/*aw883*	-	스마트 앰프 AW883xx ACF(3단계)	확인함(기기 목록: aw883xx_acf_gyt.bin, aw883xx_acf_yc.bin)
 file	vendor/firmware/awinic_*params.bin	-	스마트 앰프 매개변수(3단계)	확인함(기기 목록)
 file	vendor/firmware/remoteproc_scp	-	센서 허브 SCP 펌웨어(3단계, 자동 회전·조도)	확인함(기기 목록)
+file	vendor/firmware/aw883xx_acf_gyt.bin	lenovo/tb375fc/aw883xx_acf_gyt.bin	스피커 앰프 AW88394(aw88395), GPIO82가 0일 때. 장치 트리의 firmware-name	확인함(기기의 vendor)
+file	vendor/firmware/aw883xx_acf_yc.bin	lenovo/tb375fc/aw883xx_acf_yc.bin	스피커 앰프 AW88394(aw88395), GPIO82가 1일 때. 장치 트리의 firmware-name	확인함(기기의 vendor, 읽어 본 기기가 이 값)
