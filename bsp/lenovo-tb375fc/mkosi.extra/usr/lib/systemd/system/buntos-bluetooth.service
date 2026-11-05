@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 블루투스 드라이버를 Wi-Fi 뒤에 올리고 어댑터의 주소를 넣는다(bluetooth-up). 적재에서 멈추면 슬롯의 재시도가 줄어
+# 안드로이드로 돌아갈 길이 남는다.
+[Unit]
+Description=Load the Bluetooth driver and set the adapter's address
+After=greetd.service buntos-display.service buntos-wifi.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+ExecStart=/usr/libexec/buntos/bluetooth-up
+
+[Install]
+WantedBy=multi-user.target

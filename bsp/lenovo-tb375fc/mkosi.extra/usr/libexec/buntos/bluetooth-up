@@ -1,0 +1,61 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 블루투스 드라이버를 올리고 어댑터에 주소를 넣는다. 명령줄의 modprobe.blacklist가 자동 적재를 막으니
+# 이 스크립트가 차례를 정한다(Wi-Fi 뒤).
+#
+# 칩에는 주소를 둘 곳이 없고 MCU는 켤 때마다 ROM부터 시작한다. 주소를 넣기 전까지 어댑터는 설정되지 않은
+# 채로 남는다. 스택이 값을 기억해 켤 때마다 다시 넣지만 재부팅하면 사라진다. 그래서 처음 켤 때 한 번 만들어
+# 파일에 두고 부팅마다 넣는다. 기기마다 달라야 하므로 이미지에 넣지 않는다. 공장 주소를 쓰려면 파일을 바꾼다.
+# 주소는 로그에 남기지 않는다.
+set -u
+
+file=/var/lib/buntos/bluetooth-address
+index=0
+
+valid() {
+	[[ $1 =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]] && [ "$1" != 00:00:00:00:00:00 ]
+}
+
+# 첫 바이트의 아래 두 비트를 10으로 둬 회사에 배정된 주소와 겹치지 않게 한다. 조회용으로 예약된 LAP(9E8B00~9E8B3F)는 피한다
+new_address() {
+	local b
+	while :; do
+		read -r -a b < <(od -An -N6 -tu1 /dev/urandom)
+		b[0]=$(((b[0] & 0xfc) | 0x02))
+		[ "${b[3]}" = 158 ] && [ "${b[4]}" = 139 ] && [ "${b[5]}" -le 63 ] && continue
+		printf '%02X:%02X:%02X:%02X:%02X:%02X\n' "${b[@]}"
+		return
+	done
+}
+
+address=$(tr -d '[:space:]' 2>/dev/null <"$file" | tr '[:lower:]' '[:upper:]') || address=
+if ! valid "$address"; then
+	address=$(new_address)
+	mkdir -p "$(dirname "$file")"
+	(umask 077 && printf '%s\n' "$address" >"$file") || echo "bluetooth-up: cannot keep the address in $file" >&2
+	echo "bluetooth-up: made a new address" >&2
+fi
+
+modprobe btmtkbeif || exit 1
+
+for _ in $(seq 1 150); do
+	[ -e /sys/class/bluetooth/hci$index ] && break
+	sleep 0.1
+done
+if [ ! -e /sys/class/bluetooth/hci$index ]; then
+	echo "bluetooth-up: no hci$index" >&2
+	exit 1
+fi
+
+# 첫 켜기의 보정이 끝나야 받는다. btmgmt는 실패해도 0으로 끝나니 설정되지 않은 어댑터에는 없는 줄을 본다
+for _ in $(seq 1 20); do
+	timeout 5 btmgmt --index "$index" public-addr "$address" >/dev/null 2>&1
+	if timeout 5 btmgmt --index "$index" info 2>/dev/null | grep -q 'current settings'; then
+		exit 0
+	fi
+	sleep 0.5
+done
+echo "bluetooth-up: the adapter did not take the address" >&2
+exit 1

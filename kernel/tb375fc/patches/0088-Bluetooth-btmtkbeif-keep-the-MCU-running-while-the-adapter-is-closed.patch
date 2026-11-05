@@ -1,0 +1,124 @@
+From: buntOS contributors
+Subject: [PATCH] Bluetooth: btmtkbeif: keep the MCU running while the adapter is closed
+
+With Wi-Fi holding connsys up, BGF does not come back from a power off.
+The next power on times out on the power ack at 0x18000424, reloading the
+module does not help, and only taking every radio off does. The first
+close comes right after the first open, because the adapter has no address
+yet, so Bluetooth did not work at all next to Wi-Fi.
+
+The power off looks the same as the stock driver's and the cause is
+unknown. On the device the next power on failed the same way when any one
+step of the power off was left out (sleep protection, FUNC_EN, CPU reset,
+A-die clock, semaphores, EMI requests, the radio bit of connsys), when the
+MCU went to its firmware first, when the sleep protection was released
+before the power on, and when bit 4 of 0x18000144, which differs after a
+power off, was cleared.
+
+So leave the MCU running. Shutdown turns the function off through WMT as
+before, and if the firmware answers, close stops there. Open picks it up
+again and setup turns the function back on. A real power off remains for
+firmware that has failed, for a function off with no answer and for module
+removal, and after those the failure above remains too.
+
+The cost is an MCU that stays awake while the adapter is off, as it does
+while the adapter is open. Given to its firmware in this state it does not
+wake up ("no driver own: 00000004"), so a system sleep leaves it alone.
+Neither the power nor a system sleep has been measured.
+
+Seen on the device with Wi-Fi connected: closes and opens through
+bluetoothctl and rfkill, each with function on and calibration status 0
+and a scan that finds devices, with Wi-Fi still connected. A Wi-Fi chip
+reset and a reload of the Wi-Fi module also work, with the adapter open
+or closed.
+---
+ drivers/bluetooth/btmtkbeif.c | 45 +++++++++++++++++++++++++-
+ 1 file changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/bluetooth/btmtkbeif.c b/drivers/bluetooth/btmtkbeif.c
+--- a/drivers/bluetooth/btmtkbeif.c
++++ b/drivers/bluetooth/btmtkbeif.c
+@@ -251,6 +251,9 @@ struct btmtkbeif_dev {
+ 	u32 tx_push;
+ 	bool fw_owned;
+ 
++	/* Closed, with the function off and the MCU running. See close. */
++	bool parked;
++
+ 	/* These belong to the thread of the software interrupt */
+ 	u32 rx_pop;
+ 	bool rx_more;
+@@ -951,6 +954,23 @@ static int btmtkbeif_open(struct hci_dev *hdev)
+ 	struct btmtkbeif_dev *bdev = hci_get_drvdata(hdev);
+ 	int ret;
+ 
++	if (bdev->parked) {
++		bdev->parked = false;
++		bdev->opened = jiffies;
++
++		btmtkbeif_irqs_on(bdev);
++
++		ret = btmtkbeif_driver_own(bdev);
++		if (ret)
++			goto err_irqs_off;
++
++		set_bit(BTMTKBEIF_RUNNING, &bdev->flags);
++
++		bt_dev_info(hdev, "BGF: up again");
++
++		return 0;
++	}
++
+ 	ret = mtk_connsys_power_on(bdev->connsys, MTK_CONNSYS_RADIO_BT);
+ 	if (ret) {
+ 		bt_dev_err(hdev, "can't power connsys: %d", ret);
+@@ -1015,6 +1035,19 @@ static int btmtkbeif_close(struct hci_dev *hdev)
+ 	bdev->rx_more = false;
+ 	kfree_skb(xchg(&bdev->evt_skb, NULL));
+ 
++	/*
++	 * Powered off while Wi-Fi holds connsys up, BGF does not come back. The
++	 * next power on times out on its power ack until every radio is off,
++	 * and nobody knows why. Leaving out any one step of the power off
++	 * changes nothing, and a parked MCU given to its firmware does not wake
++	 * up either. So it stays up with the function off unless it has failed.
++	 */
++	if (bdev->parked && !test_bit(BTMTKBEIF_DEAD, &bdev->flags)) {
++		bt_dev_info(hdev, "BGF: the MCU stays up");
++		return 0;
++	}
++	bdev->parked = false;
++
+ 	btmtkbeif_mcu_power_off(bdev);
+ 	mtk_connsys_power_off(bdev->connsys, MTK_CONNSYS_RADIO_BT);
+ 
+@@ -1226,11 +1259,15 @@ static int btmtkbeif_setup(struct hci_dev *hdev)
+ static int btmtkbeif_shutdown(struct hci_dev *hdev)
+ {
+ 	struct btmtkbeif_dev *bdev = hci_get_drvdata(hdev);
++	int err;
+ 
+ 	if (test_bit(BTMTKBEIF_DEAD, &bdev->flags))
+ 		return 0;
+ 
+-	return btmtkbeif_func_ctrl(hdev, 0);
++	err = btmtkbeif_func_ctrl(hdev, 0);
++	bdev->parked = !err;
++
++	return err;
+ }
+ 
+ /* Write a whole frame or nothing. The position in the ring is the firmware's to get wrong. */
+@@ -1523,6 +1560,12 @@ static void btmtkbeif_remove(struct platform_device *pdev)
+ 	struct btmtkbeif_dev *bdev = platform_get_drvdata(pdev);
+ 
+ 	hci_unregister_dev(bdev->hdev);
++
++	if (bdev->parked) {
++		btmtkbeif_mcu_power_off(bdev);
++		mtk_connsys_power_off(bdev->connsys, MTK_CONNSYS_RADIO_BT);
++	}
++
+ 	hci_free_dev(bdev->hdev);
+ }
+ 

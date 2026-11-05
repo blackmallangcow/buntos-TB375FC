@@ -135,6 +135,8 @@
 0086-Bluetooth-btmtkbeif-add-the-MediaTek-shared-memory-HCI-transport.patch
 # 2d: 펌웨어가 기능 비트만 세우고 답하지 않는 HCI 명령에서 초기화가 멈춘다
 0087-Bluetooth-hci_sync-check-the-command-bit-before-reading-the-sync-train-parameters.patch
+# Wi-Fi가 connsys를 쥔 채 BGF 전원을 내리면 다시 켜지지 않는다(원인 미상). 닫을 때 기능만 끄고 MCU는 둔다
+0088-Bluetooth-btmtkbeif-keep-the-MCU-running-while-the-adapter-is-closed.patch
 # 0090~0093: MT6375 배터리 충전(2e). 드라이버는 값 검사를 코어에 두고, 배터리 설명과 게이지가 있어야 넘겨받는다.
 # 값은 순정 트리에서만 왔다. 기기 확인 뒤 업스트림에 낸다
 0090-dt-bindings-power-supply-mt6375-charger-add-the-battery-and-its-gauge.patch
