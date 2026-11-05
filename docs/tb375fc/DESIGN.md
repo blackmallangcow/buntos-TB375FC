@@ -1,4 +1,4 @@
-# buntOS TB375FC 포팅 최종 설계안 v1.54
+# buntOS TB375FC 포팅 최종 설계안 v1.55
 
 - 작성일: 2026-11-01
 - v1.1(2026-11-01): 커널 커스텀과 부트 이미지 도구를 만든 뒤 2.3절(2a 장치 트리를 업스트림 꼴로 시작)과 2.4절(`fastboot boot`와 헤더 v4)을 고쳤다
@@ -55,6 +55,7 @@
 - v1.52(2026-11-05): apt가 우리 것을 망가뜨리지 않게 했다(`apt-guard`). 바이너리가 쓰는 라이브러리를 꾸러미 `buntos-runtime`의 의존성으로 잡고, 커널, Mesa, GPU 펌웨어를 고정하고, 서비스 재시작을 막고, apt 앞뒤로 스냅숏과 해시를 남긴다. 기기에서 39개를 실제로 올려 우리 파일이 그대로인 것을 봤다. 설명은 [BSP README](../../bsp/lenovo-tb375fc/README.md)다.
 - v1.53(2026-11-05): 만충이 100%로 보이게 했다(패치 0178~0181). 충전기가 4.34 V에서 끝내면 게이지는 89%이고 UPower는 `charging`에 머물렀다. 게이지 드라이버가 88%를 100%로 잡아 `capacity`, `charge_full`, `charge_full_design`을 보고하고, 충전기가 끝내면 `status`를 `Full`로 한다. 배터리에 넣는 전압과 양은 그대로다. 커널 #303으로 기기에서 봤다. 0170~0177을 넣은 커널의 첫 부팅이기도 하다. 결과는 [체크리스트](bringup-checklist.md) 9.3절에 있다.
 - v1.54(2026-11-05): 터치를 패널이 켜진 동안만 돌린다(패치 0182·0183). 패널과 터치가 한 칩이라 패널 리셋이 터치 펌웨어를 지운다. 컴포지터가 첫 화면을 늦춘 뒤(buntOS `cb94109`)로 부팅 때 터치 펌웨어가 패널 리셋보다 먼저 올라가, 첫 로그인 화면에서 터치가 죽었다. 커널 #304에서 재시작 없이 터치가 되는 것을 봤다. 결과는 [체크리스트](bringup-checklist.md) 9.5절에 있다.
+- v1.55(2026-11-05): 소리를 넣었다(패치 0160~0167). MT6897 AFE(MT8196 틀)의 메모리, ETDM 4, ADDA 캡처, MT6368 코덱의 캡처, 본가 `aw88395`에 GPIO82 펌웨어 고르기, 벤더의 배터리별 출력 상한, 보정 전 음량 상한을 더했다. 앰프는 AW88394이고 칩 ID 0x2049다. 스피커 넷과 AIN0 마이크를 사용자가 듣고 확인했고, PipeWire와 상단 바 슬라이더까지 된다. USB-C 이어폰, 음악 재생, 서스펜드, 설정 앱, 배터리가 낮을 때의 상한은 아직 못 봤다. 결과는 [체크리스트](bringup-checklist.md) 9.6절에 있다.
 - 상태: 확정(기기를 받기 전). 기기 실측과 첫 부팅 결과로 고친다
 - 대상: Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC). 같은 하드웨어인 Lenovo Idea Tab Pro(TB373FU)도 같은 BSP로 지원한다
 - 관련 문서:
@@ -83,7 +84,7 @@
 | 저장장치·USB | UFS(`mediatek,mt8183-ufshci`, 업스트림이 MT6897 IP 판을 안다), mtu3 + xHCI + xsphy, USB-C(MT6375 TCPC), DP Alt |
 | 전원 | PMIC MT6363·MT6368·MT6319 ×3·MT6685·MT6375. 차지 펌프 NU2115 ×2·UPM6720 ×2, 게이지 MM8013 |
 | 무선 | connsys soc7_0(CONNAC2X, 칩 ID `0x7961` = MT7921 계열) + RF 칩 MT6637. 펌웨어는 LK가 싣고, 보정값은 nvdata 파티션에 있다 |
-| 그 밖 | 앰프 AW883xx ×4, 홀 센서 둘, 센서 허브 SCP(가속도·조도), UART 포고 키보드(Tinno MCU), SAR 둘 |
+| 그 밖 | 앰프 AW88394 ×4, 홀 센서 둘, 센서 허브 SCP(가속도·조도), UART 포고 키보드(Tinno MCU), SAR 둘 |
 | 부팅 | LK가 boot v4 + vendor_boot v4(장치 트리는 DT 표) + dtbo를 읽는다. GenieZone이 EL2를 차지할 가능성이 높다 |
 
 **가장 큰 재료 넷**([조사](porting-materials.md)).
@@ -302,7 +303,7 @@
 | 열 | `lvts_thermal` | 패치 0075~0078. 도메인 넷(AP·MCU·APU·GPU), 센서 32개, 읽기 전용, 센서별 계수, devinfo NVMEM 새 드라이버 | 중간 | 2e |
 | 게이지 | `mm8013` | 패치 0079(접근 전 4 ms, 읽기 재시도, 배터리 ID 0x0103), DT | 작음 | 2e |
 | 차지 펌프 | 없음 | 입력 FET 스위치는 패치 0048·0049, 칩 한계와 직충전은 패치 0176·0177(기본 꺼짐) | 중간 | 3 |
-| 오디오 | MT8196·MT8189 AFE, MT6359 코덱, AW88395·AW88399·AW88166, FSA4480 | MT6897 AFE, MT6368 코덱·accdet, 앰프 칩 확인, ACF | 큼 | 3 |
+| 오디오 | MT8196·MT8189 AFE, MT6359 코덱, AW88395, FSA4480 | MT6897 AFE, MT6368 코덱(캡처까지, 패치 0160~0167), 재생과 accdet은 아직, 앰프 ACF | 큼 | 3 |
 | SAR | `hx9023s` | HX9031AS를 hx9023s로 시도, HX9036 새로 | 작음/중간 | 3 |
 | 지문 센서 | 모름 | 칩과 연결을 장치 트리에서 확인한다(실기기에 센서가 있고, 입력 장치 `gf-keys`가 있다) | 모름 | 3 |
 | 센서 허브 | MT8183~MT8195 SCP만 | MT6897 SCP(nanohub) 길 조사 | 큼 | 3 |
@@ -351,7 +352,8 @@
 | 터치 NT36532(`novatek_ts_fw_boe.bin`, `novatek_ts_fw_tm.bin`) | 기기 vendor → `lenovo/tb375fc/` | 커널(터치가 열려 있고 패널이 켜질 때) | 미확인. 기기에서 뽑는다 |
 | Wi-Fi·BT soc7_0 | 기기 파티션(`connsys_wifi`, `connsys_bt`) | **LK**(conninfra EMI에 싣는다. 커널은 시작만 시킨다) | 해당 없음. 파티션을 지킨다 |
 | Wi-Fi 보정값·MAC | 기기 nvdata | 커널(NVRAM 명령으로 넘긴다. initramfs가 nvdata를 붙인다) | 기기마다 다르다 |
-| 앰프 AW883xx ACF, SCP·오디오 DSP | 기기 vendor·파티션 | 커널 | 미확인 |
+| 앰프 AW88394 ACF(`aw883xx_acf_gyt.bin`, `aw883xx_acf_yc.bin`) | 기기 vendor | 커널 | 확인함(GPIO82로 고른다) |
+| SCP·오디오 DSP | 기기 파티션 | 커널 | 미확인 |
 
 - 펌웨어 추출 스크립트는 `firmware/`에 두고, 펌웨어 파일 자체는 저장소에 넣지 않는다(buntOS ADR-012).
 - 설치기는 남겨 둔 안드로이드 슬롯이나 처음 백업에서 펌웨어를 가져온다.
@@ -367,7 +369,7 @@
 | 키보드 커버 | 포고 키보드가 붙으면 포인터 모드, 떼면 터치 모드다(지금 규칙 그대로). 붙음은 GPIO26 홀 센서(펌웨어 `hall_2`이자 `plug-gpios`, 낮으면 붙음)로 알고, 드라이버는 그때만 키보드·터치패드 입력 장치를 만든다. 덮개 홀 센서(GPIO1)는 닫힘을 알린다. 뒤로 접음을 재는 센서는 태블릿에 없다. 키보드 MCU가 일반 응답(0x93, sub 3)으로 켬·끔을 밀어 보내고, 스톡은 이것을 `KEY_KB_ENABLE`·`KEY_KB_DISABLE`로 올린다. 이것이 뒤로 접음으로 판단해(접을 때 이 프레임이 오는지는 기기에서 본다) 드라이버가 `SW_TABLET_MODE`로 보낸다(꺼짐이나 키보드 없음이 1). 그때는 키보드·터치패드를 세지 않는 규칙을 더한다(iPad Magic Keyboard처럼). 잠든 사이 잃은 상태는 키나 손가락이 눌리면 `SW_TABLET_MODE`를 0으로 되돌린다. 잠든 사이 접은 것은 키보드가 다시 알려야 안다(기기에서 본다) | `comp/src/input_mode.rs`, 포고 키보드 드라이버 |
 | 회전 | 가속도·자이로(LSM6DSO)와 조도(TCS37013)가 있지만 SCP(nanohub) 뒤에 있다. AP 장치 트리에 노드가 없다(2026-11-01 실측). 그래서 자동 회전이 막힐 수 있다. 처음에는 시스템 설정의 수동 회전이고, SCP 길이 열리면 iio-sensor-proxy로 자동 회전한다. 패널의 자연 방향은 가로다 | 시스템 설정 디스플레이 |
 | 전원 | A715 ×4 + A510 ×4의 EAS, cpufreq-hw, GPU 주파수, s2idle, 덮개(홀)로 잠자기, 45W PD 충전, LVTS 열 관리 | 커널, buntOS 전원 설정 |
-| 오디오 | 오디오가 되기 전에는 USB·Bluetooth 오디오다. 그 뒤 스피커 넷(AW883xx)의 보호 설정과 ALSA UCM을 둔다. 볼륨 키는 PMIC 키다 | UCM, WirePlumber |
+| 오디오 | 스피커 넷(AW88394)과 AIN0 마이크가 ALSA UCM(`conf.d/TB375FC`)으로 PipeWire에 보인다. 음량은 PipeWire 소프트웨어 음량이고, 앰프 감쇠는 -18 dB로 고정한다. 볼륨 키는 PMIC 키다 | UCM, WirePlumber, `buntos-sound.service` |
 | 메모리 | 8·12GB. zram과 GPU 공유 메모리를 맞춘다 | 이미지 설정 |
 | 그래픽 | Mesa 26.3 이상(G615). PanVK는 실험 플래그가 필요해 GL(Panfrost)로 시작한다 | 이미지의 Mesa 판, `GSK_RENDERER` 기본값 |
 

@@ -76,7 +76,7 @@ python3 -I tools/hw/dts_enabled.py out/merged.dts       # 켜진 노드의 compa
 | PMIC | MT6363(주, SPMI), MT6368(보조: USB VUSB, GPU 코어 VBUCK2, 진동 VIBR, 지문 VFP, 오디오 코덱·이어폰 감지), MT6319 ×3(SPMI 벅), MT6685(RTC·클럭 버퍼), MT6375(충전기·TCPC·ADC, I2C 0x34) | `mediatek,mt6363` 등 | 확인 필요(2b) |
 | 충전 | MT6375 충전기, 차지 펌프 Nuvolta NU2115 ×2와 Southchip/Unisemi UPM6720 ×2(고속 충전, PD·PE) | `nuvolta,nu2115`, `southchip,upm6720` | |
 | 배터리 | 게이지 Mitsumi MM8013(I2C 0x55) | `mediatek,mm8013`, 모듈 `mm8013a_gauge.ko` | |
-| 오디오 | MT6368 코덱, Awinic AW883xx 스마트 앰프 ×4(스피커 넷, I2C 0x34~0x37), FSA4480(USB-C 이어폰 스위치) | `awinic,aw883xx`, `fsa,fsa4480-i2c` | |
+| 오디오 | MT6368 코덱, Awinic AW88394 스마트 앰프 ×4(스피커 넷, `i2c6` 0x34~0x37, 칩 ID 0x2049), FSA4480(USB-C 이어폰 스위치) | `awinic,aw883xx`, `fsa,fsa4480-i2c` | 실측 결과는 7장 "소리" |
 | 무선 | MediaTek connsys 통합 Wi-Fi·Bluetooth·GPS(`wifi@18000000`, `bt@18000000`, `gps@18c00000`). 펌웨어 `connsys_wifi.img`, `connsys_bt.img`, `connsys_gnss.img` | `mediatek,wifi`, `mediatek,bt`, `mediatek,mt6897-gps` | 외장 칩이 아니라 SoC 통합형이다. 휴대기기용 connsys는 업스트림 드라이버가 없는 것으로 안다(4.2.1-4, 2d에서 확인) |
 | 센서 | 센서 허브 SCP(`scp@1c400000`, 펌웨어 `scp.img`), 홀 센서 둘(`hall_1`, `hall_2`: 키보드 커버), SAR 센서 TYHX HX9036·HX9031AS | `mediatek,scp`, `tyhx,hx9031as` | 가속도·조도 센서는 SCP 뒤에 있는 것으로 보인다(확인 필요) |
 | 키보드 커버 | 포고 핀 키보드(Tinno), 3핀(전원, 접지, 데이터 한 줄). 키보드 전원 GPIO61, 붙음 GPIO26(`hall_2`) | `tinno,tn_keyboard`, `mediatek,keyboard_gpio` | 드라이버 대기열(0032~0036) |
@@ -353,6 +353,20 @@ Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`
 | 개발 환경 | 기기에서 gcc, git, make, Podman(`debian:stable-slim`, `--network=host`), 네임스페이스 여섯 종이 된다 |
 | 대기 전류 | 화면 켬, 입력 0.5 A, 시험 커널에서 배터리 약 450~550 mA 방전 |
 | 슬롯 | 재시도는 부팅마다 준다. `buntos-slot-keep`이 `misc`의 `_b` 재시도를 되돌린다 |
+
+### 소리 (2026-11-05)
+
+읽은 기기 한 대의 값이다. 보정값과 GPIO82는 기기마다 다를 수 있다.
+
+| 항목 | 값 |
+|---|---|
+| 앰프 | AW88394 넷, 칩 ID 0x2049. 리셋 GPIO78~81(1이면 동작), GPIO82가 스피커 공급사를 구분한다. 풀업 `MTK_PUPD_SET_R1R0_10`에서 1을 읽어 `aw883xx_acf_yc.bin`을 쓴다 |
+| 링크 | ETDM 4, TDM 4슬롯, 슬롯마다 32비트, 48 kHz, FMT 5. BCK GPIO65, LRCK GPIO4, 출력 GPIO62, 입력 GPIO5, 함수 5 |
+| 스피커 자리 | 슬롯 0 = 0x35 왼쪽 아래, 슬롯 1 = 0x37 오른쪽 아래, 슬롯 2 = 0x34 왼쪽 위, 슬롯 3 = 0x36 오른쪽 위. 사용자가 든 방향 기준이고, 방향은 기록하지 않았다 |
+| 스피커 보정 | `persist`의 `factory/aw_cali.bin` `6403,7128,7023,6824,`(mΩ), `aw_cali_f0.bin` `675,629,644,644,`(Hz). 앰프 차례는 순정 트리의 `sound-channel`과 같다 |
+| 마이크 | AIN0, AIN2, AIN3에 신호가 있고 AIN1은 바닥값이다(프리앰프 12 dB에서 실효 -89.5 dBFS). 사용자가 들어 보고 AIN0을 골랐다 |
+| 클럭 | APLL1 180.6336 MHz, APLL2 196.608 MHz. 코덱의 26 MHz는 MT6685 BBCK5 |
+| 코덱 링크 | MTKAIF 프로토콜 2, 보정 위상 1/1/1, 주기 3/3/3. 두 번의 부팅에서 같았다 |
 
 ## 8. 남은 것
 
