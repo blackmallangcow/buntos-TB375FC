@@ -356,6 +356,12 @@ if [[ "$agent_refs" != NONE ]]; then
 	keys keys:esc sleep:1
 	guest dbus
 	check "단축키 API (목록, 겹치는 키 거절, 바꾸기, 기본값)" "$answer" "1 1 1 0"
+	# 음량 키: 출력 장치를 하나 두고 누른다. 한 칸은 16분의 1이다
+	guest volume-prepare
+	check "e2e 음량 키의 출력 장치를 둔다" "$answer" "Volume: 0.50"
+	keys keys:volumeup sleep:0.5
+	guest volume
+	check "음량 키로 음량이 한 칸 오르고 메뉴 막대 아래에 표시가 뜬다" "$answer" "Volume: 0.56 shown"
 	# 터미널: 편집기에서 ⌘C로 복사한 명령을 ⌥↩로 연 foot에 ⌘V(Ctrl+Shift+V로 간다)로 붙여 실행하고 ⌘W로 닫는다
 	guest terminal-prepare
 	[[ "$answer" == ready ]] || fail "e2e 6번: 터미널 시험을 준비하지 못했다 ($answer)"

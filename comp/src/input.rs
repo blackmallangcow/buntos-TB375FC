@@ -28,9 +28,12 @@ use crate::{
     prefs::KeyRepeat,
     screenshot::AreaSelection,
     session_lock,
-    shortcuts::{self, Accel, Builtin, Hit, Key, Mods, Place, SwitcherKey},
+    shortcuts::{self, Accel, Builtin, Hit, Key, Mods, Place, SwitcherKey, VolumeKey},
     state::BuntState,
 };
+
+/// 음량 키를 누르고 있을 때 가장 빠른 되풀이 (칸이 16개뿐이라 글자 키처럼 빠르면 건너뛴다)
+const VOLUME_REPEAT: Duration = Duration::from_millis(100);
 
 /// 앱에 키를 옮겨 보낼 때 잠시 떼거나 누르는 수정 키
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,6 +262,9 @@ impl BuntState {
         if sym == Keysym::BackSpace && modifiers.ctrl && modifiers.alt {
             return Some(Hit::Run(Builtin::Quit));
         }
+        if let Some(key) = VolumeKey::of(sym) {
+            return Some(Hit::Run(Builtin::Volume(key)));
+        }
         // 배열과 Shift에 상관없이 그 키의 첫 단계 라틴 기호로 맞춘다 (⇧⌘3은 #이 아니라 3)
         let key = shortcuts::normalize(handle.raw_latin_sym_or_raw_current_sym().unwrap_or(sym));
         if key.is_modifier_key() {
@@ -310,7 +316,14 @@ impl BuntState {
 
     fn perform(&mut self, hit: Hit, code: Keycode) {
         match hit {
-            Hit::Run(builtin) => self.run(builtin),
+            Hit::Run(builtin) => {
+                self.run(builtin);
+                if let Builtin::Volume(key) = builtin
+                    && key.repeats()
+                {
+                    self.repeat_while_held(code, VOLUME_REPEAT, move |state| state.run(builtin));
+                }
+            }
             Hit::Send { keys, repeat } => {
                 self.send_keys(&keys);
                 if repeat {
@@ -375,6 +388,7 @@ impl BuntState {
                 .dbus
                 .send(Command::ShortcutActivated("session.log-out")),
             Builtin::LogOut { confirm: false } => self.log_out(),
+            Builtin::Volume(key) => self.dbus.send(Command::ShortcutActivated(key.id())),
             Builtin::ForceQuit => self
                 .dbus
                 .send(Command::ShortcutActivated("windows.force-quit")),
@@ -459,6 +473,17 @@ impl BuntState {
     /// 옮겨 보낸 키를 누르고 있는 동안 키 반복 설정대로 되풀이한다. 앱은 컴포지터가 한 번 눌렀다 뗀
     /// 키를 받으므로 스스로 되풀이하지 않는다. 누른 키(`code`)를 떼면 멈춘다
     fn repeat_keys(&mut self, code: Keycode, keys: Vec<Key>) {
+        self.repeat_while_held(code, Duration::ZERO, move |state| state.send_keys(&keys));
+    }
+
+    /// 누른 키(`code`)를 떼기 전까지 키 반복 설정대로 되풀이한다. `slowest`보다
+    /// 짧은 간격으로는 되풀이하지 않는다
+    fn repeat_while_held(
+        &mut self,
+        code: Keycode,
+        slowest: Duration,
+        mut action: impl FnMut(&mut Self) + 'static,
+    ) {
         let repeat = self.prefs.keyboard.unwrap_or(KeyRepeat {
             delay: self.config.keyboard.repeat_delay.max(0) as u32,
             rate: self.config.keyboard.repeat_rate.max(0) as u32,
@@ -466,7 +491,7 @@ impl BuntState {
         if repeat.rate == 0 {
             return;
         }
-        let interval = Duration::from_millis(1000 / u64::from(repeat.rate));
+        let interval = Duration::from_millis(1000 / u64::from(repeat.rate)).max(slowest);
         let timer = Timer::from_duration(Duration::from_millis(u64::from(repeat.delay)));
         let source = self.loop_handle.insert_source(timer, move |_, _, state| {
             let held = state
@@ -477,7 +502,7 @@ impl BuntState {
                 state.key_repeat = None;
                 return TimeoutAction::Drop;
             }
-            state.send_keys(&keys);
+            action(state);
             TimeoutAction::ToDuration(interval)
         });
         match source {

@@ -7,7 +7,7 @@
 # 컴포지터 단축키 → 앱)을 거친다. 직렬 콘솔의 root로 실행하며 마지막 줄이 답이다.
 # 사용법: shortcuts.sh prepare | value | focus | screenshots | dbus | terminal-prepare | terminal |
 #         chord-prepare | input-method | chord-reset | minimize-button | restore-dock | switcher |
-#         preview | toolbar
+#         preview | toolbar | volume-prepare | volume
 set -u
 
 user=buntos
@@ -17,6 +17,7 @@ compositor() {
 	sudo -u "$user" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
 		busctl --user call org.buntos.Compositor /org/buntos/Compositor org.buntos.Compositor1 "$@" 2>&1
 }
+audio() { sudo -u "$user" XDG_RUNTIME_DIR=/run/user/1000 "$@"; }
 document() { A snapshot --app org.gnome.TextEditor -i | grep -m1 textbox | grep -o 'ref=e[0-9]*' | cut -d= -f2; }
 # 셸의 Dock에서 그 이름의 단추 (최소화한 창은 창 제목이 이름이다)
 dock_button() { A snapshot --app bunt-shell -i | grep -aF "button \"$1\"" | grep -o 'ref=e[0-9]*' | head -1 | cut -d= -f2; }
@@ -125,8 +126,20 @@ toolbar)
 	# ⇧⌘5 스크린샷 도구 막대가 뜨는지
 	shell_window bunt-screenshot
 	;;
+volume-prepare)
+	# 소리 장치가 없는 VM에 출력 장치를 둔다. 셸은 음량을 3초마다 읽는다
+	audio pw-cli create-node adapter '{ factory.name=support.null-audio-sink node.name=e2e-sink media.class=Audio/Sink object.linger=true audio.position=[FL FR] }' >/dev/null
+	sleep 1
+	audio wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.5
+	sleep 4
+	audio wpctl get-volume @DEFAULT_AUDIO_SINK@
+	;;
+volume)
+	# 음량과 음량 키의 표시
+	echo "$(audio wpctl get-volume @DEFAULT_AUDIO_SINK@) $(shell_window bunt-volume-hud)"
+	;;
 *)
-	echo "사용법: $0 prepare | value | focus | screenshots | dbus | terminal-prepare | terminal | chord-prepare | input-method | chord-reset | minimize-button | restore-dock | switcher | preview | toolbar" >&2
+	echo "사용법: $0 prepare | value | focus | screenshots | dbus | terminal-prepare | terminal | chord-prepare | input-method | chord-reset | minimize-button | restore-dock | switcher | preview | toolbar | volume-prepare | volume" >&2
 	exit 2
 	;;
 esac

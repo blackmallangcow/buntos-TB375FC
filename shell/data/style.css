@@ -16,6 +16,8 @@ window.bunt-screenshot-preview,
 window.bunt-screenshot-preview.background,
 window.bunt-banner,
 window.bunt-banner.background,
+window.bunt-volume-hud,
+window.bunt-volume-hud.background,
 window.bunt-launcher,
 window.bunt-launcher.background,
 window.bunt-wallpaper,
@@ -220,6 +222,23 @@ image.dock-window {
 .switcher-name {
   font-size: var(--text-body);
   font-weight: 600;
+}
+
+/* 음량 키의 표시 (macOS 26): 메뉴 막대 아래 오른쪽의 납작한 유리. 배너와 같이 둘레의
+   여백이 그림자 자리이고, 그림자가 그 안에서 끝나야 창 경계에서 잘리지 않는다 */
+.volume-hud {
+  margin: 8px 10px 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-xl);
+  background: var(--glass-strong);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--glass-outline);
+  color: var(--label);
+  opacity: 0;
+  transition: opacity var(--duration) ease-out;
+}
+
+.volume-hud.shown {
+  opacity: 1;
 }
 
 /* ⇧⌘5 스크린샷 도구 막대 (macOS 26): 화면 아래 가운데의 유리 막대. 둘레는 --shadow-menu 그림자 자리다 */
