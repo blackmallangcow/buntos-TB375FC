@@ -213,6 +213,8 @@ pub struct InputDevices<D = InputDevice> {
     mode: InputMode,
     /// 이번 이벤트 묶음이 끝난 뒤 모드를 다시 정하기로 했다 (BuntState::queue_input_mode)
     queued: bool,
+    /// 포인터 장치를 실제로 쓴 뒤 화면을 아직 누르지 않았다 (cursor_shown)
+    pointer_used: bool,
 }
 
 impl<D: PartialEq> InputDevices<D> {
@@ -222,6 +224,7 @@ impl<D: PartialEq> InputDevices<D> {
             devices: Vec::new(),
             mode: setting.resolve(InputMode::Pointer),
             queued: false,
+            pointer_used: false,
         }
     }
 
@@ -239,7 +242,32 @@ impl<D: PartialEq> InputDevices<D> {
     pub fn remove(&mut self, device: &D) -> bool {
         let before = self.devices.len();
         self.devices.retain(|(known, _)| known != device);
+        if self.census().pointers == 0 {
+            self.pointer_used = false;
+        }
         self.devices.len() != before
+    }
+
+    /// 커서를 그릴까. 포인터 장치가 없으면 그리지 않는다. 터치스크린이 함께 있으면 iPadOS처럼 포인터 장치를
+    /// 쓴 뒤에만 그린다. 키보드가 포인터 갈래를 함께 알려도 왼쪽 위에 커서가 남지 않는다. 터치스크린이
+    /// 없으면 macOS처럼 늘 그린다
+    pub fn cursor_shown(&self) -> bool {
+        let census = self.census();
+        census.pointers > 0 && (census.touchscreens == 0 || self.pointer_used)
+    }
+
+    /// 포인터 장치를 썼다. 커서가 새로 보이면 true
+    pub fn pointer_used(&mut self) -> bool {
+        let before = self.cursor_shown();
+        self.pointer_used = true;
+        self.cursor_shown() != before
+    }
+
+    /// 화면을 손가락으로 눌렀다. 커서가 숨으면 true
+    pub fn touched(&mut self) -> bool {
+        let before = self.cursor_shown();
+        self.pointer_used = false;
+        self.cursor_shown() != before
     }
 
     pub fn census(&self) -> Census {
@@ -311,6 +339,8 @@ impl BuntState {
         };
         if changed {
             self.queue_input_mode();
+            // 커서가 나타나거나 사라질 수 있다
+            self.queue_redraw_all();
         }
     }
 
@@ -567,6 +597,53 @@ mod tests {
                 touchscreens: 1,
             }
         );
+    }
+
+    /// 포인터 장치가 없으면 커서를 그리지 않는다
+    #[test]
+    fn no_pointer_device_draws_no_cursor() {
+        let mut devices = InputDevices::<u32>::new(ModeSetting::Auto);
+        assert!(!devices.cursor_shown());
+        devices.add(1, Role::of(TOUCHSCREEN));
+        assert!(!devices.cursor_shown());
+        // 키보드만 붙어도 그리지 않는다
+        devices.add(2, Role::of(KEYBOARD));
+        assert!(!devices.cursor_shown());
+        assert!(!devices.pointer_used());
+        assert!(!devices.cursor_shown());
+    }
+
+    /// 터치스크린이 없으면 포인터 장치가 붙은 동안 늘 그린다
+    #[test]
+    fn a_desktop_always_draws_the_cursor() {
+        let mut devices = InputDevices::<u32>::new(ModeSetting::Auto);
+        devices.add(1, Role::of(MOUSE));
+        assert!(devices.cursor_shown());
+        assert!(!devices.touched());
+        assert!(devices.cursor_shown());
+        devices.remove(&1);
+        assert!(!devices.cursor_shown());
+    }
+
+    /// 터치스크린이 있으면 쓴 뒤에만 그리고, 손가락으로 누르면 숨긴다
+    #[test]
+    fn a_touchscreen_draws_the_cursor_only_after_it_is_used() {
+        let mut devices = InputDevices::<u32>::new(ModeSetting::Auto);
+        devices.add(1, Role::of(TOUCHSCREEN));
+        devices.add(2, Role::of(MOUSE));
+        assert!(!devices.cursor_shown());
+        assert!(devices.pointer_used());
+        assert!(devices.cursor_shown());
+        assert!(!devices.pointer_used());
+        assert!(devices.touched());
+        assert!(!devices.cursor_shown());
+        assert!(!devices.touched());
+        // 쓰던 마우스를 떼었다 다시 붙이면 쓸 때까지 그리지 않는다
+        assert!(devices.pointer_used());
+        devices.remove(&2);
+        assert!(!devices.cursor_shown());
+        devices.add(2, Role::of(MOUSE));
+        assert!(!devices.cursor_shown());
     }
 
     /// 같은 장치가 다시 붙으면(겹쳐 오는 이벤트) 두 번 세지 않고, 한 번 떼면 없어진다
