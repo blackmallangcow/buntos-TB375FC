@@ -5,6 +5,7 @@
 //! 뜬다. 위에서부터 검색 칸, 분류 칩, 최근에 쓴 앱, 모든 앱 격자다. 이름으로 찾고(Enter는 첫
 //! 결과), 분류로 거르고, 눌러서 실행한다. 이미 실행 중인 앱은 창을 앞으로 가져온다.
 //! 패널 바깥을 누르거나 Esc를 누르면 닫힌다(검색어가 있으면 Esc는 먼저 검색어를 지운다).
+//! 검색 칸 오른쪽의 단추나 ⌘4는 클립보드 기록(clipboard_panel.rs)으로 넘어간다. Spotlight의 클립보드 단추와 같다.
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -13,13 +14,18 @@ use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::{
+    clipboard::ClipboardHistory,
+    clipboard_panel::{CLIPBOARD_ICON, ClipboardPanel},
     dock::{activate_or_launch, app_button_content},
+    input_mode::TOUCH_CLASS,
     shell_settings,
     toplevels::Toplevels,
 };
 
 /// Dock 단추의 아이콘 (shell/data/icons)
 const ICON: &str = "org.buntos.Apps";
+/// 패널 머리의 모든 앱 단추
+const APPS_MODE_ICON: &str = "view-app-grid-symbolic";
 const TILE_ICON_SIZE: i32 = 64;
 const COLUMNS: u32 = 7;
 /// 최근에 쓴 앱 줄에 놓는 수 (한 줄)
@@ -28,7 +34,7 @@ const RECENT_COUNT: usize = 7;
 const PANEL_WIDTH: i32 = 860;
 const PANEL_HEIGHT: i32 = 620;
 /// 닫힐 때 사라지는 시간 (style.css의 launcher-panel transition과 같다)
-const CLOSE_DELAY: Duration = Duration::from_millis(140);
+pub const CLOSE_DELAY: Duration = Duration::from_millis(140);
 /// org.buntos.shell 키: 최근에 실행한 앱의 .desktop ID, 최근 것이 먼저
 const RECENT_KEY: &str = "recent-apps";
 
@@ -189,6 +195,8 @@ struct Inner {
     toplevels: Option<Toplevels>,
     /// 지금 패널의 검색 칸 (열 때마다 새로 만든다)
     search: RefCell<Option<gtk::SearchEntry>>,
+    /// 클립보드 기록 창
+    clipboard: ClipboardPanel,
 }
 
 impl Launcher {
@@ -196,24 +204,9 @@ impl Launcher {
         app: &gtk::Application,
         tr: &Rc<Translations>,
         toplevels: Option<&Toplevels>,
+        history: &ClipboardHistory,
     ) -> Self {
-        // 제목은 보이지 않지만 접근성 이름이 된다. 에이전트는 이것으로 레이어 표면을 찾는다 (layer_window)
-        let window = gtk::ApplicationWindow::builder()
-            .application(app)
-            .title("bunt-launcher")
-            .css_classes(["bunt-launcher"])
-            .build();
-        window.init_layer_shell();
-        window.set_namespace(Some("bunt-launcher"));
-        window.set_layer(Layer::Overlay);
-        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
-            window.set_anchor(edge, true);
-        }
-        // 메뉴바와 Dock까지 덮어, 패널 바깥 어디를 눌러도 닫히게 한다
-        window.set_exclusive_zone(-1);
-        window.set_keyboard_mode(KeyboardMode::Exclusive);
-        // 검색 칸에 치는 동안 화면 키보드 위까지만 덮는다. 키보드보다 늦게 떠도 키보드를 가리지 않는다
-        crate::osk::avoid_keyboard(&window, crate::osk::Avoid::Fill);
+        let window = overlay_window(app, "bunt-launcher");
 
         let panel = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -229,35 +222,41 @@ impl Launcher {
             tr: tr.clone(),
             toplevels: toplevels.cloned(),
             search: RefCell::new(None),
+            clipboard: ClipboardPanel::new(app, tr, history),
         }));
 
-        // 패널 바깥을 누르면 닫는다. 안쪽 누르기는 그대로 패널로 간다
-        let click = gtk::GestureClick::new();
-        click.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(&launcher.0);
-        click.connect_pressed(move |gesture, _, x, y| {
-            let (Some(inner), Some(root)) = (weak.upgrade(), gesture.widget()) else {
-                return;
-            };
-            let inside = root
-                .pick(x, y, gtk::PickFlags::DEFAULT)
-                .is_some_and(|picked| {
-                    &picked == inner.panel.upcast_ref::<gtk::Widget>()
-                        || picked.is_ancestor(&inner.panel)
-                });
-            if !inside {
+        launcher.0.clipboard.set_back(move || {
+            if let Some(inner) = weak.upgrade() {
+                Launcher(inner).back_from_clipboard();
+            }
+        });
+
+        let weak = Rc::downgrade(&launcher.0);
+        close_on_outside_press(&launcher.0.window, &launcher.0.panel, move || {
+            if let Some(inner) = weak.upgrade() {
                 Launcher(inner).hide();
             }
         });
-        launcher.0.window.add_controller(click);
 
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(&launcher.0);
-        keys.connect_key_pressed(move |_, key, _, _| {
+        keys.connect_key_pressed(move |_, key, _, state| {
             let Some(inner) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
+            // ⌘4는 컴포지터가 Ctrl+4로 옮겨 보낸다. 시스템 설정에서 옮기기를 끄면 그대로 온다
+            if key == gdk::Key::_4
+                && state.intersects(
+                    gdk::ModifierType::CONTROL_MASK
+                        | gdk::ModifierType::SUPER_MASK
+                        | gdk::ModifierType::META_MASK,
+                )
+            {
+                Launcher(inner).show_clipboard();
+                return glib::Propagation::Stop;
+            }
             if key != gdk::Key::Escape {
                 return glib::Propagation::Proceed;
             }
@@ -276,22 +275,64 @@ impl Launcher {
         &self.0.window
     }
 
+    /// 클립보드 기록 창 (밝게·어둡게를 따르게 하려고 내놓는다)
+    pub fn clipboard_window(&self) -> &gtk::ApplicationWindow {
+        self.0.clipboard.window()
+    }
+
     pub fn toggle(&self) {
-        if self.0.window.is_visible() {
+        if self.0.clipboard.is_open() {
+            self.0.clipboard.hide();
+        } else if self.0.window.is_visible() {
             self.hide();
         } else {
             self.show();
         }
     }
 
+    /// 클립보드 기록을 연다. 모든 앱 패널이 떠 있으면 같은 자리에서 바뀐 것처럼 보이게 새 창이 그려진 뒤 내린다
+    pub fn show_clipboard(&self) {
+        let (window, panel) = (self.0.window.clone(), self.0.panel.clone());
+        let from_apps = window.is_visible();
+        self.0.clipboard.show(!from_apps, move || {
+            if from_apps {
+                panel.remove_css_class("shown");
+                window.set_visible(false);
+            }
+        });
+    }
+
+    fn focus_search(&self) {
+        if let Some(search) = self.0.search.borrow().as_ref() {
+            focus_search(&self.0.window, search);
+        }
+    }
+
+    /// 클립보드 기록에서 모든 앱으로 돌아온다
+    fn back_from_clipboard(&self) {
+        self.fill();
+        fit_panel(&self.0.window, &self.0.panel);
+        self.0.panel.add_css_class("shown");
+        self.0.window.present();
+        self.focus_search();
+        let clipboard = self.0.clipboard.clone();
+        let frames = std::cell::Cell::new(0);
+        self.0.window.add_tick_callback(move |_, _| {
+            frames.set(frames.get() + 1);
+            if frames.get() < 2 {
+                return glib::ControlFlow::Continue;
+            }
+            clipboard.hide_now();
+            glib::ControlFlow::Break
+        });
+    }
+
     pub fn show(&self) {
         // 열 때마다 앱 목록을 새로 읽는다 (그사이 설치·삭제된 앱 반영)
         self.fill();
-        self.fit_to_monitor();
+        fit_panel(&self.0.window, &self.0.panel);
         self.0.window.present();
-        if let Some(search) = self.0.search.borrow().as_ref() {
-            search.grab_focus();
-        }
+        self.focus_search();
         // 그려진 다음에 클래스를 붙여야 나타나는 전환이 보인다
         let panel = self.0.panel.clone();
         glib::timeout_add_local_once(Duration::from_millis(16), move || {
@@ -308,25 +349,6 @@ impl Launcher {
         glib::timeout_add_local_once(CLOSE_DELAY, move || window.set_visible(false));
     }
 
-    /// 화면이 작으면 패널을 화면에 맞춘다 (가운데에 두어도 메뉴바와 Dock에 닿지 않게 남긴다)
-    fn fit_to_monitor(&self) {
-        let monitor = WidgetExt::display(&self.0.window)
-            .monitors()
-            .item(0)
-            .and_downcast::<gdk::Monitor>();
-        let (width, height) = match monitor {
-            Some(monitor) => {
-                let geometry = monitor.geometry();
-                (
-                    PANEL_WIDTH.min(geometry.width() - 80),
-                    PANEL_HEIGHT.min(geometry.height() - 240),
-                )
-            }
-            None => (PANEL_WIDTH, PANEL_HEIGHT),
-        };
-        self.0.panel.set_size_request(width, height);
-    }
-
     /// 앱을 연다: 실행 중이면 창을 앞으로, 아니면 실행
     fn open(&self, app: &App) {
         activate_or_launch(&app.info, self.0.toplevels.as_ref(), &self.0.window);
@@ -336,9 +358,7 @@ impl Launcher {
     fn fill(&self) {
         let inner = &self.0;
         let tr = &inner.tr;
-        while let Some(child) = inner.panel.first_child() {
-            inner.panel.remove(&child);
-        }
+        clear(&inner.panel);
         let apps = Rc::new(installed_apps());
 
         // 검색 칸: 앱 아이콘과 큰 글씨 (macOS 응용 프로그램 창의 머리)
@@ -347,8 +367,7 @@ impl Launcher {
             .hexpand(true)
             .css_classes(["launcher-search"])
             .build();
-        // 패널 어디에 포커스가 있든 글자를 치면 검색 칸으로 간다
-        search.set_key_capture_widget(Some(&inner.window));
+        prepare_search(&inner.window, &search);
         let header = gtk::Box::builder()
             .spacing(10)
             .css_classes(["launcher-header"])
@@ -357,6 +376,12 @@ impl Launcher {
         icon.set_pixel_size(24);
         header.append(&icon);
         header.append(&search);
+        let this = self.clone();
+        header.append(&mode_buttons(tr, Mode::Apps, move |mode| {
+            if mode == Mode::Clipboard {
+                this.show_clipboard();
+            }
+        }));
         inner.panel.append(&header);
         inner.panel.append(&separator());
 
@@ -532,7 +557,143 @@ impl Launcher {
     }
 }
 
-fn separator() -> gtk::Separator {
+/// 화면 전체를 덮는 투명한 overlay 창. 메뉴바와 Dock까지 덮어 패널 바깥 어디를 눌러도 닫히게 하고, 검색 칸에 치는 동안
+/// 화면 키보드 위까지만 덮는다(키보드보다 늦게 떠도 키보드를 가리지 않는다). 모든 앱과 클립보드 기록이 쓴다
+pub fn overlay_window(app: &gtk::Application, name: &str) -> gtk::ApplicationWindow {
+    // 제목은 보이지 않지만 접근성 이름이 된다. 에이전트는 이것으로 레이어 표면을 찾는다 (layer_window)
+    let window = gtk::ApplicationWindow::builder()
+        .application(app)
+        .title(name)
+        .css_classes([name])
+        .build();
+    window.init_layer_shell();
+    window.set_namespace(Some(name));
+    window.set_layer(Layer::Overlay);
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        window.set_anchor(edge, true);
+    }
+    window.set_exclusive_zone(-1);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
+    crate::osk::avoid_keyboard(&window, crate::osk::Avoid::Fill);
+    window
+}
+
+/// 패널 바깥을 누르면 `close`를 부른다. 안쪽 누르기는 그대로 패널로 간다
+pub fn close_on_outside_press(
+    window: &gtk::ApplicationWindow,
+    panel: &gtk::Box,
+    close: impl Fn() + 'static,
+) {
+    let click = gtk::GestureClick::new();
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let panel = panel.clone();
+    click.connect_pressed(move |gesture, _, x, y| {
+        let Some(root) = gesture.widget() else {
+            return;
+        };
+        let inside = root
+            .pick(x, y, gtk::PickFlags::DEFAULT)
+            .is_some_and(|picked| {
+                &picked == panel.upcast_ref::<gtk::Widget>() || picked.is_ancestor(&panel)
+            });
+        if !inside {
+            close();
+        }
+    });
+    window.add_controller(click);
+}
+
+/// 화면이 작으면 패널을 화면에 맞춘다 (가운데에 두어도 메뉴바와 Dock에 닿지 않게 남긴다)
+pub fn fit_panel(window: &gtk::ApplicationWindow, panel: &gtk::Box) {
+    let monitor = WidgetExt::display(window)
+        .monitors()
+        .item(0)
+        .and_downcast::<gdk::Monitor>();
+    let (width, height) = match monitor {
+        Some(monitor) => {
+            let geometry = monitor.geometry();
+            (
+                PANEL_WIDTH.min(geometry.width() - 80),
+                PANEL_HEIGHT.min(geometry.height() - 240),
+            )
+        }
+        None => (PANEL_WIDTH, PANEL_HEIGHT),
+    };
+    panel.set_size_request(width, height);
+}
+
+pub fn clear(panel: &gtk::Box) {
+    while let Some(child) = panel.first_child() {
+        panel.remove(&child);
+    }
+}
+
+/// 패널이 지금 보이는 것 (Spotlight의 ⌘1, ⌘4 단추)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Apps,
+    Clipboard,
+}
+
+/// 패널 머리의 단추 둘. 지금 보이는 쪽은 강조색이고 누르면 다른 쪽으로 간다
+pub fn mode_buttons(tr: &Translations, active: Mode, open: impl Fn(Mode) + 'static) -> gtk::Box {
+    let open = Rc::new(open);
+    let buttons = gtk::Box::builder().spacing(6).build();
+    for (mode, icon, label) in [
+        (Mode::Apps, APPS_MODE_ICON, "launcher-apps"),
+        (Mode::Clipboard, CLIPBOARD_ICON, "launcher-clipboard"),
+    ] {
+        let label = tr.get(label);
+        let button = gtk::Button::builder()
+            .icon_name(icon)
+            .tooltip_text(&label)
+            .valign(gtk::Align::Center)
+            .css_classes(["launcher-mode"])
+            .build();
+        button.update_property(&[gtk::accessible::Property::Label(&label)]);
+        if mode == active {
+            button.add_css_class("active");
+        }
+        let open = open.clone();
+        button.connect_clicked(move |_| open(mode));
+        buttons.append(&button);
+    }
+    buttons
+}
+
+/// 패널을 띄운 바로 뒤의 포커스. 포인터 모드는 검색 칸이다. 터치 모드는 칸이 포커스를 받지 못하므로(`prepare_search`) GTK가 정한
+/// 단추에 그대로 두고 포커스 표시만 끈다
+pub fn focus_search(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
+    if window.has_css_class(TOUCH_CLASS) {
+        window.set_focus_visible(false);
+    } else {
+        search.grab_focus();
+    }
+}
+
+/// 검색 칸이 키를 받는 법을 입력 모드에 맞춘다.
+/// - 포인터 모드: 패널 어디에 포커스가 있든 글자를 치면 검색 칸으로 간다.
+/// - 터치 모드: 칸을 눌러야 포커스를 받고, 패널에 키를 모으지 않는다. 칸에 포커스가 있거나 키를 모으면 GTK가 패널을 띄울 때부터 글 입력을
+///   켜 둔다. 그러면 칸과 같은 줄의 단추를 누른 손가락이 칸을 누른 것으로 쳐져(앱이 글 입력을 다시 켠 것과 글 커서 자리로 가린다,
+///   comp/src/osk.rs) 화면 키보드가 패널을 가린다. 터치 모드에는 물리 키보드가 없으므로 키를 모을 일도 없다
+pub fn prepare_search(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
+    if !window.has_css_class(TOUCH_CLASS) {
+        search.set_key_capture_widget(Some(window));
+        return;
+    }
+    search.set_can_focus(false);
+    let press = gtk::GestureClick::new();
+    press.set_propagation_phase(gtk::PropagationPhase::Capture);
+    press.connect_pressed(|press, _, _, _| {
+        if let Some(search) = press.widget() {
+            search.set_can_focus(true);
+            search.grab_focus();
+        }
+    });
+    search.add_controller(press);
+}
+
+pub fn separator() -> gtk::Separator {
     gtk::Separator::builder()
         .orientation(gtk::Orientation::Horizontal)
         .css_classes(["launcher-separator"])

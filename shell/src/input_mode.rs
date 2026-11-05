@@ -458,7 +458,17 @@ mod tests {
         // 그림만 두고 넓힌 것: 그림(내용)은 그대로이고 알림 카드의 높이도 그대로다. 막대 홈은 음소거 단추가 44px로
         // 넓어진 만큼 가로가 짧아지고 높이는 그대로다
         let content = |widget: &gtk::Widget| (widget.width(), widget.height());
-        let pictures: [(&str, &gtk::Widget, &gtk::Widget); 4] = [
+        let pictures: [(&str, &gtk::Widget, &gtk::Widget); 6] = [
+            (
+                "panel mode button",
+                pointer.mode_button.upcast_ref(),
+                touch.mode_button.upcast_ref(),
+            ),
+            (
+                "clipboard copy",
+                pointer.clipboard_copy.upcast_ref(),
+                touch.clipboard_copy.upcast_ref(),
+            ),
             (
                 "card close",
                 pointer.close.upcast_ref(),
@@ -500,6 +510,10 @@ mod tests {
             expand.x() + expand.width() <= close.x() + 0.5,
             "{expand:?} {close:?}"
         );
+        // 클립보드 기록의 줄은 포인터 모드에서도 44px이다
+        for sample in [&pointer, &touch] {
+            assert!(sample.size(sample.clipboard_item.upcast_ref()).1 >= 44.0);
+        }
         // 메뉴의 줄은 팝오버를 띄우지 않고 잰다
         assert_eq!(
             touch.menu_item.measure(gtk::Orientation::Vertical, -1).0,
@@ -532,6 +546,12 @@ mod tests {
         search: gtk::SearchEntry,
         chips: gtk::Box,
         chip: gtk::ToggleButton,
+        mode_button: gtk::Button,
+        more_button: gtk::Button,
+        clipboard_title: gtk::Label,
+        clipboard_item: gtk::ListBoxRow,
+        clipboard_copy: gtk::Button,
+        clipboard_allow: gtk::Button,
         dock_item: gtk::Button,
         auth_button: gtk::Button,
         auth_field: gtk::Entry,
@@ -666,6 +686,49 @@ mod tests {
             chips.append(&chip);
             column.append(&chips);
 
+            // 패널 머리의 단추와 클립보드 기록 (launcher.rs, clipboard_panel.rs)
+            let mode_button = gtk::Button::builder()
+                .icon_name("view-app-grid-symbolic")
+                .valign(gtk::Align::Center)
+                .css_classes(["launcher-mode"])
+                .build();
+            let more = gtk::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .valign(gtk::Align::Center)
+                .css_classes(["launcher-mode"])
+                .build();
+            let clipboard_title = gtk::Label::builder()
+                .label("클립보드 기록")
+                .css_classes(["clipboard-title"])
+                .build();
+            let panel_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            panel_header.append(&clipboard_title);
+            panel_header.append(&mode_button);
+            panel_header.append(&more);
+            column.append(&panel_header);
+            let clipboard_copy = gtk::Button::builder()
+                .icon_name("edit-copy-symbolic")
+                .valign(gtk::Align::Center)
+                .css_classes(["clipboard-copy"])
+                .build();
+            let clipboard_line = gtk::Box::builder().css_classes(["clipboard-row"]).build();
+            clipboard_line.append(&clipboard_copy);
+            let clipboard_item = gtk::ListBoxRow::builder()
+                .child(&clipboard_line)
+                .css_classes(["clipboard-item"])
+                .build();
+            let clipboard_list = gtk::ListBox::builder()
+                .css_classes(["clipboard-list"])
+                .build();
+            clipboard_list.append(&clipboard_item);
+            column.append(&clipboard_list);
+            let clipboard_allow = gtk::Button::builder()
+                .label("허용")
+                .halign(gtk::Align::Center)
+                .css_classes(["clipboard-allow"])
+                .build();
+            column.append(&clipboard_allow);
+
             // Dock: 가장 작은 아이콘(32px)
             let dock_item = gtk::Button::builder().css_classes(["dock-item"]).build();
             let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -691,6 +754,7 @@ mod tests {
             let bar_button = icon.first_child().and_downcast::<gtk::Button>().unwrap();
             let bar_item = find(menubar.upcast_ref(), "item").unwrap();
             let menu_item = find(popover.upcast_ref(), "modelbutton").unwrap();
+            let more_button = more.first_child().and_downcast::<gtk::Button>().unwrap();
             Self {
                 window,
                 bar_button,
@@ -711,6 +775,12 @@ mod tests {
                 search,
                 chips,
                 chip,
+                mode_button,
+                more_button,
+                clipboard_title,
+                clipboard_item,
+                clipboard_copy,
+                clipboard_allow,
                 dock_item,
                 auth_button,
                 auth_field,
@@ -743,6 +813,9 @@ mod tests {
                 ("card expand", self.expand.clone().upcast()),
                 ("card close", self.close.clone().upcast()),
                 ("dock item", self.dock_item.clone().upcast()),
+                ("panel mode button", self.mode_button.clone().upcast()),
+                ("panel more button", self.more_button.clone().upcast()),
+                ("clipboard copy", self.clipboard_copy.clone().upcast()),
             ]
         }
 
@@ -756,6 +829,8 @@ mod tests {
                 ("category row", self.chips.clone().upcast()),
                 ("dialog button", self.auth_button.clone().upcast()),
                 ("dialog field", self.auth_field.clone().upcast()),
+                ("clipboard title", self.clipboard_title.clone().upcast()),
+                ("clipboard allow", self.clipboard_allow.clone().upcast()),
             ]
         }
     }
