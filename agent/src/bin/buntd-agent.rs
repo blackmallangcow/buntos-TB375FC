@@ -361,7 +361,9 @@ impl Refusal {
 fn auth_dialog() -> Failure {
     (
         protocol::NOT_ALLOWED,
-        "an authentication dialog is open; only the user can answer it".into(),
+        "a window only the user can answer is open (authentication, network password, Bluetooth \
+         pairing or clipboard history)"
+            .into(),
     )
 }
 
