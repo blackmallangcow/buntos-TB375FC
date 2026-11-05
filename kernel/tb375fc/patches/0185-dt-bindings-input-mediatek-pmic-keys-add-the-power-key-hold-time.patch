@@ -1,0 +1,25 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: input: mediatek,pmic-keys: add the power key hold time
+
+Describe holding the power key to power off through the kernel, for boards
+whose PMIC long press only resets.
+---
+ Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml b/Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml
+--- a/Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml
++++ b/Documentation/devicetree/bindings/input/mediatek,pmic-keys.yaml
+@@ -58,6 +58,12 @@ properties:
+ 
+   power-off-time-sec: true
+ 
++  mediatek,power-key-hold-sec:
++    description:
++      Holding the power key this long powers off through the kernel. The key
++      then reports one press and release when let go, not when pressed.
++    minimum: 3
++
+   mediatek,long-press-mode:
+     description: |
+       Key long-press force shutdown setting

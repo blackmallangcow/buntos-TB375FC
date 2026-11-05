@@ -1,0 +1,77 @@
+From: buntOS contributors
+Subject: [PATCH] pmdomain: mediatek: mt6897: keep the display domains on
+
+Patch 0153 keeps the display domains on while the CRTC is off, because
+turning off the OVL domains through the hardware voter drops their votes
+(EN 0x79 to 0x19), fails without a message, and genpd never votes again. A
+runtime PM hold does not help in a system sleep: genpd powers off a domain
+when all its devices are suspended. On the TB375FC one half of the panel
+stays gray after waking up and the system restarts about a minute later.
+
+Make the domains of the display always on. Probe now votes for them over
+what the bootloader left on, which is what the first user did until now.
+The display uses more power while the system sleeps. How much is not
+measured.
+---
+ drivers/pmdomain/mediatek/mt6897-pm-domains.h | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/pmdomain/mediatek/mt6897-pm-domains.h b/drivers/pmdomain/mediatek/mt6897-pm-domains.h
+--- a/drivers/pmdomain/mediatek/mt6897-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mt6897-pm-domains.h
+@@ -136,6 +136,10 @@ static enum scpsys_bus_prot_block scpsys_bus_prot_bloc
+  * it keeps the display on for a framebuffer, and genpd would power off an unused
+  * domain that it sees as on at sync_state, even with pd_ignore_unused.
+  *
++ * Those of the display stay on instead. Turning them off through the hardware
++ * voter drops their votes and fails without a message, which genpd does not
++ * notice, and the display and soon the system stop when they are used again.
++ *
+  * The numbers of parent domains are lower than those of their subdomains, which
+  * the reverse order of scpsys_domain_cleanup() depends on.
+  */
+@@ -794,7 +798,7 @@ static const struct scpsys_hwv_domain_data scpsys_hwv_
+ 		.set_sta = 0x146c,
+ 		.clr_sta = 0x1470,
+ 		.setclr_bit = 0,
+-		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++		.caps = MTK_SCPD_ALWAYS_ON,
+ 	},
+ 	[MT6897_POWER_DOMAIN_VDE0] = {
+ 		.name = "vde0",
+@@ -827,7 +831,7 @@ static const struct scpsys_hwv_domain_data scpsys_hwv_
+ 		.set_sta = 0x146c,
+ 		.clr_sta = 0x1470,
+ 		.setclr_bit = 3,
+-		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++		.caps = MTK_SCPD_ALWAYS_ON,
+ 	},
+ 	[MT6897_POWER_DOMAIN_DIS1_SHUTDOWN] = {
+ 		.name = "dis1-shutdown",
+@@ -838,7 +842,7 @@ static const struct scpsys_hwv_domain_data scpsys_hwv_
+ 		.set_sta = 0x146c,
+ 		.clr_sta = 0x1470,
+ 		.setclr_bit = 4,
+-		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++		.caps = MTK_SCPD_ALWAYS_ON,
+ 	},
+ 	[MT6897_POWER_DOMAIN_OVL0_SHUTDOWN] = {
+ 		.name = "ovl0-shutdown",
+@@ -849,7 +853,7 @@ static const struct scpsys_hwv_domain_data scpsys_hwv_
+ 		.set_sta = 0x146c,
+ 		.clr_sta = 0x1470,
+ 		.setclr_bit = 5,
+-		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++		.caps = MTK_SCPD_ALWAYS_ON,
+ 	},
+ 	[MT6897_POWER_DOMAIN_OVL1_SHUTDOWN] = {
+ 		.name = "ovl1-shutdown",
+@@ -860,7 +864,7 @@ static const struct scpsys_hwv_domain_data scpsys_hwv_
+ 		.set_sta = 0x146c,
+ 		.clr_sta = 0x1470,
+ 		.setclr_bit = 6,
+-		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++		.caps = MTK_SCPD_ALWAYS_ON,
+ 	},
+ };
+ 

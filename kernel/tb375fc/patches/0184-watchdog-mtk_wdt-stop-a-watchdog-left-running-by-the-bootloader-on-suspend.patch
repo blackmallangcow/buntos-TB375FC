@@ -1,0 +1,40 @@
+From: buntOS contributors
+Subject: [PATCH] watchdog: mtk_wdt: stop a watchdog left running by the bootloader on suspend
+
+The bootloader can leave the watchdog running, which the driver notes as
+WDOG_HW_RUNNING at probe. Nobody has to open the device then: the watchdog
+core pings it from a timer. Suspend and resume only look at
+watchdog_active(), so the watchdog keeps counting while the system sleeps,
+the timer does not fire, and the watchdog resets the system.
+
+Seen on the Lenovo TB375FC (MT6897), where LK leaves WDT_MODE at 0x7d. It
+restarted about a minute after entering s2idle.
+
+Treat a running watchdog like an active one, as da9062 and da9063 do.
+---
+ drivers/watchdog/mtk_wdt.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/watchdog/mtk_wdt.c b/drivers/watchdog/mtk_wdt.c
+--- a/drivers/watchdog/mtk_wdt.c
++++ b/drivers/watchdog/mtk_wdt.c
+@@ -473,7 +473,8 @@ static int mtk_wdt_suspend(struct device *dev)
+ {
+ 	struct mtk_wdt_dev *mtk_wdt = dev_get_drvdata(dev);
+ 
+-	if (watchdog_active(&mtk_wdt->wdt_dev))
++	if (watchdog_active(&mtk_wdt->wdt_dev) ||
++	    watchdog_hw_running(&mtk_wdt->wdt_dev))
+ 		mtk_wdt_stop(&mtk_wdt->wdt_dev);
+ 
+ 	return 0;
+@@ -483,7 +484,8 @@ static int mtk_wdt_resume(struct device *dev)
+ {
+ 	struct mtk_wdt_dev *mtk_wdt = dev_get_drvdata(dev);
+ 
+-	if (watchdog_active(&mtk_wdt->wdt_dev)) {
++	if (watchdog_active(&mtk_wdt->wdt_dev) ||
++	    watchdog_hw_running(&mtk_wdt->wdt_dev)) {
+ 		mtk_wdt_start(&mtk_wdt->wdt_dev);
+ 		mtk_wdt_ping(&mtk_wdt->wdt_dev);
+ 	}

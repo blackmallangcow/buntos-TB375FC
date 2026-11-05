@@ -1,0 +1,44 @@
+From: buntOS contributors
+Subject: [PATCH] drm/mediatek: do not ask for a VT switch on system sleep
+
+Without a driver that says otherwise the kernel moves to the suspend
+console around a system sleep. A compositor then loses the session as soon
+as the system wakes up, drops its input devices and DRM master, and takes
+them back half a second later. On the TB375FC this shows as a flicker, and
+the seat losing touch is the moment a lock screen crashes.
+
+The driver restores the display itself through the atomic helpers, like
+i915 and others that opt out, so nothing needs the switch.
+---
+ drivers/gpu/drm/mediatek/mtk_drm_drv.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/gpu/drm/mediatek/mtk_drm_drv.c b/drivers/gpu/drm/mediatek/mtk_drm_drv.c
+--- a/drivers/gpu/drm/mediatek/mtk_drm_drv.c
++++ b/drivers/gpu/drm/mediatek/mtk_drm_drv.c
+@@ -10,6 +10,7 @@
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
++#include <linux/pm.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/dma-mapping.h>
+ 
+@@ -781,6 +782,9 @@ static int mtk_drm_bind(struct device *dev)
+ 
+ 	drm_client_setup(drm, NULL);
+ 
++	/* The display is restored without the VT switch of the system sleep */
++	pm_vt_switch_required(dev, false);
++
+ 	return 0;
+ 
+ err_deinit:
+@@ -802,6 +806,7 @@ static void mtk_drm_unbind(struct device *dev)
+ 
+ 	/* for multi mmsys dev, unregister drm dev in mmsys master */
+ 	if (private->drm_master) {
++		pm_vt_switch_unregister(dev);
+ 		drm_dev_unregister(private->drm);
+ 		mtk_drm_kms_deinit(private->drm);
+ 		drm_dev_put(private->drm);

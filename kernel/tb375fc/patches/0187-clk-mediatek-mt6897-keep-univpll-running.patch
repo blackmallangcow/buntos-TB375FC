@@ -1,0 +1,32 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: mt6897: keep univpll running
+
+The first system sleep unprepares the last users of univpll: I2C in its
+noirq suspend, USB and the backlight PWM before that. The hardware voter
+then does not finish the request ("did not release the PLL: -110") and does
+not take a new vote on resume, so every controller under univpll fails with
+-ETIMEDOUT. I2C stays marked suspended, MT6375 interrupts that cannot be
+read flood the log, and the system restarts soon after.
+
+Why the voter does not finish is unknown. Keep the PLL on, like mainpll,
+until someone finds out. It costs the power of one PLL during sleep.
+---
+ drivers/clk/mediatek/clk-mt6897-apmixedsys.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/clk/mediatek/clk-mt6897-apmixedsys.c b/drivers/clk/mediatek/clk-mt6897-apmixedsys.c
+--- a/drivers/clk/mediatek/clk-mt6897-apmixedsys.c
++++ b/drivers/clk/mediatek/clk-mt6897-apmixedsys.c
+@@ -120,7 +120,11 @@ static const struct mtk_pll_data apmixed_plls[] = {
+ static const struct mtk_pll_data apmixed_plls[] = {
+ 	PLL_HWV(CLK_APMIXED_MAINPLL, "mainpll", MAINPLL_CON0, PLL_AO,
+ 		MAINPLL_CON1, 24, MAINPLL_CON1, 0, 22, 0),
+-	PLL_HWV(CLK_APMIXED_UNIVPLL, "univpll", UNIVPLL_CON0, 0,
++	/*
++	 * Voted off, the voter neither finishes nor takes a new vote, and I2C,
++	 * USB and the backlight PWM never get their clocks back after a sleep.
++	 */
++	PLL_HWV(CLK_APMIXED_UNIVPLL, "univpll", UNIVPLL_CON0, PLL_AO,
+ 		UNIVPLL_CON1, 24, UNIVPLL_CON1, 0, 22, 1),
+ 	PLL(CLK_APMIXED_MSDCPLL, "msdcpll", MSDCPLL_CON0, MSDCPLL_CON3, 0, 0,
+ 	    MSDCPLL_CON1, 24, 0, 0, 0,

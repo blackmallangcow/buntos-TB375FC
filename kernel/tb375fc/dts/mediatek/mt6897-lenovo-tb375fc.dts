@@ -1006,6 +1006,8 @@
 			compatible = "mediatek,mt6363-keys";
 			mediatek,long-press-mode = <2>;
 			power-off-time-sec = <0>;
+			/* Press to sleep, hold to power off. Two keys reset. */
+			mediatek,power-key-hold-sec = <10>;
 
 			power-key {
 				interrupts = <0x4 48 IRQ_TYPE_LEVEL_HIGH>,

@@ -247,3 +247,11 @@
 0167-ASoC-aw88395-keep-the-volume-down-until-the-speaker-s-resistance-is-known.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 RTC까지 0110~0113에 있다):
 #  - spmi: mtk-pmif: 처리기가 있는 SID도 처리기 앞에서 지운다(벤더와 스톡의 순서). 지금은 EOI가 칩의 RCS 완료 쓰기 뒤에 와서, 그 사이 새 RCS가 지워지면 그 PMIC의 인터럽트가 재부팅까지 멈출 수 있다(창은 좁다. 코드로 본 것이다). 처리기를 뗀 SID와 직접 요청한 SID도 함께 풀린다
+# 0184~0186: 전원 키. LK가 켜 둔 감시 타이머가 잠든 동안 재시작한다. 누르면 잠자기, 10초 잡으면 강제 종료
+0184-watchdog-mtk_wdt-stop-a-watchdog-left-running-by-the-bootloader-on-suspend.patch
+0185-dt-bindings-input-mediatek-pmic-keys-add-the-power-key-hold-time.patch
+0186-Input-mtk-pmic-keys-sleep-on-a-click-and-power-off-on-a-long-hold.patch
+0187-clk-mediatek-mt6897-keep-univpll-running.patch
+0188-pmdomain-mediatek-mt6897-keep-the-display-domains-on.patch
+0189-drm-mediatek-do-not-ask-for-a-VT-switch-on-system-sleep.patch
+0190-Bluetooth-btmtkbeif-keep-the-MCU-awake-in-a-system-sleep.patch

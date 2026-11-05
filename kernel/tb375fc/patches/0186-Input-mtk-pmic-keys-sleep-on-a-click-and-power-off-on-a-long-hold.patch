@@ -1,0 +1,275 @@
+From: buntOS contributors
+Subject: [PATCH] Input: mtk-pmic-keys: sleep on a click and power off on a long hold
+
+The TB375FC has no other button for sleep and no firmware that powers off
+on a long press: the PMIC long press only resets, on two keys. Logind acts
+on the press, so a key that wakes the system puts it back to sleep, and a
+hold meant as a forced power off sleeps at once.
+
+With mediatek,power-key-hold-sec the power key reports a press and release
+together when let go. A press that woke the system reports nothing, and
+neither does a press let go after two seconds, which was probably a forced
+power off given up on.
+
+Held for the given time, the kernel powers off. This is done here because
+it is needed when userspace does not answer. Whatever is in memory gets two
+seconds to reach the disk first. Two keys together stay the PMIC's reset.
+
+A lost release interrupt must not power off a system in use, so the hold is
+checked against the key's status bit: TOPSTATUS reads 0x1e with the keys up
+and 0x1c with the power key down on the TB375FC, as on the MT6359.
+---
+ drivers/input/keyboard/mtk-pmic-keys.c | 143 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 143 insertions(+)
+
+diff --git a/drivers/input/keyboard/mtk-pmic-keys.c b/drivers/input/keyboard/mtk-pmic-keys.c
+--- a/drivers/input/keyboard/mtk-pmic-keys.c
++++ b/drivers/input/keyboard/mtk-pmic-keys.c
+@@ -5,9 +5,12 @@
+  * Author: Chen Zhong <chen.zhong@mediatek.com>
+  */
+ 
++#include <linux/devm-helpers.h>
++#include <linux/fs.h>
+ #include <linux/input.h>
+ #include <linux/interrupt.h>
+ #include <linux/kernel.h>
++#include <linux/ktime.h>
+ #include <linux/mfd/mt6323/registers.h>
+ #include <linux/mfd/mt6331/registers.h>
+ #include <linux/mfd/mt6357/registers.h>
+@@ -21,7 +24,10 @@
+ #include <linux/of.h>
+ #include <linux/of_irq.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
++#include <linux/reboot.h>
+ #include <linux/regmap.h>
++#include <linux/workqueue.h>
+ 
+ #define MTK_PMIC_RST_DU_MASK	GENMASK(9, 8)
+ #define MTK_PMIC_PWRKEY_RST	BIT(6)
+@@ -44,6 +50,17 @@
+ #define MTK_PMIC_HOMEKEY_INDEX	1
+ #define MTK_PMIC_MAX_KEY_COUNT	2
+ 
++/* Read on the TB375FC: 0x1e with the keys up, bit 1 clears for the power key */
++#define MTK_PMIC_MT6363_TOPSTATUS	0x1e
++#define MTK_PMIC_MT6363_PWRKEY_UP	BIT(1)
++
++/* What is in memory gets this long to reach the disk before the power off */
++#define MTK_PMIC_HOLD_SYNC_MS	2000
++/* A press let go later than this was neither a click nor a power off */
++#define MTK_PMIC_CLICK_MAX_MS	2000
++/* A press this soon after resume is the one that woke the system */
++#define MTK_PMIC_WAKE_PRESS_MS	500
++
+ struct mtk_pmic_keys_regs {
+ 	u32 deb_reg;
+ 	u32 deb_mask;
+@@ -73,6 +90,9 @@ struct mtk_pmic_regs {
+ 	u32 pmic_rst_sel_reg;
+ 	u32 rst_sel_mask; /* Long-press reset key selection bitmask */
+ 	bool key_release_irq;
++	/* Optional: a set bit says the power key is up */
++	u32 pwrkey_up_reg;
++	u32 pwrkey_up_mask;
+ };
+ 
+ static const struct mtk_pmic_regs mt6397_regs = {
+@@ -165,6 +185,8 @@ static const struct mtk_pmic_regs mt6363_regs = {
+ 	.pmic_rst_sel_reg = MT6363_REG_STRUP_CON12,
+ 	.rst_sel_mask = MTK_PMIC_MT6363_RST_SEL_MASK,
+ 	.key_release_irq = true,
++	.pwrkey_up_reg = MTK_PMIC_MT6363_TOPSTATUS,
++	.pwrkey_up_mask = MTK_PMIC_MT6363_PWRKEY_UP,
+ };
+ 
+ struct mtk_pmic_keys_info {
+@@ -174,13 +196,27 @@ struct mtk_pmic_keys_info {
+ 	int irq;
+ 	int irq_r; /* optional: release irq if different */
+ 	bool wakeup:1;
++	bool pressed:1;
+ };
+ 
+ struct mtk_pmic_keys {
+ 	struct input_dev *input_dev;
+ 	struct device *dev;
+ 	struct regmap *regmap;
++	const struct mtk_pmic_regs *regs;
+ 	struct mtk_pmic_keys_info keys[MTK_PMIC_MAX_KEY_COUNT];
++
++	/*
++	 * With hold_ms the power key does not report its press and release. It
++	 * reports a click when let go, and powers off when held for hold_ms.
++	 */
++	unsigned int hold_ms;
++	struct delayed_work hold_work;
++	bool hold_synced;
++	ktime_t pressed_at;
++	bool woke;
++	bool suspended;
++	ktime_t wake_press_end;
+ };
+ 
+ enum mtk_pmic_keys_lp_mode {
+@@ -274,9 +310,84 @@ static void mtk_pmic_keys_lp_reset_setup(struct mtk_pm
+ 	regmap_update_bits(keys->regmap, regs->pmic_rst_reg, mask, value);
+ }
+ 
++static bool mtk_pmic_keys_power_key_up(struct mtk_pmic_keys *keys)
++{
++	u32 val;
++
++	if (!keys->regs->pwrkey_up_mask ||
++	    regmap_read(keys->regmap, keys->regs->pwrkey_up_reg, &val))
++		return false;
++
++	return val & keys->regs->pwrkey_up_mask;
++}
++
++/*
++ * Holding the key has to work when userspace does not, which is when it is
++ * needed, so it is done here. Both keys together stay the PMIC's own reset.
++ */
++static void mtk_pmic_keys_hold_work(struct work_struct *work)
++{
++	struct mtk_pmic_keys *keys =
++		container_of(to_delayed_work(work), struct mtk_pmic_keys,
++			     hold_work);
++
++	if (keys->keys[MTK_PMIC_HOMEKEY_INDEX].pressed)
++		return;
++
++	/* A lost release interrupt must not power off a system in use */
++	if (mtk_pmic_keys_power_key_up(keys)) {
++		dev_warn(keys->dev, "the release of the power key was lost\n");
++		pm_relax(keys->dev);
++		return;
++	}
++
++	if (!keys->hold_synced) {
++		keys->hold_synced = true;
++		emergency_sync();
++		mod_delayed_work(system_dfl_wq, &keys->hold_work,
++				 msecs_to_jiffies(MTK_PMIC_HOLD_SYNC_MS));
++		return;
++	}
++
++	dev_emerg(keys->dev, "the power key was held, powering off\n");
++	kernel_power_off();
++}
++
++static void mtk_pmic_keys_power_key(struct mtk_pmic_keys *keys, bool pressed)
++{
++	unsigned int keycode = keys->keys[MTK_PMIC_PWRKEY_INDEX].keycode;
++	ktime_t now = ktime_get();
++
++	if (pressed) {
++		keys->woke = READ_ONCE(keys->suspended) ||
++			     ktime_before(now, keys->wake_press_end);
++		keys->pressed_at = now;
++		keys->hold_synced = false;
++		pm_stay_awake(keys->dev);
++		mod_delayed_work(system_dfl_wq, &keys->hold_work,
++				 msecs_to_jiffies(keys->hold_ms -
++						  MTK_PMIC_HOLD_SYNC_MS));
++		return;
++	}
++
++	cancel_delayed_work_sync(&keys->hold_work);
++	pm_relax(keys->dev);
++
++	/* Waking the system must not put it back to sleep */
++	if (keys->woke || !keys->pressed_at ||
++	    ktime_ms_delta(now, keys->pressed_at) > MTK_PMIC_CLICK_MAX_MS)
++		return;
++
++	input_report_key(keys->input_dev, keycode, 1);
++	input_sync(keys->input_dev);
++	input_report_key(keys->input_dev, keycode, 0);
++	input_sync(keys->input_dev);
++}
++
+ static irqreturn_t mtk_pmic_keys_irq_handler_thread(int irq, void *data)
+ {
+ 	struct mtk_pmic_keys_info *info = data;
++	struct mtk_pmic_keys *keys = info->keys;
+ 	u32 key_deb, pressed;
+ 
+ 	if (info->regs->deb_mask) {
+@@ -289,6 +400,13 @@ static irqreturn_t mtk_pmic_keys_irq_handler_thread(in
+ 		pressed = irq == info->irq;
+ 	}
+ 
++	info->pressed = pressed;
++
++	if (keys->hold_ms && info == &keys->keys[MTK_PMIC_PWRKEY_INDEX]) {
++		mtk_pmic_keys_power_key(keys, pressed);
++		return IRQ_HANDLED;
++	}
++
+ 	input_report_key(info->keys->input_dev, info->keycode, pressed);
+ 	input_sync(info->keys->input_dev);
+ 
+@@ -345,6 +463,8 @@ static int mtk_pmic_keys_suspend(struct device *dev)
+ 	struct mtk_pmic_keys *keys = dev_get_drvdata(dev);
+ 	int index;
+ 
++	WRITE_ONCE(keys->suspended, true);
++
+ 	for (index = 0; index < MTK_PMIC_MAX_KEY_COUNT; index++) {
+ 		if (keys->keys[index].wakeup) {
+ 			enable_irq_wake(keys->keys[index].irq);
+@@ -369,6 +489,10 @@ static int mtk_pmic_keys_resume(struct device *dev)
+ 		}
+ 	}
+ 
++	keys->wake_press_end = ktime_add_ms(ktime_get(),
++					    MTK_PMIC_WAKE_PRESS_MS);
++	WRITE_ONCE(keys->suspended, false);
++
+ 	return 0;
+ }
+ 
+@@ -430,6 +554,7 @@ static int mtk_pmic_keys_probe(struct platform_device 
+ 	struct mtk_pmic_keys *keys;
+ 	const struct mtk_pmic_regs *mtk_pmic_regs;
+ 	struct input_dev *input_dev;
++	u32 hold_sec;
+ 	const struct of_device_id *of_id =
+ 		of_match_device(of_mtk_pmic_keys_match_tbl, &pdev->dev);
+ 
+@@ -446,6 +571,7 @@ static int mtk_pmic_keys_probe(struct platform_device 
+ 		keys->regmap = pmic_chip->regmap;
+ 	}
+ 	mtk_pmic_regs = of_id->data;
++	keys->regs = mtk_pmic_regs;
+ 
+ 	keys->input_dev = input_dev = devm_input_allocate_device(keys->dev);
+ 	if (!input_dev) {
+@@ -459,6 +585,23 @@ static int mtk_pmic_keys_probe(struct platform_device 
+ 	input_dev->id.product = 0x0001;
+ 	input_dev->id.version = 0x0001;
+ 
++	if (!of_property_read_u32(node, "mediatek,power-key-hold-sec",
++				  &hold_sec)) {
++		if (hold_sec * 1000 <= MTK_PMIC_HOLD_SYNC_MS)
++			return dev_err_probe(keys->dev, -EINVAL,
++					     "hold of %u s is too short\n",
++					     hold_sec);
++
++		keys->hold_ms = hold_sec * 1000;
++		error = devm_delayed_work_autocancel(keys->dev,
++						     &keys->hold_work,
++						     mtk_pmic_keys_hold_work);
++		if (error)
++			return error;
++
++		device_init_wakeup(keys->dev, true);
++	}
++
+ 	keycount = of_get_available_child_count(node);
+ 	if (keycount > MTK_PMIC_MAX_KEY_COUNT ||
+ 	    keycount > ARRAY_SIZE(irqnames)) {

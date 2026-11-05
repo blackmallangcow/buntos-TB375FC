@@ -1,0 +1,162 @@
+From: buntOS contributors
+Subject: [PATCH] Bluetooth: btmtkbeif: keep the MCU awake in a system sleep
+
+Given to its firmware on suspend, the MCU does not come back: the next
+command after waking up fails with "no driver own: 00000004, MCU pc
+00000000". The driver then powers BGF off, and with Wi-Fi holding connsys
+up it does not power on again, so Bluetooth was gone after the first sleep
+on the TB375FC.
+
+The stock driver also takes a step before asking for the MCU back and goes
+through the secure firmware, which may be what is missing here. Until that
+is tried, leave the MCU with the driver, at the cost of an awake MCU while
+the system sleeps. Nothing else used firmware own.
+---
+ drivers/bluetooth/btmtkbeif.c | 87 +----------------------------------------
+ 1 file changed, 1 insertions(+), 86 deletions(-)
+
+diff --git a/drivers/bluetooth/btmtkbeif.c b/drivers/bluetooth/btmtkbeif.c
+--- a/drivers/bluetooth/btmtkbeif.c
++++ b/drivers/bluetooth/btmtkbeif.c
+@@ -27,7 +27,6 @@
+ #include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+-#include <linux/pm.h>
+ #include <linux/sizes.h>
+ #include <linux/skbuff.h>
+ #include <linux/soc/mediatek/mtk-connsys.h>
+@@ -246,10 +245,9 @@ struct btmtkbeif_dev {
+ 	unsigned long opened;
+ 	unsigned int resets;
+ 
+-	/* Serialises the writers of the host to chip ring and who owns the MCU */
++	/* Serialises the writers of the host to chip ring */
+ 	struct mutex tx_lock;
+ 	u32 tx_push;
+-	bool fw_owned;
+ 
+ 	/* Closed, with the function off and the MCU running. See close. */
+ 	bool parked;
+@@ -894,43 +892,10 @@ static int btmtkbeif_driver_own(struct btmtkbeif_dev *
+ 	}
+ 
+ 	writel(CONN_CSR_BGF_IRQ_FW_OWN, bdev->conn + CONN_CSR_BGF_IRQ_STAT);
+-	bdev->fw_owned = false;
+ 
+ 	return 0;
+ }
+ 
+-/*
+- * Give the MCU back to its firmware. The owner bit follows the write, not the
+- * firmware, so what counts is the interrupt status, masked or not.
+- */
+-static int btmtkbeif_fw_own(struct btmtkbeif_dev *bdev)
+-{
+-	unsigned long timeout = jiffies + msecs_to_jiffies(BTMTKBEIF_OWN_TIMEOUT_MS);
+-	int i;
+-
+-	bt_dev_info(bdev->hdev, "BGF: firmware own");
+-
+-	for (i = 0; ; i++) {
+-		if (!(i % 16))
+-			writel(CONN_CSR_BGF_SET_FW_OWN,
+-			       bdev->conn + CONN_CSR_BGF_LPCTL);
+-
+-		if (readl(bdev->conn + CONN_CSR_BGF_IRQ_STAT2) &
+-		    CONN_CSR_BGF_IRQ_FW_OWN)
+-			break;
+-
+-		if (time_after(jiffies, timeout))
+-			return -ETIMEDOUT;
+-
+-		usleep_range(BTMTKBEIF_POLL_US, BTMTKBEIF_POLL_US + 50);
+-	}
+-
+-	writel(CONN_CSR_BGF_IRQ_FW_OWN, bdev->conn + CONN_CSR_BGF_IRQ_STAT2);
+-	bdev->fw_owned = true;
+-
+-	return 0;
+-}
+-
+ /* The firmware writes where its release string is. It is not read outside the window. */
+ static void btmtkbeif_log_fw_version(struct btmtkbeif_dev *bdev)
+ {
+@@ -979,7 +944,6 @@ static int btmtkbeif_open(struct hci_dev *hdev)
+ 
+ 	clear_bit(BTMTKBEIF_DEAD, &bdev->flags);
+ 	bdev->opened = jiffies;
+-	bdev->fw_owned = true;
+ 
+ 	/*
+ 	 * The stock driver has the ring in place from when it loads, so the MCU
+@@ -1328,15 +1292,6 @@ static int btmtkbeif_tx(struct btmtkbeif_dev *bdev, co
+ 	    test_bit(BTMTKBEIF_DEAD, &bdev->flags))
+ 		return -EIO;
+ 
+-	/* After a system sleep it is the firmware's until there is something to do */
+-	if (bdev->fw_owned) {
+-		err = btmtkbeif_driver_own(bdev);
+-		if (err) {
+-			btmtkbeif_fatal(bdev, "BGF: it does not wake up");
+-			return err;
+-		}
+-	}
+-
+ 	err = btmtkbeif_ring_write(bdev, data, len);
+ 	if (err == -ETIMEDOUT) {
+ 		btmtkbeif_dump(bdev);
+@@ -1394,45 +1349,6 @@ static void btmtkbeif_cmd_timeout(struct hci_dev *hdev
+ 	btmtkbeif_fatal(bdev, "BGF: a command timed out");
+ }
+ 
+-/*
+- * The stock driver never lets the system sleep while the MCU is the driver's. It
+- * gets the firmware's here if nothing is going on, and comes back when needed.
+- */
+-static int btmtkbeif_suspend(struct device *dev)
+-{
+-	struct btmtkbeif_dev *bdev = dev_get_drvdata(dev);
+-	void __iomem *fw = bdev->ring + BEIF_FW_CTRL;
+-	int i;
+-
+-	mutex_lock(&bdev->tx_lock);
+-
+-	if (!test_bit(BTMTKBEIF_RUNNING, &bdev->flags) ||
+-	    test_bit(BTMTKBEIF_DEAD, &bdev->flags) || bdev->fw_owned)
+-		goto out;
+-
+-	/* A command being answered is not in the rings. It may take a while. */
+-	for (i = 0; i < 5; i++) {
+-		if (!test_bit(BTMTKBEIF_WMT_WAIT, &bdev->flags) &&
+-		    readl(fw + BEIF_CTRL_RX_POP) == bdev->tx_push &&
+-		    readl(fw + BEIF_CTRL_TX_PUSH) == bdev->rx_pop)
+-			break;
+-		usleep_range(1000, 1100);
+-	}
+-	if (i == 5) {
+-		bt_dev_warn(bdev->hdev, "BGF: it is busy, not sleeping");
+-		goto out;
+-	}
+-
+-	if (btmtkbeif_fw_own(bdev))
+-		btmtkbeif_fatal(bdev, "BGF: it does not go to sleep");
+-out:
+-	mutex_unlock(&bdev->tx_lock);
+-
+-	return 0;
+-}
+-
+-static DEFINE_SIMPLE_DEV_PM_OPS(btmtkbeif_pm_ops, btmtkbeif_suspend, NULL);
+-
+ static int btmtkbeif_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -1581,7 +1497,6 @@ static struct platform_driver btmtkbeif_driver = {
+ 	.driver = {
+ 		.name = "btmtkbeif",
+ 		.of_match_table = btmtkbeif_of_match,
+-		.pm = pm_sleep_ptr(&btmtkbeif_pm_ops),
+ 	},
+ };
+ module_platform_driver(btmtkbeif_driver);

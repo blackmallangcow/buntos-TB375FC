@@ -1,0 +1,25 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 컴퓨터에 연결된 USB 가젯이 있으면 컨트롤러가 잠들지 않아(mtu3: ip sleep failed) 시스템 잠자기가
+# 실패한다. 잠든 동안 가젯을 컨트롤러에서 뗀다. 컴퓨터에서는 장치가 사라졌다가 깨어나면 돌아온다.
+udc_file=/sys/kernel/config/usb_gadget/buntos/UDC
+saved=/run/buntos-usb-gadget-udc
+
+case "$1" in
+pre)
+	udc=$(cat "$udc_file" 2>/dev/null)
+	if [ -n "$udc" ]; then
+		echo "$udc" >"$saved"
+		echo "" >"$udc_file"
+	fi
+	;;
+post)
+	if [ -f "$saved" ]; then
+		cat "$saved" >"$udc_file"
+		rm -f "$saved"
+	fi
+	;;
+esac
+exit 0
