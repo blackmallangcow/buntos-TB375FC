@@ -9,8 +9,9 @@
 # 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 8번(데스크탑 항목, tests/e2e/desktop.sh),
 # e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키,
 # tests/e2e/shortcuts.sh), e2e 4번(한글 입력, tests/e2e/hangul.sh), e2e 7번(화면 잠금과 VM의 잠자기,
-# tests/e2e/session-lock.sh), e2e 9번(패키지 매니저, tests/e2e/packages.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는
-# 이미지(그래픽 세션이 없는 x86-64)에서는 8·5·6·4·7·9번을 건너뛴다.
+# tests/e2e/session-lock.sh), e2e 9번(패키지 매니저, tests/e2e/packages.sh), e2e 11번(화면 키보드와 단축 줄,
+# tests/e2e/touch-keyboard.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는 이미지(그래픽 세션이 없는 x86-64)에서는
+# 8·5·6·4·7·9·11번을 건너뛴다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
 # 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 8·5·6·4·7·9번에 10분 넘게 걸린다)
 #            BUNTOS_IMAGE_DIR 띄울 이미지의 디렉터리 (tools/image/build.sh·vmctl.sh와 같다. 기본
@@ -105,7 +106,8 @@ push() {
 # 테스트가 빌드한 이미지를 바꾸지 않게, 멈춘 상태로 띄워 디스크에 임시 덮어쓰기를 씌운 뒤 실행한다.
 # mkosi는 이미지를 -blockdev로 붙여 QEMU의 -snapshot이 효과가 없고, --ephemeral은 이미지 전체를 복사한다
 # 그래픽 세션이 뜨도록 가상 GPU를 붙이고(화면은 내보내지 않는다), 로그인 화면에 암호를 치도록 가상 키보드를,
-# 데스크탑을 누르고 드래그하도록(e2e 8번) 가상 태블릿을 붙인다
+# 데스크탑을 누르고 드래그하도록(e2e 8번) 가상 태블릿을 붙인다. 키보드와 태블릿은 PCIe 루트 포트에 꽂아 e2e 11번이 떼고
+# 그 자리에 가상 터치 화면을 붙일 수 있게 한다(태블릿의 키보드 덮개를 뗀 것과 같다. 입력 모드가 터치가 된다)
 # E2E_LOG_DIR이 있으면 게스트 저널을 받을 virtio 직렬 포트를 더한다(셸에 들어간 뒤 journalctl -f를 이 포트로 보낸다)
 journal_port=()
 if [[ -n "${E2E_LOG_DIR:-}" ]]; then
@@ -114,7 +116,12 @@ if [[ -n "${E2E_LOG_DIR:-}" ]]; then
 		-device "virtserialport,bus=e2e-serial.0,chardev=e2e-journal,name=org.buntos.e2e.journal")
 fi
 BUNTOS_IMAGE_DIR="$image_dir" "$repo/tools/image/build.sh" "$board" vm -- -S -qmp "unix:$work/qmp.sock,server=on,wait=off" \
-	-device virtio-gpu-pci -device virtio-keyboard-pci -device virtio-tablet-pci "${journal_port[@]}" \
+	-device virtio-gpu-pci \
+	-device pcie-root-port,id=e2e-keyboard-port,chassis=11,slot=11 \
+	-device virtio-keyboard-pci,id=e2e-keyboard,bus=e2e-keyboard-port \
+	-device pcie-root-port,id=e2e-tablet-port,chassis=12,slot=12 \
+	-device virtio-tablet-pci,id=e2e-tablet,bus=e2e-tablet-port \
+	-device pcie-root-port,id=e2e-touch-port,chassis=13,slot=13 "${journal_port[@]}" \
 	-smbios "type=11,value=io.systemd.credential:buntos.account=$account" \
 	<"$work/console.in" >"$log" 2>&1 &
 vm_pid=$!
@@ -622,6 +629,131 @@ if [[ "$agent_refs" != NONE ]]; then
 	keys keys:esc sleep:1
 	((failed == 0)) || fail "e2e 9번(패키지 매니저): ${failed}개 실패"
 	echo "e2e 9번(패키지 매니저): ${SECONDS}초, ${passed}개 통과"
+fi
+
+# e2e 11번: 화면 키보드와 단축 줄(ARCHITECTURE 5.1, 5.2). 키보드와 태블릿을 떼고 터치 화면을 붙여 터치 모드로 간 뒤, 손가락만으로
+# 친 글을 단축 줄로 오려두고 복사해 붙여 넣는다. 결과는 게스트 쪽 도우미(tests/e2e/touch-keyboard.sh)가 앱의 글과 터미널이 받은
+# 바이트로 읽는다. 화면 키보드는 에이전트에 보이지 않으므로(6.3절) 단추는 화면의 픽셀로 본다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/touch-keyboard.sh /tmp/e2e-touch-keyboard.sh
+	begin 11 /tmp/e2e-touch-keyboard.sh
+	# 1280×800에서 판은 472에서 시작한다(단축 줄 48px + 줄 68px × 4 + 위아래 여백 4px씩). 칸은 (1280 - 8) / 46 픽셀이다
+	bar_y=500
+	key_top=472
+	cut_key=touch:45,$bar_y
+	copy_key=touch:128,$bar_y
+	paste_key=touch:211,$bar_y
+	return_key=touch:1168,626
+	# 글자 하나의 손가락 동작 (글자 쪽의 QWERTY. 글자 키는 4칸이고, 둘째 줄은 2칸, 셋째 줄은 5칸 들였다)
+	osk_letter() {
+		local row letters start y head
+		for row in qwertyuiop:0:558 asdfghjkl:2:626 zxcvbnm:5:694; do
+			IFS=: read -r letters start y <<<"$row"
+			head=${letters%%"$1"*}
+			if ((${#head} < ${#letters})); then
+				echo "touch:$((4 + (2 * (start + 4 * ${#head}) + 4) * 1272 / 92)),$y"
+				return
+			fi
+		done
+	}
+	osk_type() {
+		local actions=() i
+		for ((i = 0; i < ${#1}; i++)); do
+			actions+=("$(osk_letter "${1:i:1}")" sleep:0.3)
+		done
+		keys "${actions[@]}"
+	}
+	# 단축 줄에 보이는 단추. 그림은 칸 가운데의 어두운 점으로 본다 (판은 밝다)
+	bar_buttons() {
+		local x name shown=()
+		for x in 45:cut 128:copy 211:paste; do
+			name=${x#*:}
+			x=${x%:*}
+			if (($(keys "dark:$work/bar.ppm,$((x - 16)),$((bar_y - 16)),$((x + 16)),$((bar_y + 16))") > 15)); then
+				shown+=("$name")
+			fi
+		done
+		echo "${shown[*]:-none}"
+	}
+
+	guest prepare
+	[[ "$answer" == ready ]] || fail "e2e 11번: 텍스트 편집기를 준비하지 못했다 ($answer)"
+	# 창을 화면에 채운다. 떠 있는 창은 키보드를 피해 옮기지 않는다 (디자인 스펙 15장)
+	keys keys:ctrl+meta_l+f sleep:2
+	keys plug:virtio-multitouch-pci,e2e-touch,e2e-touch-port unplug:e2e-keyboard unplug:e2e-tablet
+	guest mode touch
+	check "키보드와 태블릿을 떼고 터치 화면을 붙이면 터치 모드다" "$answer" touch
+
+	# 문서를 누르면 키보드가 뜨고 창이 판 위에서 끝난다 (창 자리 줄이기와 단축 줄이 있는 판의 높이가 맞다)
+	keys touch:640,200 sleep:2
+	guest window-height
+	check "키보드가 뜨면 창이 단축 줄 위에서 끝난다" "$answer" "$key_top"
+	check "보통 칸의 단축 줄에 오려두기, 복사하기, 붙여넣기가 있다" "$(bar_buttons)" "cut copy paste"
+	osk_type hello
+	keys sleep:1
+	guest value
+	check "손가락으로 친 글이 문서에 들어간다" "$answer" "[hello]"
+
+	# 글을 고르고 복사한 뒤, 줄의 끝을 눌러 글 커서를 옮기고 붙여 넣는다 (⌘C, ⌘V와 같은 키가 앱에 간다)
+	guest select-all
+	keys "$copy_key" sleep:1
+	guest value
+	check "복사하기는 글을 바꾸지 않는다" "$answer" "[hello]"
+	keys touch:1000,27 sleep:1 "$paste_key" sleep:1
+	guest value
+	check "복사하기와 붙여넣기: 고른 글이 글 커서 자리에 들어간다" "$answer" "[hellohello]"
+	guest select-all
+	keys "$cut_key" sleep:1
+	guest value
+	check "오려두기: 고른 글이 지워진다" "$answer" "[]"
+	keys "$paste_key" sleep:1
+	guest value
+	check "붙여넣기: 오려둔 글이 들어간다" "$answer" "[hellohello]"
+
+	# 암호 칸에는 붙여넣기만 있다. 붙여넣기는 자리가 그대로다
+	guest password-prepare
+	check "시스템 설정의 암호 시트를 연다" "$answer" 1
+	keys touch:677,392 sleep:2
+	check "암호 칸의 단축 줄에는 붙여넣기만 있다" "$(bar_buttons)" paste
+	guest password-cleanup
+	check "암호 시트를 닫으면 텍스트 편집기로 돌아온다" "$answer" org.gnome.TextEditor
+	keys sleep:1 touch:640,200 sleep:2
+	check "보통 칸으로 돌아오면 세 단추가 다시 있다" "$(bar_buttons)" "cut copy paste"
+
+	# 잠금 화면의 키보드에는 단축 줄이 없다. 단축 줄의 붙여넣기 자리를 눌러도 클립보드의 글이 암호 칸에 들어가지 않아, 그대로 친
+	# 암호로 풀린다
+	guest lock
+	check "화면을 잠근다" "$answer" true
+	keys touch:640,488 sleep:2 "$paste_key" sleep:0.5
+	osk_type "$password"
+	keys "$return_key" sleep:3
+	guest locked
+	check "잠금 화면에서 붙여넣기 자리를 눌러도 클립보드가 들어가지 않고 친 암호로 풀린다" "$answer" false
+
+	# 터미널에는 오려두기가 없고, 복사하기와 붙여넣기는 터미널의 키(Ctrl+Shift+C·V)로 간다. Ctrl+V로 갔으면 cat은 글이 아니라 ^V를 받는다
+	guest foot-prepare
+	check "터미널을 띄운다" "$answer" foot
+	keys touch:640,200 sleep:2
+	check "터미널의 단축 줄에는 복사하기와 붙여넣기만 있다" "$(bar_buttons)" "copy paste"
+	keys "$paste_key" sleep:1 "$return_key" sleep:1
+	guest foot
+	check "터미널에서 붙여넣기: 프로그램이 글을 받는다" "$answer" " h e l l o h e l l o \\n"
+	# 둘째 줄의 낱말을 손가락으로 두 번 눌러 고르면 복사하기와 붙여넣기로 다시 들어간다
+	osk_type xyz
+	keys "$return_key" sleep:1 touch:8,32 touch:8,32 sleep:1 "$copy_key" sleep:1 "$paste_key" sleep:1 \
+		"$return_key" sleep:1
+	guest foot
+	check "터미널에서 복사하기: 고른 낱말을 복사한다" "$answer" " h e l l o h e l l o \\n x y z \\n x y z \\n"
+	guest cleanup
+	keys sleep:2
+
+	# 키보드와 태블릿을 다시 붙이면 포인터 모드로 돌아온다
+	keys plug:virtio-keyboard-pci,e2e-keyboard,e2e-keyboard-port plug:virtio-tablet-pci,e2e-tablet,e2e-tablet-port \
+		unplug:e2e-touch
+	guest mode pointer
+	check "키보드와 태블릿을 다시 붙이면 포인터 모드다" "$answer" pointer
+	((failed == 0)) || fail "e2e 11번(화면 키보드와 단축 줄): ${failed}개 실패"
+	echo "e2e 11번(화면 키보드와 단축 줄): ${SECONDS}초, ${passed}개 통과"
 fi
 
 # 로그아웃: 로그인 화면이 다시 뜨고, 그 컴포지터도 사용자 세션의 CRTC와 모드를 끄지 않고 이어받는다 (comp/src/handover.rs)
