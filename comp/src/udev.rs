@@ -1331,7 +1331,7 @@ impl BuntState {
             .get_pointer()
             .map(|pointer| pointer.current_location())
             .unwrap_or_default();
-        if output_geo.to_f64().contains(pointer_pos) {
+        if self.input_devices.cursor_shown() && output_geo.to_f64().contains(pointer_pos) {
             let local = pointer_pos - output_geo.loc.to_f64();
             match &self.cursor_status {
                 CursorImageStatus::Hidden => {}

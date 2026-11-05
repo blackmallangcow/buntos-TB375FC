@@ -87,6 +87,7 @@ impl BuntState {
         match event {
             InputEvent::Keyboard { event } => self.on_keyboard::<I>(event),
             InputEvent::PointerMotion { event } => {
+                self.pointer_device_used();
                 let Some(pointer) = self.seat.get_pointer() else {
                     return;
                 };
@@ -94,6 +95,7 @@ impl BuntState {
                 self.pointer_moved(pos, event.time_msec());
             }
             InputEvent::PointerMotionAbsolute { event } => {
+                self.pointer_device_used();
                 let Some(output_geo) = self
                     .space
                     .outputs()
@@ -105,10 +107,21 @@ impl BuntState {
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
                 self.pointer_moved(pos, event.time_msec());
             }
-            InputEvent::PointerButton { event } => self.on_button::<I>(event),
-            InputEvent::PointerAxis { event } => self.on_axis::<I>(event),
+            InputEvent::PointerButton { event } => {
+                self.pointer_device_used();
+                self.on_button::<I>(event);
+            }
+            InputEvent::PointerAxis { event } => {
+                self.pointer_device_used();
+                self.on_axis::<I>(event);
+            }
             // 터치 화면. 입력 모드와 상관없이 늘 받는다 (touch.rs)
-            InputEvent::TouchDown { event } => self.on_touch_down::<I>(event),
+            InputEvent::TouchDown { event } => {
+                if self.input_devices.touched() {
+                    self.queue_redraw_all();
+                }
+                self.on_touch_down::<I>(event);
+            }
             InputEvent::TouchMotion { event } => self.on_touch_motion::<I>(event),
             InputEvent::TouchUp { event } => self.on_touch_up::<I>(event),
             InputEvent::TouchCancel { event } => self.on_touch_cancel::<I>(event),
@@ -125,6 +138,13 @@ impl BuntState {
                 self.touch_device_removed(&device.id())
             }
             _ => {}
+        }
+    }
+
+    /// 포인터 장치에서 온 이벤트다. 에이전트가 옮긴 포인터는 여기로 오지 않아 커서를 꺼내지 않는다
+    fn pointer_device_used(&mut self) {
+        if self.input_devices.pointer_used() {
+            self.queue_redraw_all();
         }
     }
 
