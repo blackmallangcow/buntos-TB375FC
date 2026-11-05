@@ -7,7 +7,7 @@
 # 컴포지터의 길을 거치고, 결과는 앱의 글(에이전트)과 터미널의 cat이 받은 바이트로 읽는다. 직렬 콘솔의 root로 실행하며 마지막
 # 줄이 답이다(답이 없으면 호스트가 기다리므로 늘 한 줄을 낸다).
 # 사용법: touch-keyboard.sh prepare | mode pointer|touch | value | window-height | select-all | password-prepare |
-#         password-cleanup | lock | locked | foot-prepare | foot | cleanup
+#         password-cleanup | lock | locked | foot-prepare | foot | cleanup | copy-prepare
 set -u
 
 user=buntos
@@ -119,6 +119,12 @@ locked)
 		sleep 0.5
 	done
 	locked
+	;;
+copy-prepare)
+	# 텍스트 편집기에 복사할 글을 채운다. 호스트가 ⌘A ⌘C로 복사한다
+	A launch org.gnome.TextEditor >/dev/null
+	doc=$(editor_doc)
+	A fill "$doc" secretclip >/dev/null && A focus "$doc" >/dev/null && echo ready
 	;;
 cleanup)
 	pkill -x foot

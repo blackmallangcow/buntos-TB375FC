@@ -752,6 +752,16 @@ if [[ "$agent_refs" != NONE ]]; then
 		unplug:e2e-touch
 	guest mode pointer
 	check "키보드와 태블릿을 다시 붙이면 포인터 모드다" "$answer" pointer
+
+	# 잠금 화면의 암호 칸은 물리 키보드의 ⌃V도 받지 않는다. 클립보드의 글이 들어갔으면 그 뒤에 친 암호가 틀린다
+	guest copy-prepare
+	[[ "$answer" == ready ]] || fail "e2e 11번: 복사할 글을 준비하지 못했다 ($answer)"
+	keys keys:meta_l+a sleep:0.3 keys:meta_l+c sleep:0.5
+	guest lock
+	check "클립보드에 글을 두고 화면을 잠근다" "$answer" true
+	keys keys:ctrl+v sleep:1 "type:$password" sleep:0.5 keys:ret sleep:3
+	guest locked
+	check "잠금 화면에서 ⌃V로 클립보드가 들어가지 않고 친 암호로 풀린다" "$answer" false
 	((failed == 0)) || fail "e2e 11번(화면 키보드와 단축 줄): ${failed}개 실패"
 	echo "e2e 11번(화면 키보드와 단축 줄): ${SECONDS}초, ${passed}개 통과"
 fi
