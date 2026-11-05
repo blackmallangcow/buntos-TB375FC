@@ -1,0 +1,28 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: input: touchscreen: nt36532: add the panel
+
+The NT36532 is one chip for the panel and the touch controller, and a
+reset of the panel also stops the controller. Add a reference to the
+panel, so that the driver can start the controller after it.
+
+---
+ .../bindings/input/touchscreen/novatek,nt36532-ts.yaml      | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/input/touchscreen/novatek,nt36532-ts.yaml b/Documentation/devicetree/bindings/input/touchscreen/novatek,nt36532-ts.yaml
+index e1625d2..08d668c 100644
+--- a/Documentation/devicetree/bindings/input/touchscreen/novatek,nt36532-ts.yaml
++++ b/Documentation/devicetree/bindings/input/touchscreen/novatek,nt36532-ts.yaml
+@@ -61,6 +61,12 @@ properties:
+       GPIOs that read the panel ID straps. The first GPIO gives bit 0 of the
+       index into firmware-name.
+ 
++  panel:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      The panel on the same chip. A reset of the panel also stops the touch
++      controller, which then has to start again after the panel.
++
+ required:
+   - compatible
+   - reg

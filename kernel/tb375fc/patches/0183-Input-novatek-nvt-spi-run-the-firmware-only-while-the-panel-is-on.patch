@@ -1,0 +1,182 @@
+From: buntOS contributors
+Subject: [PATCH] Input: novatek-nvt-spi: run the firmware only while the panel is on
+
+The NT36532 is one chip for the panel and the touch controller. A reset
+of the panel wipes the firmware that this driver loads into the SRAM of
+the controller, and nothing then reports a touch until the input device
+is closed and opened again.
+
+This driver loads the firmware when the device is opened, and the panel
+is reset at its first prepare. So it depends on which of the two a
+compositor does first. On a Lenovo TB375FC the boots where the mode set
+came first had a working touch screen. Once the compositor waited for its
+first frame before the mode set, it opened the device 0.5 seconds before.
+The interrupt count then stayed at 2 for 13 minutes of tapping, and the
+login screen could not be used. Restarting the compositor brought the
+touch screen back, as the panel stays up then.
+
+With a panel in the tree, follow it: load the firmware once the panel is
+enabled and the device is open, and stop before the panel is disabled.
+Loading takes a while, so do it in a work and leave the mode set alone.
+
+This also restarts the firmware after the panel was turned off and on,
+which it did not do before. After a suspend the firmware failed to start
+with -110, presumably with the panel still off. It now waits for the panel.
+
+On the device the compositor still opens the device 0.5 seconds before
+the mode set. The firmware now comes up after it, and the touch screen
+works on the first login screen of a boot. Turning the panel off and on,
+and a suspend, have not been tried with this.
+
+---
+ drivers/input/touchscreen/Kconfig           |  1 +
+ drivers/input/touchscreen/novatek-nvt-spi.c | 82 ++++++++++++++++++++-
+ 2 files changed, 80 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index aebf2b5..032c76e 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -704,6 +704,7 @@ config TOUCHSCREEN_NOVATEK_NVT_TS
+ config TOUCHSCREEN_NOVATEK_NVT_SPI
+ 	tristate "Novatek NT36532 SPI touchscreen support"
+ 	depends on SPI
++	depends on DRM || !DRM
+ 	help
+ 	  Say Y here if you have a touchscreen driven by a Novatek NT36532
+ 	  touch and display driver IC over SPI, as on the Lenovo Xiaoxin Pad
+diff --git a/drivers/input/touchscreen/novatek-nvt-spi.c b/drivers/input/touchscreen/novatek-nvt-spi.c
+index d2d2ea7..d985a15 100644
+--- a/drivers/input/touchscreen/novatek-nvt-spi.c
++++ b/drivers/input/touchscreen/novatek-nvt-spi.c
+@@ -34,6 +34,8 @@
+ #include <linux/unaligned.h>
+ #include <linux/workqueue.h>
+ 
++#include <drm/drm_panel.h>
++
+ /*
+  * The controller has a 24-bit address space, selected in pages of 128
+  * bytes. A transfer starts with the offset in the page, with bit 7 set for a
+@@ -133,9 +135,12 @@ struct nvt_spi_ts {
+ 	struct gpio_desc *reset_gpio;
+ 	const char *fw_name;
+ 	struct work_struct recover_work;
+-	struct mutex lock;	/* users and running */
++	struct drm_panel_follower panel_follower;
++	struct work_struct panel_work;
++	struct mutex lock;	/* users, running and panel_off */
+ 	unsigned int users;
+ 	bool running;
++	bool panel_off;
+ 	unsigned int wdt_reports;
+ 	u8 report[NVT_REPORT_LEN];
+ 	u8 *tx;
+@@ -876,7 +881,7 @@ static int nvt_spi_open(struct input_dev *dev)
+ 
+ 	guard(mutex)(&ts->lock);
+ 
+-	if (!ts->users) {
++	if (!ts->users && !ts->panel_off) {
+ 		error = nvt_spi_start(ts);
+ 		if (error)
+ 			return error;
+@@ -902,6 +907,7 @@ static int nvt_spi_suspend(struct device *dev)
+ 	struct nvt_spi_ts *ts = spi_get_drvdata(to_spi_device(dev));
+ 
+ 	cancel_work_sync(&ts->recover_work);
++	flush_work(&ts->panel_work);
+ 
+ 	guard(mutex)(&ts->lock);
+ 
+@@ -917,12 +923,68 @@ static int nvt_spi_resume(struct device *dev)
+ 
+ 	guard(mutex)(&ts->lock);
+ 
+-	if (ts->users && !ts->running)
++	if (ts->users && !ts->running && !ts->panel_off)
+ 		return nvt_spi_start(ts);
+ 
+ 	return 0;
+ }
+ 
++/*
++ * The panel and the touch controller are one chip, and a reset of the panel
++ * wipes the firmware from the controller's SRAM. Run the firmware only while
++ * the panel is on. Loading it takes a while, and the panel's caller is setting
++ * a mode.
++ */
++static void nvt_spi_panel_work(struct work_struct *work)
++{
++	struct nvt_spi_ts *ts = container_of(work, struct nvt_spi_ts,
++					     panel_work);
++	int error;
++
++	guard(mutex)(&ts->lock);
++
++	ts->panel_off = false;
++
++	if (ts->users && !ts->running) {
++		error = nvt_spi_start(ts);
++		if (error)
++			dev_err(&ts->spi->dev,
++				"failed to start after the panel: %d\n", error);
++	}
++}
++
++static int nvt_spi_panel_enabled(struct drm_panel_follower *follower)
++{
++	struct nvt_spi_ts *ts = container_of(follower, struct nvt_spi_ts,
++					     panel_follower);
++
++	schedule_work(&ts->panel_work);
++
++	return 0;
++}
++
++static int nvt_spi_panel_disabling(struct drm_panel_follower *follower)
++{
++	struct nvt_spi_ts *ts = container_of(follower, struct nvt_spi_ts,
++					     panel_follower);
++
++	cancel_work_sync(&ts->panel_work);
++
++	guard(mutex)(&ts->lock);
++
++	ts->panel_off = true;
++
++	if (ts->running)
++		nvt_spi_stop(ts);
++
++	return 0;
++}
++
++static const struct drm_panel_follower_funcs nvt_spi_panel_funcs = {
++	.panel_enabled = nvt_spi_panel_enabled,
++	.panel_disabling = nvt_spi_panel_disabling,
++};
++
+ static DEFINE_SIMPLE_DEV_PM_OPS(nvt_spi_pm_ops, nvt_spi_suspend, nvt_spi_resume);
+ 
+ /* The panel ID straps pick the firmware for the panel */
+@@ -1096,6 +1158,20 @@ static int nvt_spi_probe(struct spi_device *spi)
+ 	if (error)
+ 		return error;
+ 
++	error = devm_work_autocancel(dev, &ts->panel_work, nvt_spi_panel_work);
++	if (error)
++		return error;
++
++	/* With users still at 0 the panel can only clear panel_off for now */
++	if (drm_is_panel_follower(dev)) {
++		ts->panel_off = true;
++		ts->panel_follower.funcs = &nvt_spi_panel_funcs;
++		error = devm_drm_panel_add_follower(dev, &ts->panel_follower);
++		if (error)
++			return dev_err_probe(dev, error,
++					     "failed to follow the panel\n");
++	}
++
+ 	spi->mode = SPI_MODE_0;
+ 	spi->bits_per_word = 8;
+ 	error = spi_setup(spi);

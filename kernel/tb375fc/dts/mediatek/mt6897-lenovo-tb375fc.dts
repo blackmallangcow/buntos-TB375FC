@@ -827,6 +827,7 @@
 		compatible = "novatek,nt36532-ts";
 		reg = <0>;
 		spi-max-frequency = <9600000>;
+		panel = <&panel0>;
 		interrupts-extended = <&pio 9 IRQ_TYPE_EDGE_RISING>;
 		reset-gpios = <&pio 60 GPIO_ACTIVE_LOW>;
 		iovcc-supply = <&vddio_1v8>;

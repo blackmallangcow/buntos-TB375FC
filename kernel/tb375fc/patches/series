@@ -214,6 +214,9 @@
 0179-power-supply-mm8013-report-the-charge-against-what-the-charger-fills.patch
 0180-power-supply-mm8013-report-full-when-the-charger-ends-a-charge.patch
 0181-power-supply-mt6375-charger-tell-the-fuel-gauge-how-a-charge-goes.patch
+# 0182·0183 터치를 패널이 켜진 동안만 돌린다(기기, 2026-11-05). 패널 리셋이 터치 펌웨어를 지워, 컴포지터가 첫 화면 전에 터치를 열면 부팅마다 터치가 죽는다
+0182-dt-bindings-input-touchscreen-nt36532-add-the-panel.patch
+0183-Input-novatek-nvt-spi-run-the-firmware-only-while-the-panel-is-on.patch
 # 2a: LK가 앞에 넣는 framebuffer 노드에 no-map이 없어 트리의 no-map 노드가 실패한다(기기의 살아 있는 트리로 확인)
 0140-of-reserved_mem-mark-no-map-regions-before-other-reservations.patch
 # 2b: 가젯이 묶이고 D+를 올려도 컨트롤러가 인터럽트를 내지 않는다. 벤더처럼 VBUS 입력을 덮어쓴다(mediatek,force-vbus)
