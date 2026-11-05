@@ -151,7 +151,7 @@ screen /dev/ttyACM0 115200
 
 기기와 이미지의 apt는 live forky를 보고 `apt upgrade`를 그대로 써도 된다. 우리 바이너리와 모듈은 dpkg가 모르는 파일이라 apt에게 의존성이 없고, 그래서 위험은 덮어쓰기보다 **쓰는 줄 모르고 라이브러리를 지우는 것**이다. dpkg가 모르는 파일 2375개를 forky의 전체 파일 목록과 맞대 보니 경로가 겹치는 것은 설치되지 않은 꾸러미 하나(`sxmo-utils`의 `mimeapps.list`)뿐이었다(2026-11-05).
 
-설치 뒤 스크립트가 `/usr/libexec/buntos/apt-guard install`을 돌린다. 무엇을 지키는지는 `/etc/buntos/apt-guard.conf`에 있다.
+도구와 공통 설정은 buntOS 공통 레시피(`image/`, 설계안 5.5절)에 있고, `image/mkosi.postinst.chroot`가 `/usr/libexec/buntos/apt-guard install`을 돌린다. 이 기기가 더 지키는 것은 `/etc/buntos/apt-guard.conf.d/50-tb375fc.conf`에 있다(커널 모듈, GPU와 패널 펌웨어, Mesa, 소리). 커널과 부트로더 차단(`preferences.d/70-buntos-tb375fc`)도 여기에만 있다.
 
 | 무엇 | 어떻게 | 막는 것 |
 |---|---|---|
