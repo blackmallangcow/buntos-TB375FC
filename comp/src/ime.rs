@@ -346,8 +346,8 @@ impl Dispatch<ZwpTextInputV3, TextInputUserData> for BuntState {
                 _ => {}
             }
         }
-        if let zwp_text_input_v3::Request::SetContentType { purpose, .. } = &request {
-            state.osk.content_purpose(resource, *purpose);
+        if let zwp_text_input_v3::Request::SetContentType { hint, purpose } = &request {
+            state.osk.content_type(resource, *hint, *purpose);
         }
         <TextInputManagerState as Dispatch<ZwpTextInputV3, TextInputUserData, Self>>::request(
             state, client, resource, request, data, dhandle, data_init,

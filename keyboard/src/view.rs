@@ -10,6 +10,8 @@
 //! - 키 사이의 틈과 들여쓴 자리를 눌러도 가장 가까운 키다. 키는 키보드 포커스를 받지 않는다(포커스를 가진 글 칸이
 //!   포커스를 지킨다).
 //! - 키마다 접근성 역할(단추)과 이름이 있다. 접근성 동작은 없다: 화면 키보드는 사람만 누른다
+//! - 단축 줄(셸의 창에만): 키 줄 위의 줄이고 왼쪽 끝에 오려두기, 복사하기, 붙여넣기 단추가 있다(iPadOS 26). 기능 키처럼 누른
+//!   단추에서 뗄 때 한다. 잠금·로그인 화면의 키보드에는 없다: 클립보드에 닿는 길을 두지 않는다
 
 use std::{
     cell::{Cell, RefCell},
@@ -23,7 +25,7 @@ use gtk4::{self as gtk, gdk, glib, graphene, prelude::*};
 use crate::{
     KeySink,
     board::{Board, Output},
-    layout::{Action, COLUMNS, Face, Icon, Key, Script, Slot},
+    layout::{self, Action, COLUMNS, Commands, Face, Icon, Key, Script, Slot},
 };
 
 const TRANSLATIONS: &Sources = &[
@@ -49,6 +51,10 @@ const PREVIEW_GAP: f32 = 4.0;
 const ROW_SHARE: f64 = 0.085;
 const MIN_ROW: i32 = 52;
 const MAX_ROW: i32 = 80;
+/// 단축 줄의 높이. 줄 전체가 단추의 누를 자리다. HIG의 누를 영역 44px보다 조금 크다
+const BAR_HEIGHT: i32 = 48;
+/// 단축 줄의 자리 ([`Placed`]의 줄 번호). 키 줄은 0~3이다
+const BAR_ROW: usize = 4;
 /// 기능 키 그림의 크기
 const ICON_SIZE: i32 = 22;
 /// 미끄러져 나오고 들어가는 시간 (tokens.css의 --duration)
@@ -59,23 +65,29 @@ pub fn row_height(screen_height: i32) -> i32 {
     ((f64::from(screen_height) * ROW_SHARE).round() as i32).clamp(MIN_ROW, MAX_ROW)
 }
 
-/// 판의 높이: 네 줄과 위아래 여백
+/// 판의 높이: 네 줄과 위아래 여백 (잠금·로그인 화면)
 pub fn panel_height(row: i32) -> i32 {
     4 * row + 2 * PANEL_PADDING
 }
 
-/// 맨 윗줄 키의 미리 보기 풍선이 판 위로 나가는 높이
+/// 단축 줄이 있는 판의 높이 (셸의 창)
+pub fn panel_with_bar_height(row: i32) -> i32 {
+    panel_height(row) + BAR_HEIGHT
+}
+
+/// 맨 윗줄 키의 미리 보기 풍선이 단축 줄이 있는 판 위로 나가는 높이. 풍선은 단축 줄을 덮고 그 위로 나간다
 pub fn preview_room(row: i32) -> i32 {
     let key = (row - 2 * KEY_MARGIN) as f32;
     let bubble = (key * PREVIEW_HEIGHT).ceil() + PREVIEW_GAP;
-    (bubble as i32 - PANEL_PADDING - KEY_MARGIN).max(0)
+    (bubble as i32 - PANEL_PADDING - BAR_HEIGHT - KEY_MARGIN).max(0)
 }
 
 /// 키보드를 어디에 두는지
 pub enum Room {
-    /// 키보드만 있는 창(셸의 bunt-osk): 판 위에 미리 보기 풍선이 뜰 투명한 띠를 둔다. 띠는 셸이 창의 입력 영역에서 뺀다
+    /// 키보드만 있는 창(셸의 bunt-osk): 판 위에 미리 보기 풍선이 뜰 투명한 띠를 둔다. 띠는 셸이 창의 입력 영역에서 뺀다.
+    /// 판의 맨 위에 단축 줄이 있다
     Window,
-    /// 다른 창 안(잠금·로그인 화면): 풍선은 그 창 전체를 덮는 겹치기(overlay)에 띄운다
+    /// 다른 창 안(잠금·로그인 화면): 풍선은 그 창 전체를 덮는 겹치기(overlay)에 띄운다. 단축 줄이 없다
     Embedded(gtk::Overlay),
 }
 
@@ -108,6 +120,10 @@ struct Inner {
     room: Option<gtk::Box>,
     revealer: gtk::Revealer,
     grid: gtk::Grid,
+    /// 단축 줄 (Window). 칸은 키 격자와 같은 46칸이다
+    bar: Option<gtk::Grid>,
+    /// 단축 줄에 내놓는 명령
+    commands: Cell<Commands>,
     /// 미리 보기 풍선을 띄우는 겹치기와 풍선
     host: gtk::Overlay,
     preview: gtk::Label,
@@ -144,9 +160,20 @@ impl Keyboard {
             .hexpand(true)
             .build();
         let panel = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
             .css_classes(["osk"])
             .hexpand(true)
             .build();
+        // 잠금·로그인 화면에는 단축 줄을 두지 않는다(모듈 설명)
+        let bar = matches!(room, Room::Window).then(|| {
+            let bar = gtk::Grid::builder()
+                .column_homogeneous(true)
+                .row_homogeneous(true)
+                .hexpand(true)
+                .build();
+            panel.append(&bar);
+            bar
+        });
         panel.append(&grid);
         let revealer = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideUp)
@@ -189,6 +216,8 @@ impl Keyboard {
             room,
             revealer,
             grid,
+            bar,
+            commands: Cell::default(),
             host,
             preview,
             placed: RefCell::default(),
@@ -223,20 +252,27 @@ impl Keyboard {
         }
     }
 
-    /// (띠의 높이, 판의 높이). 셸은 판의 자리만 창의 입력 영역으로 둔다
+    /// (띠의 높이, 판의 높이). 셸은 판의 자리만 창의 입력 영역으로 둔다. 컴포지터는 그 위쪽 끝까지 창 자리를 줄인다
+    /// (comp/src/osk.rs의 keyboard_top). 단축 줄은 판 안이므로 창이 단축 줄을 가리지 않는다
     pub fn heights(&self) -> (i32, i32) {
         let row = self.0.row.get();
-        let room = if self.0.room.is_some() {
-            preview_room(row)
+        if self.0.room.is_some() {
+            (preview_room(row), panel_with_bar_height(row))
         } else {
-            0
-        };
-        (room, panel_height(row))
+            (0, panel_height(row))
+        }
     }
 
     /// 입력 소스가 바뀌었다 (한글이면 2벌식, 그 밖은 QWERTY)
     pub fn set_script(&self, script: Script) {
         if self.0.board.borrow_mut().set_script(script) {
+            self.0.rebuild();
+        }
+    }
+
+    /// 단축 줄에 내놓을 명령 (컴포지터가 글 칸마다 알린다)
+    pub fn set_commands(&self, commands: Commands) {
+        if self.0.commands.replace(commands) != commands {
             self.0.rebuild();
         }
     }
@@ -314,13 +350,10 @@ impl Keyboard {
     }
 
     fn listen(&self) {
-        let controller = gtk::EventControllerLegacy::new();
-        let weak = Rc::downgrade(&self.0);
-        controller.connect_event(move |_, event| match weak.upgrade() {
-            Some(inner) => inner.on_event(event),
-            None => glib::Propagation::Proceed,
-        });
-        self.0.grid.add_controller(controller);
+        self.listen_to_presses(self.0.grid.upcast_ref());
+        if let Some(bar) = &self.0.bar {
+            self.listen_to_presses(bar.upcast_ref());
+        }
         let weak = Rc::downgrade(&self.0);
         self.0
             .revealer
@@ -336,6 +369,17 @@ impl Keyboard {
                     concealed();
                 }
             });
+    }
+
+    /// 격자(키 격자, 단축 줄)가 받은 누르기를 손가락마다 따라간다
+    fn listen_to_presses(&self, grid: &gtk::Widget) {
+        let controller = gtk::EventControllerLegacy::new();
+        let weak = Rc::downgrade(&self.0);
+        controller.connect_event(move |_, event| match weak.upgrade() {
+            Some(inner) => inner.on_event(event),
+            None => glib::Propagation::Proceed,
+        });
+        grid.add_controller(controller);
     }
 }
 
@@ -403,7 +447,14 @@ impl Inner {
     ) {
         // 같은 손가락의 앞 누르기가 남았으면(끝을 놓쳤다) 버린다
         self.cancel(&sequence);
-        let Some(at) = self.slot_at(point) else {
+        // 키 격자의 좌표에서 그 위는 단축 줄이다
+        let on_bar = self.bar.is_some() && point.is_some_and(|point| point.y() < 0.0);
+        let at = if on_bar {
+            self.bar_slot_at(point)
+        } else {
+            self.slot_at(point)
+        };
+        let Some(at) = at else {
             return;
         };
         let Some(key) = self.key_at(at) else {
@@ -433,10 +484,14 @@ impl Inner {
         sequence: &Option<gdk::EventSequence>,
         point: Option<graphene::Point>,
     ) {
-        let under = self.slot_at(point);
         let mut touches = self.touches.borrow_mut();
         let Some(touch) = touches.iter_mut().find(|touch| touch.sequence == *sequence) else {
             return;
+        };
+        let under = if touch.began.0 == BAR_ROW {
+            self.bar_slot_at(point)
+        } else {
+            self.slot_at(point)
         };
         let typing = |at| {
             self.key_at(at)
@@ -590,9 +645,18 @@ impl Inner {
     }
 
     /// 격자 좌표에서 그 자리 키의 칸. 격자는 46칸 × 4줄의 같은 크기 칸이므로 셈으로 안다. 키를 다시 만든
-    /// 직후(Shift를 누른 뒤 등)에는 새 위젯이 다음 프레임에야 배치되므로, 위젯의 자리를 읽으면 빨리 친 키가 다른 키로 간다
+    /// 직후(Shift를 누른 뒤 등)에는 새 위젯이 다음 프레임에야 배치되므로, 위젯의 자리를 읽으면 빨리 친 키가 다른 키로 간다.
+    /// 단축 줄은 키 격자 바로 위이고 칸의 너비가 같다
     fn slot_rect(&self, at: (usize, u8), width: u8) -> graphene::Rect {
         let column = self.grid.width() as f32 / f32::from(COLUMNS);
+        if at.0 == BAR_ROW {
+            return graphene::Rect::new(
+                f32::from(at.1) * column,
+                -(BAR_HEIGHT as f32),
+                f32::from(width) * column,
+                BAR_HEIGHT as f32,
+            );
+        }
         let row = self.grid.height() as f32 / 4.0;
         graphene::Rect::new(
             f32::from(at.1) * column,
@@ -624,6 +688,18 @@ impl Inner {
         nearest.map(|(at, _)| at)
     }
 
+    /// 그 점의 단축 줄 단추 자리. 키와 달리 가장 가까운 것을 고르지 않는다: 단추는 줄의 왼쪽 끝에만 있고, 빈 곳을 눌러
+    /// 붙여넣어지면 안 된다. 줄 밖으로 밀면 단추에서 벗어난 것이다
+    fn bar_slot_at(&self, point: Option<graphene::Point>) -> Option<(usize, u8)> {
+        let point = point?;
+        self.placed
+            .borrow()
+            .iter()
+            .filter(|key| key.at.0 == BAR_ROW)
+            .find(|key| self.slot_rect(key.at, key.key.width).contains_point(&point))
+            .map(|key| key.at)
+    }
+
     fn key_at(&self, at: (usize, u8)) -> Option<Key> {
         self.placed
             .borrow()
@@ -638,17 +714,19 @@ impl Inner {
         if let Some(room) = &self.room {
             room.set_size_request(-1, preview_room(row));
             self.root
-                .set_size_request(-1, preview_room(row) + panel_height(row));
+                .set_size_request(-1, preview_room(row) + panel_with_bar_height(row));
         }
     }
 
-    /// 지금 쪽의 키를 모두 새로 만든다 (쪽, Shift, 입력 소스, 크기가 바뀌었을 때). 누르던 손가락은 자리로 다시 찾는다
+    /// 지금 쪽의 키를 모두 새로 만든다 (쪽, Shift, 입력 소스, 크기, 내놓는 명령이 바뀌었을 때). 누르던 손가락은 자리로
+    /// 다시 찾는다
     fn rebuild(&self) {
         while let Some(child) = self.grid.first_child() {
             self.grid.remove(&child);
         }
         let rows = self.board.borrow().rows(self.globe.get());
         let mut placed = Vec::new();
+        self.rebuild_bar(&mut placed);
         for (row_index, row) in rows.iter().enumerate() {
             let mut column = 0u8;
             for slot in row {
@@ -674,10 +752,46 @@ impl Inner {
         self.show_pressed();
     }
 
-    /// 칸 하나: 누를 자리이고 접근성 단추인 칸 안에 보이는 키
+    /// 단축 줄의 단추를 새로 만든다. 격자는 놓인 칸만 세므로 빈 칸도 채워 46칸을 지킨다: 내놓지 않는 단추의 자리가
+    /// 비어 있어도 다른 단추가 움직이지 않는다
+    fn rebuild_bar(&self, placed: &mut Vec<Placed>) {
+        let Some(bar) = &self.bar else {
+            return;
+        };
+        while let Some(child) = bar.first_child() {
+            bar.remove(&child);
+        }
+        let mut column = 0u8;
+        for slot in layout::bar(self.commands.get()) {
+            let widget = match &slot {
+                Slot::Key(key) => {
+                    let widget = self.key_widget(key);
+                    placed.push(Placed {
+                        slot: widget.clone(),
+                        key: key.clone(),
+                        at: (BAR_ROW, column),
+                    });
+                    widget
+                }
+                Slot::Gap(_) => {
+                    let gap = gtk::Box::builder()
+                        .accessible_role(gtk::AccessibleRole::Presentation)
+                        .hexpand(true)
+                        .build();
+                    gap.set_size_request(-1, BAR_HEIGHT);
+                    gap
+                }
+            };
+            bar.attach(&widget, i32::from(column), 0, i32::from(slot.width()), 1);
+            column += slot.width();
+        }
+    }
+
+    /// 칸 하나: 누를 자리이고 접근성 단추인 칸 안에 보이는 키. 단축 줄의 단추는 키의 바탕이 없다
     fn key_widget(&self, key: &Key) -> gtk::Box {
-        let mut classes = vec!["osk-key"];
-        if key.function {
+        let on_bar = matches!(key.action, Action::Command(_));
+        let mut classes = vec![if on_bar { "osk-bar-button" } else { "osk-key" }];
+        if key.function && !on_bar {
             classes.push("function");
         }
         if key.on {
@@ -724,7 +838,7 @@ impl Inner {
             .hexpand(true)
             .focusable(false)
             .build();
-        slot.set_size_request(-1, self.row.get());
+        slot.set_size_request(-1, if on_bar { BAR_HEIGHT } else { self.row.get() });
         slot.append(&face);
         slot.update_property(&[gtk::accessible::Property::Label(&name)]);
         slot
@@ -803,6 +917,7 @@ fn install_style() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::Command;
 
     #[test]
     fn keys_are_big_enough_to_touch_and_fit_the_screen() {
@@ -815,23 +930,29 @@ mod tests {
         assert_eq!(row_height(400), MIN_ROW);
         const { assert!(MIN_ROW - 2 * KEY_MARGIN >= 44) };
         assert_eq!(row_height(1472), MAX_ROW);
+        // 단축 줄이 있는 판: 1280×800에서 328px(화면의 41%). 단추의 누를 자리도 44px 이상이다
+        assert_eq!(panel_with_bar_height(68), 328);
+        const { assert!(BAR_HEIGHT >= 44) };
     }
 
     #[test]
     fn the_preview_room_holds_a_top_row_bubble() {
         for row in MIN_ROW..=MAX_ROW {
             let key = (row - 2 * KEY_MARGIN) as f32;
-            let bubble_top = PANEL_PADDING as f32 + KEY_MARGIN as f32
+            let bubble_top = PANEL_PADDING as f32 + BAR_HEIGHT as f32 + KEY_MARGIN as f32
                 - PREVIEW_GAP
                 - (key * PREVIEW_HEIGHT).round();
-            // 띠의 위쪽 끝(-preview_room) 안에 풍선이 든다
+            // 풍선은 단축 줄을 덮고, 띠의 위쪽 끝(-preview_room) 안에 든다
             assert!(
                 bubble_top >= -(preview_room(row) as f32),
                 "row {row}: {bubble_top} < -{}",
                 preview_room(row)
             );
         }
-        assert_eq!(preview_room(68), 68);
+        assert_eq!(preview_room(68), 20);
+        // 단축 줄이 들어와도 셸의 창 높이(띠와 판)는 그대로다(68 + 280): 띠가 그만큼 줄었다
+        assert_eq!(preview_room(68) + panel_with_bar_height(68), 348);
+        assert_eq!(preview_room(MAX_ROW) + panel_with_bar_height(MAX_ROW), 411);
     }
 
     /// 보낸 키를 적어 둔다
@@ -951,6 +1072,51 @@ mod tests {
         tap((2, 0));
         tap((0, 0));
         assert_eq!(take(), [Output::Char('Q')]);
+        // 단축 줄: 왼쪽 끝의 단추를 누른 자리에서 떼면 명령을 보낸다
+        tap((BAR_ROW, 0));
+        assert_eq!(take(), [Output::Command(Command::Cut)]);
+        tap((BAR_ROW, 3));
+        assert_eq!(take(), [Output::Command(Command::Copy)]);
+        tap((BAR_ROW, 6));
+        assert_eq!(take(), [Output::Command(Command::Paste)]);
+        // 누를 자리는 줄 전체의 높이다
+        assert!(inner.slot_rect((BAR_ROW, 0), 3).height() >= 44.0);
+        // 단추에서 벗어나 떼면 아무것도 하지 않는다. 다른 단추로 밀어도 그 단추를 하지 않는다
+        inner.begin(None, center((BAR_ROW, 6)));
+        inner.end(&None, center((BAR_ROW, 3)));
+        assert_eq!(take(), []);
+        // 단축 줄 아래 키로 밀어도 하지 않는다
+        inner.begin(None, center((BAR_ROW, 6)));
+        inner.end(&None, center((0, 8)));
+        assert_eq!(take(), []);
+        // 단축 줄의 빈 곳을 눌러도 아무 일이 없다 (가장 가까운 단추가 아니다)
+        let blank = Some(graphene::Point::new(600.0, -20.0));
+        inner.begin(None, blank);
+        inner.end(&None, blank);
+        assert_eq!(take(), []);
+        // 맨 윗줄 글자 키에서 위로 밀어 단축 줄 위에서 떼도 그 글자다 (단축 줄이 없을 때와 같다)
+        inner.begin(None, center((0, 0)));
+        let above = center((0, 0)).map(|point| graphene::Point::new(point.x(), -20.0));
+        inner.moved(&None, above);
+        inner.end(&None, above);
+        assert_eq!(take(), [Output::Char('q')]);
+        // 내놓지 않는 단추(암호 칸의 오려두기·복사하기)는 없고 그 자리를 눌러도 아무 일이 없다. 붙여넣기는 그 자리에 있다
+        keyboard.set_commands(Commands {
+            cut: false,
+            copy: false,
+            paste: true,
+        });
+        let gone = Some(graphene::Point::new(40.0, -24.0));
+        inner.begin(None, gone);
+        inner.end(&None, gone);
+        assert_eq!(take(), []);
+        tap((BAR_ROW, 6));
+        assert_eq!(take(), [Output::Command(Command::Paste)]);
+        keyboard.set_commands(Commands::default());
+        tap((BAR_ROW, 0));
+        assert_eq!(take(), [Output::Command(Command::Cut)]);
+        // 단축 줄이 있어도 판은 키보드의 높이에 든다 (셸이 이 높이를 입력 영역으로 둔다)
+        assert_eq!(keyboard.heights(), (20, 328));
         // 키보드 가리기
         tap((3, 42));
         assert_eq!(hidden.get(), 1);
@@ -1015,6 +1181,19 @@ mod tests {
         // Return은 칸의 기본 동작(잠금 화면: 암호 확인)
         tap((1, 38), 8);
         assert_eq!(activated.get(), 1);
+        // 잠금·로그인 화면의 키보드에는 단축 줄이 없고, 판은 네 줄의 높이다. 명령이 와도 칸을 건드리지 않는다
+        assert!(inner.bar.is_none());
+        assert_eq!(keyboard.heights(), (0, panel_height(68)));
+        assert!(
+            inner
+                .placed
+                .borrow()
+                .iter()
+                .all(|key| !matches!(key.key.action, Action::Command(_)))
+        );
+        keyboard.set_commands(Commands::default());
+        crate::EditableKeys::new(&window).send(Output::Command(Command::Paste));
+        assert_eq!(entry.text(), "qw ");
         // 막아 둔 칸(암호를 확인하는 동안)에는 넣지 않는다
         entry.set_sensitive(false);
         tap((0, 0), 4);

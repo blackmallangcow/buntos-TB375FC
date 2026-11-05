@@ -15,6 +15,8 @@
 //! - 키: 같은 프로토콜의 press로 컴포지터가 실제 키보드처럼 넣어 입력기(fcitx5)가 한글을 조합한다. 키와 글 입력 상태는
 //!   셸의 Wayland 연결로만 오간다(keyboard/src/compositor.rs). 전에는 세션 버스로 오가 같은 사용자의 프로그램이 엿볼 수
 //!   있었다.
+//! - 단축 줄: 판 맨 위의 오려두기, 복사하기, 붙여넣기(iPadOS 26). 무엇을 내놓을지는 컴포지터가 글 칸마다 알리고(암호 칸에는
+//!   붙여넣기만), 누르면 같은 프로토콜의 press로 보내 ⌘X, ⌘C, ⌘V와 같은 키가 앱에 간다(comp/src/osk.rs).
 //! - 배열은 메뉴 막대의 입력 소스를 따른다(한글이면 2벌식, 그 밖은 QWERTY). 지구본 키는 다음 입력 소스다.
 //! - 셸의 다른 창(관리자 인증 창, Wi-Fi 암호 창, 모든 앱)은 키보드 위로 비킨다([`avoid_keyboard`]).
 
@@ -195,10 +197,11 @@ impl Osk {
     /// 컴포지터가 알린 글 입력 소식을 받은 차례로 규칙에 넣는다 (꺼졌다 바로 켜지면 숨기려던 것을 그만둔다)
     fn read_text_input(&self) {
         for event in self.0.compositor.take_text_input() {
-            self.decide(|rules| match event {
-                TextInputEvent::Changed(active) => rules.text_input(active),
-                TextInputEvent::Tapped => rules.tapped(),
-            });
+            match event {
+                TextInputEvent::Changed(active) => self.decide(|rules| rules.text_input(active)),
+                TextInputEvent::Tapped => self.decide(Rules::tapped),
+                TextInputEvent::Commands(commands) => self.0.keyboard.set_commands(commands),
+            }
         }
     }
 
@@ -392,12 +395,12 @@ mod tests {
 
     #[test]
     fn shell_windows_move_above_the_keyboard_and_back() {
-        // 키보드(판 280px)가 뜨면 가운데의 창은 키보드 위 16px에, 모든 앱은 키보드 위까지
+        // 키보드(단축 줄이 있는 판 328px)가 뜨면 가운데의 창은 키보드 위 16px에, 모든 앱은 키보드 위까지
         assert_eq!(
-            placement(Avoid::Centered, 280),
-            Placement::Raised { bottom: 296 }
+            placement(Avoid::Centered, 328),
+            Placement::Raised { bottom: 344 }
         );
-        assert_eq!(placement(Avoid::Fill, 280), Placement::Fill { bottom: 280 });
+        assert_eq!(placement(Avoid::Fill, 328), Placement::Fill { bottom: 328 });
         // 들어가면 다시 가운데, 화면 끝까지
         assert_eq!(placement(Avoid::Centered, 0), Placement::Centered);
         assert_eq!(placement(Avoid::Fill, 0), Placement::Fill { bottom: 0 });

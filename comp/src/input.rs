@@ -313,7 +313,7 @@ impl BuntState {
     }
 
     /// 키보드 포커스가 있는 곳: 글을 입력하는 중인지, 터미널인지
-    fn key_place(&self) -> Place {
+    pub(crate) fn key_place(&self) -> Place {
         let focus = self
             .seat
             .get_keyboard()

@@ -64,3 +64,18 @@
   font-family: var(--font-family);
   font-size: var(--osk-preview-text);
 }
+
+/* 단축 줄의 단추: 키의 바탕 없이 판 위의 그림이다 (iPadOS 26). 누르는 동안만 바탕이 보인다 */
+.osk-bar-button {
+  margin: var(--space-1);
+  border-radius: var(--radius-md);
+  color: var(--label);
+}
+
+.osk-bar-button image {
+  color: var(--label);
+}
+
+.osk-slot.pressed > .osk-bar-button {
+  background: var(--osk-key-function);
+}
