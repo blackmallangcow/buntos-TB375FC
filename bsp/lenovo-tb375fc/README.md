@@ -25,8 +25,11 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `buntos-display.service` | PHY, mtk-mmsys, 패널, mediatek-drm을 올리고 DSI 커넥터를 기다린다. 화면 노드가 꺼진 커널이면 simple-framebuffer 그대로 둔다 | 로그인 화면 전 |
 | `buntos-gpu.service` | panthor를 올리고 렌더 노드를 기다린다. 안 뜨면 CPU로 그린다 | 로그인 화면 전 |
 | `buntos-wifi.service` | mt7921soc를 올린다. NetworkManager가 wlan0을 받는다 | 로그인 화면 뒤 |
+| `buntos-bluetooth.service` | `btmtkbeif`를 올리고 `bluetooth-up`이 어댑터에 주소를 넣는다. 주소는 처음 켤 때 만들어 `/var/lib/buntos/bluetooth-address`에 둔다. 공장 주소를 쓰려면 이 파일을 바꾼다 | Wi-Fi 뒤 |
 | `buntos-sound.service` | AFE, MT6368 코덱, 앰프, 카드를 올리고 `persist`의 앰프 보정값을 읽기 전용으로 읽어 넣는다. 못 읽으면 드라이버가 앰프를 -30 dB 아래로 묶는다 | 로그인 화면 뒤 |
 | `buntos-charge.service` | 온도 감시(`charge-guard`: 배터리 40도, 커넥터 55도)를 먼저 걸고 충전 드라이버를 올린다. 끄려면 `systemctl stop`(이번 부팅), `systemctl disable`(다음 부팅부터) | 로그인 화면 뒤 |
+
+전원 키: `logind.conf.d/50-tb375fc.conf`가 누르면 잠들게 하고, 10초 잡기는 커널이 한다(패치 0186). 컴퓨터에 꽂힌 USB 가젯은 컨트롤러가 잠들지 못하게 해서 `system-sleep/buntos-usb-gadget`가 잠든 동안 뗀다. 자세한 것은 [체크리스트 9.7절](../../docs/tb375fc/bringup-checklist.md)이다.
 
 Wi-Fi, 소리, 충전은 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
 
