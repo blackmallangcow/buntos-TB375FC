@@ -26,6 +26,36 @@
 		spmi0 = &spmi_m;
 	};
 
+	sound: sound {
+		compatible = "mediatek,mt6897-mt6368-sound";
+		model = "TB375FC";
+		mediatek,platform = <&afe>;
+		audio-routing =
+			"Speakers", "Amp0 DAC Output",
+			"Speakers", "Amp1 DAC Output",
+			"Speakers", "Amp2 DAC Output",
+			"Speakers", "Amp3 DAC Output";
+		status = "disabled";
+
+		dai-link-0 {
+			link-name = "I2SOUT4_BE";
+			dai-format = "dsp_b";
+			mediatek,clk-provider = "cpu";
+
+			codec {
+				sound-dai = <&amp0>, <&amp1>, <&amp2>, <&amp3>;
+			};
+		};
+
+		dai-link-1 {
+			link-name = "ADDA_BE";
+
+			codec {
+				sound-dai = <&mt6368_codec>;
+			};
+		};
+	};
+
 	chosen {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -561,6 +591,71 @@
  * TODO(USB host): on the device, see with i2cdetect which ones answer and which
  * is not strapped as a slave, and enable that one only.
  */
+/*
+ * The four speakers' smart amplifiers, AW88394 by their stock tuning files. Each
+ * takes one slot of the TDM link, which the file picks by audio-channel. The
+ * GPIO82 strap tells who made the speakers, and the bus holds its pull-up so
+ * that the strap reads true for whichever amplifier probes first. The driver
+ * holds a reset line at 0 to reset the chip, so the lines are active high here.
+ */
+&i2c6 {
+	clock-frequency = <400000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&aw883xx_id_pins>;
+
+	amp0: audio-codec@34 {
+		compatible = "awinic,aw88395";
+		reg = <0x34>;
+		#sound-dai-cells = <0>;
+		reset-gpios = <&pio 78 GPIO_ACTIVE_HIGH>;
+		firmware-name = "lenovo/tb375fc/aw883xx_acf_gyt.bin",
+				"lenovo/tb375fc/aw883xx_acf_yc.bin";
+		awinic,calibration-required;
+		awinic,speaker-id-gpios = <&pio 82 GPIO_ACTIVE_HIGH>;
+		awinic,audio-channel = <0>;
+		sound-name-prefix = "Amp0";
+	};
+
+	amp1: audio-codec@35 {
+		compatible = "awinic,aw88395";
+		reg = <0x35>;
+		#sound-dai-cells = <0>;
+		reset-gpios = <&pio 79 GPIO_ACTIVE_HIGH>;
+		firmware-name = "lenovo/tb375fc/aw883xx_acf_gyt.bin",
+				"lenovo/tb375fc/aw883xx_acf_yc.bin";
+		awinic,calibration-required;
+		awinic,speaker-id-gpios = <&pio 82 GPIO_ACTIVE_HIGH>;
+		awinic,audio-channel = <1>;
+		sound-name-prefix = "Amp1";
+	};
+
+	amp2: audio-codec@36 {
+		compatible = "awinic,aw88395";
+		reg = <0x36>;
+		#sound-dai-cells = <0>;
+		reset-gpios = <&pio 80 GPIO_ACTIVE_HIGH>;
+		firmware-name = "lenovo/tb375fc/aw883xx_acf_gyt.bin",
+				"lenovo/tb375fc/aw883xx_acf_yc.bin";
+		awinic,calibration-required;
+		awinic,speaker-id-gpios = <&pio 82 GPIO_ACTIVE_HIGH>;
+		awinic,audio-channel = <2>;
+		sound-name-prefix = "Amp2";
+	};
+
+	amp3: audio-codec@37 {
+		compatible = "awinic,aw88395";
+		reg = <0x37>;
+		#sound-dai-cells = <0>;
+		reset-gpios = <&pio 81 GPIO_ACTIVE_HIGH>;
+		firmware-name = "lenovo/tb375fc/aw883xx_acf_gyt.bin",
+				"lenovo/tb375fc/aw883xx_acf_yc.bin";
+		awinic,calibration-required;
+		awinic,speaker-id-gpios = <&pio 82 GPIO_ACTIVE_HIGH>;
+		awinic,audio-channel = <3>;
+		sound-name-prefix = "Amp3";
+	};
+};
+
 &i2c7 {
 	clock-frequency = <400000>;
 
@@ -637,7 +732,46 @@
 	pinctrl-0 = <&disp_pwm0_pins>;
 };
 
+&afe {
+	pinctrl-names = "default";
+	pinctrl-0 = <&aud_etdm4_pins>, <&aud_mtkaif_pins>;
+};
+
 &pio {
+	aud_etdm4_pins: aud-etdm4-pins {
+		pins-etdm4 {
+			pinmux = <PINMUX_GPIO65__FUNC_I2SIN4_BCK>,
+				 <PINMUX_GPIO4__FUNC_I2SIN4_LRCK>,
+				 <PINMUX_GPIO5__FUNC_I2SIN4_DATA0>,
+				 <PINMUX_GPIO62__FUNC_I2SOUT4_DATA0>;
+			drive-strength = <6>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aud_mtkaif_pins: aud-mtkaif-pins {
+		pins-mtkaif {
+			pinmux = <PINMUX_GPIO222__FUNC_AUD_CLK_MOSI>,
+				 <PINMUX_GPIO223__FUNC_AUD_SYNC_MOSI>,
+				 <PINMUX_GPIO224__FUNC_AUD_DAT_MOSI0>,
+				 <PINMUX_GPIO225__FUNC_AUD_DAT_MOSI1>,
+				 <PINMUX_GPIO229__FUNC_AUD_DAT_MISO0>,
+				 <PINMUX_GPIO230__FUNC_AUD_DAT_MISO1>,
+				 <PINMUX_GPIO231__FUNC_AUD_DAT_MISO2>;
+			input-schmitt-enable;
+			bias-disable;
+		};
+	};
+
+	aw883xx_id_pins: aw883xx-id-pins {
+		pins-id {
+			pinmux = <PINMUX_GPIO82__FUNC_GPIO82>;
+			input-enable;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
 	hall_pins: hall-pins {
 		pins-hall {
 			pinmux = <PINMUX_GPIO1__FUNC_GPIO1>;
@@ -1070,8 +1204,8 @@
 	 * them USB's analog supply and the GPU core, which stays on until a
 	 * GPU driver takes it. The stock tree leaves the others to their
 	 * users, such as vibr (the vibrator and the camera autofocus), vfp
-	 * (the fingerprint sensor), vaud18 (the audio codec), vmc and
-	 * vmch-eint-* (the SD card) and vsim2 (the cameras); leaving them
+	 * (the fingerprint sensor), vmc and vmch-eint-* (the SD card) and
+	 * vsim2 (the cameras); leaving them
 	 * out of this node keeps Linux from touching them. As on the MT6363,
 	 * no voltage limits are given and the names come from the stock
 	 * consumers where there is one.
@@ -1085,12 +1219,31 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
+		/* Three analog microphones with direct coupling, by the stock tree */
+		mt6368_codec: audio-codec {
+			compatible = "mediatek,mt6368-sound";
+			#sound-dai-cells = <0>;
+			mediatek,dcxo = <&mt6685>;
+			mediatek,mic-type-0 = <3>;
+			mediatek,mic-type-1 = <3>;
+			mediatek,mic-type-2 = <3>;
+			vaud18-supply = <&mt6368_vaud18>;
+			status = "disabled";
+		};
+
 		regulators@30 {
 			compatible = "mediatek,mt6368-regulator";
 			reg = <0x30>;
 
 			mt6368_vant18: vant18 {
 				regulator-name = "mt6368_vant18";
+				regulator-enable-ramp-delay = <680>;
+				regulator-allowed-modes = <0 2>;
+				status = "disabled";
+			};
+
+			mt6368_vaud18: vaud18 {
+				regulator-name = "mt6368_vaud18";
 				regulator-enable-ramp-delay = <680>;
 				regulator-allowed-modes = <0 2>;
 				status = "disabled";

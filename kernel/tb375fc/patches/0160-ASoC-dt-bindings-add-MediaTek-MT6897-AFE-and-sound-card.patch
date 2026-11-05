@@ -1,0 +1,237 @@
+From: buntOS contributors
+Subject: [PATCH] ASoC: dt-bindings: add MediaTek MT6897 AFE and sound card
+
+The AFE of MT6897 is the block of MT8196 with its own clock tree: the
+audio clocks come from topckgen, not from the VLP domain, and the ADSP
+bus clock is not involved. The sound card binds the AFE to the amplifiers
+on the TDM link, and later to the PMIC codec.
+---
+ .../bindings/sound/mediatek,mt6897-afe.yaml   | 112 ++++++++++++++++++
+ .../sound/mediatek,mt6897-mt6368.yaml         |  99 ++++++++++++++++
+ 2 files changed, 211 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/sound/mediatek,mt6897-afe.yaml
+ create mode 100644 Documentation/devicetree/bindings/sound/mediatek,mt6897-mt6368.yaml
+
+diff --git a/Documentation/devicetree/bindings/sound/mediatek,mt6897-afe.yaml b/Documentation/devicetree/bindings/sound/mediatek,mt6897-afe.yaml
+new file mode 100644
+index 0000000..1625ce0
+--- /dev/null
++++ b/Documentation/devicetree/bindings/sound/mediatek,mt6897-afe.yaml
+@@ -0,0 +1,112 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/sound/mediatek,mt6897-afe.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek Audio Front End PCM controller for MT6897
++
++maintainers:
++  - Liam Girdwood <lgirdwood@gmail.com>
++  - Mark Brown <broonie@kernel.org>
++
++properties:
++  compatible:
++    const: mediatek,mt6897-afe
++
++  reg:
++    maxItems: 1
++
++  interrupts:
++    maxItems: 1
++
++  power-domains:
++    maxItems: 1
++
++  clocks:
++    items:
++      - description: mux for the audio internal bus
++      - description: mux for audio h
++      - description: mux that takes APLL1
++      - description: mux that takes APLL2
++      - description: mux for audio engine 1
++      - description: mux for audio engine 2
++      - description: audio PLL 1
++      - description: audio PLL 2
++      - description: audio PLL 1 divided by 2
++      - description: audio PLL 2 divided by 2
++      - description: audio PLL 1 divided by 4
++      - description: audio PLL 2 divided by 4
++      - description: 26 MHz clock
++
++  clock-names:
++    items:
++      - const: top_aud_intbus
++      - const: top_aud_h
++      - const: top_aud_1
++      - const: top_aud_2
++      - const: top_aud_eng1
++      - const: top_aud_eng2
++      - const: apll1
++      - const: apll2
++      - const: apll1_d2
++      - const: apll2_d2
++      - const: apll1_d4
++      - const: apll2_d4
++      - const: clk26m
++
++  mediatek,topckgen:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      The clock controller with the test of the link to the PMIC codec.
++
++  pinctrl-0: true
++
++  pinctrl-names: true
++
++required:
++  - compatible
++  - reg
++  - interrupts
++  - power-domains
++  - clocks
++  - clock-names
++  - mediatek,topckgen
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/mediatek,mt6897-clock.h>
++    #include <dt-bindings/interrupt-controller/arm-gic.h>
++    #include <dt-bindings/interrupt-controller/irq.h>
++    #include <dt-bindings/power/mediatek,mt6897-power.h>
++
++    audio-controller@11050000 {
++        compatible = "mediatek,mt6897-afe";
++        reg = <0x11050000 0x9000>;
++        interrupts = <GIC_SPI 257 IRQ_TYPE_LEVEL_HIGH 0>;
++        power-domains = <&scpsys MT6897_POWER_DOMAIN_AUDIO>;
++        clocks = <&topckgen CLK_TOP_AUD_INTBUS>,
++                 <&topckgen CLK_TOP_AUDIO_H>,
++                 <&topckgen CLK_TOP_AUD_1>,
++                 <&topckgen CLK_TOP_AUD_2>,
++                 <&topckgen CLK_TOP_AUD_ENGEN1>,
++                 <&topckgen CLK_TOP_AUD_ENGEN2>,
++                 <&apmixedsys CLK_APMIXED_APLL1>,
++                 <&apmixedsys CLK_APMIXED_APLL2>,
++                 <&topckgen CLK_TOP_APLL1_D2>,
++                 <&topckgen CLK_TOP_APLL2_D2>,
++                 <&topckgen CLK_TOP_APLL1_D4>,
++                 <&topckgen CLK_TOP_APLL2_D4>,
++                 <&clk26m>;
++        clock-names = "top_aud_intbus", "top_aud_h",
++                      "top_aud_1", "top_aud_2",
++                      "top_aud_eng1", "top_aud_eng2",
++                      "apll1", "apll2",
++                      "apll1_d2", "apll2_d2",
++                      "apll1_d4", "apll2_d4",
++                      "clk26m";
++        mediatek,topckgen = <&topckgen>;
++    };
++...
+diff --git a/Documentation/devicetree/bindings/sound/mediatek,mt6897-mt6368.yaml b/Documentation/devicetree/bindings/sound/mediatek,mt6897-mt6368.yaml
+new file mode 100644
+index 0000000..f91879e
+--- /dev/null
++++ b/Documentation/devicetree/bindings/sound/mediatek,mt6897-mt6368.yaml
+@@ -0,0 +1,99 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/sound/mediatek,mt6897-mt6368.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6897 ASoC sound card with the MT6368 PMIC codec
++
++maintainers:
++  - Liam Girdwood <lgirdwood@gmail.com>
++  - Mark Brown <broonie@kernel.org>
++
++allOf:
++  - $ref: sound-card-common.yaml#
++
++properties:
++  compatible:
++    const: mediatek,mt6897-mt6368-sound
++
++  mediatek,platform:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: The phandle of the MT6897 AFE platform.
++
++patternProperties:
++  "^dai-link-[0-9]+$":
++    type: object
++    description:
++      Container for dai-link level properties and the CODEC sub-nodes.
++
++    properties:
++      link-name:
++        description: The name of a back end link of the machine driver.
++        items:
++          enum:
++            - ADDA_BE
++            - I2SOUT4_BE
++            - I2SIN4_BE
++
++      dai-format:
++        description: The format of the link.
++        enum:
++          - i2s
++          - left_j
++          - right_j
++          - dsp_a
++          - dsp_b
++
++      mediatek,clk-provider:
++        $ref: /schemas/types.yaml#/definitions/string
++        description: Which end provides the clocks of the link.
++        enum:
++          - cpu
++          - codec
++
++      codec:
++        description: The CODECs of the link.
++        type: object
++
++        properties:
++          sound-dai:
++            minItems: 1
++            maxItems: 8
++            description: The phandles of the CODECs.
++
++        required:
++          - sound-dai
++
++        additionalProperties: false
++
++    required:
++      - link-name
++
++    unevaluatedProperties: false
++
++required:
++  - compatible
++  - mediatek,platform
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    sound {
++        compatible = "mediatek,mt6897-mt6368-sound";
++        model = "TB375FC";
++        mediatek,platform = <&afe>;
++        audio-routing = "Speakers", "Amp0 DAC Output";
++
++        dai-link-0 {
++            link-name = "I2SOUT4_BE";
++            dai-format = "dsp_b";
++            mediatek,clk-provider = "cpu";
++
++            codec {
++                sound-dai = <&amp0>, <&amp1>;
++            };
++        };
++    };
++...

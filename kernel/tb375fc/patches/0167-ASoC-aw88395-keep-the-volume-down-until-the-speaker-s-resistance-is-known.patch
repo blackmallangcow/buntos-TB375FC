@@ -1,0 +1,100 @@
+From: buntOS contributors
+Subject: [PATCH] ASoC: aw88395: keep the volume down until the speaker's resistance is known
+
+The protection in the DSP works from the resistance measured on each speaker
+at the factory. A board can only give it from userspace, through the "Calib"
+control, because it is in a file on another partition. Until then the DSP
+runs with the default of the tuning file.
+
+With "awinic,calibration-required", stay at -30 dB or lower until the control
+has a value in range, instead of relying on the order of things at boot.
+---
+ .../devicetree/bindings/sound/awinic,aw88395.yaml   |  7 +++++++
+ sound/soc/codecs/aw88395/aw88395_device.c           | 13 +++++++++++++
+ sound/soc/codecs/aw88395/aw88395_device.h           |  3 +++
+ 3 files changed, 23 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/sound/awinic,aw88395.yaml b/Documentation/devicetree/bindings/sound/awinic,aw88395.yaml
+index 8729868..6e75a32 100644
+--- a/Documentation/devicetree/bindings/sound/awinic,aw88395.yaml
++++ b/Documentation/devicetree/bindings/sound/awinic,aw88395.yaml
+@@ -47,6 +47,13 @@ properties:
+     description:
+       A strap that tells which speakers the board has, shared by its amplifiers.
+ 
++  awinic,calibration-required:
++    type: boolean
++    description:
++      The amplifier stays at -30 dB or lower until its "Calib" control has the
++      resistance measured on this speaker, which the protection in its DSP
++      relies on.
++
+   awinic,audio-channel:
+     description:
+       It is used to distinguish multiple PA devices, so that different
+diff --git a/sound/soc/codecs/aw88395/aw88395_device.c b/sound/soc/codecs/aw88395/aw88395_device.c
+index 51d3659..0fd8955 100644
+--- a/sound/soc/codecs/aw88395/aw88395_device.c
++++ b/sound/soc/codecs/aw88395/aw88395_device.c
+@@ -11,6 +11,7 @@
+ #include <linux/crc32.h>
+ #include <linux/i2c.h>
+ #include <linux/minmax.h>
++#include <linux/property.h>
+ #include <linux/regmap.h>
+ #include <linux/unaligned.h>
+ #include "aw88395_data_type.h"
+@@ -258,6 +259,12 @@ static int aw_dev_dsp_fw_check(struct aw_device *aw_dev)
+ 	return 0;
+ }
+ 
++static bool aw_dev_cali_re_valid(struct aw_device *aw_dev)
++{
++	return aw_dev->cali_desc.cali_re > AW88395_CALI_RE_MIN &&
++	       aw_dev->cali_desc.cali_re < AW88395_CALI_RE_MAX;
++}
++
+ static int aw_dev_set_volume(struct aw_device *aw_dev, unsigned int value)
+ {
+ 	struct aw_volume_desc *vol_desc = &aw_dev->volume_desc;
+@@ -265,6 +272,10 @@ static int aw_dev_set_volume(struct aw_device *aw_dev, unsigned int value)
+ 	u16 real_value, volume;
+ 	int ret;
+ 
++	/* The protection needs the speaker's resistance: stay low without it */
++	if (aw_dev->cali_required && !aw_dev_cali_re_valid(aw_dev))
++		value = max(value, AW88395_UNCALIBRATED_VOL);
++
+ 	volume = min((value + vol_desc->init_volume), (unsigned int)AW88395_MUTE_VOL);
+ 	real_value = db_to_reg_val(volume);
+ 
+@@ -1867,6 +1878,8 @@ int aw88395_init(struct aw_device **aw_dev, struct i2c_client *i2c, struct regma
+ 
+ 	(*aw_dev)->i2c = i2c;
+ 	(*aw_dev)->dev = &i2c->dev;
++	(*aw_dev)->cali_required = device_property_read_bool(&i2c->dev,
++							     "awinic,calibration-required");
+ 	(*aw_dev)->regmap = regmap;
+ 	mutex_init(&(*aw_dev)->dsp_lock);
+ 
+diff --git a/sound/soc/codecs/aw88395/aw88395_device.h b/sound/soc/codecs/aw88395/aw88395_device.h
+index 5f2fa48..9148572 100644
+--- a/sound/soc/codecs/aw88395/aw88395_device.h
++++ b/sound/soc/codecs/aw88395/aw88395_device.h
+@@ -25,6 +25,8 @@
+ #define AW88395_FADE_IN_OUT_DEFAULT			(0)
+ #define AW88395_CALI_RE_MAX				(15000)
+ #define AW88395_CALI_RE_MIN				(4000)
++/* What the volume stays under until the speaker's resistance is known, -30 dB */
++#define AW88395_UNCALIBRATED_VOL			(30U * 8)
+ #define AW88395_CALI_DELAY_CACL(value)			((value * 32) / 48)
+ 
+ #define AW88395_DSP_RE_TO_SHOW_RE(re, shift)		(((re) * (1000)) >> (shift))
+@@ -188,6 +190,7 @@ struct aw_device {
+ 
+ 	unsigned int channel;
+ 	unsigned int fade_step;
++	bool cali_required;
+ 	unsigned int prof_data_type;
+ 
+ 	struct i2c_client *i2c;

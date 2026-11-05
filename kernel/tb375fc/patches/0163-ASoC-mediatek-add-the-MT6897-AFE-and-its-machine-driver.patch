@@ -1,0 +1,2888 @@
+From: buntOS contributors
+Subject: [PATCH] ASoC: mediatek: add the MT6897 AFE and its machine driver
+
+Register layout and bring-up values come from the MediaTek MT6897 driver
+in the OnePlus kernel (oneplus/mt6897_b_16.0.0_oneplus_pad), the structure
+from the mainline MT8196 driver. Of 1415 register addresses with the same
+name in both, 1360 match. The others are the ETDM_OUT blocks and the TDM
+block. The interrupts are also cleared differently, by writing
+AFE_IRQ_MCU_CLR.
+
+Unlike MT8196, the firmware expects the SiP audio calls on this SoC: the
+domain sidebands when the clocks come up and the SRAM and DRAM requests
+for the SPM. MediaTek's driver makes all of them.
+
+This starts with what the Lenovo TB375FC needs for its speakers and
+microphones: three stereo memifs, four uplink ones, ETDM 4 and the capture
+side of ADDA. ETDM_OUT4 masters the link, the clocks leave on the I2SIN4
+pads and ETDM_IN4 follows it. Its data is taken from ETDM_OUT4 with the
+"I2SIN4 Loopback" control, which allows checking the frames without a codec.
+The internal path misses the pads, so that ETDM_IN4 then samples two bit
+clocks later: at the vendor's value for the pads, the samples come back
+shifted left by two bits.
+
+The machine driver fixes the link to the 48 kHz, four slots of 32 bits
+that the amplifiers' register files program. The AFE has no rate
+converter in that path, so the front ends take 48 kHz only.
+
+The machine driver also runs the calibration of the MTKAIF link to the
+MT6368, as the vendor's does.
+
+The stereo memifs can reach any of the four slots through the
+interconnect, so the board's speaker layout is a matter of mixer
+settings.
+---
+ sound/soc/mediatek/Kconfig                    |  22 +
+ sound/soc/mediatek/Makefile                   |   1 +
+ sound/soc/mediatek/mt6897/Makefile            |  13 +
+ sound/soc/mediatek/mt6897/mt6897-afe-clk.c    | 242 ++++++
+ sound/soc/mediatek/mt6897/mt6897-afe-clk.h    |  50 ++
+ sound/soc/mediatek/mt6897/mt6897-afe-common.h |  92 ++
+ sound/soc/mediatek/mt6897/mt6897-afe-pcm.c    | 789 ++++++++++++++++++
+ sound/soc/mediatek/mt6897/mt6897-dai-adda.c   | 246 ++++++
+ sound/soc/mediatek/mt6897/mt6897-dai-i2s.c    | 496 +++++++++++
+ .../mediatek/mt6897/mt6897-interconnection.h  | 112 +++
+ sound/soc/mediatek/mt6897/mt6897-mt6368.c     | 298 +++++++
+ sound/soc/mediatek/mt6897/mt6897-reg.h        | 387 +++++++++
+ 12 files changed, 2748 insertions(+)
+ create mode 100644 sound/soc/mediatek/mt6897/Makefile
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-afe-clk.c
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-afe-clk.h
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-afe-common.h
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-afe-pcm.c
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-dai-adda.c
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-dai-i2s.c
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-interconnection.h
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-mt6368.c
+ create mode 100644 sound/soc/mediatek/mt6897/mt6897-reg.h
+
+diff --git a/sound/soc/mediatek/Kconfig b/sound/soc/mediatek/Kconfig
+index 4af7bbb..d324d5c 100644
+--- a/sound/soc/mediatek/Kconfig
++++ b/sound/soc/mediatek/Kconfig
+@@ -363,6 +363,28 @@ config SND_SOC_MT8365_MT6357
+ 	  Select Y if you have such device.
+ 	  If unsure select "N".
+ 
++config SND_SOC_MT6897
++	tristate "ASoC support for MediaTek MT6897 chip"
++	depends on ARCH_MEDIATEK
++	select SND_SOC_MEDIATEK
++	help
++	  This adds ASoC driver for MediaTek MT6897 boards
++	  that can be used with other codecs.
++	  Select Y if you have such device.
++	  If unsure select "N".
++
++config SND_SOC_MT6897_MT6368
++	tristate "ASoC audio driver for MT6897 with MT6368 and smart amplifiers"
++	depends on SND_SOC_MT6897
++	depends on I2C
++	select SND_SOC_AW88395
++	select SND_SOC_MT6368
++	help
++	  This adds support for the ASoC machine driver for MediaTek MT6897
++	  boards with the MT6368 PMIC codec and Awinic smart amplifiers.
++	  Select Y if you have such device.
++	  If unsure select "N".
++
+ config SND_SOC_MT8196
+ 	tristate "ASoC support for Mediatek MT8196 chip"
+ 	depends on ARCH_MEDIATEK
+diff --git a/sound/soc/mediatek/Makefile b/sound/soc/mediatek/Makefile
+index a6815a3..9ca5a3b 100644
+--- a/sound/soc/mediatek/Makefile
++++ b/sound/soc/mediatek/Makefile
+@@ -2,6 +2,7 @@
+ obj-$(CONFIG_SND_SOC_MEDIATEK) += common/
+ obj-$(CONFIG_SND_SOC_MT2701) += mt2701/
+ obj-$(CONFIG_SND_SOC_MT6797) += mt6797/
++obj-$(CONFIG_SND_SOC_MT6897) += mt6897/
+ obj-$(CONFIG_SND_SOC_MT7986) += mt7986/
+ obj-$(CONFIG_SND_SOC_MT8173) += mt8173/
+ obj-$(CONFIG_SND_SOC_MT8183) += mt8183/
+diff --git a/sound/soc/mediatek/mt6897/Makefile b/sound/soc/mediatek/mt6897/Makefile
+new file mode 100644
+index 0000000..8b041f6
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/Makefile
+@@ -0,0 +1,13 @@
++# SPDX-License-Identifier: GPL-2.0
++
++# platform driver
++snd-soc-mt6897-afe-y := \
++	mt6897-afe-pcm.o \
++	mt6897-afe-clk.o \
++	mt6897-dai-adda.o \
++	mt6897-dai-i2s.o
++
++obj-$(CONFIG_SND_SOC_MT6897) += snd-soc-mt6897-afe.o
++
++# machine driver
++obj-$(CONFIG_SND_SOC_MT6897_MT6368) += mt6897-mt6368.o
+diff --git a/sound/soc/mediatek/mt6897/mt6897-afe-clk.c b/sound/soc/mediatek/mt6897/mt6897-afe-clk.c
+new file mode 100644
+index 0000000..861b94e
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-afe-clk.c
+@@ -0,0 +1,242 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MediaTek MT6897 AFE clock control
++ *
++ * Copyright (c) 2021 MediaTek Inc.
++ * Author: Tina Tsai <tina.tsai@mediatek.com>
++ *
++ * The audio gates live in the AFE's own AUDIO_TOP_CON registers and are
++ * handled with the rest of the AFE, so this file only deals with the clocks
++ * that come from outside.
++ */
++
++#include <linux/arm-smccc.h>
++#include <linux/clk.h>
++#include <linux/regmap.h>
++#include <linux/soc/mediatek/mtk_sip_svc.h>
++
++#include "mt6897-afe-clk.h"
++#include "mt6897-afe-common.h"
++
++static const char *const aud_clks[MT6897_CLK_NUM] = {
++	[MT6897_CLK_AUD_INTBUS] = "top_aud_intbus",
++	[MT6897_CLK_AUD_H] = "top_aud_h",
++	[MT6897_CLK_AUD_1] = "top_aud_1",
++	[MT6897_CLK_AUD_2] = "top_aud_2",
++	[MT6897_CLK_AUD_ENG1] = "top_aud_eng1",
++	[MT6897_CLK_AUD_ENG2] = "top_aud_eng2",
++	[MT6897_CLK_APLL1] = "apll1",
++	[MT6897_CLK_APLL2] = "apll2",
++	[MT6897_CLK_APLL1_D2] = "apll1_d2",
++	[MT6897_CLK_APLL2_D2] = "apll2_d2",
++	[MT6897_CLK_APLL1_D4] = "apll1_d4",
++	[MT6897_CLK_APLL2_D4] = "apll2_d4",
++	[MT6897_CLK_26M] = "clk26m",
++};
++
++static int mt6897_afe_enable_mux(struct mtk_base_afe *afe, int mux, int parent)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	int ret;
++
++	ret = clk_prepare_enable(afe_priv->clk[mux]);
++	if (ret) {
++		dev_err(afe->dev, "failed to enable %s: %d\n", aud_clks[mux], ret);
++		return ret;
++	}
++
++	ret = clk_set_parent(afe_priv->clk[mux], afe_priv->clk[parent]);
++	if (ret) {
++		dev_err(afe->dev, "failed to set %s to %s: %d\n",
++			aud_clks[mux], aud_clks[parent], ret);
++		clk_disable_unprepare(afe_priv->clk[mux]);
++	}
++
++	return ret;
++}
++
++/* Back on 26 MHz before the gate closes, so that the APLL can stop */
++static void mt6897_afe_disable_mux(struct mtk_base_afe *afe, int mux)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	int ret;
++
++	ret = clk_set_parent(afe_priv->clk[mux], afe_priv->clk[MT6897_CLK_26M]);
++	if (ret)
++		dev_warn(afe->dev, "failed to set %s to 26 MHz: %d\n",
++			 aud_clks[mux], ret);
++
++	clk_disable_unprepare(afe_priv->clk[mux]);
++}
++
++int mt6897_afe_enable_clock(struct mtk_base_afe *afe)
++{
++	struct arm_smccc_res res;
++	int ret;
++
++	ret = mt6897_afe_enable_mux(afe, MT6897_CLK_AUD_INTBUS, MT6897_CLK_26M);
++	if (ret)
++		return ret;
++
++	ret = mt6897_afe_enable_mux(afe, MT6897_CLK_AUD_H, MT6897_CLK_26M);
++	if (ret) {
++		mt6897_afe_disable_mux(afe, MT6897_CLK_AUD_INTBUS);
++		return ret;
++	}
++
++	/* The firmware tells the SPM about the domain's sidebands */
++	arm_smccc_smc(MTK_SIP_AUDIO_CONTROL, MTK_AUDIO_SMC_OP_DOMAIN_SIDEBANDS,
++		      0, 0, 0, 0, 0, 0, &res);
++	arm_smccc_smc(MTK_SIP_AUDIO_CONTROL, MTK_AUDIO_SMC_OP_SRAM_REQUEST,
++		      0, 0, 0, 0, 0, 0, &res);
++
++	return 0;
++}
++
++void mt6897_afe_disable_clock(struct mtk_base_afe *afe)
++{
++	struct arm_smccc_res res;
++
++	arm_smccc_smc(MTK_SIP_AUDIO_CONTROL, MTK_AUDIO_SMC_OP_SRAM_RELEASE,
++		      0, 0, 0, 0, 0, 0, &res);
++
++	mt6897_afe_disable_mux(afe, MT6897_CLK_AUD_H);
++	mt6897_afe_disable_mux(afe, MT6897_CLK_AUD_INTBUS);
++}
++
++void mt6897_afe_dram_request(struct mtk_base_afe *afe)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	struct arm_smccc_res res;
++
++	guard(mutex)(&afe_priv->dram_lock);
++
++	if (!afe_priv->dram_users++)
++		arm_smccc_smc(MTK_SIP_AUDIO_CONTROL, MTK_AUDIO_SMC_OP_DRAM_REQUEST,
++			      0, 0, 0, 0, 0, 0, &res);
++}
++
++void mt6897_afe_dram_release(struct mtk_base_afe *afe)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	struct arm_smccc_res res;
++
++	guard(mutex)(&afe_priv->dram_lock);
++
++	if (!--afe_priv->dram_users)
++		arm_smccc_smc(MTK_SIP_AUDIO_CONTROL, MTK_AUDIO_SMC_OP_DRAM_RELEASE,
++			      0, 0, 0, 0, 0, 0, &res);
++}
++
++int mt6897_apll_enable(struct mtk_base_afe *afe, int apll)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	bool first = apll == MT6897_APLL1;
++	int aud = first ? MT6897_CLK_AUD_1 : MT6897_CLK_AUD_2;
++	int eng = first ? MT6897_CLK_AUD_ENG1 : MT6897_CLK_AUD_ENG2;
++	int pll = first ? MT6897_CLK_APLL1 : MT6897_CLK_APLL2;
++	int ret;
++
++	ret = mt6897_afe_enable_mux(afe, aud, pll);
++	if (ret)
++		return ret;
++
++	/* The 22.5792 or 24.576 MHz family, APLL / 4 */
++	ret = mt6897_afe_enable_mux(afe, eng,
++				    first ? MT6897_CLK_APLL1_D4 : MT6897_CLK_APLL2_D4);
++	if (ret)
++		goto err_aud;
++
++	ret = clk_set_parent(afe_priv->clk[MT6897_CLK_AUD_H],
++			     afe_priv->clk[first ? MT6897_CLK_APLL1_D2 : MT6897_CLK_APLL2_D2]);
++	if (ret) {
++		dev_err(afe->dev, "failed to set the audio_h parent: %d\n", ret);
++		goto err_eng;
++	}
++
++	ret = clk_prepare_enable(afe_priv->clk[pll]);
++	if (ret) {
++		dev_err(afe->dev, "failed to enable %s: %d\n", aud_clks[pll], ret);
++		goto err_h;
++	}
++
++	if (first) {
++		regmap_update_bits(afe->regmap, AFE_APLL1_TUNER_CFG, 0xfff7, 0x372);
++		regmap_update_bits(afe->regmap, AFE_APLL1_TUNER_CFG, 0x1, 0x1);
++		regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
++				   AUDIO_APLL1_EN_ON_MASK_SFT,
++				   BIT(AUDIO_APLL1_EN_ON_SFT));
++	} else {
++		regmap_update_bits(afe->regmap, AFE_APLL2_TUNER_CFG, 0xfff7, 0x374);
++		regmap_update_bits(afe->regmap, AFE_APLL2_TUNER_CFG, 0x1, 0x1);
++		regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
++				   AUDIO_APLL2_EN_ON_MASK_SFT,
++				   BIT(AUDIO_APLL2_EN_ON_SFT));
++	}
++
++	return 0;
++
++err_h:
++	clk_set_parent(afe_priv->clk[MT6897_CLK_AUD_H],
++		       afe_priv->clk[MT6897_CLK_26M]);
++err_eng:
++	mt6897_afe_disable_mux(afe, eng);
++err_aud:
++	mt6897_afe_disable_mux(afe, aud);
++
++	return ret;
++}
++
++void mt6897_apll_disable(struct mtk_base_afe *afe, int apll)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	bool first = apll == MT6897_APLL1;
++
++	if (first) {
++		regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
++				   AUDIO_APLL1_EN_ON_MASK_SFT, 0);
++		regmap_update_bits(afe->regmap, AFE_APLL1_TUNER_CFG, 0x1, 0);
++	} else {
++		regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
++				   AUDIO_APLL2_EN_ON_MASK_SFT, 0);
++		regmap_update_bits(afe->regmap, AFE_APLL2_TUNER_CFG, 0x1, 0);
++	}
++
++	clk_disable_unprepare(afe_priv->clk[first ? MT6897_CLK_APLL1 : MT6897_CLK_APLL2]);
++
++	clk_set_parent(afe_priv->clk[MT6897_CLK_AUD_H],
++		       afe_priv->clk[MT6897_CLK_26M]);
++
++	mt6897_afe_disable_mux(afe, first ? MT6897_CLK_AUD_ENG1 : MT6897_CLK_AUD_ENG2);
++	mt6897_afe_disable_mux(afe, first ? MT6897_CLK_AUD_1 : MT6897_CLK_AUD_2);
++}
++
++int mt6897_get_apll_by_rate(unsigned int rate)
++{
++	return rate % 8000 ? MT6897_APLL1 : MT6897_APLL2;
++}
++
++int mt6897_get_apll_by_name(const char *name)
++{
++	return strcmp(name, APLL1_W_NAME) ? MT6897_APLL2 : MT6897_APLL1;
++}
++
++int mt6897_init_clock(struct mtk_base_afe *afe)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	int i;
++
++	afe_priv->clk = devm_kcalloc(afe->dev, MT6897_CLK_NUM,
++				     sizeof(*afe_priv->clk), GFP_KERNEL);
++	if (!afe_priv->clk)
++		return -ENOMEM;
++
++	for (i = 0; i < MT6897_CLK_NUM; i++) {
++		afe_priv->clk[i] = devm_clk_get(afe->dev, aud_clks[i]);
++		if (IS_ERR(afe_priv->clk[i]))
++			return dev_err_probe(afe->dev, PTR_ERR(afe_priv->clk[i]),
++					     "failed to get %s\n", aud_clks[i]);
++	}
++
++	return 0;
++}
+diff --git a/sound/soc/mediatek/mt6897/mt6897-afe-clk.h b/sound/soc/mediatek/mt6897/mt6897-afe-clk.h
+new file mode 100644
+index 0000000..ee9c867
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-afe-clk.h
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * MediaTek MT6897 AFE clock control definitions
++ *
++ * Copyright (c) 2021 MediaTek Inc.
++ * Author: Tina Tsai <tina.tsai@mediatek.com>
++ */
++
++#ifndef _MT6897_AFE_CLK_H_
++#define _MT6897_AFE_CLK_H_
++
++/* APLL */
++#define APLL1_W_NAME "APLL1"
++#define APLL2_W_NAME "APLL2"
++
++enum {
++	MT6897_APLL1,
++	MT6897_APLL2,
++};
++
++enum {
++	MT6897_CLK_AUD_INTBUS,
++	MT6897_CLK_AUD_H,
++	MT6897_CLK_AUD_1,
++	MT6897_CLK_AUD_2,
++	MT6897_CLK_AUD_ENG1,
++	MT6897_CLK_AUD_ENG2,
++	MT6897_CLK_APLL1,
++	MT6897_CLK_APLL2,
++	MT6897_CLK_APLL1_D2,
++	MT6897_CLK_APLL2_D2,
++	MT6897_CLK_APLL1_D4,
++	MT6897_CLK_APLL2_D4,
++	MT6897_CLK_26M,
++	MT6897_CLK_NUM,
++};
++
++struct mtk_base_afe;
++
++int mt6897_init_clock(struct mtk_base_afe *afe);
++int mt6897_afe_enable_clock(struct mtk_base_afe *afe);
++void mt6897_afe_disable_clock(struct mtk_base_afe *afe);
++void mt6897_afe_dram_request(struct mtk_base_afe *afe);
++void mt6897_afe_dram_release(struct mtk_base_afe *afe);
++int mt6897_apll_enable(struct mtk_base_afe *afe, int apll);
++void mt6897_apll_disable(struct mtk_base_afe *afe, int apll);
++int mt6897_get_apll_by_rate(unsigned int rate);
++int mt6897_get_apll_by_name(const char *name);
++
++#endif
+diff --git a/sound/soc/mediatek/mt6897/mt6897-afe-common.h b/sound/soc/mediatek/mt6897/mt6897-afe-common.h
+new file mode 100644
+index 0000000..5b937a4
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-afe-common.h
+@@ -0,0 +1,92 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * MediaTek MT6897 audio driver definitions
++ *
++ * Copyright (c) 2021 MediaTek Inc.
++ * Author: Tina Tsai <tina.tsai@mediatek.com>
++ */
++
++#ifndef _MT6897_AFE_COMMON_H_
++#define _MT6897_AFE_COMMON_H_
++
++#include <sound/pcm.h>
++#include <sound/soc.h>
++
++#include "mt6897-reg.h"
++#include "../common/mtk-base-afe.h"
++
++/* HW IPM 2.0 */
++enum {
++	MTK_AFE_IPM2P0_RATE_8K = 0x0,
++	MTK_AFE_IPM2P0_RATE_11K = 0x1,
++	MTK_AFE_IPM2P0_RATE_12K = 0x2,
++	MTK_AFE_IPM2P0_RATE_16K = 0x4,
++	MTK_AFE_IPM2P0_RATE_22K = 0x5,
++	MTK_AFE_IPM2P0_RATE_24K = 0x6,
++	MTK_AFE_IPM2P0_RATE_32K = 0x8,
++	MTK_AFE_IPM2P0_RATE_44K = 0x9,
++	MTK_AFE_IPM2P0_RATE_48K = 0xa,
++	MTK_AFE_IPM2P0_RATE_88K = 0xd,
++	MTK_AFE_IPM2P0_RATE_96K = 0xe,
++	MTK_AFE_IPM2P0_RATE_176K = 0x11,
++	MTK_AFE_IPM2P0_RATE_192K = 0x12,
++};
++
++enum {
++	MT6897_MEMIF_DL0,
++	MT6897_MEMIF_DL1,
++	MT6897_MEMIF_DL2,
++	MT6897_MEMIF_VUL0,
++	MT6897_MEMIF_VUL1,
++	MT6897_MEMIF_VUL2,
++	MT6897_MEMIF_VUL3,
++	MT6897_MEMIF_NUM,
++	MT6897_DAI_I2S_IN4 = MT6897_MEMIF_NUM,
++	MT6897_DAI_I2S_OUT4,
++	MT6897_DAI_ADDA,
++	MT6897_DAI_NUM,
++};
++
++/* irq ID (= enum) from AFE_IRQ_MCU_STATUS */
++enum {
++	MT6897_IRQ_0,
++	MT6897_IRQ_1,
++	MT6897_IRQ_2,
++	MT6897_IRQ_13 = 13,
++	MT6897_IRQ_14,
++	MT6897_IRQ_15,
++	MT6897_IRQ_16,
++	MT6897_IRQ_NUM,
++};
++
++enum {
++	MTKAIF_PROTOCOL_1 = 0,
++	MTKAIF_PROTOCOL_2,
++	MTKAIF_PROTOCOL_2_CLK_P2,
++};
++
++/* The data pins of the link to the MT6368, the third is for channels 3 and 4 */
++#define MT6897_MTKAIF_MISO_NUM 3
++
++struct clk;
++struct mtk_base_afe;
++struct regmap;
++
++struct mt6897_afe_private {
++	struct clk **clk;
++	struct regmap *topckgen;
++	/* serializes the DRAM request, which several memifs can hold */
++	struct mutex dram_lock;
++	int dram_users;
++	/* MTKAIF, the calibration runs in the machine driver */
++	int mtkaif_protocol;
++	int mtkaif_chosen_phase[MT6897_MTKAIF_MISO_NUM];
++	int mtkaif_phase_cycle[MT6897_MTKAIF_MISO_NUM];
++	/* dai */
++	void *dai_priv[MT6897_DAI_NUM];
++};
++
++int mt6897_dai_adda_register(struct mtk_base_afe *afe);
++int mt6897_dai_i2s_register(struct mtk_base_afe *afe);
++
++#endif
+diff --git a/sound/soc/mediatek/mt6897/mt6897-afe-pcm.c b/sound/soc/mediatek/mt6897/mt6897-afe-pcm.c
+new file mode 100644
+index 0000000..7fb6042
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-afe-pcm.c
+@@ -0,0 +1,789 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MediaTek ALSA SoC AFE platform driver for MT6897
++ *
++ * Copyright (c) 2021 MediaTek Inc.
++ * Author: Tina Tsai <tina.tsai@mediatek.com>
++ */
++
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/io.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <sound/pcm.h>
++#include <sound/soc.h>
++
++#include "mt6897-afe-clk.h"
++#include "mt6897-afe-common.h"
++#include "mt6897-interconnection.h"
++#include "../common/mtk-afe-fe-dai.h"
++#include "../common/mtk-afe-platform-driver.h"
++
++static const struct snd_pcm_hardware mt6897_afe_hardware = {
++	.info = (SNDRV_PCM_INFO_MMAP |
++		 SNDRV_PCM_INFO_NO_PERIOD_WAKEUP |
++		 SNDRV_PCM_INFO_INTERLEAVED |
++		 SNDRV_PCM_INFO_MMAP_VALID),
++	.formats = (SNDRV_PCM_FMTBIT_S16_LE |
++		    SNDRV_PCM_FMTBIT_S24_LE |
++		    SNDRV_PCM_FMTBIT_S32_LE),
++	.period_bytes_min = 96,
++	.period_bytes_max = 4 * 48 * 1024,
++	.periods_min = 2,
++	.periods_max = 256,
++	.buffer_bytes_max = 256 * 1024,
++	.fifo_size = 0,
++};
++
++static int mt6897_rate_transform(struct device *dev, unsigned int rate)
++{
++	switch (rate) {
++	case 8000:
++		return MTK_AFE_IPM2P0_RATE_8K;
++	case 11025:
++		return MTK_AFE_IPM2P0_RATE_11K;
++	case 12000:
++		return MTK_AFE_IPM2P0_RATE_12K;
++	case 16000:
++		return MTK_AFE_IPM2P0_RATE_16K;
++	case 22050:
++		return MTK_AFE_IPM2P0_RATE_22K;
++	case 24000:
++		return MTK_AFE_IPM2P0_RATE_24K;
++	case 32000:
++		return MTK_AFE_IPM2P0_RATE_32K;
++	case 44100:
++		return MTK_AFE_IPM2P0_RATE_44K;
++	case 48000:
++		return MTK_AFE_IPM2P0_RATE_48K;
++	case 88200:
++		return MTK_AFE_IPM2P0_RATE_88K;
++	case 96000:
++		return MTK_AFE_IPM2P0_RATE_96K;
++	case 176400:
++		return MTK_AFE_IPM2P0_RATE_176K;
++	case 192000:
++		return MTK_AFE_IPM2P0_RATE_192K;
++	default:
++		dev_err(dev, "unsupported rate %u\n", rate);
++		return -EINVAL;
++	}
++}
++
++static int mt6897_fe_startup(struct snd_pcm_substream *substream,
++			     struct snd_soc_dai *dai)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct snd_pcm_runtime *runtime = substream->runtime;
++	struct mtk_base_afe_memif *memif = &afe->memif[snd_soc_rtd_to_cpu(rtd, 0)->id];
++	int ret;
++
++	memif->substream = substream;
++
++	ret = snd_pcm_hw_constraint_step(runtime, 0,
++					 SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 16);
++	if (ret < 0)
++		return ret;
++
++	snd_soc_set_runtime_hwparams(substream, afe->mtk_afe_hardware);
++
++	ret = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
++	if (ret < 0)
++		return ret;
++
++	mt6897_afe_dram_request(afe);
++
++	return 0;
++}
++
++static void mt6897_fe_shutdown(struct snd_pcm_substream *substream,
++			       struct snd_soc_dai *dai)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct mtk_base_afe_memif *memif = &afe->memif[snd_soc_rtd_to_cpu(rtd, 0)->id];
++
++	mt6897_afe_dram_release(afe);
++	memif->substream = NULL;
++}
++
++static int mt6897_fe_trigger(struct snd_pcm_substream *substream, int cmd,
++			     struct snd_soc_dai *dai)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_pcm_runtime *const runtime = substream->runtime;
++	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
++	int id = snd_soc_rtd_to_cpu(rtd, 0)->id;
++	struct mtk_base_afe_memif *memif = &afe->memif[id];
++	const struct mtk_base_irq_data *irq_data = afe->irqs[memif->irq_usage].irq_data;
++	int fs, ret;
++
++	switch (cmd) {
++	case SNDRV_PCM_TRIGGER_START:
++	case SNDRV_PCM_TRIGGER_RESUME:
++		ret = mtk_memif_set_enable(afe, id);
++		if (ret) {
++			dev_err(afe->dev, "memif %d enable failed: %d\n", id, ret);
++			return ret;
++		}
++
++		/* An uplink memif needs some data before its first interrupt */
++		if (substream->stream == SNDRV_PCM_STREAM_CAPTURE &&
++		    (runtime->period_size * 1000) / runtime->rate <= 10)
++			udelay(300);
++
++		regmap_update_bits(afe->regmap, irq_data->irq_cnt_reg,
++				   irq_data->irq_cnt_maskbit << irq_data->irq_cnt_shift,
++				   runtime->period_size << irq_data->irq_cnt_shift);
++
++		fs = afe->irq_fs(substream, runtime->rate);
++		if (fs < 0)
++			return fs;
++
++		regmap_update_bits(afe->regmap, irq_data->irq_fs_reg,
++				   irq_data->irq_fs_maskbit << irq_data->irq_fs_shift,
++				   fs << irq_data->irq_fs_shift);
++
++		regmap_update_bits(afe->regmap, irq_data->irq_en_reg,
++				   BIT(irq_data->irq_en_shift),
++				   BIT(irq_data->irq_en_shift));
++		return 0;
++	case SNDRV_PCM_TRIGGER_STOP:
++	case SNDRV_PCM_TRIGGER_SUSPEND:
++		ret = mtk_memif_set_disable(afe, id);
++		if (ret)
++			dev_warn(afe->dev, "memif %d disable failed: %d\n", id, ret);
++
++		regmap_update_bits(afe->regmap, irq_data->irq_en_reg,
++				   BIT(irq_data->irq_en_shift), 0);
++
++		/* A pending interrupt must not fire on the next start */
++		regmap_write(afe->regmap, irq_data->irq_clr_reg,
++			     BIT(irq_data->irq_clr_shift));
++		return ret;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int mt6897_memif_fs(struct snd_pcm_substream *substream, unsigned int rate)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_component *component = snd_soc_rtdcom_lookup(rtd, AFE_PCM_NAME);
++
++	if (!component)
++		return -EINVAL;
++
++	return mt6897_rate_transform(component->dev, rate);
++}
++
++static int mt6897_get_dai_fs(struct mtk_base_afe *afe, int dai_id,
++			     unsigned int rate)
++{
++	return mt6897_rate_transform(afe->dev, rate);
++}
++
++static int mt6897_get_memif_pbuf_size(struct snd_pcm_substream *substream)
++{
++	struct snd_pcm_runtime *runtime = substream->runtime;
++
++	if ((runtime->period_size * 1000) / runtime->rate > 10)
++		return MT6897_MEMIF_PBUF_SIZE_256_BYTES;
++
++	return MT6897_MEMIF_PBUF_SIZE_32_BYTES;
++}
++
++/* FE DAIs */
++static const struct snd_soc_dai_ops mt6897_memif_dai_ops = {
++	.startup = mt6897_fe_startup,
++	.shutdown = mt6897_fe_shutdown,
++	.hw_params = mtk_afe_fe_hw_params,
++	.hw_free = mtk_afe_fe_hw_free,
++	.prepare = mtk_afe_fe_prepare,
++	.trigger = mt6897_fe_trigger,
++};
++
++#define MTK_PCM_RATES (SNDRV_PCM_RATE_8000_48000 |\
++		       SNDRV_PCM_RATE_88200 |\
++		       SNDRV_PCM_RATE_96000 |\
++		       SNDRV_PCM_RATE_176400 |\
++		       SNDRV_PCM_RATE_192000)
++
++#define MTK_PCM_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
++			 SNDRV_PCM_FMTBIT_S24_LE |\
++			 SNDRV_PCM_FMTBIT_S32_LE)
++
++#define MT6897_FE_DAI(_name, _id, _max_ch, _dir) \
++{ \
++	.name = #_name, \
++	.id = _id, \
++	._dir = { \
++		.stream_name = #_name, \
++		.channels_min = 1, \
++		.channels_max = _max_ch, \
++		.rates = MTK_PCM_RATES, \
++		.formats = MTK_PCM_FORMATS, \
++	}, \
++	.ops = &mt6897_memif_dai_ops, \
++}
++
++static struct snd_soc_dai_driver mt6897_memif_dai_driver[] = {
++	MT6897_FE_DAI(DL0, MT6897_MEMIF_DL0, 2, playback),
++	MT6897_FE_DAI(DL1, MT6897_MEMIF_DL1, 2, playback),
++	MT6897_FE_DAI(DL2, MT6897_MEMIF_DL2, 2, playback),
++	MT6897_FE_DAI(UL0, MT6897_MEMIF_VUL0, 2, capture),
++	MT6897_FE_DAI(UL1, MT6897_MEMIF_VUL1, 2, capture),
++	MT6897_FE_DAI(UL2, MT6897_MEMIF_VUL2, 2, capture),
++	MT6897_FE_DAI(UL3, MT6897_MEMIF_VUL3, 2, capture),
++};
++
++/* The four TDM slots of ETDM_IN4 come in pairs, on UL0 and UL1 */
++static const struct snd_kcontrol_new memif_ul0_ch1_mix[] = {
++	SOC_DAPM_SINGLE_AUTODISABLE("ADDA_UL_CH1", AFE_CONN018_0, I_ADDA_UL_CH1, 1, 0),
++	SOC_DAPM_SINGLE_AUTODISABLE("I2SIN4_CH1", AFE_CONN018_4, I_I2SIN4_CH1, 1, 0),
++};
++
++static const struct snd_kcontrol_new memif_ul0_ch2_mix[] = {
++	SOC_DAPM_SINGLE_AUTODISABLE("ADDA_UL_CH2", AFE_CONN019_0, I_ADDA_UL_CH2, 1, 0),
++	SOC_DAPM_SINGLE_AUTODISABLE("I2SIN4_CH2", AFE_CONN019_4, I_I2SIN4_CH2, 1, 0),
++};
++
++static const struct snd_kcontrol_new memif_ul1_ch1_mix[] = {
++	SOC_DAPM_SINGLE_AUTODISABLE("I2SIN4_CH3", AFE_CONN020_4, I_I2SIN4_CH3, 1, 0),
++};
++
++static const struct snd_kcontrol_new memif_ul1_ch2_mix[] = {
++	SOC_DAPM_SINGLE_AUTODISABLE("I2SIN4_CH4", AFE_CONN021_4, I_I2SIN4_CH4, 1, 0),
++};
++
++static const struct snd_soc_dapm_widget mt6897_memif_widgets[] = {
++	SND_SOC_DAPM_MIXER("UL0_CH1", SND_SOC_NOPM, 0, 0,
++			   memif_ul0_ch1_mix, ARRAY_SIZE(memif_ul0_ch1_mix)),
++	SND_SOC_DAPM_MIXER("UL0_CH2", SND_SOC_NOPM, 0, 0,
++			   memif_ul0_ch2_mix, ARRAY_SIZE(memif_ul0_ch2_mix)),
++	SND_SOC_DAPM_MIXER("UL1_CH1", SND_SOC_NOPM, 0, 0,
++			   memif_ul1_ch1_mix, ARRAY_SIZE(memif_ul1_ch1_mix)),
++	SND_SOC_DAPM_MIXER("UL1_CH2", SND_SOC_NOPM, 0, 0,
++			   memif_ul1_ch2_mix, ARRAY_SIZE(memif_ul1_ch2_mix)),
++};
++
++static const struct snd_soc_dapm_route mt6897_memif_routes[] = {
++	{"UL0", NULL, "UL0_CH1"},
++	{"UL0", NULL, "UL0_CH2"},
++	{"UL0_CH1", "ADDA_UL_CH1", "ADDA Capture"},
++	{"UL0_CH2", "ADDA_UL_CH2", "ADDA Capture"},
++	{"UL0_CH1", "I2SIN4_CH1", "I2SIN4"},
++	{"UL0_CH2", "I2SIN4_CH2", "I2SIN4"},
++
++	{"UL1", NULL, "UL1_CH1"},
++	{"UL1", NULL, "UL1_CH2"},
++	{"UL1_CH1", "I2SIN4_CH3", "I2SIN4"},
++	{"UL1_CH2", "I2SIN4_CH4", "I2SIN4"},
++};
++
++#define MT6897_DL_MEMIF(_id) \
++	[MT6897_MEMIF_##_id] = { \
++		.name = #_id, \
++		.id = MT6897_MEMIF_##_id, \
++		.reg_ofs_base = AFE_##_id##_BASE, \
++		.reg_ofs_cur = AFE_##_id##_CUR, \
++		.reg_ofs_end = AFE_##_id##_END, \
++		.reg_ofs_base_msb = AFE_##_id##_BASE_MSB, \
++		.reg_ofs_cur_msb = AFE_##_id##_CUR_MSB, \
++		.reg_ofs_end_msb = AFE_##_id##_END_MSB, \
++		.fs_reg = AFE_##_id##_CON0, \
++		.fs_shift = _id##_SEL_FS_SFT, \
++		.fs_maskbit = _id##_SEL_FS_MASK, \
++		.mono_reg = AFE_##_id##_CON0, \
++		.mono_shift = _id##_MONO_SFT, \
++		.enable_reg = AFE_##_id##_CON0, \
++		.enable_shift = _id##_ON_SFT, \
++		.hd_reg = AFE_##_id##_CON0, \
++		.hd_shift = _id##_HD_MODE_SFT, \
++		.hd_align_reg = AFE_##_id##_CON0, \
++		.hd_align_mshift = _id##_HALIGN_SFT, \
++		.agent_disable_reg = -1, \
++		.agent_disable_shift = -1, \
++		.msb_reg = -1, \
++		.msb_shift = -1, \
++		.ch_num_shift = -1, \
++		.pbuf_reg = AFE_##_id##_CON0, \
++		.pbuf_mask = _id##_PBUF_SIZE_MASK, \
++		.pbuf_shift = _id##_PBUF_SIZE_SFT, \
++		.minlen_reg = AFE_##_id##_CON0, \
++		.minlen_mask = _id##_MINLEN_MASK, \
++		.minlen_shift = _id##_MINLEN_SFT, \
++	}
++
++#define MT6897_UL_MEMIF(_id) \
++	[MT6897_MEMIF_##_id] = { \
++		.name = #_id, \
++		.id = MT6897_MEMIF_##_id, \
++		.reg_ofs_base = AFE_##_id##_BASE, \
++		.reg_ofs_cur = AFE_##_id##_CUR, \
++		.reg_ofs_end = AFE_##_id##_END, \
++		.reg_ofs_base_msb = AFE_##_id##_BASE_MSB, \
++		.reg_ofs_cur_msb = AFE_##_id##_CUR_MSB, \
++		.reg_ofs_end_msb = AFE_##_id##_END_MSB, \
++		.fs_reg = AFE_##_id##_CON0, \
++		.fs_shift = _id##_SEL_FS_SFT, \
++		.fs_maskbit = _id##_SEL_FS_MASK, \
++		.mono_reg = AFE_##_id##_CON0, \
++		.mono_shift = _id##_MONO_SFT, \
++		.enable_reg = AFE_##_id##_CON0, \
++		.enable_shift = _id##_ON_SFT, \
++		.hd_reg = AFE_##_id##_CON0, \
++		.hd_shift = _id##_HD_MODE_SFT, \
++		.hd_align_reg = AFE_##_id##_CON0, \
++		.hd_align_mshift = _id##_HALIGN_SFT, \
++		.agent_disable_reg = -1, \
++		.agent_disable_shift = -1, \
++		.msb_reg = -1, \
++		.msb_shift = -1, \
++		.ch_num_shift = -1, \
++	}
++
++static const struct mtk_base_memif_data memif_data[MT6897_MEMIF_NUM] = {
++	MT6897_DL_MEMIF(DL0),
++	MT6897_DL_MEMIF(DL1),
++	MT6897_DL_MEMIF(DL2),
++	MT6897_UL_MEMIF(VUL0),
++	MT6897_UL_MEMIF(VUL1),
++	MT6897_UL_MEMIF(VUL2),
++	MT6897_UL_MEMIF(VUL3),
++};
++
++#define MT6897_AFE_IRQ(_id) \
++	[MT6897_IRQ_##_id] = { \
++		.id = MT6897_IRQ_##_id, \
++		.irq_cnt_reg = AFE_IRQ##_id##_MCU_CFG1, \
++		.irq_cnt_shift = AFE_IRQ_CNT_SHIFT, \
++		.irq_cnt_maskbit = AFE_IRQ_CNT_MASK, \
++		.irq_fs_reg = AFE_IRQ##_id##_MCU_CFG0, \
++		.irq_fs_shift = AFE_IRQ##_id##_MCU_FS_SFT, \
++		.irq_fs_maskbit = AFE_IRQ##_id##_MCU_FS_MASK, \
++		.irq_en_reg = AFE_IRQ##_id##_MCU_CFG0, \
++		.irq_en_shift = AFE_IRQ##_id##_MCU_ON_SFT, \
++		.irq_clr_reg = AFE_IRQ_MCU_CLR, \
++		.irq_clr_shift = IRQ##_id##_MCU_CLR_SFT, \
++	}
++
++static const struct mtk_base_irq_data irq_data[MT6897_IRQ_NUM] = {
++	MT6897_AFE_IRQ(0),
++	MT6897_AFE_IRQ(1),
++	MT6897_AFE_IRQ(2),
++	MT6897_AFE_IRQ(13),
++	MT6897_AFE_IRQ(14),
++	MT6897_AFE_IRQ(15),
++	MT6897_AFE_IRQ(16),
++};
++
++static const int memif_irq_usage[MT6897_MEMIF_NUM] = {
++	[MT6897_MEMIF_DL0] = MT6897_IRQ_0,
++	[MT6897_MEMIF_DL1] = MT6897_IRQ_1,
++	[MT6897_MEMIF_DL2] = MT6897_IRQ_2,
++	[MT6897_MEMIF_VUL0] = MT6897_IRQ_13,
++	[MT6897_MEMIF_VUL1] = MT6897_IRQ_14,
++	[MT6897_MEMIF_VUL2] = MT6897_IRQ_15,
++	[MT6897_MEMIF_VUL3] = MT6897_IRQ_16,
++};
++
++static bool mt6897_is_volatile_reg(struct device *dev, unsigned int reg)
++{
++	switch (reg) {
++	case AUDIO_TOP_CON0 ... AUDIO_TOP_CON4:
++	case AFE_APLL1_TUNER_MON0:
++	case AFE_APLL2_TUNER_MON0:
++	case AFE_SPM_CONTROL_ACK:
++	case AUDIO_ENGEN_CON0_MON:
++	case AFE_IRQ_MCU_EN:
++	case AFE_IRQ_MCU_STATUS:
++	case AFE_IRQ_MCU_CLR:
++	case AFE_CUSTOM_IRQ_MCU_EN:
++	case AFE_CUSTOM_IRQ_MCU_STATUS:
++	case AFE_CUSTOM_IRQ_MCU_CLR:
++	case AFE_IRQ_MCU_MON0:
++	case AFE_IRQ_MCU_MON1:
++	case AFE_IRQ_MCU_MON2:
++	case AFE_IRQ0_MCU_CFG0:
++	case AFE_IRQ1_MCU_CFG0:
++	case AFE_IRQ2_MCU_CFG0:
++	case AFE_IRQ13_MCU_CFG0:
++	case AFE_IRQ14_MCU_CFG0:
++	case AFE_IRQ15_MCU_CFG0:
++	case AFE_IRQ16_MCU_CFG0:
++	case AFE_IRQ0_MCU_CFG1:
++	case AFE_IRQ1_MCU_CFG1:
++	case AFE_IRQ2_MCU_CFG1:
++	case AFE_IRQ13_MCU_CFG1:
++	case AFE_IRQ14_MCU_CFG1:
++	case AFE_IRQ15_MCU_CFG1:
++	case AFE_IRQ16_MCU_CFG1:
++	case ETDM_IN4_MON:
++	case ETDM_OUT4_MON:
++	case AFE_DL0_CUR_MSB:
++	case AFE_DL0_CUR:
++	case AFE_DL0_RCH_MON:
++	case AFE_DL0_LCH_MON:
++	case AFE_DL1_CUR_MSB:
++	case AFE_DL1_CUR:
++	case AFE_DL1_RCH_MON:
++	case AFE_DL1_LCH_MON:
++	case AFE_DL2_CUR_MSB:
++	case AFE_DL2_CUR:
++	case AFE_DL2_RCH_MON:
++	case AFE_DL2_LCH_MON:
++	case AFE_VUL0_CUR_MSB:
++	case AFE_VUL0_CUR:
++	case AFE_VUL1_CUR_MSB:
++	case AFE_VUL1_CUR:
++	case AFE_VUL2_CUR_MSB:
++	case AFE_VUL2_CUR:
++	case AFE_VUL3_CUR_MSB:
++	case AFE_VUL3_CUR:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static const struct regmap_config mt6897_afe_regmap_config = {
++	.reg_bits = 32,
++	.reg_stride = 4,
++	.val_bits = 32,
++	.volatile_reg = mt6897_is_volatile_reg,
++	.max_register = AFE_MAX_REGISTER,
++	.num_reg_defaults_raw = AFE_MAX_REGISTER,
++	.cache_type = REGCACHE_FLAT,
++};
++
++static irqreturn_t mt6897_afe_irq_handler(int irq_id, void *dev)
++{
++	struct mtk_base_afe *afe = dev;
++	unsigned int status, status_mcu, mcu_en;
++	int i;
++
++	regmap_read(afe->regmap, AFE_IRQ_MCU_EN, &mcu_en);
++	regmap_read(afe->regmap, AFE_IRQ_MCU_STATUS, &status);
++
++	status_mcu = status & mcu_en & AFE_IRQ_STATUS_BITS;
++	if (!status_mcu)
++		return IRQ_NONE;
++
++	for (i = 0; i < MT6897_MEMIF_NUM; i++) {
++		struct mtk_base_afe_memif *memif = &afe->memif[i];
++
++		if (memif->substream &&
++		    (status_mcu & BIT(afe->irqs[memif->irq_usage].irq_data->id)))
++			snd_pcm_period_elapsed(memif->substream);
++	}
++
++	regmap_write(afe->regmap, AFE_IRQ_MCU_CLR, status_mcu);
++
++	return IRQ_HANDLED;
++}
++
++static void mt6897_afe_init_hw(struct mtk_base_afe *afe)
++{
++	/* The module gates stay open while the domain is on */
++	regmap_write(afe->regmap, AUDIO_TOP_CON0, 0);
++	regmap_write(afe->regmap, AUDIO_TOP_CON1, 0);
++	regmap_write(afe->regmap, AUDIO_TOP_CON2, 0);
++	regmap_write(afe->regmap, AUDIO_TOP_CON3, 0);
++
++	regmap_write(afe->regmap, AFE_IRQ_MCU_EN, 0xffffffff);
++
++	regmap_update_bits(afe->regmap, AFE_CBIP_CFG0, 0x1, 0x1);
++
++	/* The CPU writes 32-bit data in the 8.24 format */
++	regmap_update_bits(afe->regmap, AFE_MEMIF_CON0, CPU_HD_ALIGN_MASK_SFT, 0);
++
++	regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
++			   AUDIO_26M_EN_ON_MASK_SFT, AUDIO_26M_EN_ON_MASK_SFT);
++}
++
++static int mt6897_afe_runtime_suspend(struct device *dev)
++{
++	struct mtk_base_afe *afe = dev_get_drvdata(dev);
++	unsigned int value;
++	int ret;
++
++	if (!afe->regmap)
++		goto skip_regmap;
++
++	regmap_update_bits(afe->regmap, AUDIO_ENGEN_CON0,
++			   AUDIO_26M_EN_ON_MASK_SFT, 0);
++
++	ret = regmap_read_poll_timeout(afe->regmap, AUDIO_ENGEN_CON0_MON, value,
++				       (value & AUDIO_ENGEN_MON_SFT) == 0,
++				       20, 1000 * 1000);
++	if (ret)
++		dev_warn(afe->dev, "the engine did not stop: %d\n", ret);
++
++	regmap_write(afe->regmap, AFE_IRQ_MCU_CLR, 0xffffffff);
++	regmap_write(afe->regmap, AFE_CUSTOM_IRQ_MCU_CLR, 0xffffffff);
++
++	regcache_cache_only(afe->regmap, true);
++	regcache_mark_dirty(afe->regmap);
++
++skip_regmap:
++	mt6897_afe_disable_clock(afe);
++
++	return 0;
++}
++
++static int mt6897_afe_runtime_resume(struct device *dev)
++{
++	struct mtk_base_afe *afe = dev_get_drvdata(dev);
++	int ret;
++
++	ret = mt6897_afe_enable_clock(afe);
++	if (ret)
++		return ret;
++
++	/*
++	 * The hopping and 26 MHz gates feed the registers themselves, so they
++	 * open before anything else touches the block, the regmap included.
++	 */
++	writel(0, afe->base_addr + AUDIO_TOP_CON4);
++
++	if (!afe->regmap)
++		return 0;
++
++	regcache_cache_only(afe->regmap, false);
++	ret = regcache_sync(afe->regmap);
++	if (ret)
++		dev_warn(afe->dev, "regcache sync failed: %d\n", ret);
++
++	mt6897_afe_init_hw(afe);
++
++	return 0;
++}
++
++static int mt6897_afe_component_probe(struct snd_soc_component *component)
++{
++	return mtk_afe_add_sub_dai_control(component);
++}
++
++static int mt6897_afe_pcm_open(struct snd_soc_component *component,
++			       struct snd_pcm_substream *substream)
++{
++	substream->wait_time = msecs_to_jiffies(2 * 1000);
++
++	return 0;
++}
++
++static void mt6897_afe_pcm_free(struct snd_soc_component *component,
++				struct snd_pcm *pcm)
++{
++	snd_pcm_lib_preallocate_free_for_all(pcm);
++}
++
++static const struct snd_soc_component_driver mt6897_afe_component = {
++	.name = AFE_PCM_NAME,
++	.probe = mt6897_afe_component_probe,
++	.pcm_new = mtk_afe_pcm_new,
++	.pcm_free = mt6897_afe_pcm_free,
++	.open = mt6897_afe_pcm_open,
++	.pointer = mtk_afe_pcm_pointer,
++};
++
++static int mt6897_dai_memif_register(struct mtk_base_afe *afe)
++{
++	struct mtk_base_afe_dai *dai;
++
++	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
++	if (!dai)
++		return -ENOMEM;
++
++	dai->dai_drivers = mt6897_memif_dai_driver;
++	dai->num_dai_drivers = ARRAY_SIZE(mt6897_memif_dai_driver);
++	dai->dapm_widgets = mt6897_memif_widgets;
++	dai->num_dapm_widgets = ARRAY_SIZE(mt6897_memif_widgets);
++	dai->dapm_routes = mt6897_memif_routes;
++	dai->num_dapm_routes = ARRAY_SIZE(mt6897_memif_routes);
++
++	list_add(&dai->list, &afe->sub_dais);
++
++	return 0;
++}
++
++typedef int (*dai_register_cb)(struct mtk_base_afe *);
++static const dai_register_cb dai_register_cbs[] = {
++	mt6897_dai_adda_register,
++	mt6897_dai_i2s_register,
++	mt6897_dai_memif_register,
++};
++
++static int mt6897_afe_pcm_dev_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6897_afe_private *afe_priv;
++	struct mtk_base_afe *afe;
++	int i, irq_id, ret;
++
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(34));
++	if (ret)
++		return ret;
++
++	afe = devm_kzalloc(dev, sizeof(*afe), GFP_KERNEL);
++	if (!afe)
++		return -ENOMEM;
++
++	platform_set_drvdata(pdev, afe);
++	afe->dev = dev;
++
++	afe->platform_priv = devm_kzalloc(dev, sizeof(*afe_priv), GFP_KERNEL);
++	if (!afe->platform_priv)
++		return -ENOMEM;
++
++	afe_priv = afe->platform_priv;
++	ret = devm_mutex_init(dev, &afe_priv->dram_lock);
++	if (ret)
++		return ret;
++
++	afe_priv->topckgen = syscon_regmap_lookup_by_phandle(dev->of_node,
++							     "mediatek,topckgen");
++	if (IS_ERR(afe_priv->topckgen))
++		return dev_err_probe(dev, PTR_ERR(afe_priv->topckgen),
++				     "failed to get topckgen\n");
++
++	afe_priv->mtkaif_protocol = MTKAIF_PROTOCOL_2_CLK_P2;
++	for (i = 0; i < MT6897_MTKAIF_MISO_NUM; i++)
++		afe_priv->mtkaif_chosen_phase[i] = -1;
++
++	afe->base_addr = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(afe->base_addr))
++		return dev_err_probe(dev, PTR_ERR(afe->base_addr),
++				     "AFE base_addr not found\n");
++
++	ret = mt6897_init_clock(afe);
++	if (ret)
++		return ret;
++
++	afe->memif_32bit_supported = 1;
++	afe->memif_size = MT6897_MEMIF_NUM;
++	afe->memif = devm_kcalloc(dev, afe->memif_size, sizeof(*afe->memif),
++				  GFP_KERNEL);
++	if (!afe->memif)
++		return -ENOMEM;
++
++	for (i = 0; i < afe->memif_size; i++) {
++		afe->memif[i].data = &memif_data[i];
++		afe->memif[i].irq_usage = memif_irq_usage[i];
++		afe->memif[i].const_irq = 1;
++	}
++
++	mutex_init(&afe->irq_alloc_lock);
++
++	afe->irqs_size = MT6897_IRQ_NUM;
++	afe->irqs = devm_kcalloc(dev, afe->irqs_size, sizeof(*afe->irqs),
++				 GFP_KERNEL);
++	if (!afe->irqs)
++		return -ENOMEM;
++
++	for (i = 0; i < afe->irqs_size; i++)
++		afe->irqs[i].irq_data = &irq_data[i];
++
++	INIT_LIST_HEAD(&afe->sub_dais);
++
++	for (i = 0; i < ARRAY_SIZE(dai_register_cbs); i++) {
++		ret = dai_register_cbs[i](afe);
++		if (ret)
++			return dev_err_probe(dev, ret, "dai register %d failed\n", i);
++	}
++
++	ret = mtk_afe_combine_sub_dai(afe);
++	if (ret)
++		return dev_err_probe(dev, ret, "mtk_afe_combine_sub_dai failed\n");
++
++	afe->mtk_afe_hardware = &mt6897_afe_hardware;
++	afe->memif_fs = mt6897_memif_fs;
++	afe->irq_fs = mt6897_memif_fs;
++	afe->get_dai_fs = mt6897_get_dai_fs;
++	afe->get_memif_pbuf_size = mt6897_get_memif_pbuf_size;
++	afe->runtime_resume = mt6897_afe_runtime_resume;
++	afe->runtime_suspend = mt6897_afe_runtime_suspend;
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++
++	/*
++	 * The audio device is part of a genpd domain. As a syscore device the
++	 * domain is not turned off behind it across suspend.
++	 */
++	dev_pm_syscore_device(dev, true);
++
++	/* The regmap reads its defaults from the hardware */
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to resume the AFE\n");
++
++	afe->regmap = devm_regmap_init_mmio(dev, afe->base_addr,
++					    &mt6897_afe_regmap_config);
++	if (IS_ERR(afe->regmap)) {
++		ret = PTR_ERR(afe->regmap);
++		goto err_pm_put;
++	}
++
++	/* The first resume above had no regmap yet */
++	mt6897_afe_init_hw(afe);
++
++	irq_id = platform_get_irq(pdev, 0);
++	if (irq_id < 0) {
++		ret = irq_id;
++		goto err_pm_put;
++	}
++
++	ret = devm_request_irq(dev, irq_id, mt6897_afe_irq_handler,
++			       IRQF_TRIGGER_NONE, "mt6897-afe", afe);
++	if (ret) {
++		dev_err(dev, "failed to request the interrupt: %d\n", ret);
++		goto err_pm_put;
++	}
++
++	pm_runtime_put_sync(dev);
++
++	ret = devm_snd_soc_register_component(dev, &mt6897_afe_component,
++					      afe->dai_drivers,
++					      afe->num_dai_drivers);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to register the component\n");
++
++	return 0;
++
++err_pm_put:
++	pm_runtime_put_sync(dev);
++	return ret;
++}
++
++static const struct of_device_id mt6897_afe_pcm_dt_match[] = {
++	{ .compatible = "mediatek,mt6897-afe" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, mt6897_afe_pcm_dt_match);
++
++static const struct dev_pm_ops mt6897_afe_pm_ops = {
++	RUNTIME_PM_OPS(mt6897_afe_runtime_suspend, mt6897_afe_runtime_resume, NULL)
++};
++
++static struct platform_driver mt6897_afe_pcm_driver = {
++	.driver = {
++		.name = "mt6897-afe",
++		.of_match_table = mt6897_afe_pcm_dt_match,
++		.pm = pm_ptr(&mt6897_afe_pm_ops),
++	},
++	.probe = mt6897_afe_pcm_dev_probe,
++};
++module_platform_driver(mt6897_afe_pcm_driver);
++
++MODULE_DESCRIPTION("MediaTek ALSA SoC AFE platform driver for MT6897");
++MODULE_LICENSE("GPL");
+diff --git a/sound/soc/mediatek/mt6897/mt6897-dai-adda.c b/sound/soc/mediatek/mt6897/mt6897-dai-adda.c
+new file mode 100644
+index 0000000..6c53505
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-dai-adda.c
+@@ -0,0 +1,246 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MediaTek ALSA SoC Audio DAI ADDA control, the capture path for now
++ *
++ * Copyright (c) 2021 MediaTek Inc.
++ * Author: Tina Tsai <tina.tsai@mediatek.com>
++ */
++
++#include <linux/delay.h>
++#include <linux/regmap.h>
++#include <sound/pcm_params.h>
++
++#include "mt6897-afe-common.h"
++#include "mt6897-interconnection.h"
++
++enum {
++	MTK_AFE_ADDA_UL_RATE_8K,
++	MTK_AFE_ADDA_UL_RATE_16K,
++	MTK_AFE_ADDA_UL_RATE_32K,
++	MTK_AFE_ADDA_UL_RATE_48K,
++	MTK_AFE_ADDA_UL_RATE_96K,
++	MTK_AFE_ADDA_UL_RATE_192K,
++};
++
++enum {
++	SUPPLY_SEQ_ADDA_AFE_ON,
++	SUPPLY_SEQ_ADDA_AUD_PAD_TOP,
++	SUPPLY_SEQ_ADDA_MTKAIF_CFG,
++	SUPPLY_SEQ_ADDA_UL_ON,
++};
++
++/* The data of the two pins are delayed against each other by one of these */
++enum {
++	DELAY_DATA_MISO1,
++	DELAY_DATA_MISO2,
++};
++
++#define MT6897_UL_IIR_SW	0
++
++static int adda_ul_rate_transform(unsigned int rate)
++{
++	switch (rate) {
++	case 8000:
++		return MTK_AFE_ADDA_UL_RATE_8K;
++	case 16000:
++		return MTK_AFE_ADDA_UL_RATE_16K;
++	case 32000:
++		return MTK_AFE_ADDA_UL_RATE_32K;
++	case 48000:
++		return MTK_AFE_ADDA_UL_RATE_48K;
++	case 96000:
++		return MTK_AFE_ADDA_UL_RATE_96K;
++	case 192000:
++		return MTK_AFE_ADDA_UL_RATE_192K;
++	default:
++		return -EINVAL;
++	}
++}
++
++/* 1/fs at the lowest rate, before the AFE may go down */
++static int mtk_adda_ul_event(struct snd_soc_dapm_widget *w,
++			     struct snd_kcontrol *kcontrol, int event)
++{
++	if (event == SND_SOC_DAPM_POST_PMD)
++		usleep_range(125, 150);
++
++	return 0;
++}
++
++static int mtk_adda_pad_top_event(struct snd_soc_dapm_widget *w,
++				  struct snd_kcontrol *kcontrol, int event)
++{
++	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
++	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++
++	regmap_write(afe->regmap, AFE_AUD_PAD_TOP_CFG0,
++		     afe_priv->mtkaif_protocol == MTKAIF_PROTOCOL_2_CLK_P2 ?
++		     0xb8 : 0xb0);
++
++	return 0;
++}
++
++static int mtk_adda_mtkaif_cfg_event(struct snd_soc_dapm_widget *w,
++				     struct snd_kcontrol *kcontrol, int event)
++{
++	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
++	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	int delay_data, delay_cycle;
++
++	switch (afe_priv->mtkaif_protocol) {
++	case MTKAIF_PROTOCOL_2_CLK_P2:
++		regmap_write(afe->regmap, AFE_MTKAIF0_CFG0, 0x00010000);
++		regmap_write(afe->regmap, AFE_MTKAIF1_CFG0, 0x00010000);
++
++		/* The clock is inverted for the calibrated phase */
++		regmap_update_bits(afe->regmap, AFE_MTKAIF0_CFG0,
++				   RG_MTKAIF0_RXIF_CLKINV_MASK_SFT,
++				   0x1 << RG_MTKAIF0_RXIF_CLKINV_SFT);
++		regmap_update_bits(afe->regmap, AFE_MTKAIF1_CFG0,
++				   RG_MTKAIF1_RXIF_CLKINV_ADC_MASK_SFT,
++				   0x1 << RG_MTKAIF1_RXIF_CLKINV_ADC_SFT);
++
++		if (afe_priv->mtkaif_chosen_phase[0] < 0 ||
++		    afe_priv->mtkaif_chosen_phase[1] < 0) {
++			dev_warn(afe->dev, "no calibrated MTKAIF phase\n");
++			break;
++		}
++
++		/* Align the data of the two pins */
++		if (afe_priv->mtkaif_phase_cycle[0] >=
++		    afe_priv->mtkaif_phase_cycle[1]) {
++			delay_data = DELAY_DATA_MISO1;
++			delay_cycle = afe_priv->mtkaif_phase_cycle[0] -
++				      afe_priv->mtkaif_phase_cycle[1];
++		} else {
++			delay_data = DELAY_DATA_MISO2;
++			delay_cycle = afe_priv->mtkaif_phase_cycle[1] -
++				      afe_priv->mtkaif_phase_cycle[0];
++		}
++
++		regmap_update_bits(afe->regmap, AFE_MTKAIF0_RX_CFG2,
++				   RG_MTKAIF0_RXIF_DELAY_DATA_MASK_SFT,
++				   delay_data << RG_MTKAIF0_RXIF_DELAY_DATA_SFT);
++		regmap_update_bits(afe->regmap, AFE_MTKAIF0_RX_CFG2,
++				   RG_MTKAIF0_RXIF_DELAY_CYCLE_MASK_SFT,
++				   delay_cycle << RG_MTKAIF0_RXIF_DELAY_CYCLE_SFT);
++		break;
++	case MTKAIF_PROTOCOL_2:
++		regmap_write(afe->regmap, AFE_MTKAIF0_CFG0, 0x00010000);
++		regmap_write(afe->regmap, AFE_MTKAIF1_CFG0, 0x00010000);
++		break;
++	default:
++		regmap_write(afe->regmap, AFE_MTKAIF0_CFG0, 0x0);
++		regmap_write(afe->regmap, AFE_MTKAIF1_CFG0, 0x0);
++		break;
++	}
++
++	return 0;
++}
++
++static const struct snd_soc_dapm_widget mtk_dai_adda_widgets[] = {
++	SND_SOC_DAPM_SUPPLY_S("ADDA Enable", SUPPLY_SEQ_ADDA_AFE_ON,
++			      AUDIO_ENGEN_CON0, AUDIO_F3P25M_EN_ON_SFT, 0,
++			      NULL, 0),
++	SND_SOC_DAPM_SUPPLY_S("ADDA Capture Enable", SUPPLY_SEQ_ADDA_UL_ON,
++			      AFE_ADDA_UL0_SRC_CON0, UL_SRC_ON_TMP_CTL_SFT, 0,
++			      mtk_adda_ul_event, SND_SOC_DAPM_POST_PMD),
++	SND_SOC_DAPM_SUPPLY_S("AUD_PAD_TOP", SUPPLY_SEQ_ADDA_AUD_PAD_TOP,
++			      AFE_AUD_PAD_TOP_CFG0, RG_RX_FIFO_ON_SFT, 0,
++			      mtk_adda_pad_top_event, SND_SOC_DAPM_PRE_PMU),
++	SND_SOC_DAPM_SUPPLY_S("ADDA_MTKAIF_CFG", SUPPLY_SEQ_ADDA_MTKAIF_CFG,
++			      SND_SOC_NOPM, 0, 0,
++			      mtk_adda_mtkaif_cfg_event, SND_SOC_DAPM_PRE_PMU),
++};
++
++static const struct snd_soc_dapm_route mtk_dai_adda_routes[] = {
++	{"ADDA Capture", NULL, "ADDA Enable"},
++	{"ADDA Capture", NULL, "ADDA Capture Enable"},
++	{"ADDA Capture", NULL, "AUD_PAD_TOP"},
++	{"ADDA Capture", NULL, "ADDA_MTKAIF_CFG"},
++};
++
++static int mtk_dai_adda_hw_params(struct snd_pcm_substream *substream,
++				  struct snd_pcm_hw_params *params,
++				  struct snd_soc_dai *dai)
++{
++	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
++	int voice_mode = adda_ul_rate_transform(params_rate(params));
++	unsigned int ul_src_con0;
++
++	if (voice_mode < 0) {
++		dev_err(afe->dev, "unsupported rate %u\n", params_rate(params));
++		return voice_mode;
++	}
++
++	ul_src_con0 = (voice_mode & 0x7) << 17;
++	ul_src_con0 |= 1 << UL_IIR_ON_TMP_CTL_SFT;
++	ul_src_con0 |= (MT6897_UL_IIR_SW << UL_IIRMODE_CTL_SFT) & UL_IIRMODE_CTL_MASK_SFT;
++
++	/* A high pass at 35 Hz, for 48 kHz */
++	regmap_write(afe->regmap, AFE_ADDA_UL0_IIR_COEF_02_01, 0x00000000);
++	regmap_write(afe->regmap, AFE_ADDA_UL0_IIR_COEF_04_03, 0x00003fb8);
++	regmap_write(afe->regmap, AFE_ADDA_UL0_IIR_COEF_06_05, 0x3fb80000);
++	regmap_write(afe->regmap, AFE_ADDA_UL0_IIR_COEF_08_07, 0x3fb80000);
++	regmap_write(afe->regmap, AFE_ADDA_UL0_IIR_COEF_10_09, 0x0000c048);
++
++	regmap_update_bits(afe->regmap, AFE_ADDA_UL0_SRC_CON0,
++			   ~(u32)(1 << UL_SRC_ON_TMP_CTL_SFT), ul_src_con0);
++
++	/* The data on the link comes from analog microphones */
++	regmap_update_bits(afe->regmap, AFE_MTKAIF0_RX_CFG0, 0x1, 0x0);
++
++	return 0;
++}
++
++static const struct snd_soc_dai_ops mtk_dai_adda_ops = {
++	.hw_params = mtk_dai_adda_hw_params,
++};
++
++#define MTK_ADDA_CAPTURE_RATES (SNDRV_PCM_RATE_8000 |\
++				SNDRV_PCM_RATE_16000 |\
++				SNDRV_PCM_RATE_32000 |\
++				SNDRV_PCM_RATE_48000 |\
++				SNDRV_PCM_RATE_96000 |\
++				SNDRV_PCM_RATE_192000)
++
++#define MTK_ADDA_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
++			  SNDRV_PCM_FMTBIT_S24_LE |\
++			  SNDRV_PCM_FMTBIT_S32_LE)
++
++static struct snd_soc_dai_driver mtk_dai_adda_driver[] = {
++	{
++		.name = "ADDA",
++		.id = MT6897_DAI_ADDA,
++		.capture = {
++			.stream_name = "ADDA Capture",
++			.channels_min = 1,
++			.channels_max = 2,
++			.rates = MTK_ADDA_CAPTURE_RATES,
++			.formats = MTK_ADDA_FORMATS,
++		},
++		.ops = &mtk_dai_adda_ops,
++	},
++};
++
++int mt6897_dai_adda_register(struct mtk_base_afe *afe)
++{
++	struct mtk_base_afe_dai *dai;
++
++	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
++	if (!dai)
++		return -ENOMEM;
++
++	dai->dai_drivers = mtk_dai_adda_driver;
++	dai->num_dai_drivers = ARRAY_SIZE(mtk_dai_adda_driver);
++	dai->dapm_widgets = mtk_dai_adda_widgets;
++	dai->num_dapm_widgets = ARRAY_SIZE(mtk_dai_adda_widgets);
++	dai->dapm_routes = mtk_dai_adda_routes;
++	dai->num_dapm_routes = ARRAY_SIZE(mtk_dai_adda_routes);
++
++	list_add(&dai->list, &afe->sub_dais);
++
++	return 0;
++}
+diff --git a/sound/soc/mediatek/mt6897/mt6897-dai-i2s.c b/sound/soc/mediatek/mt6897/mt6897-dai-i2s.c
+new file mode 100644
+index 0000000..54d6e1d
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-dai-i2s.c
+@@ -0,0 +1,496 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MediaTek MT6897 ALSA SoC audio I2S (ETDM) control
++ *
++ * Copyright (c) 2021 MediaTek Inc.
++ * Author: Tina Tsai <tina.tsai@mediatek.com>
++ *
++ * Only ETDM 4 for now, the TDM link of the smart amplifiers. ETDM_OUT4 makes
++ * the clocks, which leave on the I2SIN4 pads, and ETDM_IN4 follows it.
++ */
++
++#include <linux/bitops.h>
++#include <linux/regmap.h>
++#include <sound/pcm_params.h>
++
++#include "mt6897-afe-clk.h"
++#include "mt6897-afe-common.h"
++#include "mt6897-interconnection.h"
++#include "../common/mtk-afe-fe-dai.h"
++
++enum {
++	ETDM_CLK_SOURCE_H26M,
++	ETDM_CLK_SOURCE_APLL,
++};
++
++enum {
++	ETDM_RELATCH_SEL_H26M,
++	ETDM_RELATCH_SEL_APLL,
++};
++
++enum {
++	ETDM_RATE_8K,
++	ETDM_RATE_12K,
++	ETDM_RATE_16K,
++	ETDM_RATE_24K,
++	ETDM_RATE_32K,
++	ETDM_RATE_48K,
++	ETDM_RATE_64K,
++	ETDM_RATE_96K,
++	ETDM_RATE_128K,
++	ETDM_RATE_192K,
++	ETDM_RATE_11025 = 16,
++	ETDM_RATE_22050,
++	ETDM_RATE_44100,
++	ETDM_RATE_88200,
++	ETDM_RATE_176400,
++};
++
++enum {
++	ETDM_CONN_8K,
++	ETDM_CONN_11K,
++	ETDM_CONN_12K,
++	ETDM_CONN_16K = 4,
++	ETDM_CONN_22K,
++	ETDM_CONN_24K,
++	ETDM_CONN_32K = 8,
++	ETDM_CONN_44K,
++	ETDM_CONN_48K,
++	ETDM_CONN_88K = 13,
++	ETDM_CONN_96K,
++	ETDM_CONN_176K = 17,
++	ETDM_CONN_192K,
++};
++
++enum {
++	ETDM_WLEN_16_BIT = 0xf,
++	ETDM_WLEN_32_BIT = 0x1f,
++};
++
++enum {
++	ETDM_SLAVE_SEL_ETDMIN4_MASTER = 0,
++	ETDM_SLAVE_SEL_ETDMOUT4_MASTER = 8,
++};
++
++enum {
++	MTK_DAI_ETDM_FORMAT_I2S,
++	MTK_DAI_ETDM_FORMAT_LJ,
++	MTK_DAI_ETDM_FORMAT_RJ,
++	MTK_DAI_ETDM_FORMAT_EIAJ,
++	MTK_DAI_ETDM_FORMAT_DSPA,
++	MTK_DAI_ETDM_FORMAT_DSPB,
++};
++
++struct mtk_afe_i2s_priv {
++	unsigned int rate;
++	unsigned int format;
++};
++
++static unsigned int get_etdm_wlen(snd_pcm_format_t format)
++{
++	return snd_pcm_format_physical_width(format) < 16 ?
++		ETDM_WLEN_16_BIT : ETDM_WLEN_32_BIT;
++}
++
++static unsigned int get_etdm_lrck_width(snd_pcm_format_t format)
++{
++	return snd_pcm_format_physical_width(format) - 1;
++}
++
++static int get_etdm_rate(unsigned int rate)
++{
++	switch (rate) {
++	case 8000:
++		return ETDM_RATE_8K;
++	case 11025:
++		return ETDM_RATE_11025;
++	case 12000:
++		return ETDM_RATE_12K;
++	case 16000:
++		return ETDM_RATE_16K;
++	case 22050:
++		return ETDM_RATE_22050;
++	case 24000:
++		return ETDM_RATE_24K;
++	case 32000:
++		return ETDM_RATE_32K;
++	case 44100:
++		return ETDM_RATE_44100;
++	case 48000:
++		return ETDM_RATE_48K;
++	case 88200:
++		return ETDM_RATE_88200;
++	case 96000:
++		return ETDM_RATE_96K;
++	case 176400:
++		return ETDM_RATE_176400;
++	case 192000:
++		return ETDM_RATE_192K;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int get_etdm_conn_rate(unsigned int rate)
++{
++	switch (rate) {
++	case 8000:
++		return ETDM_CONN_8K;
++	case 11025:
++		return ETDM_CONN_11K;
++	case 12000:
++		return ETDM_CONN_12K;
++	case 16000:
++		return ETDM_CONN_16K;
++	case 22050:
++		return ETDM_CONN_22K;
++	case 24000:
++		return ETDM_CONN_24K;
++	case 32000:
++		return ETDM_CONN_32K;
++	case 44100:
++		return ETDM_CONN_44K;
++	case 48000:
++		return ETDM_CONN_48K;
++	case 88200:
++		return ETDM_CONN_88K;
++	case 96000:
++		return ETDM_CONN_96K;
++	case 176400:
++		return ETDM_CONN_176K;
++	case 192000:
++		return ETDM_CONN_192K;
++	default:
++		return -EINVAL;
++	}
++}
++
++static struct mtk_afe_i2s_priv *get_i2s_priv(struct mtk_base_afe *afe, int id)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++
++	return afe_priv->dai_priv[id];
++}
++
++/* A loopback from ETDM_OUT4 to ETDM_IN4 checks the TDM frames without a codec */
++static const char *const i2sin4_loopback_text[] = { "Off", "ETDMOUT4" };
++static const u32 i2sin4_loopback_values[] = { 0, 8 };
++
++static SOC_VALUE_ENUM_SINGLE_DECL(i2sin4_loopback_enum, ETDM_4_7_COWORK_CON1,
++				  ETDM_IN4_SDATA0_SEL_SFT, ETDM_IN4_SDATA0_SEL_MASK,
++				  i2sin4_loopback_text, i2sin4_loopback_values);
++
++static const struct snd_kcontrol_new mtk_dai_i2s_controls[] = {
++	SOC_ENUM("I2SIN4 Loopback", i2sin4_loopback_enum),
++};
++
++/*
++ * The stereo memifs can reach any slot, so that the speakers can be laid out
++ * from the interconnect alone.
++ */
++#define MTK_I2SOUT4_MIX(_n, _reg) \
++static const struct snd_kcontrol_new mtk_i2sout4_ch##_n##_mix[] = { \
++	SOC_DAPM_SINGLE_AUTODISABLE("DL0_CH1", _reg, I_DL0_CH1, 1, 0), \
++	SOC_DAPM_SINGLE_AUTODISABLE("DL0_CH2", _reg, I_DL0_CH2, 1, 0), \
++	SOC_DAPM_SINGLE_AUTODISABLE("DL1_CH1", _reg, I_DL1_CH1, 1, 0), \
++	SOC_DAPM_SINGLE_AUTODISABLE("DL1_CH2", _reg, I_DL1_CH2, 1, 0), \
++	SOC_DAPM_SINGLE_AUTODISABLE("DL2_CH1", _reg, I_DL2_CH1, 1, 0), \
++	SOC_DAPM_SINGLE_AUTODISABLE("DL2_CH2", _reg, I_DL2_CH2, 1, 0), \
++}
++
++MTK_I2SOUT4_MIX(1, AFE_CONN116_1);
++MTK_I2SOUT4_MIX(2, AFE_CONN117_1);
++MTK_I2SOUT4_MIX(3, AFE_CONN118_1);
++MTK_I2SOUT4_MIX(4, AFE_CONN119_1);
++
++enum {
++	SUPPLY_SEQ_APLL,
++	SUPPLY_SEQ_I2S_EN,
++};
++
++static int mtk_apll_event(struct snd_soc_dapm_widget *w,
++			  struct snd_kcontrol *kcontrol, int event)
++{
++	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
++	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
++	int apll = mt6897_get_apll_by_name(w->name);
++
++	switch (event) {
++	case SND_SOC_DAPM_PRE_PMU:
++		return mt6897_apll_enable(afe, apll);
++	case SND_SOC_DAPM_POST_PMD:
++		mt6897_apll_disable(afe, apll);
++		return 0;
++	default:
++		return 0;
++	}
++}
++
++static const struct snd_soc_dapm_widget mtk_dai_i2s_widgets[] = {
++	SND_SOC_DAPM_MIXER("I2SOUT4_CH1", SND_SOC_NOPM, 0, 0,
++			   mtk_i2sout4_ch1_mix, ARRAY_SIZE(mtk_i2sout4_ch1_mix)),
++	SND_SOC_DAPM_MIXER("I2SOUT4_CH2", SND_SOC_NOPM, 0, 0,
++			   mtk_i2sout4_ch2_mix, ARRAY_SIZE(mtk_i2sout4_ch2_mix)),
++	SND_SOC_DAPM_MIXER("I2SOUT4_CH3", SND_SOC_NOPM, 0, 0,
++			   mtk_i2sout4_ch3_mix, ARRAY_SIZE(mtk_i2sout4_ch3_mix)),
++	SND_SOC_DAPM_MIXER("I2SOUT4_CH4", SND_SOC_NOPM, 0, 0,
++			   mtk_i2sout4_ch4_mix, ARRAY_SIZE(mtk_i2sout4_ch4_mix)),
++
++	SND_SOC_DAPM_SUPPLY_S("I2SIN4_EN", SUPPLY_SEQ_I2S_EN,
++			      ETDM_IN4_CON0, REG_ETDM_IN_EN_SFT, 0, NULL, 0),
++	SND_SOC_DAPM_SUPPLY_S("I2SOUT4_EN", SUPPLY_SEQ_I2S_EN,
++			      ETDM_OUT4_CON0, OUT_REG_ETDM_OUT_EN_SFT, 0, NULL, 0),
++
++	SND_SOC_DAPM_SUPPLY_S(APLL1_W_NAME, SUPPLY_SEQ_APLL, SND_SOC_NOPM, 0, 0,
++			      mtk_apll_event,
++			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
++	SND_SOC_DAPM_SUPPLY_S(APLL2_W_NAME, SUPPLY_SEQ_APLL, SND_SOC_NOPM, 0, 0,
++			      mtk_apll_event,
++			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
++};
++
++static int mtk_afe_i2s_apll_connect(struct snd_soc_dapm_widget *source,
++				    struct snd_soc_dapm_widget *sink)
++{
++	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(sink->dapm);
++	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
++	struct mtk_afe_i2s_priv *i2s_priv = get_i2s_priv(afe, MT6897_DAI_I2S_OUT4);
++
++	return mt6897_get_apll_by_rate(i2s_priv->rate) ==
++	       mt6897_get_apll_by_name(source->name);
++}
++
++static const struct snd_soc_dapm_route mtk_dai_i2s_routes[] = {
++	{"I2SOUT4", NULL, "I2SOUT4_CH1"},
++	{"I2SOUT4_CH1", "DL0_CH1", "DL0"},
++	{"I2SOUT4_CH1", "DL0_CH2", "DL0"},
++	{"I2SOUT4_CH1", "DL1_CH1", "DL1"},
++	{"I2SOUT4_CH1", "DL1_CH2", "DL1"},
++	{"I2SOUT4_CH1", "DL2_CH1", "DL2"},
++	{"I2SOUT4_CH1", "DL2_CH2", "DL2"},
++
++	{"I2SOUT4", NULL, "I2SOUT4_CH2"},
++	{"I2SOUT4_CH2", "DL0_CH1", "DL0"},
++	{"I2SOUT4_CH2", "DL0_CH2", "DL0"},
++	{"I2SOUT4_CH2", "DL1_CH1", "DL1"},
++	{"I2SOUT4_CH2", "DL1_CH2", "DL1"},
++	{"I2SOUT4_CH2", "DL2_CH1", "DL2"},
++	{"I2SOUT4_CH2", "DL2_CH2", "DL2"},
++
++	{"I2SOUT4", NULL, "I2SOUT4_CH3"},
++	{"I2SOUT4_CH3", "DL0_CH1", "DL0"},
++	{"I2SOUT4_CH3", "DL0_CH2", "DL0"},
++	{"I2SOUT4_CH3", "DL1_CH1", "DL1"},
++	{"I2SOUT4_CH3", "DL1_CH2", "DL1"},
++	{"I2SOUT4_CH3", "DL2_CH1", "DL2"},
++	{"I2SOUT4_CH3", "DL2_CH2", "DL2"},
++
++	{"I2SOUT4", NULL, "I2SOUT4_CH4"},
++	{"I2SOUT4_CH4", "DL0_CH1", "DL0"},
++	{"I2SOUT4_CH4", "DL0_CH2", "DL0"},
++	{"I2SOUT4_CH4", "DL1_CH1", "DL1"},
++	{"I2SOUT4_CH4", "DL1_CH2", "DL1"},
++	{"I2SOUT4_CH4", "DL2_CH1", "DL2"},
++	{"I2SOUT4_CH4", "DL2_CH2", "DL2"},
++
++	/* One clock domain, whichever direction is in use */
++	{"I2SOUT4", NULL, "I2SOUT4_EN"},
++	{"I2SOUT4", NULL, "I2SIN4_EN"},
++	{"I2SIN4", NULL, "I2SOUT4_EN"},
++	{"I2SIN4", NULL, "I2SIN4_EN"},
++
++	{"I2SOUT4", NULL, APLL1_W_NAME, mtk_afe_i2s_apll_connect},
++	{"I2SOUT4", NULL, APLL2_W_NAME, mtk_afe_i2s_apll_connect},
++	{"I2SIN4", NULL, APLL1_W_NAME, mtk_afe_i2s_apll_connect},
++	{"I2SIN4", NULL, APLL2_W_NAME, mtk_afe_i2s_apll_connect},
++};
++
++static void mtk_dai_etdm4_config(struct mtk_base_afe *afe,
++				 struct mtk_afe_i2s_priv *i2s_priv,
++				 unsigned int rate_reg, unsigned int conn_rate,
++				 snd_pcm_format_t format, unsigned int channels)
++{
++	struct regmap *map = afe->regmap;
++	unsigned int cowork;
++
++	/* The data of the internal loopback does not go through the pads */
++	regmap_read(map, ETDM_4_7_COWORK_CON1, &cowork);
++
++	/* ETDM_IN4 follows the clocks of ETDM_OUT4 */
++	regmap_update_bits(map, ETDM_IN4_CON1, REG_INITIAL_COUNT_MASK_SFT,
++			   0x5 << REG_INITIAL_COUNT_SFT);
++	/* 3: pad top, 5: no pad top */
++	regmap_update_bits(map, ETDM_IN4_CON1, REG_INITIAL_POINT_MASK_SFT,
++			   (cowork & ETDM_IN4_SDATA0_SEL_MASK ? 0x5 : 0x3) <<
++			   REG_INITIAL_POINT_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON1, REG_LRCK_RESET_MASK_SFT,
++			   0x1 << REG_LRCK_RESET_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON2, REG_CLOCK_SOURCE_SEL_MASK_SFT,
++			   ETDM_CLK_SOURCE_APLL << REG_CLOCK_SOURCE_SEL_SFT);
++	/* 0: manual, 1: auto */
++	regmap_update_bits(map, ETDM_IN4_CON2, REG_CK_EN_SEL_AUTO_MASK_SFT,
++			   0x1 << REG_CK_EN_SEL_AUTO_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON2, REG_MULTI_IP_MODE_MASK_SFT, 0);
++	regmap_update_bits(map, ETDM_IN4_CON3, REG_FS_TIMING_SEL_MASK_SFT,
++			   rate_reg << REG_FS_TIMING_SEL_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON4, REG_RELATCH_1X_EN_SEL_MASK_SFT,
++			   conn_rate << REG_RELATCH_1X_EN_SEL_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON8, REG_ETDM_USE_AFIFO_MASK_SFT, 0);
++	regmap_update_bits(map, ETDM_IN4_CON8, REG_AFIFO_MODE_MASK_SFT, 0);
++	regmap_update_bits(map, ETDM_IN4_CON9, REG_ALMOST_END_CH_COUNT_MASK_SFT, 0);
++	regmap_update_bits(map, ETDM_IN4_CON9, REG_ALMOST_END_BIT_COUNT_MASK_SFT, 0);
++	regmap_update_bits(map, ETDM_IN4_CON9, REG_OUT2LATCH_TIME_MASK_SFT,
++			   0x6 << REG_OUT2LATCH_TIME_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON0, REG_FMT_MASK_SFT,
++			   i2s_priv->format << REG_FMT_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON0, REG_RELATCH_1X_EN_DOMAIN_SEL_MASK_SFT,
++			   ETDM_RELATCH_SEL_APLL << REG_RELATCH_1X_EN_DOMAIN_SEL_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON0, REG_BIT_LENGTH_MASK_SFT,
++			   get_etdm_lrck_width(format) << REG_BIT_LENGTH_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON0, REG_WORD_LENGTH_MASK_SFT,
++			   get_etdm_wlen(format) << REG_WORD_LENGTH_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON0, REG_CH_NUM_MASK_SFT,
++			   (channels - 1) << REG_CH_NUM_SFT);
++	regmap_update_bits(map, ETDM_IN4_CON0, REG_SYNC_MODE_MASK_SFT,
++			   0x1 << REG_SYNC_MODE_SFT);
++	regmap_update_bits(map, ETDM_4_7_COWORK_CON0, ETDM_IN4_SLAVE_SEL_MASK_SFT,
++			   ETDM_SLAVE_SEL_ETDMOUT4_MASTER << ETDM_IN4_SLAVE_SEL_SFT);
++
++	/* ETDM_OUT4 is the master */
++	regmap_update_bits(map, ETDM_OUT4_CON1, OUT_REG_INITIAL_COUNT_MASK_SFT,
++			   0x5 << OUT_REG_INITIAL_COUNT_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON1, OUT_REG_INITIAL_POINT_MASK_SFT,
++			   0x6 << OUT_REG_INITIAL_POINT_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON1, OUT_REG_LRCK_RESET_MASK_SFT,
++			   0x1 << OUT_REG_LRCK_RESET_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON4, OUT_REG_FS_TIMING_SEL_MASK_SFT,
++			   rate_reg << OUT_REG_FS_TIMING_SEL_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON4, OUT_REG_CLOCK_SOURCE_SEL_MASK_SFT,
++			   ETDM_CLK_SOURCE_APLL << OUT_REG_CLOCK_SOURCE_SEL_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON4, OUT_REG_RELATCH_EN_SEL_MASK_SFT,
++			   conn_rate << OUT_REG_RELATCH_EN_SEL_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON0, OUT_REG_FMT_MASK_SFT,
++			   i2s_priv->format << OUT_REG_FMT_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON0, OUT_REG_RELATCH_DOMAIN_SEL_MASK_SFT,
++			   ETDM_RELATCH_SEL_APLL << OUT_REG_RELATCH_DOMAIN_SEL_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON0, OUT_REG_BIT_LENGTH_MASK_SFT,
++			   get_etdm_lrck_width(format) << OUT_REG_BIT_LENGTH_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON0, OUT_REG_WORD_LENGTH_MASK_SFT,
++			   get_etdm_wlen(format) << OUT_REG_WORD_LENGTH_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON0, OUT_REG_CH_NUM_MASK_SFT,
++			   (channels - 1) << OUT_REG_CH_NUM_SFT);
++	regmap_update_bits(map, ETDM_OUT4_CON0, OUT_REG_SYNC_MODE_MASK_SFT, 0);
++	regmap_update_bits(map, ETDM_4_7_COWORK_CON0, ETDM_OUT4_SLAVE_SEL_MASK_SFT,
++			   ETDM_SLAVE_SEL_ETDMIN4_MASTER << ETDM_OUT4_SLAVE_SEL_SFT);
++}
++
++static int mtk_dai_i2s_hw_params(struct snd_pcm_substream *substream,
++				 struct snd_pcm_hw_params *params,
++				 struct snd_soc_dai *dai)
++{
++	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct mtk_afe_i2s_priv *i2s_priv = get_i2s_priv(afe, MT6897_DAI_I2S_OUT4);
++	unsigned int rate = params_rate(params);
++	int rate_reg = get_etdm_rate(rate);
++	int conn_rate = get_etdm_conn_rate(rate);
++
++	if (rate_reg < 0 || conn_rate < 0) {
++		dev_err(afe->dev, "unsupported rate %u\n", rate);
++		return -EINVAL;
++	}
++
++	i2s_priv->rate = rate;
++	mtk_dai_etdm4_config(afe, i2s_priv, rate_reg, conn_rate,
++			     params_format(params), params_channels(params));
++
++	return 0;
++}
++
++static int mtk_dai_i2s_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
++{
++	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct mtk_afe_i2s_priv *i2s_priv = get_i2s_priv(afe, MT6897_DAI_I2S_OUT4);
++
++	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
++	case SND_SOC_DAIFMT_I2S:
++		i2s_priv->format = MTK_DAI_ETDM_FORMAT_I2S;
++		break;
++	case SND_SOC_DAIFMT_LEFT_J:
++		i2s_priv->format = MTK_DAI_ETDM_FORMAT_LJ;
++		break;
++	case SND_SOC_DAIFMT_RIGHT_J:
++		i2s_priv->format = MTK_DAI_ETDM_FORMAT_RJ;
++		break;
++	case SND_SOC_DAIFMT_DSP_A:
++		i2s_priv->format = MTK_DAI_ETDM_FORMAT_DSPA;
++		break;
++	case SND_SOC_DAIFMT_DSP_B:
++		i2s_priv->format = MTK_DAI_ETDM_FORMAT_DSPB;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static const struct snd_soc_dai_ops mtk_dai_i2s_ops = {
++	.hw_params = mtk_dai_i2s_hw_params,
++	.set_fmt = mtk_dai_i2s_set_fmt,
++};
++
++#define MTK_ETDM_RATES SNDRV_PCM_RATE_8000_192000
++#define MTK_ETDM_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
++			  SNDRV_PCM_FMTBIT_S24_LE |\
++			  SNDRV_PCM_FMTBIT_S32_LE)
++
++#define MT6897_I2S_DAI(_name, _id, _max_ch, _dir) \
++{ \
++	.name = #_name, \
++	.id = _id, \
++	._dir = { \
++		.stream_name = #_name, \
++		.channels_min = 1, \
++		.channels_max = _max_ch, \
++		.rates = MTK_ETDM_RATES, \
++		.formats = MTK_ETDM_FORMATS, \
++	}, \
++	.ops = &mtk_dai_i2s_ops, \
++}
++
++static struct snd_soc_dai_driver mtk_dai_i2s_driver[] = {
++	MT6897_I2S_DAI(I2SIN4, MT6897_DAI_I2S_IN4, 8, capture),
++	MT6897_I2S_DAI(I2SOUT4, MT6897_DAI_I2S_OUT4, 8, playback),
++};
++
++int mt6897_dai_i2s_register(struct mtk_base_afe *afe)
++{
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	struct mtk_afe_i2s_priv *i2s_priv;
++	struct mtk_base_afe_dai *dai;
++
++	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
++	if (!dai)
++		return -ENOMEM;
++
++	i2s_priv = devm_kzalloc(afe->dev, sizeof(*i2s_priv), GFP_KERNEL);
++	if (!i2s_priv)
++		return -ENOMEM;
++
++	i2s_priv->rate = 48000;
++	afe_priv->dai_priv[MT6897_DAI_I2S_IN4] = i2s_priv;
++	afe_priv->dai_priv[MT6897_DAI_I2S_OUT4] = i2s_priv;
++
++	dai->dai_drivers = mtk_dai_i2s_driver;
++	dai->num_dai_drivers = ARRAY_SIZE(mtk_dai_i2s_driver);
++	dai->controls = mtk_dai_i2s_controls;
++	dai->num_controls = ARRAY_SIZE(mtk_dai_i2s_controls);
++	dai->dapm_widgets = mtk_dai_i2s_widgets;
++	dai->num_dapm_widgets = ARRAY_SIZE(mtk_dai_i2s_widgets);
++	dai->dapm_routes = mtk_dai_i2s_routes;
++	dai->num_dapm_routes = ARRAY_SIZE(mtk_dai_i2s_routes);
++
++	list_add(&dai->list, &afe->sub_dais);
++
++	return 0;
++}
+diff --git a/sound/soc/mediatek/mt6897/mt6897-interconnection.h b/sound/soc/mediatek/mt6897/mt6897-interconnection.h
+new file mode 100644
+index 0000000..1358dd5
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-interconnection.h
+@@ -0,0 +1,112 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Mediatek MT6897 audio driver interconnection definition
++ *
++ * Copyright (c) 2021 MediaTek Inc.
++ * Author: Tina Tsai <tina.tsai@mediatek.com>
++ */
++
++#ifndef _MT6897_INTERCONNECTION_H_
++#define _MT6897_INTERCONNECTION_H_
++
++/* in port define */
++#define I_CONNSYS_I2S_CH1 0
++#define I_CONNSYS_I2S_CH2 1
++#define I_GAIN0_OUT_CH1 6
++#define I_GAIN0_OUT_CH2 7
++#define I_GAIN1_OUT_CH1 8
++#define I_GAIN1_OUT_CH2 9
++#define I_GAIN2_OUT_CH1 10
++#define I_GAIN2_OUT_CH2 11
++#define I_GAIN3_OUT_CH1 12
++#define I_GAIN3_OUT_CH2 13
++#define I_STF_CH1 14
++#define I_ADDA_UL_CH1 16
++#define I_ADDA_UL_CH2 17
++#define I_ADDA_UL_CH3 18
++#define I_ADDA_UL_CH4 19
++#define I_UL_PROX_CH1 20
++#define I_UL_PROX_CH2 21
++#define I_ADDA_UL_CH5 24
++#define I_ADDA_UL_CH6 25
++#define I_DMIC0_CH1 28
++#define I_DMIC0_CH2 29
++#define I_DMIC1_CH1 30
++#define I_DMIC1_CH2 31
++
++/* in port define >= 32 */
++#define I_32_OFFSET 32
++#define I_DL0_CH1 (32 - I_32_OFFSET)
++#define I_DL0_CH2 (33 - I_32_OFFSET)
++#define I_DL1_CH1 (34 - I_32_OFFSET)
++#define I_DL1_CH2 (35 - I_32_OFFSET)
++#define I_DL2_CH1 (36 - I_32_OFFSET)
++#define I_DL2_CH2 (37 - I_32_OFFSET)
++#define I_DL3_CH1 (38 - I_32_OFFSET)
++#define I_DL3_CH2 (39 - I_32_OFFSET)
++#define I_DL4_CH1 (40 - I_32_OFFSET)
++#define I_DL4_CH2 (41 - I_32_OFFSET)
++#define I_DL5_CH1 (42 - I_32_OFFSET)
++#define I_DL5_CH2 (43 - I_32_OFFSET)
++#define I_DL6_CH1 (44 - I_32_OFFSET)
++#define I_DL6_CH2 (45 - I_32_OFFSET)
++#define I_DL7_CH1 (46 - I_32_OFFSET)
++#define I_DL7_CH2 (47 - I_32_OFFSET)
++#define I_DL8_CH1 (48 - I_32_OFFSET)
++#define I_DL8_CH2 (49 - I_32_OFFSET)
++#define I_DL_24CH_CH1 (54 - I_32_OFFSET)
++#define I_DL_24CH_CH2 (55 - I_32_OFFSET)
++#define I_DL_24CH_CH3 (56 - I_32_OFFSET)
++#define I_DL_24CH_CH4 (57 - I_32_OFFSET)
++#define I_DL_24CH_CH5 (58 - I_32_OFFSET)
++#define I_DL_24CH_CH6 (59 - I_32_OFFSET)
++#define I_DL_24CH_CH7 (60 - I_32_OFFSET)
++#define I_DL_24CH_CH8 (61 - I_32_OFFSET)
++
++/* in port define >= 64 */
++#define I_64_OFFSET 64
++#define I_DL23_CH1 (78 - I_64_OFFSET)
++#define I_DL23_CH2 (79 - I_64_OFFSET)
++#define I_DL24_CH1 (80 - I_64_OFFSET)
++#define I_DL24_CH2 (81 - I_64_OFFSET)
++#define I_DL25_CH1 (82 - I_64_OFFSET)
++#define I_DL25_CH2 (83 - I_64_OFFSET)
++
++/* in port define >= 128 */
++#define I_128_OFFSET 128
++#define I_PCM_0_CAP_CH1 (130 - I_128_OFFSET)
++#define I_PCM_0_CAP_CH2 (131 - I_128_OFFSET)
++#define I_PCM_1_CAP_CH1 (132 - I_128_OFFSET)
++#define I_PCM_1_CAP_CH2 (133 - I_128_OFFSET)
++#define I_I2SIN0_CH1 (134 - I_128_OFFSET)
++#define I_I2SIN0_CH2 (135 - I_128_OFFSET)
++#define I_I2SIN1_CH1 (136 - I_128_OFFSET)
++#define I_I2SIN1_CH2 (137 - I_128_OFFSET)
++#define I_I2SIN2_CH1 (138 - I_128_OFFSET)
++#define I_I2SIN2_CH2 (139 - I_128_OFFSET)
++#define I_I2SIN4_CH1 (142 - I_128_OFFSET)
++#define I_I2SIN4_CH2 (143 - I_128_OFFSET)
++#define I_I2SIN4_CH3 (144 - I_128_OFFSET)
++#define I_I2SIN4_CH4 (145 - I_128_OFFSET)
++#define I_I2SIN4_CH5 (146 - I_128_OFFSET)
++#define I_I2SIN4_CH6 (147 - I_128_OFFSET)
++#define I_I2SIN4_CH7 (148 - I_128_OFFSET)
++#define I_I2SIN4_CH8 (149 - I_128_OFFSET)
++
++/* in port define >= 160 */
++#define I_160_OFFSET 160
++#define I_I2SIN6_CH1 (166 - I_160_OFFSET)
++#define I_I2SIN6_CH2 (167 - I_160_OFFSET)
++
++/* in port define >= 192 */
++#define I_192_OFFSET 192
++#define I_SRC_0_OUT_CH1 (198 - I_192_OFFSET)
++#define I_SRC_0_OUT_CH2 (199 - I_192_OFFSET)
++#define I_SRC_1_OUT_CH1 (200 - I_192_OFFSET)
++#define I_SRC_1_OUT_CH2 (201 - I_192_OFFSET)
++#define I_SRC_2_OUT_CH1 (202 - I_192_OFFSET)
++#define I_SRC_2_OUT_CH2 (203 - I_192_OFFSET)
++#define I_SRC_3_OUT_CH1 (204 - I_192_OFFSET)
++#define I_SRC_3_OUT_CH2 (205 - I_192_OFFSET)
++
++#endif
+diff --git a/sound/soc/mediatek/mt6897/mt6897-mt6368.c b/sound/soc/mediatek/mt6897/mt6897-mt6368.c
+new file mode 100644
+index 0000000..bf746b4
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-mt6368.c
+@@ -0,0 +1,298 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MediaTek ALSA SoC machine driver for MT6897 boards with the MT6368 PMIC codec
++ * and smart amplifiers on a TDM link
++ */
++
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++
++#include "mt6897-afe-common.h"
++#include "../common/mtk-afe-platform-driver.h"
++#include "../common/mtk-soundcard-driver.h"
++#include "../../codecs/mt6368.h"
++
++#define CKSYS_AUD_TOP_CFG	0x032c
++#define CKSYS_AUD_TOP_MON	0x0330
++
++/* The phases of the link to the MT6368 that the codec can choose from */
++#define MT6897_MTKAIF_PHASES	42
++
++/*
++ * The amplifiers' register files fix their TDM link to 48 kHz, four slots of
++ * 32 bits, and the AFE has no rate converter between the memifs and the link.
++ */
++#define MT6897_TDM_RATE		48000
++#define MT6897_TDM_SLOTS	4
++
++/*
++ * Find, for each data pin of the link, the phase of the codec at which the delay
++ * of the returning test pulse changes, and use the one before it.
++ */
++static int mt6897_mt6368_mtkaif_calibration(struct snd_soc_pcm_runtime *rtd)
++{
++	struct snd_soc_component *cmpnt_afe = snd_soc_rtdcom_lookup(rtd, AFE_PCM_NAME);
++	struct snd_soc_component *cmpnt_codec = snd_soc_rtd_to_codec(rtd, 0)->component;
++	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt_afe);
++	struct mt6897_afe_private *afe_priv = afe->platform_priv;
++	int prev_cycle[MT6897_MTKAIF_MISO_NUM] = { };
++	bool ok = true;
++	int phase, i, ret;
++
++	ret = pm_runtime_resume_and_get(afe->dev);
++	if (ret)
++		return ret;
++
++	ret = mt6368_mtkaif_calibration_enable(cmpnt_codec);
++	if (ret)
++		goto out_pm;
++
++	/* Protocol 2 with the second clock phase */
++	regmap_update_bits(afe->regmap, AFE_AUD_PAD_TOP_CFG0, 0xff, 0xb8);
++	regmap_update_bits(afe->regmap, AFE_AUD_PAD_TOP_CFG0, 0xff, 0xb9);
++
++	/* The test: a synchronizer pulse */
++	regmap_update_bits(afe_priv->topckgen, CKSYS_AUD_TOP_CFG, 0xffff, 0x4);
++
++	for (i = 0; i < MT6897_MTKAIF_MISO_NUM; i++)
++		afe_priv->mtkaif_chosen_phase[i] = -1;
++
++	for (phase = 0; phase <= MT6897_MTKAIF_PHASES && ok; phase++) {
++		int cycle[MT6897_MTKAIF_MISO_NUM] = { -1, -1, -1 };
++		bool done[MT6897_MTKAIF_MISO_NUM] = { };
++		unsigned int monitor;
++		int counter = 0;
++
++		mt6368_set_mtkaif_calibration_phase(cmpnt_codec, phase, phase, phase);
++
++		regmap_update_bits(afe_priv->topckgen, CKSYS_AUD_TOP_CFG, 0x1, 0x1);
++
++		while (!done[0] || !done[1] || !done[2]) {
++			regmap_read(afe_priv->topckgen, CKSYS_AUD_TOP_MON, &monitor);
++
++			for (i = 0; i < MT6897_MTKAIF_MISO_NUM; i++) {
++				if (!done[i] && (monitor >> (28 + i)) & 0x1) {
++					done[i] = true;
++					cycle[i] = (monitor >> (4 * i)) & 0xf;
++				}
++			}
++
++			if (++counter > 10000) {
++				dev_err(afe->dev, "MTKAIF test timed out at phase %d: %#x\n",
++					phase, monitor);
++				ok = false;
++				break;
++			}
++		}
++
++		if (phase == 0)
++			memcpy(prev_cycle, cycle, sizeof(prev_cycle));
++
++		for (i = 0; i < MT6897_MTKAIF_MISO_NUM; i++) {
++			if (cycle[i] != prev_cycle[i] &&
++			    afe_priv->mtkaif_chosen_phase[i] < 0) {
++				afe_priv->mtkaif_chosen_phase[i] = phase - 1;
++				afe_priv->mtkaif_phase_cycle[i] = prev_cycle[i];
++			}
++		}
++
++		regmap_update_bits(afe_priv->topckgen, CKSYS_AUD_TOP_CFG, 0x1, 0x0);
++
++		if (afe_priv->mtkaif_chosen_phase[0] >= 0 &&
++		    afe_priv->mtkaif_chosen_phase[1] >= 0 &&
++		    afe_priv->mtkaif_chosen_phase[2] >= 0)
++			break;
++	}
++
++	mt6368_set_mtkaif_calibration_phase(cmpnt_codec,
++					    max(afe_priv->mtkaif_chosen_phase[0], 0),
++					    max(afe_priv->mtkaif_chosen_phase[1], 0),
++					    max(afe_priv->mtkaif_chosen_phase[2], 0));
++
++	regmap_update_bits(afe->regmap, AFE_AUD_PAD_TOP_CFG0, 0xff, 0xb8);
++
++	mt6368_mtkaif_calibration_disable(cmpnt_codec);
++
++	dev_info(afe->dev, "MTKAIF phases %d/%d/%d, cycles %d/%d/%d\n",
++		 afe_priv->mtkaif_chosen_phase[0], afe_priv->mtkaif_chosen_phase[1],
++		 afe_priv->mtkaif_chosen_phase[2], afe_priv->mtkaif_phase_cycle[0],
++		 afe_priv->mtkaif_phase_cycle[1], afe_priv->mtkaif_phase_cycle[2]);
++
++out_pm:
++	pm_runtime_put(afe->dev);
++
++	return ret;
++}
++
++static int mt6897_adda_init(struct snd_soc_pcm_runtime *rtd)
++{
++	struct snd_soc_component *cmpnt_afe = snd_soc_rtdcom_lookup(rtd, AFE_PCM_NAME);
++	struct snd_soc_component *cmpnt_codec = snd_soc_rtd_to_codec(rtd, 0)->component;
++	struct mtk_base_afe *afe;
++	struct mt6897_afe_private *afe_priv;
++
++	if (!cmpnt_afe)
++		return -EINVAL;
++
++	/* The card without a codec on this link tries the AFE alone */
++	if (strcmp(cmpnt_codec->name, "snd-soc-dummy") == 0)
++		return 0;
++
++	afe = snd_soc_component_get_drvdata(cmpnt_afe);
++	afe_priv = afe->platform_priv;
++
++	mt6368_set_mtkaif_protocol(cmpnt_codec, afe_priv->mtkaif_protocol);
++
++	return mt6897_mt6368_mtkaif_calibration(rtd);
++}
++
++static int mt6897_fe_startup(struct snd_pcm_substream *substream)
++{
++	return snd_pcm_hw_constraint_single(substream->runtime,
++					    SNDRV_PCM_HW_PARAM_RATE,
++					    MT6897_TDM_RATE);
++}
++
++static const struct snd_soc_ops mt6897_fe_ops = {
++	.startup = mt6897_fe_startup,
++};
++
++static int mt6897_tdm_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
++				      struct snd_pcm_hw_params *params)
++{
++	hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE)->min = MT6897_TDM_RATE;
++	hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE)->max = MT6897_TDM_RATE;
++	hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS)->min = MT6897_TDM_SLOTS;
++	hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS)->max = MT6897_TDM_SLOTS;
++
++	snd_mask_reset_range(hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT),
++			     0, (__force unsigned int)SNDRV_PCM_FORMAT_LAST);
++	params_set_format(params, SNDRV_PCM_FORMAT_S32_LE);
++
++	return 0;
++}
++
++SND_SOC_DAILINK_DEFS(playback0,
++		     DAILINK_COMP_ARRAY(COMP_CPU("DL0")),
++		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
++		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
++SND_SOC_DAILINK_DEFS(playback1,
++		     DAILINK_COMP_ARRAY(COMP_CPU("DL1")),
++		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
++		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
++SND_SOC_DAILINK_DEFS(capture0,
++		     DAILINK_COMP_ARRAY(COMP_CPU("UL0")),
++		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
++		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
++SND_SOC_DAILINK_DEFS(capture1,
++		     DAILINK_COMP_ARRAY(COMP_CPU("UL1")),
++		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
++		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
++SND_SOC_DAILINK_DEFS(i2sout4,
++		     DAILINK_COMP_ARRAY(COMP_CPU("I2SOUT4")),
++		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
++		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
++SND_SOC_DAILINK_DEFS(i2sin4,
++		     DAILINK_COMP_ARRAY(COMP_CPU("I2SIN4")),
++		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
++		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
++SND_SOC_DAILINK_DEFS(adda,
++		     DAILINK_COMP_ARRAY(COMP_CPU("ADDA")),
++		     DAILINK_COMP_ARRAY(COMP_DUMMY()),
++		     DAILINK_COMP_ARRAY(COMP_EMPTY()));
++
++#define MT6897_FE(_name, _dailink, _dir) \
++	{ \
++		.name = _name "_FE", \
++		.stream_name = _name, \
++		.trigger = { SND_SOC_DPCM_TRIGGER_PRE, SND_SOC_DPCM_TRIGGER_PRE }, \
++		.dynamic = 1, \
++		._dir = 1, \
++		.ops = &mt6897_fe_ops, \
++		SND_SOC_DAILINK_REG(_dailink), \
++	}
++
++static struct snd_soc_dai_link mt6897_dai_links[] = {
++	/* Front ends, the PCM devices */
++	MT6897_FE("DL0", playback0, playback_only),
++	MT6897_FE("DL1", playback1, playback_only),
++	MT6897_FE("UL0", capture0, capture_only),
++	MT6897_FE("UL1", capture1, capture_only),
++
++	/* Back ends */
++	{
++		.name = "I2SOUT4_BE",
++		.no_pcm = 1,
++		.playback_only = 1,
++		.ignore_suspend = 1,
++		.ignore_pmdown_time = 1,
++		.be_hw_params_fixup = mt6897_tdm_hw_params_fixup,
++		SND_SOC_DAILINK_REG(i2sout4),
++	},
++	{
++		.name = "I2SIN4_BE",
++		.no_pcm = 1,
++		.capture_only = 1,
++		.ignore_suspend = 1,
++		.be_hw_params_fixup = mt6897_tdm_hw_params_fixup,
++		SND_SOC_DAILINK_REG(i2sin4),
++	},
++	{
++		.name = "ADDA_BE",
++		.no_pcm = 1,
++		.capture_only = 1,
++		.ignore_suspend = 1,
++		.init = mt6897_adda_init,
++		SND_SOC_DAILINK_REG(adda),
++	},
++};
++
++static const struct snd_soc_dapm_widget mt6897_widgets[] = {
++	SND_SOC_DAPM_SPK("Speakers", NULL),
++};
++
++static const struct snd_kcontrol_new mt6897_controls[] = {
++	SOC_DAPM_PIN_SWITCH("Speakers"),
++};
++
++static struct snd_soc_card mt6897_soc_card = {
++	.owner = THIS_MODULE,
++	.dai_link = mt6897_dai_links,
++	.num_links = ARRAY_SIZE(mt6897_dai_links),
++	.dapm_widgets = mt6897_widgets,
++	.num_dapm_widgets = ARRAY_SIZE(mt6897_widgets),
++	.controls = mt6897_controls,
++	.num_controls = ARRAY_SIZE(mt6897_controls),
++};
++
++static const struct mtk_soundcard_pdata mt6897_mt6368_card = {
++	.card_name = "mt6897_mt6368",
++	.card_data = &(struct mtk_platform_card_data) {
++		.card = &mt6897_soc_card,
++	},
++};
++
++static const struct of_device_id mt6897_mt6368_dt_match[] = {
++	{ .compatible = "mediatek,mt6897-mt6368-sound", .data = &mt6897_mt6368_card },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, mt6897_mt6368_dt_match);
++
++static struct platform_driver mt6897_mt6368_driver = {
++	.driver = {
++		.name = "mt6897-mt6368",
++		.of_match_table = mt6897_mt6368_dt_match,
++		.pm = &snd_soc_pm_ops,
++	},
++	.probe = mtk_soundcard_common_probe,
++};
++module_platform_driver(mt6897_mt6368_driver);
++
++MODULE_DESCRIPTION("MediaTek ALSA SoC machine driver for MT6897 with MT6368");
++MODULE_LICENSE("GPL");
+diff --git a/sound/soc/mediatek/mt6897/mt6897-reg.h b/sound/soc/mediatek/mt6897/mt6897-reg.h
+new file mode 100644
+index 0000000..ea73ce2
+--- /dev/null
++++ b/sound/soc/mediatek/mt6897/mt6897-reg.h
+@@ -0,0 +1,387 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * MediaTek MT6897 audio driver register definitions
++ *
++ * Copyright (c) 2021 MediaTek Inc.
++ * Author: Tina Tsai <tina.tsai@mediatek.com>
++ */
++
++#ifndef _MT6897_REG_H_
++#define _MT6897_REG_H_
++
++enum {
++	MT6897_MEMIF_PBUF_SIZE_32_BYTES,
++	MT6897_MEMIF_PBUF_SIZE_64_BYTES,
++	MT6897_MEMIF_PBUF_SIZE_128_BYTES,
++	MT6897_MEMIF_PBUF_SIZE_256_BYTES,
++	MT6897_MEMIF_PBUF_SIZE_NUM,
++};
++
++/* registers */
++#define AUDIO_TOP_CON0                           0x0
++#define AUDIO_TOP_CON1                           0x4
++#define AUDIO_TOP_CON2                           0x8
++#define AUDIO_TOP_CON3                           0xc
++#define AUDIO_TOP_CON4                           0x10
++#define AUDIO_ENGEN_CON0                         0x14
++#define AFE_APLL1_TUNER_CFG                      0x30
++#define AFE_APLL1_TUNER_MON0                     0x34
++#define AFE_APLL2_TUNER_CFG                      0x38
++#define AFE_APLL2_TUNER_MON0                     0x3c
++#define AFE_SPM_CONTROL_ACK                      0x64
++#define AUDIO_ENGEN_CON0_MON                     0x7c
++#define AFE_IRQ_MCU_EN                           0x100
++#define AFE_CUSTOM_IRQ_MCU_EN                    0x110
++#define AFE_IRQ_MCU_STATUS                       0x120
++#define AFE_CUSTOM_IRQ_MCU_STATUS                0x124
++#define AFE_IRQ_MCU_CLR                          0x128
++#define AFE_CUSTOM_IRQ_MCU_CLR                   0x130
++#define AFE_IRQ0_MCU_CFG0                        0x140
++#define AFE_IRQ0_MCU_CFG1                        0x144
++#define AFE_IRQ1_MCU_CFG0                        0x148
++#define AFE_IRQ1_MCU_CFG1                        0x14c
++#define AFE_IRQ2_MCU_CFG0                        0x150
++#define AFE_IRQ2_MCU_CFG1                        0x154
++#define AFE_IRQ13_MCU_CFG0                       0x1a8
++#define AFE_IRQ13_MCU_CFG1                       0x1ac
++#define AFE_IRQ14_MCU_CFG0                       0x1b0
++#define AFE_IRQ14_MCU_CFG1                       0x1b4
++#define AFE_IRQ15_MCU_CFG0                       0x1b8
++#define AFE_IRQ15_MCU_CFG1                       0x1bc
++#define AFE_IRQ16_MCU_CFG0                       0x1c0
++#define AFE_IRQ16_MCU_CFG1                       0x1c4
++#define AFE_IRQ_MCU_MON0                         0x300
++#define AFE_IRQ_MCU_MON1                         0x304
++#define AFE_IRQ_MCU_MON2                         0x308
++#define AFE_ADDA_UL0_SRC_CON0                    0xbd0
++#define AFE_ADDA_UL0_IIR_COEF_02_01              0xbec
++#define AFE_ADDA_UL0_IIR_COEF_04_03              0xbf0
++#define AFE_ADDA_UL0_IIR_COEF_06_05              0xbf4
++#define AFE_ADDA_UL0_IIR_COEF_08_07              0xbf8
++#define AFE_ADDA_UL0_IIR_COEF_10_09              0xbfc
++#define AFE_MTKAIF0_CFG0                         0x1190
++#define AFE_MTKAIF0_RX_CFG0                      0x1198
++#define AFE_MTKAIF0_RX_CFG2                      0x11a0
++#define AFE_MTKAIF1_CFG0                         0x11f0
++#define AFE_AUD_PAD_TOP_CFG0                     0x1204
++#define ETDM_IN4_CON0                            0x13c0
++#define ETDM_IN4_CON1                            0x13c4
++#define ETDM_IN4_CON2                            0x13c8
++#define ETDM_IN4_CON3                            0x13cc
++#define ETDM_IN4_CON4                            0x13d0
++#define ETDM_IN4_CON8                            0x13e0
++#define ETDM_IN4_CON9                            0x13e4
++#define ETDM_IN4_MON                             0x13e8
++#define ETDM_OUT4_MON                            0x1460
++#define ETDM_OUT4_CON0                           0x1540
++#define ETDM_OUT4_CON1                           0x1544
++#define ETDM_OUT4_CON4                           0x1550
++#define ETDM_4_7_COWORK_CON0                     0x15e0
++#define ETDM_4_7_COWORK_CON1                     0x15e4
++#define AFE_CONN018_0                            0x22c0
++#define AFE_CONN018_1                            0x22c4
++#define AFE_CONN018_2                            0x22c8
++#define AFE_CONN018_4                            0x22d0
++#define AFE_CONN018_5                            0x22d4
++#define AFE_CONN018_6                            0x22d8
++#define AFE_CONN019_0                            0x22e0
++#define AFE_CONN019_1                            0x22e4
++#define AFE_CONN019_2                            0x22e8
++#define AFE_CONN019_4                            0x22f0
++#define AFE_CONN019_5                            0x22f4
++#define AFE_CONN019_6                            0x22f8
++#define AFE_CONN020_0                            0x2300
++#define AFE_CONN020_1                            0x2304
++#define AFE_CONN020_2                            0x2308
++#define AFE_CONN020_4                            0x2310
++#define AFE_CONN020_5                            0x2314
++#define AFE_CONN020_6                            0x2318
++#define AFE_CONN021_0                            0x2320
++#define AFE_CONN021_1                            0x2324
++#define AFE_CONN021_2                            0x2328
++#define AFE_CONN021_4                            0x2330
++#define AFE_CONN021_5                            0x2334
++#define AFE_CONN021_6                            0x2338
++#define AFE_CONN022_0                            0x2340
++#define AFE_CONN022_1                            0x2344
++#define AFE_CONN022_2                            0x2348
++#define AFE_CONN022_4                            0x2350
++#define AFE_CONN022_5                            0x2354
++#define AFE_CONN022_6                            0x2358
++#define AFE_CONN023_0                            0x2360
++#define AFE_CONN023_1                            0x2364
++#define AFE_CONN023_2                            0x2368
++#define AFE_CONN023_4                            0x2370
++#define AFE_CONN023_5                            0x2374
++#define AFE_CONN023_6                            0x2378
++#define AFE_CONN024_0                            0x2380
++#define AFE_CONN024_1                            0x2384
++#define AFE_CONN024_2                            0x2388
++#define AFE_CONN024_4                            0x2390
++#define AFE_CONN024_5                            0x2394
++#define AFE_CONN024_6                            0x2398
++#define AFE_CONN025_0                            0x23a0
++#define AFE_CONN025_1                            0x23a4
++#define AFE_CONN025_2                            0x23a8
++#define AFE_CONN025_4                            0x23b0
++#define AFE_CONN025_5                            0x23b4
++#define AFE_CONN025_6                            0x23b8
++#define AFE_CONN116_0                            0x2f00
++#define AFE_CONN116_1                            0x2f04
++#define AFE_CONN116_2                            0x2f08
++#define AFE_CONN116_4                            0x2f10
++#define AFE_CONN116_5                            0x2f14
++#define AFE_CONN116_6                            0x2f18
++#define AFE_CONN117_0                            0x2f20
++#define AFE_CONN117_1                            0x2f24
++#define AFE_CONN117_2                            0x2f28
++#define AFE_CONN117_4                            0x2f30
++#define AFE_CONN117_5                            0x2f34
++#define AFE_CONN117_6                            0x2f38
++#define AFE_CONN118_0                            0x2f40
++#define AFE_CONN118_1                            0x2f44
++#define AFE_CONN118_2                            0x2f48
++#define AFE_CONN118_4                            0x2f50
++#define AFE_CONN118_5                            0x2f54
++#define AFE_CONN118_6                            0x2f58
++#define AFE_CONN119_0                            0x2f60
++#define AFE_CONN119_1                            0x2f64
++#define AFE_CONN119_2                            0x2f68
++#define AFE_CONN119_4                            0x2f70
++#define AFE_CONN119_5                            0x2f74
++#define AFE_CONN119_6                            0x2f78
++#define AFE_CBIP_CFG0                            0x4380
++#define AFE_MEMIF_CON0                           0x4400
++#define AFE_DL0_BASE_MSB                         0x4440
++#define AFE_DL0_BASE                             0x4444
++#define AFE_DL0_CUR_MSB                          0x4448
++#define AFE_DL0_CUR                              0x444c
++#define AFE_DL0_END_MSB                          0x4450
++#define AFE_DL0_END                              0x4454
++#define AFE_DL0_RCH_MON                          0x4458
++#define AFE_DL0_LCH_MON                          0x445c
++#define AFE_DL0_CON0                             0x4460
++#define AFE_DL1_BASE_MSB                         0x4470
++#define AFE_DL1_BASE                             0x4474
++#define AFE_DL1_CUR_MSB                          0x4478
++#define AFE_DL1_CUR                              0x447c
++#define AFE_DL1_END_MSB                          0x4480
++#define AFE_DL1_END                              0x4484
++#define AFE_DL1_RCH_MON                          0x4488
++#define AFE_DL1_LCH_MON                          0x448c
++#define AFE_DL1_CON0                             0x4490
++#define AFE_DL2_BASE_MSB                         0x44a0
++#define AFE_DL2_BASE                             0x44a4
++#define AFE_DL2_CUR_MSB                          0x44a8
++#define AFE_DL2_CUR                              0x44ac
++#define AFE_DL2_END_MSB                          0x44b0
++#define AFE_DL2_END                              0x44b4
++#define AFE_DL2_RCH_MON                          0x44b8
++#define AFE_DL2_LCH_MON                          0x44bc
++#define AFE_DL2_CON0                             0x44c0
++#define AFE_VUL0_BASE_MSB                        0x4d60
++#define AFE_VUL0_BASE                            0x4d64
++#define AFE_VUL0_CUR_MSB                         0x4d68
++#define AFE_VUL0_CUR                             0x4d6c
++#define AFE_VUL0_END_MSB                         0x4d70
++#define AFE_VUL0_END                             0x4d74
++#define AFE_VUL0_CON0                            0x4d80
++#define AFE_VUL1_BASE_MSB                        0x4d90
++#define AFE_VUL1_BASE                            0x4d94
++#define AFE_VUL1_CUR_MSB                         0x4d98
++#define AFE_VUL1_CUR                             0x4d9c
++#define AFE_VUL1_END_MSB                         0x4da0
++#define AFE_VUL1_END                             0x4da4
++#define AFE_VUL1_CON0                            0x4db0
++#define AFE_VUL2_BASE_MSB                        0x4dc0
++#define AFE_VUL2_BASE                            0x4dc4
++#define AFE_VUL2_CUR_MSB                         0x4dc8
++#define AFE_VUL2_CUR                             0x4dcc
++#define AFE_VUL2_END_MSB                         0x4dd0
++#define AFE_VUL2_END                             0x4dd4
++#define AFE_VUL2_CON0                            0x4de0
++#define AFE_VUL3_BASE_MSB                        0x4df0
++#define AFE_VUL3_BASE                            0x4df4
++#define AFE_VUL3_CUR_MSB                         0x4df8
++#define AFE_VUL3_CUR                             0x4dfc
++#define AFE_VUL3_END_MSB                         0x4e00
++#define AFE_VUL3_END                             0x4e04
++#define AFE_VUL3_CON0                            0x4e10
++#define AFE_GASRC3_NEW_IP_VERSION                0x793c
++
++#define AFE_MAX_REGISTER AFE_GASRC3_NEW_IP_VERSION
++#define AFE_IRQ_STATUS_BITS 0x87FFFFFF
++#define AFE_IRQ_CNT_SHIFT 0
++#define AFE_IRQ_CNT_MASK 0xffffff
++
++/* register fields */
++#define AUDIO_APLL2_EN_ON_SFT                    3
++#define AUDIO_APLL2_EN_ON_MASK_SFT               (0x1 << 3)
++#define AUDIO_APLL1_EN_ON_SFT                    2
++#define AUDIO_APLL1_EN_ON_MASK_SFT               (0x1 << 2)
++#define AUDIO_F3P25M_EN_ON_SFT                   1
++#define AUDIO_26M_EN_ON_MASK_SFT                 (0x1 << 0)
++#define AUDIO_ENGEN_MON_SFT                      0
++#define IRQ16_MCU_CLR_SFT                        16
++#define IRQ15_MCU_CLR_SFT                        15
++#define IRQ14_MCU_CLR_SFT                        14
++#define IRQ13_MCU_CLR_SFT                        13
++#define IRQ2_MCU_CLR_SFT                         2
++#define IRQ1_MCU_CLR_SFT                         1
++#define IRQ0_MCU_CLR_SFT                         0
++#define AFE_IRQ0_MCU_FS_SFT                      4
++#define AFE_IRQ0_MCU_FS_MASK                     0x1f
++#define AFE_IRQ0_MCU_ON_SFT                      0
++#define AFE_IRQ1_MCU_FS_SFT                      4
++#define AFE_IRQ1_MCU_FS_MASK                     0x1f
++#define AFE_IRQ1_MCU_ON_SFT                      0
++#define AFE_IRQ2_MCU_FS_SFT                      4
++#define AFE_IRQ2_MCU_FS_MASK                     0x1f
++#define AFE_IRQ2_MCU_ON_SFT                      0
++#define AFE_IRQ13_MCU_FS_SFT                     4
++#define AFE_IRQ13_MCU_FS_MASK                    0x1f
++#define AFE_IRQ13_MCU_ON_SFT                     0
++#define AFE_IRQ14_MCU_FS_SFT                     4
++#define AFE_IRQ14_MCU_FS_MASK                    0x1f
++#define AFE_IRQ14_MCU_ON_SFT                     0
++#define AFE_IRQ15_MCU_FS_SFT                     4
++#define AFE_IRQ15_MCU_FS_MASK                    0x1f
++#define AFE_IRQ15_MCU_ON_SFT                     0
++#define AFE_IRQ16_MCU_FS_SFT                     4
++#define AFE_IRQ16_MCU_FS_MASK                    0x1f
++#define AFE_IRQ16_MCU_ON_SFT                     0
++#define UL_IIR_ON_TMP_CTL_SFT                    10
++#define UL_IIRMODE_CTL_SFT                       7
++#define UL_IIRMODE_CTL_MASK_SFT                  (0x7 << 7)
++#define UL_SRC_ON_TMP_CTL_SFT                    0
++#define RG_MTKAIF0_RXIF_CLKINV_SFT               31
++#define RG_MTKAIF0_RXIF_CLKINV_MASK_SFT          (0x1 << 31)
++#define RG_MTKAIF0_RXIF_DELAY_CYCLE_SFT          12
++#define RG_MTKAIF0_RXIF_DELAY_CYCLE_MASK_SFT     (0xf << 12)
++#define RG_MTKAIF0_RXIF_DELAY_DATA_SFT           8
++#define RG_MTKAIF0_RXIF_DELAY_DATA_MASK_SFT      (0x1 << 8)
++#define RG_MTKAIF1_RXIF_CLKINV_ADC_SFT           31
++#define RG_MTKAIF1_RXIF_CLKINV_ADC_MASK_SFT      (0x1 << 31)
++#define RG_RX_FIFO_ON_SFT                        0
++#define REG_ETDM_IN_EN_SFT                       0
++#define REG_SYNC_MODE_SFT                        1
++#define REG_SYNC_MODE_MASK_SFT                   (0x1 << 1)
++#define REG_FMT_SFT                              6
++#define REG_FMT_MASK_SFT                         (0x7 << 6)
++#define REG_BIT_LENGTH_SFT                       11
++#define REG_BIT_LENGTH_MASK_SFT                  (0x1f << 11)
++#define REG_WORD_LENGTH_SFT                      16
++#define REG_WORD_LENGTH_MASK_SFT                 (0x1f << 16)
++#define REG_CH_NUM_SFT                           23
++#define REG_CH_NUM_MASK_SFT                      (0x1f << 23)
++#define REG_RELATCH_1X_EN_DOMAIN_SEL_SFT         28
++#define REG_RELATCH_1X_EN_DOMAIN_SEL_MASK_SFT    (0x7 << 28)
++#define REG_INITIAL_COUNT_SFT                    0
++#define REG_INITIAL_COUNT_MASK_SFT               (0x1f << 0)
++#define REG_INITIAL_POINT_SFT                    5
++#define REG_INITIAL_POINT_MASK_SFT               (0x1f << 5)
++#define REG_LRCK_RESET_SFT                       15
++#define REG_LRCK_RESET_MASK_SFT                  (0x1 << 15)
++#define REG_CLOCK_SOURCE_SEL_SFT                 10
++#define REG_CLOCK_SOURCE_SEL_MASK_SFT            (0x7 << 10)
++#define REG_CK_EN_SEL_AUTO_SFT                   14
++#define REG_CK_EN_SEL_AUTO_MASK_SFT              (0x1 << 14)
++#define REG_MULTI_IP_MODE_MASK_SFT               (0x1 << 31)
++#define REG_FS_TIMING_SEL_SFT                    26
++#define REG_FS_TIMING_SEL_MASK_SFT               (0x1f << 26)
++#define REG_RELATCH_1X_EN_SEL_SFT                20
++#define REG_RELATCH_1X_EN_SEL_MASK_SFT           (0x1f << 20)
++#define REG_ETDM_USE_AFIFO_MASK_SFT              (0x1 << 8)
++#define REG_AFIFO_MODE_MASK_SFT                  (0x1f << 0)
++#define REG_OUT2LATCH_TIME_SFT                   10
++#define REG_OUT2LATCH_TIME_MASK_SFT              (0x1f << 10)
++#define REG_ALMOST_END_BIT_COUNT_MASK_SFT        (0x1f << 5)
++#define REG_ALMOST_END_CH_COUNT_MASK_SFT         (0x1f << 0)
++#define OUT_REG_ETDM_OUT_EN_SFT                  0
++#define OUT_REG_SYNC_MODE_MASK_SFT               (0x1 << 1)
++#define OUT_REG_FMT_SFT                          6
++#define OUT_REG_FMT_MASK_SFT                     (0x7 << 6)
++#define OUT_REG_BIT_LENGTH_SFT                   11
++#define OUT_REG_BIT_LENGTH_MASK_SFT              (0x1f << 11)
++#define OUT_REG_WORD_LENGTH_SFT                  16
++#define OUT_REG_WORD_LENGTH_MASK_SFT             (0x1f << 16)
++#define OUT_REG_CH_NUM_SFT                       23
++#define OUT_REG_CH_NUM_MASK_SFT                  (0x1f << 23)
++#define OUT_REG_RELATCH_DOMAIN_SEL_SFT           28
++#define OUT_REG_RELATCH_DOMAIN_SEL_MASK_SFT      (0x7 << 28)
++#define OUT_REG_INITIAL_COUNT_SFT                0
++#define OUT_REG_INITIAL_COUNT_MASK_SFT           (0x1f << 0)
++#define OUT_REG_INITIAL_POINT_SFT                5
++#define OUT_REG_INITIAL_POINT_MASK_SFT           (0x1f << 5)
++#define OUT_REG_LRCK_RESET_SFT                   15
++#define OUT_REG_LRCK_RESET_MASK_SFT              (0x1 << 15)
++#define OUT_REG_FS_TIMING_SEL_SFT                0
++#define OUT_REG_FS_TIMING_SEL_MASK_SFT           (0x1f << 0)
++#define OUT_REG_CLOCK_SOURCE_SEL_SFT             6
++#define OUT_REG_CLOCK_SOURCE_SEL_MASK_SFT        (0x7 << 6)
++#define OUT_REG_RELATCH_EN_SEL_SFT               24
++#define OUT_REG_RELATCH_EN_SEL_MASK_SFT          (0x1f << 24)
++#define ETDM_OUT4_SLAVE_SEL_SFT                  8
++#define ETDM_OUT4_SLAVE_SEL_MASK_SFT             (0xf << 8)
++#define ETDM_IN4_SLAVE_SEL_SFT                   24
++#define ETDM_IN4_SLAVE_SEL_MASK_SFT              (0xf << 24)
++#define ETDM_IN4_SDATA0_SEL_SFT                  0
++#define ETDM_IN4_SDATA0_SEL_MASK                 0xf
++#define CPU_HD_ALIGN_MASK_SFT                    (0x1 << 1)
++#define DL0_ON_SFT                               28
++#define DL0_MINLEN_SFT                           20
++#define DL0_MINLEN_MASK                          0xf
++#define DL0_SEL_FS_SFT                           8
++#define DL0_SEL_FS_MASK                          0x1f
++#define DL0_PBUF_SIZE_SFT                        5
++#define DL0_PBUF_SIZE_MASK                       0x3
++#define DL0_MONO_SFT                             4
++#define DL0_HALIGN_SFT                           2
++#define DL0_HD_MODE_SFT                          0
++#define DL1_ON_SFT                               28
++#define DL1_MINLEN_SFT                           20
++#define DL1_MINLEN_MASK                          0xf
++#define DL1_SEL_FS_SFT                           8
++#define DL1_SEL_FS_MASK                          0x1f
++#define DL1_PBUF_SIZE_SFT                        5
++#define DL1_PBUF_SIZE_MASK                       0x3
++#define DL1_MONO_SFT                             4
++#define DL1_HALIGN_SFT                           2
++#define DL1_HD_MODE_SFT                          0
++#define DL2_ON_SFT                               28
++#define DL2_MINLEN_SFT                           20
++#define DL2_MINLEN_MASK                          0xf
++#define DL2_SEL_FS_SFT                           8
++#define DL2_SEL_FS_MASK                          0x1f
++#define DL2_PBUF_SIZE_SFT                        5
++#define DL2_PBUF_SIZE_MASK                       0x3
++#define DL2_MONO_SFT                             4
++#define DL2_HALIGN_SFT                           2
++#define DL2_HD_MODE_SFT                          0
++#define VUL0_ON_SFT                              28
++#define VUL0_SEL_FS_SFT                          8
++#define VUL0_SEL_FS_MASK                         0x1f
++#define VUL0_MONO_SFT                            4
++#define VUL0_HALIGN_SFT                          2
++#define VUL0_HD_MODE_SFT                         0
++#define VUL1_ON_SFT                              28
++#define VUL1_SEL_FS_SFT                          8
++#define VUL1_SEL_FS_MASK                         0x1f
++#define VUL1_MONO_SFT                            4
++#define VUL1_HALIGN_SFT                          2
++#define VUL1_HD_MODE_SFT                         0
++#define VUL2_ON_SFT                              28
++#define VUL2_SEL_FS_SFT                          8
++#define VUL2_SEL_FS_MASK                         0x1f
++#define VUL2_MONO_SFT                            4
++#define VUL2_HALIGN_SFT                          2
++#define VUL2_HD_MODE_SFT                         0
++#define VUL3_ON_SFT                              28
++#define VUL3_SEL_FS_SFT                          8
++#define VUL3_SEL_FS_MASK                         0x1f
++#define VUL3_MONO_SFT                            4
++#define VUL3_HALIGN_SFT                          2
++#define VUL3_HD_MODE_SFT                         0
++#define AFE_IRQ_CNT_MASK                         0xffffff
++
++#endif

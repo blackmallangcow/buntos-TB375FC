@@ -1,0 +1,31 @@
+From: buntOS contributors
+Subject: [PATCH] ASoC: dt-bindings: aw88395: allow a speaker id strap
+
+The Lenovo TB375FC has speakers from two suppliers with their own tuning
+files. A GPIO strap tells them apart, read by all four amplifiers.
+---
+ .../devicetree/bindings/sound/awinic,aw88395.yaml      | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/sound/awinic,aw88395.yaml b/Documentation/devicetree/bindings/sound/awinic,aw88395.yaml
+index b9abb10..8729868 100644
+--- a/Documentation/devicetree/bindings/sound/awinic,aw88395.yaml
++++ b/Documentation/devicetree/bindings/sound/awinic,aw88395.yaml
+@@ -36,8 +36,16 @@ properties:
+   dvdd-supply: true
+ 
+   firmware-name:
++    minItems: 1
++    maxItems: 2
++    description:
++      Name of the *_acf.bin file used for amplifier initialization. With
++      awinic,speaker-id-gpios, the name that the GPIO's value selects.
++
++  awinic,speaker-id-gpios:
+     maxItems: 1
+-    description: Name of the *_acf.bin file used for amplifier initialization
++    description:
++      A strap that tells which speakers the board has, shared by its amplifiers.
+ 
+   awinic,audio-channel:
+     description:

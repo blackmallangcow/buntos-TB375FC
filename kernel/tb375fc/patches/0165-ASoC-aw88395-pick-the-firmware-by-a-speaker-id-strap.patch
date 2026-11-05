@@ -1,0 +1,94 @@
+From: buntOS contributors
+Subject: [PATCH] ASoC: aw88395: pick the firmware by a speaker id strap
+
+The four AW88394 amplifiers of the Lenovo TB375FC take one of two tuning
+files, depending on who made the speakers. A pulled up GPIO tells which:
+low is aw883xx_acf_gyt.bin and high is aw883xx_acf_yc.bin in the stock
+driver.
+
+Read firmware-name as a list and let an optional strap index into it.
+The binding already documents firmware-name, and aw88166 reads it. A
+board without the property keeps the old file name.
+---
+ sound/soc/codecs/aw88395/aw88395.c | 41 +++++++++++++++++++++++++++---
+ 1 file changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/sound/soc/codecs/aw88395/aw88395.c b/sound/soc/codecs/aw88395/aw88395.c
+index ee0e8bd..3a201cf 100644
+--- a/sound/soc/codecs/aw88395/aw88395.c
++++ b/sound/soc/codecs/aw88395/aw88395.c
+@@ -11,6 +11,7 @@
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/firmware.h>
++#include <linux/of.h>
+ #include <linux/regmap.h>
+ #include <sound/soc.h>
+ #include "aw88395.h"
+@@ -459,22 +460,54 @@ static void aw88395_hw_reset(struct aw88395 *aw88395)
+ 	}
+ }
+ 
++/*
++ * Boards can source their speakers from more than one supplier, each with its
++ * own tuning. A strap then picks the file from the "firmware-name" list.
++ */
++static int aw88395_get_firmware_name(struct device *dev, const char **name)
++{
++	struct gpio_desc *id;
++	int index = 0;
++
++	/* All the amplifiers of a board read the same strap */
++	id = devm_gpiod_get_optional(dev, "awinic,speaker-id",
++				     GPIOD_IN | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
++	if (IS_ERR(id))
++		return dev_err_probe(dev, PTR_ERR(id), "failed to get the speaker id\n");
++
++	if (id) {
++		index = gpiod_get_value_cansleep(id);
++		if (index < 0)
++			return index;
++	}
++
++	if (of_property_read_string_index(dev->of_node, "firmware-name", index, name))
++		*name = AW88395_ACF_FILE;
++
++	return 0;
++}
++
+ static int aw88395_request_firmware_file(struct aw88395 *aw88395)
+ {
+ 	const struct firmware *cont = NULL;
+ 	struct aw_container *aw_cfg;
++	const char *fw_name;
+ 	int ret;
+ 
+ 	aw88395->aw_pa->fw_status = AW88395_DEV_FW_FAILED;
+ 
+-	ret = request_firmware(&cont, AW88395_ACF_FILE, aw88395->aw_pa->dev);
++	ret = aw88395_get_firmware_name(aw88395->aw_pa->dev, &fw_name);
++	if (ret)
++		return ret;
++
++	ret = request_firmware(&cont, fw_name, aw88395->aw_pa->dev);
+ 	if ((ret < 0) || (!cont)) {
+-		dev_err(aw88395->aw_pa->dev, "load [%s] failed!", AW88395_ACF_FILE);
++		dev_err(aw88395->aw_pa->dev, "load [%s] failed!", fw_name);
+ 		return ret;
+ 	}
+ 
+ 	dev_info(aw88395->aw_pa->dev, "loaded %s - size: %zu\n",
+-			AW88395_ACF_FILE, cont ? cont->size : 0);
++			fw_name, cont ? cont->size : 0);
+ 
+ 	aw_cfg = devm_kzalloc(aw88395->aw_pa->dev, struct_size(aw_cfg, data, cont->size), GFP_KERNEL);
+ 	if (!aw_cfg) {
+@@ -489,7 +522,7 @@ static int aw88395_request_firmware_file(struct aw88395 *aw88395)
+ 
+ 	ret = aw88395_dev_load_acf_check(aw88395->aw_pa, aw88395->aw_cfg);
+ 	if (ret < 0) {
+-		dev_err(aw88395->aw_pa->dev, "Load [%s] failed ....!", AW88395_ACF_FILE);
++		dev_err(aw88395->aw_pa->dev, "Load [%s] failed ....!", fw_name);
+ 		return ret;
+ 	}
+ 

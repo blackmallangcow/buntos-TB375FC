@@ -440,3 +440,28 @@
 &i2c13 {
 	status = "okay";
 };
+
+// 소리. 드라이버는 명령줄의 modprobe.blacklist로 막고 buntos-sound.service가 올린다.
+&sound {
+	status = "okay";
+};
+
+&afe {
+	status = "okay";
+};
+
+&mt6368_codec {
+	status = "okay";
+};
+
+&mt6368_vaud18 {
+	status = "okay";
+};
+
+&imp_iic_wrap_c {
+	status = "okay";
+};
+
+&i2c6 {
+	status = "okay";
+};

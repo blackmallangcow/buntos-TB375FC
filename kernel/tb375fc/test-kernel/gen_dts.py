@@ -39,7 +39,7 @@ rows.sort()
 # REUSE-IgnoreStart
 out = ['// SPDX-FileCopyrightText: 2026 buntOS contributors', '// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause', '// 시험용: 커널에 넣는 트리. gen_dts.py가 기기의 살아 있는 트리에서 만들었다.',
        '#include "mt6897-lenovo-tb375fc.dts"', '#include "test-stage.dtsi"', '', '/ {', '\tchosen {', '\t\t/delete-property/ stdout-path;',
-       '\t\tbootargs = "console=tty0 ignore_loglevel log_buf_len=1M root=PARTLABEL=buntos rootflags=subvol=buntos-full rootfstype=btrfs rw systemd.firstboot=no drm_client_lib.active= buntos.usbdebug=1 buntos.wait=10 buntos.telnet=1 buntos.autoreboot=30 modprobe.blacklist=mt7921soc,mtk_connsys,btmtkbeif,panthor,mt6375,mt6375_charger,tcpci_mt6375,mediatek_drm,mtk_mmsys,phy_mtk_mipi_dsi_drv,panel_novatek_nt36532 buntos.dump=1 panic=30 clk_ignore_unused pd_ignore_unused regulator_ignore_unused arm64.nomte";',
+       '\t\tbootargs = "console=tty0 ignore_loglevel log_buf_len=1M root=PARTLABEL=buntos rootflags=subvol=buntos-full rootfstype=btrfs rw systemd.firstboot=no drm_client_lib.active= buntos.usbdebug=1 buntos.wait=10 buntos.telnet=1 buntos.autoreboot=30 modprobe.blacklist=mt7921soc,mtk_connsys,btmtkbeif,panthor,mt6375,mt6375_charger,tcpci_mt6375,mediatek_drm,mtk_mmsys,phy_mtk_mipi_dsi_drv,panel_novatek_nt36532,snd_soc_mt6897_afe,mt6897_mt6368,snd_soc_mt6368,snd_soc_aw88395 buntos.dump=1 panic=30 clk_ignore_unused pd_ignore_unused regulator_ignore_unused arm64.nomte";',
        '\t};', '', '\tmemory@40000000 {', '\t\treg = <0 0x40000000 0x2 0x0>;', '\t};', '};', '',
        '&uart0 {', '\tstatus = "disabled";', '};', '', '&reserved_memory {']
 # REUSE-IgnoreEnd

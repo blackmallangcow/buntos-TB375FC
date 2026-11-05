@@ -1347,6 +1347,35 @@
 			status = "disabled";
 		};
 
+		afe: audio-controller@11050000 {
+			compatible = "mediatek,mt6897-afe";
+			reg = <0 0x11050000 0 0x9000>;
+			interrupts = <GIC_SPI 257 IRQ_TYPE_LEVEL_HIGH 0>;
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_AUDIO>;
+			mediatek,topckgen = <&topckgen>;
+			clocks = <&topckgen CLK_TOP_AUD_INTBUS>,
+				 <&topckgen CLK_TOP_AUDIO_H>,
+				 <&topckgen CLK_TOP_AUD_1>,
+				 <&topckgen CLK_TOP_AUD_2>,
+				 <&topckgen CLK_TOP_AUD_ENGEN1>,
+				 <&topckgen CLK_TOP_AUD_ENGEN2>,
+				 <&apmixedsys CLK_APMIXED_APLL1>,
+				 <&apmixedsys CLK_APMIXED_APLL2>,
+				 <&topckgen CLK_TOP_APLL1_D2>,
+				 <&topckgen CLK_TOP_APLL2_D2>,
+				 <&topckgen CLK_TOP_APLL1_D4>,
+				 <&topckgen CLK_TOP_APLL2_D4>,
+				 <&clk26m>;
+			clock-names = "top_aud_intbus", "top_aud_h",
+				      "top_aud_1", "top_aud_2",
+				      "top_aud_eng1", "top_aud_eng2",
+				      "apll1", "apll2",
+				      "apll1_d2", "apll2_d2",
+				      "apll1_d4", "apll2_d4",
+				      "clk26m";
+			status = "disabled";
+		};
+
 		/*
 		 * The stock wakeup glue (pericfg_ao 0x200, vendor version 103)
 		 * is a different layout from the mainline version 103 (MT8195
@@ -1997,6 +2026,16 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 				#power-domain-cells = <1>;
+
+				power-domain@MT6897_POWER_DOMAIN_AUDIO {
+					reg = <MT6897_POWER_DOMAIN_AUDIO>;
+					clocks = <&topckgen CLK_TOP_AUD_INTBUS>,
+						 <&pericfg_ao CLK_PERI_AO_AUDIO_SLV_CK>,
+						 <&pericfg_ao CLK_PERI_AO_AUDIO_MST_CK>,
+						 <&pericfg_ao CLK_PERI_AO_AUDIO_INTBUS_CK>;
+					clock-names = "audio", "audio-0", "audio-1", "audio-2";
+					#power-domain-cells = <0>;
+				};
 
 				power-domain@MT6897_POWER_DOMAIN_CONN {
 					reg = <MT6897_POWER_DOMAIN_CONN>;

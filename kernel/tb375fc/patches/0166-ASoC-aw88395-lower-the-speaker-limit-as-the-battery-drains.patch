@@ -1,0 +1,328 @@
+From: buntOS contributors
+Subject: [PATCH] ASoC: aw88395: lower the speaker limit as the battery drains
+
+The tuning files carry a monitor section that this driver has skipped so
+far. On the Lenovo TB375FC its table lowers the DSP's Vmax in five steps,
+from 0 at 4.1 V and above to -319 at 3.4 V and below. The vendor driver
+reads the amplifier's VBAT register every five seconds while playing and
+applies it. Without this the amplifiers run above the vendor's limit on
+a low battery.
+
+Apply the Vmax column of the table. The gaps between the rows are the
+hysteresis, and the first reading picks the highest row at or below it.
+The DSP gets a fresh configuration on each start, so that first reading
+happens before the mute is released. The other columns of this table
+repeat the register file's values, and temperature monitoring is off in
+it, so they are left out.
+---
+ sound/soc/codecs/aw88395/aw88395.c        |   1 +
+ sound/soc/codecs/aw88395/aw88395_device.c | 174 ++++++++++++++++++++++
+ sound/soc/codecs/aw88395/aw88395_device.h |  23 +++
+ sound/soc/codecs/aw88395/aw88395_reg.h    |   2 +
+ 4 files changed, 200 insertions(+)
+
+diff --git a/sound/soc/codecs/aw88395/aw88395.c b/sound/soc/codecs/aw88395/aw88395.c
+index 3a201cf..17c12ca 100644
+--- a/sound/soc/codecs/aw88395/aw88395.c
++++ b/sound/soc/codecs/aw88395/aw88395.c
+@@ -431,6 +431,7 @@ static void aw88395_codec_remove(struct snd_soc_component *aw_codec)
+ 	struct aw88395 *aw88395 = snd_soc_component_get_drvdata(aw_codec);
+ 
+ 	cancel_delayed_work_sync(&aw88395->start_work);
++	aw88395_dev_exit(aw88395->aw_pa);
+ }
+ 
+ static const struct snd_soc_component_driver soc_codec_dev_aw88395 = {
+diff --git a/sound/soc/codecs/aw88395/aw88395_device.c b/sound/soc/codecs/aw88395/aw88395_device.c
+index 79c3135..51d3659 100644
+--- a/sound/soc/codecs/aw88395/aw88395_device.c
++++ b/sound/soc/codecs/aw88395/aw88395_device.c
+@@ -12,6 +12,8 @@
+ #include <linux/i2c.h>
+ #include <linux/minmax.h>
+ #include <linux/regmap.h>
++#include <linux/unaligned.h>
++#include "aw88395_data_type.h"
+ #include "aw88395_device.h"
+ #include "aw88395_reg.h"
+ 
+@@ -1387,6 +1389,165 @@ static int aw_dev_dsp_check(struct aw_device *aw_dev)
+ 	return ret;
+ }
+ 
++/* The monitor section of an ACF file, little endian */
++#define AW_MONITOR_HDR_VER		0x00010100
++#define AW_MONITOR_EN			BIT(0)
++#define AW_MONITOR_VMAX_EN		BIT(4)
++#define AW_MONITOR_VOL_EN		BIT(6)
++#define AW_MONITOR_ROW_SIZE		12
++
++struct aw_monitor_hdr {
++	__le32 check_sum;
++	__le32 version;
++	char chip_type[16];
++	__le32 ui_ver;
++	__le32 monitor_time;
++	__le32 monitor_count;
++	__le32 enable_flag;
++	__le32 temp_alpha;
++	__le32 temp_num;
++	__le32 single_temp_size;
++	__le32 temp_offset;
++	__le32 vol_alpha;
++	__le32 vol_num;
++	__le32 single_vol_size;
++	__le32 vol_offset;
++	__le32 reserved[3];
++} __packed;
++
++static void aw_dev_monitor_parse(struct aw_device *aw_dev, const u8 *data, u32 len)
++{
++	struct aw_monitor_desc *desc = &aw_dev->monitor_desc;
++	const struct aw_monitor_hdr *hdr = (const void *)data;
++	u32 check_sum = 0, flags, num, offset, i;
++
++	if (len < sizeof(*hdr) || le32_to_cpu(hdr->version) != AW_MONITOR_HDR_VER)
++		goto invalid;
++
++	for (i = sizeof(hdr->check_sum); i < len; i++)
++		check_sum += data[i];
++	if (check_sum != le32_to_cpu(hdr->check_sum))
++		goto invalid;
++
++	flags = le32_to_cpu(hdr->enable_flag);
++	if ((flags & (AW_MONITOR_EN | AW_MONITOR_VMAX_EN | AW_MONITOR_VOL_EN)) !=
++	    (AW_MONITOR_EN | AW_MONITOR_VMAX_EN | AW_MONITOR_VOL_EN))
++		return;
++
++	num = le32_to_cpu(hdr->vol_num);
++	offset = le32_to_cpu(hdr->vol_offset);
++	if (!num || num > ARRAY_SIZE(desc->rows) ||
++	    le32_to_cpu(hdr->single_vol_size) != AW_MONITOR_ROW_SIZE ||
++	    offset > len || (len - offset) / AW_MONITOR_ROW_SIZE < num)
++		goto invalid;
++
++	for (i = 0; i < num; i++) {
++		const u8 *row = data + offset + i * AW_MONITOR_ROW_SIZE;
++
++		desc->rows[i].min_mv = (s16)get_unaligned_le16(row);
++		desc->rows[i].max_mv = (s16)get_unaligned_le16(row + 2);
++		desc->rows[i].vmax = (s32)get_unaligned_le32(row + 8);
++	}
++
++	desc->num_rows = num;
++	desc->period_ms = le32_to_cpu(hdr->monitor_time);
++	return;
++
++invalid:
++	dev_warn(aw_dev->dev, "ignoring an invalid monitor section\n");
++}
++
++/* The section of this channel in a file with one section per channel */
++static void aw_dev_monitor_load(struct aw_device *aw_dev, struct aw_container *aw_cfg)
++{
++	const struct aw_cfg_hdr *hdr = (const void *)aw_cfg->data;
++	const struct aw_cfg_dde *dde;
++	u32 i;
++
++	if (hdr->hdr_version != AW88395_CFG_HDR_VER)
++		return;
++
++	dde = (const void *)(aw_cfg->data + hdr->hdr_offset);
++	for (i = 0; i < hdr->ddt_num; i++) {
++		if (dde[i].data_type == ACF_SEC_TYPE_MONITOR &&
++		    dde[i].type == AW88395_DEV_DEFAULT_TYPE_ID &&
++		    dde[i].dev_index == aw_dev->channel) {
++			aw_dev_monitor_parse(aw_dev, aw_cfg->data + dde[i].data_offset,
++					     dde[i].data_size);
++			return;
++		}
++	}
++}
++
++/* A row covers a voltage range and the gaps between them are the hysteresis */
++static const struct aw_monitor_row *aw_dev_monitor_row(struct aw_monitor_desc *desc, int mv)
++{
++	unsigned int i;
++
++	for (i = 0; i < desc->num_rows; i++) {
++		const struct aw_monitor_row *row = &desc->rows[i];
++
++		if (desc->cur ? (mv >= row->min_mv && mv <= row->max_mv) : mv >= row->min_mv)
++			return row;
++	}
++
++	return desc->cur;
++}
++
++static void aw_dev_monitor_update(struct aw_device *aw_dev)
++{
++	struct aw_monitor_desc *desc = &aw_dev->monitor_desc;
++	const struct aw_monitor_row *row;
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(aw_dev->regmap, AW88395_VBAT_REG, &val);
++	if (ret)
++		return;
++
++	row = aw_dev_monitor_row(desc, val * AW88395_VBAT_RANGE / AW88395_VBAT_INT_10BIT);
++	if (!row || row == desc->cur)
++		return;
++
++	ret = aw_dev_dsp_write(aw_dev, AW88395_DSP_REG_VMAX,
++			       (u16)((s16)aw_dev->vmax_desc.init_vmax + (s16)row->vmax),
++			       AW_DSP_16_DATA);
++	if (ret)
++		return;
++
++	desc->cur = row;
++	dev_dbg(aw_dev->dev, "vmax %d at %u\n", row->vmax, val);
++}
++
++static void aw_dev_monitor_work(struct work_struct *work)
++{
++	struct aw_monitor_desc *desc = container_of(to_delayed_work(work),
++						    struct aw_monitor_desc, work);
++	struct aw_device *aw_dev = container_of(desc, struct aw_device, monitor_desc);
++
++	aw_dev_monitor_update(aw_dev);
++	queue_delayed_work(system_dfl_wq, &desc->work, msecs_to_jiffies(desc->period_ms));
++}
++
++/* The DSP gets a new copy of its configuration on every start */
++static void aw_dev_monitor_start(struct aw_device *aw_dev)
++{
++	struct aw_monitor_desc *desc = &aw_dev->monitor_desc;
++
++	if (!desc->num_rows)
++		return;
++
++	desc->cur = NULL;
++	aw_dev_monitor_update(aw_dev);
++	queue_delayed_work(system_dfl_wq, &desc->work, msecs_to_jiffies(desc->period_ms));
++}
++
++static void aw_dev_monitor_stop(struct aw_device *aw_dev)
++{
++	if (aw_dev->monitor_desc.num_rows)
++		cancel_delayed_work_sync(&aw_dev->monitor_desc.work);
++}
++
+ static void aw_dev_update_cali_re(struct aw_cali_desc *cali_desc)
+ {
+ 	struct aw_device *aw_dev =
+@@ -1460,6 +1621,9 @@ int aw88395_dev_start(struct aw_device *aw_dev)
+ 	/* enable tx feedback */
+ 	aw_dev_i2s_tx_enable(aw_dev, true);
+ 
++	/* the limit for this battery voltage is in place before any sound */
++	aw_dev_monitor_start(aw_dev);
++
+ 	/* close mute */
+ 	aw88395_dev_mute(aw_dev, false);
+ 	/* clear inturrupt */
+@@ -1499,6 +1663,8 @@ int aw88395_dev_stop(struct aw_device *aw_dev)
+ 
+ 	aw_dev->status = AW88395_DEV_PW_OFF;
+ 
++	aw_dev_monitor_stop(aw_dev);
++
+ 	/* set mute */
+ 	aw88395_dev_mute(aw_dev, true);
+ 	usleep_range(AW88395_4000_US, AW88395_4000_US + 100);
+@@ -1548,6 +1714,7 @@ int aw88395_dev_init(struct aw_device *aw_dev, struct aw_container *aw_cfg)
+ 		dev_err(aw_dev->dev, "aw_dev acf parse failed");
+ 		return -EINVAL;
+ 	}
++	aw_dev_monitor_load(aw_dev, aw_cfg);
+ 	aw_dev->fade_in_time = AW88395_1000_US / 10;
+ 	aw_dev->fade_out_time = AW88395_1000_US >> 1;
+ 	aw_dev->prof_cur = aw_dev->prof_info.prof_desc[0].id;
+@@ -1610,11 +1777,18 @@ static int aw_dev_init(struct aw_device *aw_dev)
+ 
+ 	aw_dev->fade_step = AW88395_VOLUME_STEP_DB;
+ 	aw_dev->volume_desc.ctl_volume = AW88395_VOL_DEFAULT_VALUE;
++	INIT_DELAYED_WORK(&aw_dev->monitor_desc.work, aw_dev_monitor_work);
+ 	aw88395_parse_channel_dt(aw_dev);
+ 
+ 	return 0;
+ }
+ 
++void aw88395_dev_exit(struct aw_device *aw_dev)
++{
++	aw_dev_monitor_stop(aw_dev);
++}
++EXPORT_SYMBOL_GPL(aw88395_dev_exit);
++
+ int aw88395_dev_get_profile_count(struct aw_device *aw_dev)
+ {
+ 	return aw_dev->prof_info.count;
+diff --git a/sound/soc/codecs/aw88395/aw88395_device.h b/sound/soc/codecs/aw88395/aw88395_device.h
+index 7b74eeb..5f2fa48 100644
+--- a/sound/soc/codecs/aw88395/aw88395_device.h
++++ b/sound/soc/codecs/aw88395/aw88395_device.h
+@@ -10,6 +10,7 @@
+ #ifndef __AW88395_DEVICE_FILE_H__
+ #define __AW88395_DEVICE_FILE_H__
+ 
++#include <linux/workqueue.h>
+ #include "aw88395.h"
+ #include "aw88395_data_type.h"
+ #include "aw88395_lib.h"
+@@ -125,6 +126,26 @@ struct aw_vmax_desc {
+ 	unsigned int init_vmax;
+ };
+ 
++/*
++ * The tuning file can lower the speaker voltage limit as the battery drains,
++ * so that the boost does not pull the supply down.
++ */
++#define AW88395_MONITOR_ROWS_MAX	8
++
++struct aw_monitor_row {
++	int min_mv;
++	int max_mv;
++	int vmax;
++};
++
++struct aw_monitor_desc {
++	struct delayed_work work;
++	unsigned int period_ms;
++	unsigned int num_rows;
++	struct aw_monitor_row rows[AW88395_MONITOR_ROWS_MAX];
++	const struct aw_monitor_row *cur;
++};
++
+ struct aw_cali_delay_desc {
+ 	unsigned int delay;
+ };
+@@ -188,6 +209,7 @@ struct aw_device {
+ 	struct aw_volume_desc volume_desc;
+ 	struct aw_dsp_mem_desc dsp_mem_desc;
+ 	struct aw_vmax_desc vmax_desc;
++	struct aw_monitor_desc monitor_desc;
+ 
+ 	struct aw_cali_delay_desc cali_delay_desc;
+ 	struct aw_cali_desc cali_desc;
+@@ -196,6 +218,7 @@ struct aw_device {
+ 
+ int aw88395_init(struct aw_device **aw_dev, struct i2c_client *i2c, struct regmap *regmap);
+ int aw88395_dev_init(struct aw_device *aw_dev, struct aw_container *aw_cfg);
++void aw88395_dev_exit(struct aw_device *aw_dev);
+ int aw88395_dev_start(struct aw_device *aw_dev);
+ int aw88395_dev_stop(struct aw_device *aw_dev);
+ int aw88395_dev_fw_update(struct aw_device *aw_dev, bool up_dsp_fw_en, bool force_up_en);
+diff --git a/sound/soc/codecs/aw88395/aw88395_reg.h b/sound/soc/codecs/aw88395/aw88395_reg.h
+index e64f24e..fb25baa 100644
+--- a/sound/soc/codecs/aw88395/aw88395_reg.h
++++ b/sound/soc/codecs/aw88395/aw88395_reg.h
+@@ -372,6 +372,8 @@ enum aw88395_id {
+ #define AW88395_DSP_CFG_ADDR		(0x9C80)
+ #define AW88395_DSP_FW_ADDR		(0x8C00)
+ #define AW88395_DSP_REG_VMAX		(0x9C94)
++#define AW88395_VBAT_RANGE		(6025)
++#define AW88395_VBAT_INT_10BIT		(1023)
+ #define AW88395_DSP_REG_CFG_ADPZ_RE	(0x9D00)
+ #define AW88395_DSP_REG_VCALB		(0x9CF7)
+ #define AW88395_DSP_RE_SHIFT		(12)

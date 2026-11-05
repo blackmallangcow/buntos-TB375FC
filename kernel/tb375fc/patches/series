@@ -234,5 +234,14 @@
 0147-thermal-drivers-mediatek-lvts-let-the-MT6897-GPU-and-APU-zones-wait-for-their-power.patch
 # 2e: MT6375의 TCPC가 가진 vbus-supply를 I2C 어댑터가 자기 것으로 찾아 버스가 뜨지 않는다
 0148-i2c-mt65xx-look-for-the-bus-supply-on-the-controller-only.patch
+# 3: 소리. AFE(MT8196 틀), 코덱 MT6368(캡처), 앰프 AW88394(본가 aw88395)
+0160-ASoC-dt-bindings-add-MediaTek-MT6897-AFE-and-sound-card.patch
+0161-ASoC-dt-bindings-add-the-MediaTek-MT6368-codec.patch
+0162-ASoC-codecs-add-the-MediaTek-MT6368-capture-path.patch
+0163-ASoC-mediatek-add-the-MT6897-AFE-and-its-machine-driver.patch
+0164-ASoC-dt-bindings-aw88395-allow-a-speaker-id-strap.patch
+0165-ASoC-aw88395-pick-the-firmware-by-a-speaker-id-strap.patch
+0166-ASoC-aw88395-lower-the-speaker-limit-as-the-battery-drains.patch
+0167-ASoC-aw88395-keep-the-volume-down-until-the-speaker-s-resistance-is-known.patch
 # 다음 차례(아직 없음). 2b의 PMIC 쪽은 MT6363·MT6368까지 장치 트리에 있다(MT6685는 RTC까지 0110~0113에 있다):
 #  - spmi: mtk-pmif: 처리기가 있는 SID도 처리기 앞에서 지운다(벤더와 스톡의 순서). 지금은 EOI가 칩의 RCS 완료 쓰기 뒤에 와서, 그 사이 새 RCS가 지워지면 그 PMIC의 인터럽트가 재부팅까지 멈출 수 있다(창은 좁다. 코드로 본 것이다). 처리기를 뗀 SID와 직접 요청한 SID도 함께 풀린다
