@@ -1,8 +1,9 @@
-# buntOS 설계안 v0.8.7
+# buntOS 설계안 v0.8.8
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
 - 개정 이력
+  - v0.8.8 (2026-11-05): 5.5절의 apt 저장소를 고치고 apt 보호(5.5.1절, ADR-015)를 더했다. 9.2절의 e2e 9번, 10장의 패키지 형식, 11장의 진행 상황과 데스크톱 라인의 다음 작업, 13장을 고쳤다
   - v0.8.7 (2026-11-04): 5.4절과 11장에 로그인과 로그아웃 때 컴포지터끼리 화면을 끄지 않고 넘기는 것(`comp/src/handover.rs`)을, 9.2절에 e2e 1번의 화면 넘겨받기와 로그아웃 확인을 적었다
   - v0.8.6 (2026-11-04): 5.1절과 11장에 Firefox의 칸 밖 누르기를 화면 키보드가 칸 누르기로 보지 않게 한 것(입력기 초기화와 글 커서 자리로 가리기)과 칸을 처음 켤 때 글 커서를 보지 않는 것을 적었다. 커넥터가 있는 카드를 화면 장치로 고르는 것도 적었다
   - v0.8.5 (2026-11-04): 5.1절의 누를 영역에 메뉴 막대와 메뉴의 줄 36px를 적었다
@@ -402,7 +403,29 @@ macOS 26의 화면 잠금(⌃⌘Q), 로그아웃(⇧⌘Q), 응용 프로그램 �
 - **세션 환경**: greetd가 세션을 열 때 `/etc/profile`을 읽어 flatpak의 `/etc/profile.d/flatpak.sh`가 `XDG_DATA_DIRS`에 Flatpak 내보내기 경로를 더한다. systemd 사용자 관리자는 flatpak의 환경 생성기로 같은 값을 받는다. 그래서 설치한 Flatpak 앱이 모든 앱과 `bunt agent apps --installed`에 보인다. GIO는 Exec의 프로그램이 PATH에 없는 항목을 없는 앱으로 치는데 사용자 관리자의 PATH에 `/usr/games`가 없어, `/usr/lib/environment.d/70-buntos-games.conf`로 더한다.
 - **앱을 열 때**: Flathub와 GNOME의 앱은 D-Bus로 뜨는 것이 많다(`DBusActivatable`). 뜨는 사이에 부른 쪽이 세션 버스를 떠나면 dbus-daemon이 실행 요청을 버려 앱이 창 없이 떴다가 사라진다. 그래서 [열기]를 누르면 창은 바로 닫고 프로세스는 앱이 답할 때까지(GDBus 기본 25초) 남는다(`packages/src/ui.rs`의 `launch_app`).
 - **앱 스토어**: `gnome-software`와 `-plugin-deb`, `-plugin-flatpak`. fwupd 플러그인(Recommends)은 넣지 않는다. Flathub는 이미지를 만들 때 `flatpak remote-add`로 넣고(저장소 파일 `/usr/share/buntos/flathub.flatpakrepo`, Flathub가 내는 파일 그대로), 지우면 다시 생기지 않는다. 이름은 `/usr/local/share/applications/org.gnome.Software.desktop`이 바꾼다. 세션이 XDG 자동 시작을 돌리지 않으므로 앱을 열기 전에는 메모리를 쓰지 않는다. 한 번 열면 창을 닫아도 세션이 끝날 때까지 약 190MB로 남는다(GNOME Software의 동작). 그동안 업데이트를 혼자 내려받지 않게 `download-updates=false`로 둔다.
-- **apt 저장소**: mkosi는 이미지의 sources에 스냅숏을 적지 않으므로 설치한 시스템의 apt는 live forky(`deb.debian.org`)를 본다. 목록은 약 200MB이고 `deb-src`와 `-debug`가 그 가운데 절반쯤이다. 앱 스토어와 .deb 설치가 받은 패키지는 이미지보다 새 판일 수 있다. Debian 기본값대로 Recommends도 함께 설치한다(이미지가 Recommends 없이 만들어져 2.4MB인 `gnome-sudoku`가 yelp 등 패키지 141개를 더 끌어왔다).
+- **apt 저장소**: mkosi는 이미지의 sources에 스냅숏을 적지 않으므로 설치한 시스템의 apt는 live forky(`deb.debian.org`)를 본다. 스냅숏 고정(ADR-004)은 이미지를 만들 때의 일이고, 설치한 뒤에는 `apt upgrade`와 앱 스토어가 Debian의 새 판을 받는다. 그래도 우리 것이 망가지지 않게 아래의 apt 보호가 지킨다. 목록은 약 200MB이고 `deb-src`와 `-debug`가 그 가운데 절반쯤이다. 앱 스토어와 .deb 설치가 받은 패키지는 이미지보다 새 판일 수 있다. Debian 기본값대로 Recommends도 함께 설치한다(이미지가 Recommends 없이 만들어져 2.4MB인 `gnome-sudoku`가 yelp 등 패키지 141개를 더 끌어왔다).
+
+#### 5.5.1 apt 보호
+
+자체 컴포넌트는 아직 dpkg가 모르는 파일이다(10장). 그래서 apt는 이들이 쓰는 라이브러리를 모르고, `autoremove`나 `full-upgrade`가 라이브러리를 지우면 다음 로그인에 화면이 뜨지 않는다. 파일 덮어쓰기는 위험이 작다. 이미지에서 dpkg가 모르는 파일 2278개를 forky의 arm64·amd64 전체 파일 목록과 맞대 보니 경로가 겹치는 것은 설치되지 않은 꾸러미 하나(`sxmo-utils`의 `mimeapps.list`)뿐이었다(2026-11-05). 이 위험을 막는 것이 `/usr/libexec/buntos/apt-guard`다(ADR-015). `mkosi.postinst.chroot`가 이미지를 만들 때 `apt-guard install`을 부른다.
+
+| 무엇 | 어떻게 | 막는 것 |
+|---|---|---|
+| 꾸러미 `buntos-runtime` | 바이너리의 `DT_NEEDED`를 꾸러미 이름으로 바꾸고, 실행 중에 열거나 부르는 꾸러미(설정의 `GUARD_DEPENDS`)를 더해 의존성으로 잡은 뒤 고정한다. 이미지 목록에 들어가 패키지 매니저에 보이지 않는다 | `autoremove`, `full-upgrade`가 세션의 라이브러리와 서비스를 지우는 것 |
+| `dpkg-divert` | `os-release`(mkosi가 `IMAGE_ID`를 더했다)와 `mimeapps.list` | 같은 경로의 꾸러미 파일은 `<경로>.dpkg-dist`로 받는다 |
+| `/usr/sbin/policy-rc.d` | 로그인 화면, NetworkManager, `wpa_supplicant`, D-Bus, logind, polkit, UPower, accountsservice의 재시작과 멈춤을 막는다 | 쓰는 중에 화면이나 네트워크가 끊겨 apt까지 함께 죽는 것. 새 판은 다음 부팅부터 돈다 |
+| `Dpkg::Options` | `--force-confold` | 고친 설정 파일을 묻는 창에서 멈추는 것. 꾸러미의 새 판은 `.dpkg-dist`로 남는다 |
+| 훅 `DPkg::Pre-Invoke`, `DPkg::Post-Invoke` (`/etc/apt/apt.conf.d/70-buntos-guard`) | apt가 dpkg를 부르기 전에 우리 파일의 해시를 재고, 끝나면 해시, 라이브러리, 서비스 켜짐 상태, 다시 시작하지 않은 서비스를 비교해 알린다. 기록은 `/var/log/buntos-apt-guard.log`다. 패키지 매니저와 앱 스토어도 libapt를 쓰므로 함께 걸린다 | 그래도 일이 난 것을 모르고 지나가는 것 |
+
+- **공통과 보드.** 도구와 위 표는 모든 이미지에 공통이고 설정은 `/etc/buntos/apt-guard.conf`에 있다. 보드는 `/etc/buntos/apt-guard.conf.d/*.conf`에 `GUARD_HOLD+=(...)`처럼 더한다(`bsp/<보드>/mkosi.extra`). 직접 빌드한 커널과 Mesa를 쓰는 태블릿 포크는 그것과 GPU 펌웨어의 고정, Debian 커널과 부트로더 차단(`preferences.d`)을 보드 쪽에 둔다.
+- **데스크톱 이미지는 커널을 막지 않는다.** Debian 커널, Mesa, 펌웨어를 그대로 쓰므로 고정하지 않는다. 그것을 올리는 것이 곧 보안 업데이트다. apt가 넣은 커널은 dracut이 initrd를 만들고 부트 항목(`/boot/loader/entries`)이 더해져 다음 부팅의 기본이 된다. 이미지의 UKI는 그 뒤에도 항목으로 남는다.
+- **스냅숏은 루트가 btrfs 서브볼륨일 때만 쓴다.** 그때는 apt 앞에 읽기 전용 스냅숏을 맨 위 서브볼륨의 `snapshots/`에 3개까지 남기고, 못 만들면 dpkg 앞에서 멈춘다(`restore`, `rollback`). 지금 데스크톱 이미지는 파티션의 맨 위 서브볼륨을 그대로 루트로 쓰므로(`subvolid=5`) 스냅숏을 건너뛰고 apt를 막지 않으며 해시 비교와 알림만 한다. D6의 트랜잭션 스냅숏은 디스크에 설치하는 길(11장 데스크톱 라인의 B)에서 루트를 서브볼륨으로 만들면 켜진다.
+
+```bash
+/usr/libexec/buntos/apt-guard check     # 지금 상태. 문제가 있으면 1로 끝난다
+/usr/libexec/buntos/apt-guard refresh   # 바이너리를 바꾼 뒤 buntos-runtime의 의존성을 다시 계산한다
+/usr/libexec/buntos/apt-guard install   # 고정이 풀렸을 때(dpkg -i로 고정한 꾸러미를 넣었다) 다시 건다
+```
 
 ---
 
@@ -831,7 +854,7 @@ v0 구현 (2026-10-29, 접근 정책):
     - 만들며 찾아 고친 것: 조합 중 다른 창을 누르면 글자가 사라졌다(컴포지터가 키보드 포커스를 옮기기 직전에 확정한다). 터미널에서 조합 중 Enter를 누르면 가끔 마지막 글자가 줄바꿈 뒤로 갔다(입력기의 commit serial이 어긋나면 smithay가 앱에 done(0)을 보내고 foot은 그 done을 버린다. 늘 글 입력의 serial로 보낸다). 왼쪽 Shift만 눌렀다 떼면 영문으로 바뀌었다(fcitx5 기본 단축키 AltTriggerKeys를 끈다). GTK4 앱의 창 안에서 다른 칸을 누르면 조합하던 글자가 사라지는 것은 GTK의 동작이라 남았다([개발 환경](../dev/environment.md) 7장)
   - e2e 7번(2026-10-30, `tests/e2e/session-lock.sh`)은 e2e 4번에 이어 돈다. QMP로 ⌃⌘Q를 넣어 잠그고, 잠금 화면이 뜨는지(`GetLocked`, 저널의 `bunt-lock: ready`), 잠긴 동안 에이전트의 스냅샷과 앱 목록이 거절되는지, 틀린 암호로는 풀리지 않는지, 잠금 화면에 QMP로 친 암호로 풀리는지, 풀린 뒤 에이전트가 다시 읽는지 본다. 잠금은 사람의 암호로만 풀리므로 시험도 그 길로만 푼다. 잠그기 전에는 VM에서 logind가 잠자기를 받지 않고(CanSuspend no) 셸의 잠자기 동작이 꺼졌는지(셸이 D-Bus로 내보내는 `org.gtk.Actions`) 본다(2026-10-30 밤부터, 5.4절)
   - e2e 8번(2026-10-31, 데스크탑 항목, `tests/e2e/desktop.sh`)은 e2e 1번 바로 뒤, 앱 창이 데스크탑을 가리기 전에 돈다. 데스크탑 폴더에 파일 넷과 폴더 하나를 만들어 셸이 이름 차례로 보이는지 보고, QMP로 누르기·드래그·키를 넣어 고르기, 데스크탑의 키보드 포커스, 드래그해 여러 항목 선택, ⌘A·Esc, 단축 메뉴의 새로운 폴더와 이름 변경, ⌘⌫ 휴지통, 항목 보기 끄고 켜기를 본다. 결과는 에이전트(목록 항목과 selected 상태)와 데스크탑 폴더로 읽는다. 단축 메뉴 뒤 이름 변경은 컴포지터가 메뉴를 닫은 뒤 키보드를 돌려주는지도 본다
-  - e2e 9번(2026-11-03, 패키지 매니저, `tests/e2e/packages.sh`)은 e2e 7번 뒤, 맨 끝에 돈다. 게스트에서 의존성 없는 작은 `.deb`와 AppImage를 만들어 형식의 기본 앱이 패키지 매니저인지 보고, GIO로 열어(파일 앱에서 두 번 누른 것과 같은 길) 설치, 실행, 목록 창에서 제거까지 한다. 창은 에이전트로 읽고 누르고, `.deb`의 관리자 인증 창은 사람만 답하므로 암호를 QMP로 친다. 처음 열 때 apt 목록을 받지만 인터넷이 없어도 통과한다
+  - e2e 9번(2026-11-03, 패키지 매니저, `tests/e2e/packages.sh`)은 e2e 7번 뒤, 맨 끝에 돈다. 게스트에서 의존성 없는 작은 `.deb`와 AppImage를 만들어 형식의 기본 앱이 패키지 매니저인지 보고, GIO로 열어(파일 앱에서 두 번 누른 것과 같은 길) 설치, 실행, 목록 창에서 제거까지 한다. 창은 에이전트로 읽고 누르고, `.deb`의 관리자 인증 창은 사람만 답하므로 암호를 QMP로 친다. 처음 열 때 apt 목록을 받지만 인터넷이 없어도 통과한다. apt 보호(5.5절)도 여기서 본다: `buntos-runtime`이 고정되어 이미지 목록에 있고 `apt-guard check`가 문제 없다고 하며, apt가 `libseat1` 제거를 거부하고 자동 제거가 지우는 것이 없으며, 패키지 매니저의 설치와 제거가 훅을 거치고 스냅숏 없는 루트를 막지 않으며 우리 파일의 해시가 그대로인지 본다
   - 시나리오는 드라이버에 독립적인 형식(단계 = {동작, 기대값})으로 작성하고, Phase 3에는 드라이버만 교체한다
 - 시나리오 예 (워크플로우 단위):
   1. 부팅 → 로그인 → 셸 표시
@@ -890,7 +913,7 @@ buntOS/
 
 - 이미지 빌드 도구: mkosi (Debian 지원, 아키텍처별 빌드, UKI 생성)
   - 루트는 내용에 맞춘 작은 btrfs로 만들고(`Minimize=guess`), 처음 켤 때 systemd-repart(`/usr/lib/repart.d/10-root.conf`)가 파티션을, systemd-growfs-root(GPT 속성 59)가 파일 시스템을 디스크 끝까지 늘린다. 16G 디스크에서 5.4G가 15.4G가 되었고 둘을 합쳐 0.1초 남짓 걸렸다. 전에는 루트에 여유가 거의 없어 VM에 앱 하나(Claude 데스크톱 앱)를 설치하자 디스크가 찼다
-- 패키지 형식: 자체 컴포넌트도 .deb로 패키징하여 일반 Debian 패키지와 같은 경로로 배포/업데이트
+- 패키지 형식: 자체 컴포넌트도 .deb로 패키징하여 일반 Debian 패키지와 같은 경로로 배포/업데이트. 아직 하지 않았다. 지금은 파일로 넣고 apt 보호(5.5절)로 지킨다. 패키징하면 꾸러미 `buntos-runtime`은 필요 없어진다
 - 패키지 미러: snapshot.debian.org의 특정 시점으로 고정하고, 주 1회 갱신 PR(e2e 통과 시 병합)로 올린다. forky 정식 릴리스 전의 공개 빌드에는 "보안 지원 없음"을 표시한다(ADR-004)
 - Rust 툴체인: `rust-toolchain.toml`로 고정하고 Debian rustc에 의존하지 않는다(ADR-004)
 - 라이선스 표기: 파일마다 SPDX 헤더를 달고, 헤더를 달 수 없는 파일은 `REUSE.toml`로 표기한다(D10)
@@ -1190,11 +1213,37 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
     - 텍스트 편집기(글 커서에서 먼 빈 곳을 누르면 처음에도 다시 눌러도 뜬다. 제목 막대에서는 뜨지 않는다), 시스템 설정의 찾기 칸, foot, 관리자 인증 창(칸을 옮기거나 암호가 틀려도 그대로다): 앞서와 같다
   - arm64 QEMU, 펌웨어를 뺀 시험 이미지에서 e2e 1·8·5·6·4·7·9번을 한 부팅에서 통과했다(전원 꺼짐까지 221초)
 - 커넥터가 있는 카드를 화면 장치로 고른다 (2026-11-04): SoC에서는 화면 장치와 GPU가 따로라 카드가 둘이다. smithay의 `primary_gpu`는 PCI의 `boot_vga`가 없으면 경로 차례로 첫째를 주어, TB375FC에서 그리기만 하는 panthor를 골랐다. 렌더 노드는 Mesa가 화면 장치에서 찾아 준다(`comp/src/udev.rs`).
+- apt 보호 (2026-11-05, ADR-015, 5.5.1절): 사람이 TB375FC에서 요청해 포크에서 먼저 만들고 기기에서 검증한 것의 공통부를 이미지 레시피로 옮겼다. 자체 컴포넌트가 쓰는 라이브러리를 꾸러미 `buntos-runtime`의 의존성으로 잡아 apt가 지우지 못하게 한다. 보드 전용(커널, Mesa, GPU 펌웨어 고정, 부트로더 차단)은 포크의 보드 설정에 남는다.
+  - 옮기며 고친 것:
+    - mkosi 샌드박스에서는 `systemd-detect-virt --chroot`가 권한 오류로 실패해 이미지를 만드는 줄 몰랐다. `container=mkosi`를 먼저 본다(이미지에 기록 파일이 남지 않는다).
+    - `ldconfig -p`에서 바이너리의 아키텍처와 같은 줄만 고른다. x86-64에 i386을 함께 넣어도 맞는 꾸러미를 잡는다.
+    - 스냅숏 없는 루트에서 `post`와 `check`가 쓸 수 없는 `restore`를 권하지 않는다.
+  - 시험 VM(arm64 KVM, 펌웨어를 뺀 시험 이미지, live forky)에서 본 것:
+    - 이미지를 만들 때 `apt-guard install`이 돌아 `buntos-runtime`(의존성 57개, 고정, 이미지 목록에 있음)이 들어가고 패키지 매니저 목록에 보이지 않는다.
+    - 루트가 `subvolid=5`라 스냅숏을 건너뛰고 apt를 막지 않는다. `apt-guard list`는 쓰지 않는 루트라고 알린다.
+    - 그래픽 세션에 들어간 채 `apt-get upgrade`로 38개를 실제로 올렸다(128초). 지켜 보는 파일 94개의 해시, 로그인 화면, 컴포지터, 셸, NetworkManager, D-Bus, logind, polkit, UPower, accountsservice, 입력기, PipeWire의 PID가 그대로이고, 에이전트가 읽은 셸 요소도 22개 그대로다. `wpa_supplicant`의 재시작만 막혔고 `post`가 알렸다. 이어서 `full-upgrade`로 남은 5개를 올렸고(`accounts-daemon`의 재시작만 막혔다) 그 뒤로 남은 것은 없다.
+    - 올린 뒤 다시 켜면 `running`이고, 로그인 화면에서 세션까지 들어간다. `apt-guard check`도 문제 없다고 한다.
+    - `libseat1`, `libgtk-4-1`, `greetd`, `libinput10` 제거를 apt가 거부한다. `autoremove`는 `upgrade` 뒤에 지우는 것이 없고, `full-upgrade` 뒤에는 옛 판 `libaccountsservice0` 하나다.
+    - 커널을 막지 않는다: Debian `rt` 커널을 apt로 넣으면 dracut이 initrd를 만들고 부트 항목이 더해져 다음 부팅의 기본이 되고, 세션까지 뜬다. `cloud` 커널은 같은 길로 뜨지만 화면과 Wi-Fi 드라이버가 없어(`/dev/dri`, `nl80211` 없음) 로그인 화면이 나오지 않는다. 사용자가 일부러 고르는 것이고 지우면 이미지의 UKI로 돌아온다. 쓰는 중인 커널을 지워도 apt는 막지 않고 `post`가 모듈 목록이 없다고 알린다.
+    - 이미지에서 dpkg가 모르는 파일 2278개와 forky의 arm64·amd64 전체 파일 목록(main, contrib, non-free, non-free-firmware)이 겹치는 경로는 설치되지 않은 `sxmo-utils`의 `mimeapps.list` 하나다.
+  - x86-64(펌웨어를 뺀 시험 이미지, 빌드 VM에서 TCG로 띄웠다)에서 본 것. 빌드 VM이 arm64라 자체 컴포넌트를 빌드하지 못해 꾸러미의 ELF(`foot`, `gst-launch-1.0`)를 바이너리 자리에 놓고 봤다:
+    - 이미지를 만들 때 amd64 chroot에서 `apt-guard install`이 돌고, `DT_NEEDED`가 맞는 꾸러미로 잡힌다. 부팅해 `check`가 문제 없다고 하고 라이브러리 제거를 apt가 거부한다.
+    - `apt-get upgrade`로 37개를 실제로 올렸다. 지켜 보는 파일의 해시와 고정이 그대로이고 `wpa_supplicant`의 재시작만 막혔다. 다시 켜도 `running`이다.
+    - i386 라이브러리를 함께 넣어 `ldconfig -p`에 같은 이름이 둘 나와도 `refresh`가 의존성을 그대로 둔다.
+    - ELF 해석을 x86-64 ELF 125개와 arm64 ELF 6개에서 `readelf -d`와 견줘 모두 같았다.
+  - 태블릿 포크의 설정(경로, 의존성, 고정, 돌리기, 라이브러리, 서비스)은 공통 설정과 보드 파일을 합친 것에 모두 들어 있다(스크립트로 견줬다).
+  - e2e 9번에 apt 보호의 확인 넷을 더했고(9.2절) arm64 QEMU에서 e2e 1·8·5·6·4·7·9번을 한 부팅에서 통과했다(9번 28개, 전원 꺼짐까지 875초). 맥이 바빠(스왑 6GB 넘게) 평소의 네 배가 걸렸다. 앞 실행은 e2e 4번의 Firefox 확인 하나가 값이 비어 실패했고, 같은 때 이 고침 전의 이미지도 Firefox 띄우기가 똑같이 늦어 e2e 5번 하나가 실패했다.
+  - 확인하지 못한 것:
+    - 자체 컴포넌트를 넣은 x86-64 이미지의 세션과 e2e. CI(9.4절)에서 손으로 돌릴 때 함께 본다.
+    - 전체 이미지(펌웨어 포함). 맥과 VM의 여유가 모자라 펌웨어를 뺀 이미지로 확인했다.
+    - 표준 커널이 새 판으로 올라가는 경우. 지금 forky의 표준 커널이 이미지와 같은 판이라 같은 판의 다른 커널(`rt`)로 봤다.
+    - 스냅숏, `restore`, `rollback`은 이 이미지에서 쓰지 않는다. 기기에서 포크가 봤고, `rollback` 뒤의 부팅은 거기서도 보지 않았다.
+    - 앱 스토어(GNOME Software)로 올리는 길. 패키지 매니저가 쓰는 PackageKit의 설치와 제거만 봤다.
 
 데스크톱 라인의 다음 작업 (2026-11-01, 제품 라인을 나눈 뒤 아래 목록보다 먼저 한다)
 
 - A. 실기기 정하기: x86-64 시험 기기(Intel 내장 GPU 노트북 하나, AMD GPU 데스크톱이나 노트북 하나)와 arm64 데스크톱 후보(mainline 지원이 있는 기기)를 정한다
-- B. 실기기 이미지: 같은 레시피의 이미지를 USB로 UEFI 부팅하고(라이브), 디스크에 설치하는 길(D6의 btrfs와 A/B)을 만든다
+- B. 실기기 이미지: 같은 레시피의 이미지를 USB로 UEFI 부팅하고(라이브), 디스크에 설치하는 길(D6의 btrfs와 A/B)을 만든다. 루트를 btrfs 서브볼륨으로 만들면 apt 보호의 스냅숏이 켜진다(5.5절)
 - C. GPU 가속: 아래 5번(GPU 경로 확인)을 실기기에서 한다. 컴포지터의 GLES 렌더러, GTK의 GL·Vulkan 렌더러, Mesa(Intel `iris`·`anv`, AMD `radeonsi`·`radv`)와 영상 가속(VA-API)을 이미지에 넣고 확인한다
 - D. 실기기 e2e: QEMU와 같은 e2e(1·5·6·4·7번)를 실기기에서 손으로 돌린다(9.3절)
 - E. 공개 시점: 지금 결정은 "TB375FC 시험 뒤"(2026-10-30)다. 제품 라인에 맞춰 다시 정한다(아래 11번)
@@ -1292,6 +1341,7 @@ Phase 2는 Phase 3~5와 병행한다. Phase 3~5의 종료 조건은 QEMU(양 아
 | ADR-012 | 재배포 불가 펌웨어: 허용하되 공개 이미지·저장소에 넣지 않고 사용자 기기에서만 추출 | 2.1절 | v0.3 |
 | ADR-013 | 제품 라인: 이 저장소는 x86-64·arm64 데스크톱 라인(GPU 가속), 태블릿은 arm64 포크 라인(기기마다 최적화) | 1.1절, 3장, 4.1절, 11장 | v0.7.0 |
 | ADR-014 | 앱 설치: 설치 파일은 자체 앱 패키지 매니저(.deb는 PackageKit, Flatpak은 flatpak, AppImage는 풀어서), 앱 스토어는 GNOME Software + Flathub | 5.5절, 6.5절 | v0.8.0 |
+| ADR-015 | apt 보호: 자체 컴포넌트가 쓰는 라이브러리를 꾸러미 의존성으로 잡고 고정하며, 데스크톱 이미지는 커널을 고정하지 않는다 | 5.5절, 10장 | v0.3.13 |
 
 ADR-007·008은 구 Track A 폐기로 무효가 됐다. 각 항목의 선택지와 근거는 [DECISION-BRIEF.md](DECISION-BRIEF.md)에 있다.
 

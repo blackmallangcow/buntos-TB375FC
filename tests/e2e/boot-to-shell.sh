@@ -542,6 +542,12 @@ if [[ "$agent_refs" != NONE ]]; then
 	check "시험 설치 파일 둘을 만든다" "$answer" 2
 	guest base-hidden
 	check "이미지에 든 패키지를 제거 목록의 기준으로 적어 둔다" "$answer" 1
+	guest guard
+	check "apt 보호: buntos-runtime을 고정해 목록에서 빼고 문제가 없다" "$answer" "hold 1 ok"
+	guest guard-refuses
+	check "apt 보호: 라이브러리 제거를 거부하고 자동 제거가 지우는 것이 없다" "$answer" "refused 0"
+	guest guard-before
+	check "apt 보호: 우리 파일의 해시를 재 둔다" "$answer" ready
 	guest default deb
 	check ".deb의 기본 앱이 패키지 매니저다" "$answer" org.buntos.PackageManager.desktop
 	guest default appimage
@@ -581,6 +587,8 @@ if [[ "$agent_refs" != NONE ]]; then
 	check "암호를 치면 목록에서 사라진다" "$answer" yes
 	guest deb-installed
 	check "패키지가 지워졌다" "$answer" no
+	guest guard-after
+	check "apt 보호: 설치와 제거도 훅을 거치고 스냅숏 없는 루트를 막지 않으며 우리 파일이 그대로다" "$answer" "ran same none"
 
 	# AppImage: 관리자 암호 없이 이 사용자의 폴더에 푼다
 	guest open appimage

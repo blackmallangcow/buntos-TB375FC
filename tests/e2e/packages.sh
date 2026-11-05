@@ -8,6 +8,7 @@
 # 만든다. 직렬 콘솔의 root로 실행하며 마지막 줄이 답이다.
 # 사용법: packages.sh prepare | default <deb|appimage> | open <deb|appimage> | ready <상태> | click <이름> | sheet <이름>
 #         | asked <polkit 동작> | ran <deb|appimage> | deb-installed | appimage-installed | list | list-open | base-hidden
+#         | guard | guard-refuses | guard-before | guard-after
 set -u
 
 user=buntos
@@ -191,5 +192,30 @@ list-open)
 base-hidden)
 	# 이미지에 든 패키지는 제거 목록의 기준에 들어 있다
 	grep -c -x nautilus /usr/share/buntos/base-packages
+	;;
+guard)
+	# apt 보호(설계안 5.5절): buntos-runtime이 고정되어 있고, 이미지 목록에 있어 패키지 매니저에 보이지 않고, check가 문제 없다고 한다
+	want=$(dpkg-query --show --showformat='${db:Status-Want}' buntos-runtime 2>/dev/null)
+	listed=$(grep -c -x buntos-runtime /usr/share/buntos/base-packages)
+	if /usr/libexec/buntos/apt-guard check >/dev/null 2>&1; then state=ok; else state=bad; fi
+	echo "$want $listed $state"
+	;;
+guard-refuses)
+	# apt가 바이너리의 라이브러리를 지우지 못하고 자동 제거가 지우는 것이 없다. 인터넷이 없어도 된다
+	if apt-get -s remove libseat1 >/dev/null 2>&1; then answer=removes; else answer=refused; fi
+	echo "$answer $(apt-get -s autoremove 2>/dev/null | grep -c '^Remv')"
+	;;
+guard-before)
+	/usr/libexec/buntos/apt-guard sums >/tmp/e2e-guard-before
+	rm -f /run/buntos-apt-guard/not-restarted
+	[[ -s /tmp/e2e-guard-before ]] && echo ready
+	;;
+guard-after)
+	# 패키지 매니저의 설치와 제거도 apt 훅을 거쳤고(pre가 만들고 post가 치운다), 우리 파일은 그대로다. 시험 이미지의 루트는 btrfs
+	# 서브볼륨이 아니라 스냅숏 없이 지나갔다
+	if [[ -e /run/buntos-apt-guard/not-restarted && ! -e /run/buntos-apt-guard/before.sha256 ]]; then ran=ran; else ran=not-ran; fi
+	if /usr/libexec/buntos/apt-guard sums | cmp -s - /tmp/e2e-guard-before; then same=same; else same=changed; fi
+	if /usr/libexec/buntos/apt-guard list >/dev/null 2>&1; then snapshots=snapshots; else snapshots=none; fi
+	echo "$ran $same $snapshots"
 	;;
 esac
