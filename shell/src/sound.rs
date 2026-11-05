@@ -28,6 +28,17 @@ use crate::{
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// 막대를 끄는 동안 wpctl을 너무 자주 부르지 않게 모으는 시간
 const SET_DELAY: Duration = Duration::from_millis(60);
+/// 음량이 바뀔 때 막대가 따라가는 시간 (--duration-fast)
+const GLIDE_US: f64 = 120_000.0;
+
+/// 음량 키가 나누는 칸 (macOS와 같다)
+const KEY_STEPS: f64 = 16.0;
+
+/// 음량 키를 눌렀을 때의 음량. 칸 사이에 있으면 가까운 칸에서 움직인다
+fn stepped(volume: f64, up: bool) -> f64 {
+    let step = (volume * KEY_STEPS).round() + if up { 1.0 } else { -1.0 };
+    (step / KEY_STEPS).clamp(0.0, 1.0)
+}
 
 /// 음량 아이콘
 pub fn volume_icon(volume: f64, muted: bool) -> &'static str {
@@ -49,6 +60,8 @@ struct Inner {
     /// 마지막으로 읽은 채널 음량. 균형을 둔 장치의 음량을 바꿀 때 채널 사이의 비를 둔다
     mixer: RefCell<Option<mixer::Volume>>,
     pending: Cell<Option<f64>>,
+    /// 음량을 바꾸는 명령이 도는 중이다. 앞뒤가 바뀌지 않게 한 번에 하나만 돌린다
+    applying: Cell<bool>,
     listeners: Listeners<Sound>,
 }
 
@@ -58,6 +71,7 @@ impl Sound {
             volume: Cell::new(None),
             mixer: RefCell::default(),
             pending: Cell::new(None),
+            applying: Cell::new(false),
             listeners: RefCell::default(),
         }));
         sound.refresh();
@@ -81,8 +95,8 @@ impl Sound {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
-            // 막대를 끄는 중이면 그 값이 먼저다
-            if inner.pending.get().is_some() {
+            // 바꾸는 중이면 그 값이 먼저다. 읽은 값은 이미 지난 값일 수 있다
+            if inner.pending.get().is_some() || inner.applying.get() {
                 return;
             }
             inner.mixer.replace(mixer);
@@ -115,9 +129,14 @@ impl Sound {
         let volume = volume.clamp(0.0, 1.0);
         let first = self.0.pending.replace(Some(volume)).is_none();
         self.0.volume.set(Some((volume, false)));
-        if !first {
-            return;
+        // 막대와 아이콘은 바로 따라간다. 명령만 모아서 보낸다
+        self.notify();
+        if first && !self.0.applying.get() {
+            self.apply_later();
         }
+    }
+
+    fn apply_later(&self) {
         let weak = Rc::downgrade(&self.0);
         glib::timeout_add_local_once(SET_DELAY, move || {
             let Some(inner) = weak.upgrade() else {
@@ -126,11 +145,13 @@ impl Sound {
             let Some(volume) = inner.pending.take() else {
                 return;
             };
+            inner.applying.set(true);
             let sound = Sound(inner);
-            sound.notify();
             let mixer = sound.0.mixer.borrow().clone();
             glib::spawn_future_local(async move {
-                run::set_mute(DEFAULT_SINK, false).await;
+                if mixer.as_ref().is_none_or(|mixer| mixer.muted) {
+                    run::set_mute(DEFAULT_SINK, false).await;
+                }
                 // 균형을 둔 장치는 채널 사이의 비를 둔 채 바꾼다. 채널을 모르면 전처럼 wpctl set-volume이다
                 match mixer {
                     Some(mixer) => run::set_level(DEFAULT_SINK, &mixer, volume).await,
@@ -139,9 +160,25 @@ impl Sound {
                         run::run(&["wpctl", "set-volume", "-l", "1.0", DEFAULT_SINK, &level]).await
                     }
                 };
-                sound.refresh();
+                sound.0.applying.set(false);
+                if sound.0.pending.get().is_some() {
+                    sound.apply_later();
+                } else {
+                    sound.refresh();
+                }
             });
         });
+    }
+
+    /// 음량 키 한 번. 올리는 키는 소리 끔을 풀고, 내리는 키는 소리를 끈 동안 음량을
+    /// 그대로 둔다
+    pub fn step(&self, up: bool) {
+        let Some((volume, muted)) = self.volume() else {
+            return;
+        };
+        if up || !muted {
+            self.set_volume(stepped(volume, up));
+        }
     }
 
     pub fn toggle_mute(&self) {
@@ -167,6 +204,61 @@ impl Sound {
     }
 }
 
+/// 막대가 새 값으로 움직이는 중의 상태
+struct Glide {
+    from: f64,
+    to: f64,
+    /// 첫 그림의 시각(마이크로초)
+    started: Option<i64>,
+}
+
+/// 막대를 새 값까지 부드럽게 옮긴다. 끄는 중이면 막대가 이미 그 값이라 움직이지 않고,
+/// 보이지 않는 막대는 바로 옮긴다. `guard`는 value-changed 처리를 막는다
+fn glide_to(
+    scale: &gtk::Scale,
+    to: f64,
+    guard: &Rc<Cell<bool>>,
+    glide: &Rc<RefCell<Option<Glide>>>,
+) {
+    let from = scale.value();
+    if (from - to).abs() < 0.001 || !scale.is_mapped() {
+        glide.replace(None);
+        guard.set(true);
+        scale.set_value(to);
+        guard.set(false);
+        return;
+    }
+    let running = glide
+        .replace(Some(Glide {
+            from,
+            to,
+            started: None,
+        }))
+        .is_some();
+    if running {
+        return;
+    }
+    let (guard, glide) = (guard.clone(), glide.clone());
+    scale.add_tick_callback(move |scale, clock| {
+        let mut slot = glide.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return glib::ControlFlow::Break;
+        };
+        let now = clock.frame_time();
+        let started = *state.started.get_or_insert(now);
+        let progress = ((now - started) as f64 / GLIDE_US).min(1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        guard.set(true);
+        scale.set_value(state.from + (state.to - state.from) * eased);
+        guard.set(false);
+        if progress >= 1.0 {
+            *slot = None;
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
 /// 음량 막대. 제어 센터와 사운드 메뉴가 쓴다
 pub fn slider(tr: &Translations, sound: &Sound) -> gtk::Box {
     let icon = gtk::Button::builder()
@@ -190,12 +282,12 @@ pub fn slider(tr: &Translations, sound: &Sound) -> gtk::Box {
 
     // 상태에서 막대로 옮길 때는 value-changed 처리를 막는다
     let updating = Rc::new(Cell::new(false));
+    let glide = Rc::new(RefCell::new(None));
     let (shown_icon, shown_scale, guard) = (icon.clone(), scale.clone(), updating.clone());
     sound.subscribe(move |sound| {
         let (volume, muted) = sound.volume().unwrap_or((0.0, true));
-        guard.set(true);
-        shown_scale.set_value(if muted { 0.0 } else { volume });
-        guard.set(false);
+        let shown = if muted { 0.0 } else { volume };
+        glide_to(&shown_scale, shown, &guard, &glide);
         shown_icon.set_icon_name(volume_icon(volume, muted));
     });
     let changer = sound.clone();
@@ -271,6 +363,17 @@ pub fn extra(tr: &Rc<Translations>, sound: &Sound) -> gtk::MenuButton {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_keys_move_by_a_sixteenth_from_the_nearest_step() {
+        assert_eq!(stepped(0.5, true), 0.5625);
+        assert_eq!(stepped(0.5, false), 0.4375);
+        // PipeWire의 기본값 40%는 칸 사이에 있다
+        assert_eq!(stepped(0.4, true), 0.4375);
+        assert_eq!(stepped(0.4, false), 0.3125);
+        assert_eq!(stepped(1.0, true), 1.0);
+        assert_eq!(stepped(0.0, false), 0.0);
+    }
 
     #[test]
     fn volume_icons() {

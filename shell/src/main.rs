@@ -31,6 +31,7 @@ mod sound;
 mod status_items;
 mod switcher;
 mod toplevels;
+mod volume_hud;
 mod wallpaper;
 // 로고 메뉴의 강제 종료, 잠자기, 화면 잠금, 로그아웃
 mod session;
@@ -134,7 +135,15 @@ fn main() -> glib::ExitCode {
             screenshot::share_options(&settings);
             minimized::share_effect(&settings);
         }
-        compositor::follow_shortcuts(&launcher, &session, shell_settings(), &screenshot_toolbar);
+        // 음량 키의 표시
+        let volume_hud = volume_hud::VolumeHud::start(app, &tr, &services.sound);
+        compositor::follow_shortcuts(
+            &launcher,
+            &session,
+            shell_settings(),
+            &screenshot_toolbar,
+            &volume_hud,
+        );
         // ⌘⇥ 앱 전환 창. 키는 컴포지터가 받고 이 창은 보이기만 한다
         let switcher = switcher::Switcher::start(app);
         let mut windows = vec![
@@ -145,6 +154,7 @@ fn main() -> glib::ExitCode {
             switcher.window().clone(),
             screenshot_toolbar.window().clone(),
             screenshot_preview.window().clone(),
+            volume_hud.window().clone(),
         ];
         // 데스크탑의 단축 메뉴도 밝게·어둡게를 따른다
         windows.extend(desktop.map(|desktop| desktop.window().clone()));

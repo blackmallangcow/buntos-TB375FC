@@ -245,7 +245,7 @@ fn lock_size(size: Size<i32, Logical>) -> Size<u32, Logical> {
 pub fn runs_while_locked(builtin: Builtin) -> bool {
     matches!(
         builtin,
-        Builtin::SwitchInputSource | Builtin::SwitchVt(_) | Builtin::Quit
+        Builtin::SwitchInputSource | Builtin::SwitchVt(_) | Builtin::Quit | Builtin::Volume(_)
     )
 }
 
@@ -713,6 +713,9 @@ mod tests {
         assert!(runs_while_locked(Builtin::SwitchInputSource));
         assert!(runs_while_locked(Builtin::SwitchVt(2)));
         assert!(runs_while_locked(Builtin::Quit));
+        assert!(runs_while_locked(Builtin::Volume(
+            crate::shortcuts::VolumeKey::Up
+        )));
         for builtin in [
             Builtin::LockScreen,
             Builtin::LogOut { confirm: true },

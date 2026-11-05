@@ -209,10 +209,16 @@ impl BuntState {
     fn logind_event(&mut self, event: logind::Event) {
         match event {
             logind::Event::Lock => self.lock_screen("logind asked to lock the session"),
-            logind::Event::PrepareForSleep(true) => self.lock_before_sleep(),
+            logind::Event::PrepareForSleep(true) => {
+                if let Some(logind) = &self.session.logind {
+                    logind.darken_screen(true);
+                }
+                self.lock_before_sleep();
+            }
             logind::Event::PrepareForSleep(false) => {
                 if let Some(logind) = &self.session.logind {
                     logind.take_sleep_inhibitor();
+                    logind.darken_screen(false);
                 }
             }
         }

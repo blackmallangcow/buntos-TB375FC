@@ -36,6 +36,7 @@ enum Request {
     LockedHint(bool),
     TakeSleepInhibitor,
     ReleaseSleepInhibitor,
+    DarkenScreen(bool),
 }
 
 pub struct Logind {
@@ -63,6 +64,12 @@ impl Logind {
     /// 깬 뒤 다음 잠자기를 위해 다시 잡는다
     pub fn take_sleep_inhibitor(&self) {
         let _ = self.requests.send(Request::TakeSleepInhibitor);
+    }
+
+    /// 잠들기 직전에 백라이트를 끈다(true). 앱이 잠금 화면으로 바뀌는 모습이 보이지 않아
+    /// 화면이 바로 꺼진 것처럼 보인다. 깬 뒤 원래 밝기로 돌린다(false)
+    pub fn darken_screen(&self, dark: bool) {
+        let _ = self.requests.send(Request::DarkenScreen(dark));
     }
 
     /// 잠긴 장면을 낸 뒤 놓으면 logind가 잠든다
@@ -110,6 +117,7 @@ fn run(events: LoopSender<Event>, requests: mpsc::Receiver<Request>) {
         );
     }
     let mut inhibitor = take_inhibitor(&connection);
+    let mut darkened: Option<(String, u32)> = None;
     for request in requests {
         match request {
             Request::LockedHint(locked) => {
@@ -133,8 +141,55 @@ fn run(events: LoopSender<Event>, requests: mpsc::Receiver<Request>) {
             }
             // 파일을 닫으면 놓인다
             Request::ReleaseSleepInhibitor => inhibitor = None,
+            Request::DarkenScreen(dark) => {
+                let Some(session) = &session else {
+                    continue;
+                };
+                if !dark {
+                    if let Some((name, level)) = darkened.take() {
+                        set_brightness(&connection, session, &name, level);
+                    }
+                } else if darkened.is_none()
+                    && let Some((name, level)) = backlight()
+                    && set_brightness(&connection, session, &name, 0)
+                {
+                    darkened = Some((name, level));
+                }
+            }
         }
     }
+}
+
+/// 첫 백라이트의 이름과 밝기
+fn backlight() -> Option<(String, u32)> {
+    let device = std::fs::read_dir("/sys/class/backlight")
+        .ok()?
+        .flatten()
+        .next()?;
+    let level = std::fs::read_to_string(device.path().join("brightness")).ok()?;
+    Some((
+        device.file_name().into_string().ok()?,
+        level.trim().parse().ok()?,
+    ))
+}
+
+fn set_brightness(
+    connection: &blocking::Connection,
+    session: &OwnedObjectPath,
+    name: &str,
+    level: u32,
+) -> bool {
+    let result = connection.call_method(
+        Some(LOGIN1),
+        session,
+        Some(SESSION),
+        "SetBrightness",
+        &("backlight", name, level),
+    );
+    if let Err(err) = &result {
+        tracing::warn!("failed to set the brightness: {err}");
+    }
+    result.is_ok()
 }
 
 /// 이 프로세스의 세션. greetd가 연 세션의 프로세스(세션 스크립트가 exec한 컴포지터)다

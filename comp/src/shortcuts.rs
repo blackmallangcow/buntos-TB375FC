@@ -211,6 +211,41 @@ pub enum Builtin {
     },
     /// 응용 프로그램 강제 종료 창. 셸이 띄운다
     ForceQuit,
+    /// 음량 키 (표에 없는 고정 키). 셸이 음량을 바꾸고 표시를 띄운다
+    Volume(VolumeKey),
+}
+
+/// 기기와 키보드의 음량 키
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeKey {
+    Up,
+    Down,
+    Mute,
+}
+
+impl VolumeKey {
+    pub fn of(key: Keysym) -> Option<Self> {
+        match key {
+            Keysym::XF86_AudioRaiseVolume => Some(Self::Up),
+            Keysym::XF86_AudioLowerVolume => Some(Self::Down),
+            Keysym::XF86_AudioMute => Some(Self::Mute),
+            _ => None,
+        }
+    }
+
+    /// 셸에 알리는 이름 (ShortcutActivated)
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Up => "sound.volume-up",
+            Self::Down => "sound.volume-down",
+            Self::Mute => "sound.mute",
+        }
+    }
+
+    /// 누르고 있으면 되풀이하는지
+    pub fn repeats(self) -> bool {
+        self != Self::Mute
+    }
 }
 
 /// 앱 전환 창의 키 (macOS와 같다)
@@ -1111,6 +1146,22 @@ mod tests {
         typing: true,
         terminal: true,
     };
+
+    #[test]
+    fn volume_keys_are_known_by_their_symbols() {
+        assert_eq!(
+            VolumeKey::of(Keysym::XF86_AudioRaiseVolume),
+            Some(VolumeKey::Up)
+        );
+        assert_eq!(
+            VolumeKey::of(Keysym::XF86_AudioLowerVolume),
+            Some(VolumeKey::Down)
+        );
+        assert_eq!(VolumeKey::of(Keysym::XF86_AudioMute), Some(VolumeKey::Mute));
+        assert_eq!(VolumeKey::of(Keysym::XF86_PowerOff), None);
+        assert!(VolumeKey::Up.repeats() && VolumeKey::Down.repeats());
+        assert!(!VolumeKey::Mute.repeats());
+    }
 
     #[test]
     fn accelerators_parse_in_any_order_and_print_in_one() {

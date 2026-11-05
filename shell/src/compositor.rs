@@ -9,7 +9,7 @@
 
 use gtk4::{gio, prelude::*};
 
-use crate::{dbus, launcher::Launcher, screenshot, session::Session};
+use crate::{dbus, launcher::Launcher, screenshot, session::Session, volume_hud::VolumeHud};
 
 const NAME: &str = "org.buntos.Compositor";
 const PATH: &str = "/org/buntos/Compositor";
@@ -59,8 +59,10 @@ pub fn follow_shortcuts(
     session: &Session,
     settings: Option<gio::Settings>,
     screenshot_toolbar: &screenshot::Toolbar,
+    volume_hud: &VolumeHud,
 ) {
     let (launcher, screenshot_toolbar) = (launcher.clone(), screenshot_toolbar.clone());
+    let volume_hud = volume_hud.clone();
     let session = session.clone();
     gio::bus_get(
         gio::BusType::Session,
@@ -89,6 +91,9 @@ pub fn follow_shortcuts(
                         "screenshot.toolbar" => screenshot_toolbar.toggle(),
                         "session.log-out" => session.confirm_log_out(),
                         "windows.force-quit" => session.show_force_quit(),
+                        "sound.volume-up" => volume_hud.step(true),
+                        "sound.volume-down" => volume_hud.step(false),
+                        "sound.mute" => volume_hud.toggle_mute(),
                         "launcher.dock-autohide" => {
                             if let Some(settings) = &settings {
                                 let next = match settings.string(KEYS[1]).as_str() {
