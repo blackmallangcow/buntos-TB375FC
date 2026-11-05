@@ -1,0 +1,32 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: power: supply: mm8013: add what a full charge reads
+
+The gauge on the Lenovo TB375FC reads 89 % when the charger ends a
+charge, as the charger stops under the voltage that the model in the
+gauge seems to go up to. Add a property for that reading, so that a
+driver can report the charge against what the charger fills.
+
+---
+ .../devicetree/bindings/power/supply/mitsumi,mm8013.yaml | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/power/supply/mitsumi,mm8013.yaml b/Documentation/devicetree/bindings/power/supply/mitsumi,mm8013.yaml
+index 6865640..e3ce29a 100644
+--- a/Documentation/devicetree/bindings/power/supply/mitsumi,mm8013.yaml
++++ b/Documentation/devicetree/bindings/power/supply/mitsumi,mm8013.yaml
+@@ -19,6 +19,15 @@ properties:
+   reg:
+     maxItems: 1
+ 
++  mitsumi,charged-soc-percent:
++    description:
++      What the gauge reads when a charge ends. Set it when the charger stops
++      under the voltage that the gauge calls full, as the state of charge never
++      reaches 100 % then.
++    minimum: 50
++    maximum: 100
++    default: 100
++
+ required:
+   - compatible
+   - reg

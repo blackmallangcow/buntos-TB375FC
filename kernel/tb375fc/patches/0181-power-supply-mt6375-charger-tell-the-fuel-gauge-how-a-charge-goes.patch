@@ -1,0 +1,40 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: tell the fuel gauge how a charge goes
+
+The fuel gauge reports the status of the battery, and it cannot see a
+charge end under the voltage it calls full. Let it find this driver as
+its supplier, and hear from it.
+
+Name the gauge here rather than give it power-supplies in the tree. That
+would keep the gauge from probing until this module loads, late in the
+boot, and the gauge has to work without a charger: this driver waits for
+it before taking over charging, and the charging watchdog reads its
+temperature.
+
+---
+ drivers/power/supply/mt6375-charger.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+index 5fae6db..f2e7554 100644
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -1865,6 +1865,9 @@ static int mt6375_chg_init_control(struct mt6375_chg *chg)
+ 	return 0;
+ }
+ 
++/* The gauge reports the status of the battery, and cannot see a charge end */
++static char *mt6375_chg_supplied_to[] = { "mm8013" };
++
+ static int mt6375_chg_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -1913,6 +1916,8 @@ static int mt6375_chg_probe(struct platform_device *pdev)
+ 
+ 	psy_cfg.drv_data = chg;
+ 	psy_cfg.fwnode = dev_fwnode(dev);
++	psy_cfg.supplied_to = mt6375_chg_supplied_to;
++	psy_cfg.num_supplicants = ARRAY_SIZE(mt6375_chg_supplied_to);
+ 	chg->psy = devm_power_supply_register(dev, &mt6375_chg_psy_desc,
+ 					      &psy_cfg);
+ 	if (IS_ERR(chg->psy))

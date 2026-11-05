@@ -1,0 +1,151 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mm8013: report the charge against what the charger fills
+
+On the one full charge watched on a Lenovo TB375FC, the charger ended
+at 4.335 V and +0.34 A and the gauge stayed at 89 %, with charge_now at
+8.56 Ah and charge_full at 9.68 Ah. This tablet charges to 4.34 V, the
+lowest in the battery maintenance table of stock, and not to the 4.5 V
+of its battery-cv. The model in the gauge presumably goes up to that.
+
+So the number never reaches 100. UPower also counts the time left up to
+charge_full: on 5 V 3 A after that charge it said 3.4 hours, with the
+charge about to end.
+
+Add mitsumi,charged-soc-percent, what the gauge reads when a charge
+ends, and report capacity, charge_full and charge_full_design against
+it. Scaling the last two together keeps their ratio, which UPower shows
+as the capacity of the battery, at what the gauge learned.
+
+charge_now stays what the gauge measures, so the time until empty does
+not change, but it does not go over charge_full. It read 8.86 Ah after
+hours on the charger, and UPower raises charge_full to charge_now when
+that is higher, which would change the capacity it shows.
+
+Without the property only readings over these limits change. The
+charger and the charge pump on this tablet read only the voltage, the
+current and the temperature of the gauge.
+
+On the device a charge that ends now reads 100, with charge_full at
+8.515 Ah. The gauge itself reads 90 %, and UPower still shows the capacity
+of the battery as 96.76 %.
+
+---
+ drivers/power/supply/mm8013.c | 53 +++++++++++++++++++++++++++++++----
+ 1 file changed, 47 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/power/supply/mm8013.c b/drivers/power/supply/mm8013.c
+index aa269f2..7c50696 100644
+--- a/drivers/power/supply/mm8013.c
++++ b/drivers/power/supply/mm8013.c
+@@ -6,6 +6,7 @@
+ #include <linux/delay.h>
+ #include <linux/i2c.h>
+ #include <linux/power_supply.h>
++#include <linux/property.h>
+ #include <linux/regmap.h>
+ 
+ #define REG_BATID			0x00 /* This one is very unclear */
+@@ -52,6 +53,8 @@
+ struct mm8013_chip {
+ 	struct i2c_client *client;
+ 	struct regmap *regmap;
++	/* What the gauge reads when a charge ends, in percent */
++	u32 charged_soc;
+ };
+ 
+ static int mm8013_checkdevice(struct mm8013_chip *chip)
+@@ -81,6 +84,30 @@ static int mm8013_checkdevice(struct mm8013_chip *chip)
+ 	return 0;
+ }
+ 
++/*
++ * A charger can stop under the voltage that the gauge calls full. Report the
++ * charge against what the charger fills, so that a full charge reads 100 %.
++ */
++static int mm8013_read_capacity(struct mm8013_chip *chip, int *capacity)
++{
++	u32 regval;
++	int ret;
++
++	ret = regmap_read(chip->regmap, REG_STATE_OF_CHARGE, &regval);
++	if (ret < 0)
++		return ret;
++
++	*capacity = min(DIV_ROUND_CLOSEST(regval * 100, chip->charged_soc),
++			100U);
++
++	return 0;
++}
++
++static u32 mm8013_fillable_uah(struct mm8013_chip *chip, u32 mah)
++{
++	return 10 * mah * chip->charged_soc;
++}
++
+ static enum power_supply_property mm8013_battery_props[] = {
+ 	POWER_SUPPLY_PROP_CAPACITY,
+ 	POWER_SUPPLY_PROP_CHARGE_FULL,
+@@ -104,36 +131,42 @@ static int mm8013_get_property(struct power_supply *psy,
+ {
+ 	struct mm8013_chip *chip = power_supply_get_drvdata(psy);
+ 	int ret = 0;
+-	u32 regval;
++	u32 regval, full;
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_CAPACITY:
+-		ret = regmap_read(chip->regmap, REG_STATE_OF_CHARGE, &regval);
++		ret = mm8013_read_capacity(chip, &val->intval);
+ 		if (ret < 0)
+ 			return ret;
+ 
+-		val->intval = regval;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL:
+ 		ret = regmap_read(chip->regmap, REG_FULL_CHARGE_CAPACITY, &regval);
+ 		if (ret < 0)
+ 			return ret;
+ 
+-		val->intval = 1000 * regval;
++		val->intval = mm8013_fillable_uah(chip, regval);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+ 		ret = regmap_read(chip->regmap, REG_DESIGN_CAPACITY, &regval);
+ 		if (ret < 0)
+ 			return ret;
+ 
+-		val->intval = 1000 * regval;
++		val->intval = mm8013_fillable_uah(chip, regval);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_NOW:
+ 		ret = regmap_read(chip->regmap, REG_NOMINAL_CHARGE_CAPACITY, &regval);
+ 		if (ret < 0)
+ 			return ret;
+ 
+-		val->intval = 1000 * regval;
++		ret = regmap_read(chip->regmap, REG_FULL_CHARGE_CAPACITY,
++				  &full);
++		if (ret < 0)
++			return ret;
++
++		/* It reads more than charge_full near the top, and must not */
++		val->intval = min(1000 * regval,
++				  mm8013_fillable_uah(chip, full));
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_MAX:
+ 		ret = regmap_read(chip->regmap, REG_MAX_LOAD_CURRENT, &regval);
+@@ -305,6 +338,14 @@ static int mm8013_probe(struct i2c_client *client)
+ 
+ 	chip->client = client;
+ 
++	chip->charged_soc = 100;
++	device_property_read_u32(dev, "mitsumi,charged-soc-percent",
++				 &chip->charged_soc);
++	if (chip->charged_soc < 50 || chip->charged_soc > 100)
++		return dev_err_probe(dev, -EINVAL,
++				     "Bad mitsumi,charged-soc-percent: %u\n",
++				     chip->charged_soc);
++
+ 	chip->regmap = devm_regmap_init(dev, NULL, client, &mm8013_regmap_config);
+ 	if (IS_ERR(chip->regmap)) {
+ 		ret = PTR_ERR(chip->regmap);

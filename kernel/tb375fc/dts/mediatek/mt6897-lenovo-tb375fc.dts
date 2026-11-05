@@ -567,6 +567,14 @@
 	fuel_gauge: fuel-gauge@55 {
 		compatible = "mitsumi,mm8013";
 		reg = <0x55>;
+		/*
+		 * The charger stops at the 4.34 V of &battery, not at the 4.5 V
+		 * of stock that the model in the gauge presumably goes up to.
+		 * The one full charge watched ended at 89 %, and it read 90 %
+		 * hours later on the charger. One under the lower reading, so
+		 * that a charge ending a little lower still reads 100 %.
+		 */
+		mitsumi,charged-soc-percent = <88>;
 	};
 };
 
