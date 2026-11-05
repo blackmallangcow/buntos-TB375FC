@@ -173,4 +173,4 @@ apt-guard rollback <스냅숏>      # 다음 부팅부터 루트 전체를 그�
 
 `apt-guard`는 `/usr/libexec/buntos/`에 있다. `BUNTOS_APT_NO_SNAPSHOT=1`을 붙이면 스냅숏을 건너뛴다.
 
-**기기에서 본 것(2026-11-05):** `apt-get upgrade`로 39개를 실제로 올렸다. 지켜 보는 파일 1718개의 해시가 그대로이고, `wpa_supplicant` 재시작이 막혀 Wi-Fi와 세션이 끊기지 않았고, 스냅숏이 올리기 전 판을 담고 있다. Debian 커널 설치와 `libseat1` 제거, 커널 제거는 거부되고 `autoremove`는 지우는 것이 없다. 일부러 우리 파일을 덮어쓰는 꾸러미를 넣으면 `post`가 알리고 `restore`가 되돌린다. **못 본 것:** 재부팅, `rollback` 뒤의 부팅(이름 바꾸기와 스냅숏 풀기까지만 봤다), mkosi 이미지 안에서 `apt-guard install`.
+**기기에서 본 것(2026-11-05):** `apt-get upgrade`로 39개를 실제로 올렸다. 지켜 보는 파일 1718개의 해시가 그대로이고, `wpa_supplicant` 재시작이 막혀 Wi-Fi와 세션이 끊기지 않았고, 스냅숏이 올리기 전 판을 담고 있다. Debian 커널 설치와 `libseat1` 제거, 커널 제거는 거부되고 `autoremove`는 지우는 것이 없다. 일부러 우리 파일을 덮어쓰는 꾸러미를 넣으면 `post`가 알리고 `restore`가 되돌린다. 올린 뒤 재부팅하면 실패한 서비스 없이 로그인 화면까지 뜨고 새 `wpa_supplicant`가 돈다. **못 본 것:** `rollback` 뒤의 부팅(이름 바꾸기와 스냅숏 풀기까지만 봤다), mkosi 이미지 안에서 `apt-guard install`.
