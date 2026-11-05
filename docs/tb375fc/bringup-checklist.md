@@ -1143,8 +1143,12 @@ vid/pid: nofem 0/0, wlan7207h 2/4, wlan7207c 2/7, qm42195 3/1, qm45197 3/2, sky8
 | Wi-Fi 속도(2437 MHz, 한 번씩 10초) | BT 꺼짐 2.7~2.9 MB/s, 유휴 3.0~4.2 MB/s, 스캔 중 0.8 MB/s |
 
 - **원인을 찾지 못한 것:** Wi-Fi가 connsys를 쥔 채 BGF 전원을 내리면 다음 켜기의 전원 응답이 오지 않는다. 끄는 단계를 하나씩 빼기(보호, FUNC_EN, CPU 리셋, A-die 시계, 세마포어, EMI, 라디오 비트), 끄기 전 펌웨어에 넘기기, 켜기 앞 보호 풀기, `0x18000144` bit 4 지우기로는 풀리지 않았다. 안드로이드에서 같은 동작을 보지는 않았다.
-- **못 본 것:** 페어링, A2DP, HID, 대기 전력, 펌웨어가 죽은 뒤의 복구(위 실패와 같은 길을 탄다).
+- **못 본 것(2026-11-06 기준):** 블루투스 마우스, 긴 A2DP 재생, 대기 전력, 펌웨어가 죽은 뒤의 복구(위 실패와 같은 길을 탄다).
 - 켤 때마다 `Failed to read local supported codecs (-95)`가 난다. 오프로드 코덱 목록을 읽는 명령이라 연결에는 쓰지 않는 것으로 본다(소리로 확인하지 않았다).
+
+**결과(2026-11-06, `CONFIG_UHID`).** AirPods는 사용자가 페어링했고 기본 출력으로 잡힌다. BLE 키보드는 페어링과 연결이 되어도 입력이 오지 않았고 터치 키보드가 그대로 떴다. bluetoothd 기록은 `input-hog profile accept failed`이고 `/dev/uhid`가 없었다. `CONFIG_UHID=m`, `CONFIG_INPUT_UINPUT=m` 모듈을 재부팅 없이 넣고 키보드를 다시 연결하자 `hid-generic`이 붙고, 컴포지터 기록이 `input mode: pointer`로 바뀌고, 입력이 된다(사용자 확인). `CONFIG_BT_LE`는 arm64 defconfig대로 꺼진 채이고 그래도 BLE 페어링과 연결이 된다.
+
+- `CONFIG_BT_RFCOMM`이 꺼져 있어 부팅 때 `RFCOMM server failed for Hands-Free`가 난다. 이어폰을 마이크로 쓰는 프로필이 없다.
 
 아래는 코드와 자료로 짠 차례다. 2a(부팅, 콘솔), 2b(SPMI·PMIC·핀·USB 가젯)가 된 뒤에 한다.
 9.1절의 1·2단계가 먼저다. 그 뒤로 Bluetooth와 Wi-Fi는 어느 쪽을 먼저 해도 된다.
