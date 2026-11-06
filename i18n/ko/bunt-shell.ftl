@@ -60,6 +60,25 @@ launcher-category-entertainment = 엔터테인먼트
 launcher-category-games = 게임
 launcher-category-education = 교육 및 참고
 launcher-category-other = 기타
+launcher-apps = 모든 앱
+launcher-clipboard = 클립보드
+clipboard-title = 클립보드 기록
+clipboard-search = 클립보드 기록 검색
+clipboard-empty = 복사한 항목이 여기에 보입니다
+clipboard-no-match = 일치하는 항목이 없습니다
+clipboard-more = 더 보기
+clipboard-clear = 기록 지우기
+clipboard-copy = 복사
+clipboard-image = 이미지
+clipboard-item = 클립보드 항목 { $position }
+clipboard-allow-title = 클립보드 기록을 허용하겠습니까?
+clipboard-allow-description = 복사한 항목을 여기에서 다시 고를 수 있습니다. 민감한 정보가 클립보드에 나타날 수 있습니다. 기록은 이 기기의 메모리에만 남고 로그아웃하면 사라집니다.
+clipboard-allow = 허용
+clipboard-unavailable = 클립보드 기록을 사용할 수 없습니다
+clipboard-time-now = 방금
+clipboard-time-minutes = { $count }분 전
+clipboard-time-hours = { $count }시간 전
+clipboard-time-days = { $count }일 전
 
 ## 메뉴 막대 항목 (Wi-Fi, 배터리, 사운드, Bluetooth, 입력 소스)
 

@@ -18,6 +18,10 @@
 //!   키보드를 잡고 있으면 그 잡기로 가서 한글이 조합된다. 가상 키보드 프로토콜(virtual-keyboard-v1)을 셸에 여는 길은
 //!   쓰지 않았다: smithay의 가상 키보드는 키를 포커스를 가진 앱에 바로 보내 입력기 잡기를 거치지 않는다(입력기가 쓰지
 //!   않은 키를 돌려보내는 길이라서다).
+//! - 단축 줄의 명령: 같은 `press`에 이름("Cut", "Copy", "Paste")으로 온다. 단축키 표의 앱 공통 명령(`app.cut`,
+//!   `app.copy`, `app.paste`)이 그곳에서 보낼 키를 그대로 보내므로 ⌘X, ⌘C, ⌘V와 결과가 같다(앱에는 Ctrl+C, 터미널에는
+//!   Ctrl+Shift+C). 무엇을 내놓을지는 [`offered`]가 정해 셸에 알린다(`edit_commands`). iPadOS는 글자를 고른 동안에만
+//!   오려두기와 복사하기를 내놓지만 여기서는 고른 글자가 있는지 믿고 알 길이 없어 늘 내놓는다([`offered`]).
 //! - 자리: 키보드는 화면 맨 아래의 overlay 레이어이고 배타 영역을 쓰지 않는다(-1). Dock보다 먼저 놓여야 하는데
 //!   smithay는 배타 영역을 놓인 차례대로 쌓아 키보드를 Dock 위에 올리기 때문이다. 대신 창 자리(window_area)를
 //!   키보드가 키를 받는 영역(입력 영역)의 위쪽 끝까지로 줄인다. 앱(GTK)은 가려진 글 칸이 보이게 스스로 스크롤하지
@@ -36,7 +40,7 @@ use smithay::{
     output::Output,
     reexports::{
         wayland_protocols::wp::text_input::zv3::server::zwp_text_input_v3::{
-            ContentPurpose, ZwpTextInputV3,
+            ContentHint, ContentPurpose, ZwpTextInputV3,
         },
         wayland_server::{
             Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
@@ -51,7 +55,10 @@ use smithay::{
     },
 };
 
-use crate::state::{BuntState, ClientState};
+use crate::{
+    shortcuts::{self, Hit, Place},
+    state::{BuntState, ClientState},
+};
 
 use protocol::bunt_osk_v1::{self, BuntOskV1};
 
@@ -131,6 +138,95 @@ pub fn parse_key(text: &str) -> Result<OskKey, String> {
     }
 }
 
+/// 단축 줄의 명령. 키가 아니라 일이다: 앱 종류마다 맞는 키를 단축키 표에서 찾아 보낸다
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditCommand {
+    Cut,
+    Copy,
+    Paste,
+}
+
+impl EditCommand {
+    /// 셸이 보낸 이름 (keyboard/src/board.rs의 Output::key_name)
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "Cut" => Some(Self::Cut),
+            "Copy" => Some(Self::Copy),
+            "Paste" => Some(Self::Paste),
+            _ => None,
+        }
+    }
+
+    /// 이 명령을 정한 단축키 표의 줄 (shortcuts.rs)
+    fn shortcut(self) -> &'static str {
+        match self {
+            Self::Cut => "app.cut",
+            Self::Copy => "app.copy",
+            Self::Paste => "app.paste",
+        }
+    }
+}
+
+/// 단축 줄에 내놓는 명령 (`edit_commands`로 셸에 알린다)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EditCommands {
+    cut: bool,
+    copy: bool,
+    paste: bool,
+}
+
+impl EditCommands {
+    /// 알리기 전의 값. 셸도 처음에 모두 내놓는다 (keyboard/src/layout.rs의 Commands)
+    const ALL: Self = Self {
+        cut: true,
+        copy: true,
+        paste: true,
+    };
+
+    fn contains(self, command: EditCommand) -> bool {
+        match command {
+            EditCommand::Cut => self.cut,
+            EditCommand::Copy => self.copy,
+            EditCommand::Paste => self.paste,
+        }
+    }
+}
+
+/// 그 칸에 내놓을 명령. `secret`은 암호 칸인지다([`is_secret`]). 터미널에는 오려두기가 없다(단축키 표의 그 줄이 보낼 키가
+/// 없다).
+///
+/// iPadOS는 고른 글자가 있을 때만 오려두기와 복사하기를 내놓지만(iPad 사용 설명서의 그림, HIG의 Edit menus) 여기서는 고른
+/// 글자가 없다고 믿을 길이 없어 늘 내놓는다. text-input-v3의 surrounding text가 글자를 고른 것을 알리는 유일한 길인데, GTK4는
+/// 입력기를 초기화할 때만 그것을 보낸다: 누르는 순간의 글 상태를 보내고 그 누르기로 고른 글자는 알리지 않는다
+/// (gtk_text_click_gesture_pressed, GTK 4.18. 시험 VM에서 글자를 고른 동안 앱이 마지막으로 보낸 값이 "고른 것 없음"이었다).
+/// GTK3의 입력기 API(gtk_im_context_set_surrounding)에는 고른 끝이 없고, 터미널(foot)은 글 상태를 보내지 않는다. 고른 글자가
+/// 있는데 단추가 없으면 복사할 길이 없다. 고른 글자가 없을 때 눌러도 ⌘C처럼 아무 일이 없다.
+///
+/// 앱이 내용의 종류를 알리지 않으면 보통 칸이다(iPadOS의 기본값도 보통 칸이다). Firefox는 암호 칸에서도 알리지 않아
+/// (set_content_type(0, 0)) 단추가 그대로 있지만, 암호를 복사해 주지 않는다(시험 VM에서 확인했다).
+fn offered(secret: bool, place: Place) -> EditCommands {
+    let sends = |command: EditCommand| {
+        matches!(
+            shortcuts::action_of(command.shortcut(), place),
+            Some(Hit::Send { .. })
+        )
+    };
+    EditCommands {
+        cut: !secret && sends(EditCommand::Cut),
+        copy: !secret && sends(EditCommand::Copy),
+        paste: sends(EditCommand::Paste),
+    }
+}
+
+/// 암호 칸인지: 내용의 종류가 암호나 PIN이거나 글자를 가리는 칸이다. iPadOS의 isSecureTextEntry처럼 복사를 막는다.
+/// sensitive_data 힌트만으로는 아니다: 사생활 보호 창의 보통 칸(GTK의 GTK_INPUT_HINT_PRIVATE)도 그것을 쓴다
+fn is_secret(hint: WEnum<ContentHint>, purpose: WEnum<ContentPurpose>) -> bool {
+    matches!(
+        purpose,
+        WEnum::Value(ContentPurpose::Password | ContentPurpose::Pin)
+    ) || matches!(hint, WEnum::Value(hint) if hint.contains(ContentHint::HiddenText))
+}
+
 impl OskKey {
     /// 칠 수 없다고 알릴 때의 글자
     fn character(self) -> char {
@@ -149,6 +245,8 @@ enum KeysRefused {
     Locked,
     /// 지금 키 배열에 없는 글자
     NotOnLayout(char),
+    /// 지금 칸에 내놓지 않은 명령. 셸이 아직 소식을 받지 못했을 수 있다
+    NotOffered(EditCommand),
 }
 
 /// 화면 키보드 프로토콜의 상태 (BuntState의 osk)
@@ -162,6 +260,10 @@ pub struct OskState {
     pressed: Option<WlSurface>,
     /// 터미널이라고 알린 글 입력 객체 (set_content_type)
     terminal: Option<ObjectId>,
+    /// 암호 칸이라고 알린 글 입력 객체 (set_content_type, [`is_secret`])
+    secret: Option<ObjectId>,
+    /// 마지막으로 알린 단축 줄의 명령
+    commands: EditCommands,
 }
 
 impl OskState {
@@ -174,16 +276,30 @@ impl OskState {
             tap: TapWatch::default(),
             pressed: None,
             terminal: None,
+            secret: None,
+            commands: EditCommands::ALL,
         }
     }
 
     /// 글 입력 객체가 내용의 종류를 알렸다 (ime.rs)
-    pub fn content_purpose(&mut self, text_input: &ZwpTextInputV3, purpose: WEnum<ContentPurpose>) {
-        if matches!(purpose, WEnum::Value(ContentPurpose::Terminal)) {
-            self.terminal = Some(text_input.id());
-        } else if self.terminal.as_ref() == Some(&text_input.id()) {
-            self.terminal = None;
-        }
+    pub fn content_type(
+        &mut self,
+        text_input: &ZwpTextInputV3,
+        hint: WEnum<ContentHint>,
+        purpose: WEnum<ContentPurpose>,
+    ) {
+        let remember = |kept: &mut Option<ObjectId>, is: bool| {
+            if is {
+                *kept = Some(text_input.id());
+            } else if kept.as_ref() == Some(&text_input.id()) {
+                *kept = None;
+            }
+        };
+        remember(
+            &mut self.terminal,
+            matches!(purpose, WEnum::Value(ContentPurpose::Terminal)),
+        );
+        remember(&mut self.secret, is_secret(hint, purpose));
     }
 }
 
@@ -417,18 +533,27 @@ impl Dispatch<BuntOskV1, ()> for BuntState {
         _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            bunt_osk_v1::Request::Press { key } => match parse_key(&key) {
-                Ok(key) => {
-                    if let Err(refused) = state.on_screen_key(key) {
-                        tracing::debug!("on-screen keyboard: dropped {key:?}: {refused:?}");
+            bunt_osk_v1::Request::Press { key } => {
+                if let Some(command) = EditCommand::parse(&key) {
+                    if let Err(refused) = state.on_screen_command(command) {
+                        tracing::debug!("on-screen keyboard: dropped {command:?}: {refused:?}");
                     }
+                    return;
                 }
-                Err(err) => tracing::warn!("on-screen keyboard: {err}"),
-            },
+                match parse_key(&key) {
+                    Ok(key) => {
+                        if let Err(refused) = state.on_screen_key(key) {
+                            tracing::debug!("on-screen keyboard: dropped {key:?}: {refused:?}");
+                        }
+                    }
+                    Err(err) => tracing::warn!("on-screen keyboard: {err}"),
+                }
+            }
             bunt_osk_v1::Request::WatchTextInput => {
                 if !state.osk.watchers.contains(resource) {
                     // 지금 상태를 바로 알린다. 이벤트 루프가 돌 때마다 정하므로 마지막으로 정한 값이 지금 값이다
                     resource.text_input(u32::from(state.osk.published));
+                    send_commands(resource, state.osk.commands);
                     state.osk.watchers.push(resource.clone());
                 }
             }
@@ -439,6 +564,14 @@ impl Dispatch<BuntOskV1, ()> for BuntState {
     fn destroyed(state: &mut Self, _client: ClientId, resource: &BuntOskV1, _data: &()) {
         state.osk.watchers.retain(|watcher| watcher != resource);
     }
+}
+
+fn send_commands(watcher: &BuntOskV1, commands: EditCommands) {
+    watcher.edit_commands(
+        u32::from(commands.cut),
+        u32::from(commands.copy),
+        u32::from(commands.paste),
+    );
 }
 
 /// 같은 표면이거나 부표면까지 같은 뿌리인지. 앱은 창의 내용을 부표면에 그리기도 한다(Firefox). 팝업은 다른 표면이다
@@ -519,8 +652,41 @@ impl BuntState {
         Ok(())
     }
 
-    /// 이벤트 루프가 한 바퀴 돌 때마다 부른다(udev.rs, 클라이언트에 보내기 전): 글 입력 상태가 바뀌었거나 사람이 칸을
-    /// 눌렀으면 셸에 알린다. 잠긴 동안에는 끈 것으로 알린다. 잠금 화면의 암호 칸에 셸의 키보드를 띄우지 않는다
+    /// 셸의 단축 줄 단추 하나를 ⌘X, ⌘C, ⌘V와 같은 키로 앱에 보낸다. 키는 단축키 표의 앱 공통 명령에서 찾고, 사람이 그
+    /// 단축키를 바꾸거나 꺼도 그대로다([`shortcuts::action_of`]). 셸이 내놓은 단추여도 다시 본다: 칸을 옮긴 소식이 셸에 닿기
+    /// 전에 누를 수 있다. 잠긴 동안에는 받지 않는다. 앱이 단축키를 막아 둔 때(shortcuts_inhibited)도 보낸다: 막는 것은 키
+    /// 조합이고 이 단추는 사람이 일을 고른 것이다
+    fn on_screen_command(&mut self, command: EditCommand) -> Result<(), KeysRefused> {
+        if self.session_lock.is_locked() {
+            return Err(KeysRefused::Locked);
+        }
+        let place = self.key_place();
+        if !self.text_input_active() || !offered(self.secret_field(), place).contains(command) {
+            return Err(KeysRefused::NotOffered(command));
+        }
+        if let Some(Hit::Send { keys, .. }) = shortcuts::action_of(command.shortcut(), place) {
+            // 앱에 옮겨 보내며 되풀이하던 단축키는 다른 키를 누르면 멈춘다 (input.rs의 on_keyboard와 같다)
+            self.stop_key_repeat();
+            self.send_keys(&keys);
+        }
+        Ok(())
+    }
+
+    /// 지금 켜진 글 입력이 암호 칸이라고 알렸는지
+    fn secret_field(&self) -> bool {
+        let Some(secret) = &self.osk.secret else {
+            return false;
+        };
+        let mut found = false;
+        self.seat
+            .text_input()
+            .with_active_text_input(|text_input, _| found = text_input.id() == *secret);
+        found
+    }
+
+    /// 이벤트 루프가 한 바퀴 돌 때마다 부른다(udev.rs, 클라이언트에 보내기 전): 글 입력 상태나 단축 줄에 내놓을 명령이
+    /// 바뀌었거나 사람이 칸을 눌렀으면 셸에 알린다. 잠긴 동안에는 끈 것으로 알린다. 잠금 화면의 암호 칸에 셸의 키보드를 띄우지
+    /// 않는다
     pub fn publish_text_input(&mut self) {
         let active = !self.session_lock.is_locked() && self.text_input_active();
         if active != self.osk.published {
@@ -528,6 +694,17 @@ impl BuntState {
             tracing::debug!("text input {}", if active { "on" } else { "off" });
             for watcher in &self.osk.watchers {
                 watcher.text_input(u32::from(active));
+            }
+        }
+        // 글 입력이 꺼진 동안에는 그대로 둔다: 칸을 옮기는 동안 단추가 깜빡이지 않는다
+        if active {
+            let commands = offered(self.secret_field(), self.key_place());
+            if commands != self.osk.commands {
+                self.osk.commands = commands;
+                tracing::debug!("edit commands {commands:?}");
+                for watcher in &self.osk.watchers {
+                    send_commands(watcher, commands);
+                }
             }
         }
         if std::mem::take(&mut self.osk.tap.tapped) && active {
@@ -586,6 +763,10 @@ impl BuntState {
 
     /// 포커스를 가진 앱이 글 입력을 켜는 요청(enable)을 보냈다 (ime.rs)
     pub(crate) fn enable_requested(&mut self, text_input: &ZwpTextInputV3) {
+        // enable은 앞의 상태를 지운다(text-input-v3). 앱이 내용의 종류를 다시 알리지 않으면 보통 칸이다
+        if self.osk.secret.as_ref() == Some(&text_input.id()) {
+            self.osk.secret = None;
+        }
         self.osk.tap.enable_in_cycle = true;
         let handle = self.seat.text_input();
         let mut again = false;
@@ -849,6 +1030,161 @@ mod tests {
         );
         assert_eq!(plan(&keymap, 0, OskKey::Char('Q')), Err('Q'));
         assert_eq!(plan(&keymap, 0, OskKey::Return), Err('\r'));
+    }
+
+    /// 단축 줄의 이름만 명령이다. 다른 키 이름과 Ctrl 같은 수정 키로 이 길을 넓히지 않는다
+    #[test]
+    fn only_the_three_names_are_edit_commands() {
+        assert_eq!(EditCommand::parse("Cut"), Some(EditCommand::Cut));
+        assert_eq!(EditCommand::parse("Copy"), Some(EditCommand::Copy));
+        assert_eq!(EditCommand::parse("Paste"), Some(EditCommand::Paste));
+        for refused in ["cut", "COPY", "", "c", "ctrl+c", "Undo", "SelectAll"] {
+            assert_eq!(EditCommand::parse(refused), None, "{refused:?}");
+        }
+        // 명령이 아닌 이름은 전처럼 키로 읽어 거절한다. 한 글자 키와 겹치지 않는다
+        assert!(parse_key("Copy").is_err());
+        assert_eq!(EditCommand::parse("c"), None);
+        assert_eq!(parse_key("c"), Ok(OskKey::Char('c')));
+    }
+
+    fn commands_key(place: Place, command: EditCommand) -> Option<Hit> {
+        shortcuts::action_of(command.shortcut(), place)
+    }
+
+    /// ⌘X, ⌘C, ⌘V와 같은 키가 앱 종류마다 간다: 앱에는 Ctrl, 터미널에는 Ctrl+Shift. 터미널에는 오려두기가 없다
+    #[test]
+    fn commands_send_what_the_app_shortcuts_send() {
+        use crate::shortcuts::{Accel, Shortcuts};
+        let app = Place {
+            typing: true,
+            terminal: false,
+        };
+        let terminal = Place {
+            typing: true,
+            terminal: true,
+        };
+        let shortcuts = Shortcuts::new(&Default::default());
+        let pressed = |text: &str| Accel::parse(text).unwrap();
+        for (accel, command) in [
+            ("<Super>x", EditCommand::Cut),
+            ("<Super>c", EditCommand::Copy),
+            ("<Super>v", EditCommand::Paste),
+        ] {
+            for place in [app, terminal] {
+                assert_eq!(
+                    commands_key(place, command),
+                    shortcuts.lookup(pressed(accel), place),
+                    "{command:?} {place:?}"
+                );
+            }
+        }
+        let keys = |hit: Option<Hit>| match hit {
+            Some(Hit::Send { keys, repeat }) => {
+                assert!(!repeat);
+                keys.iter()
+                    .map(|key| Accel {
+                        mods: key.mods,
+                        key: key.sym,
+                    })
+                    .map(|accel| accel.name())
+                    .collect::<Vec<_>>()
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(keys(commands_key(app, EditCommand::Copy)), ["<Control>c"]);
+        assert_eq!(
+            keys(commands_key(terminal, EditCommand::Copy)),
+            ["<Control><Shift>c"]
+        );
+        assert_eq!(
+            keys(commands_key(terminal, EditCommand::Paste)),
+            ["<Control><Shift>v"]
+        );
+        assert_eq!(commands_key(terminal, EditCommand::Cut), Some(Hit::Swallow));
+    }
+
+    /// 사람이 ⌘C를 바꾸거나 꺼도 단추는 복사 키를 보낸다
+    #[test]
+    fn commands_do_not_depend_on_the_keys_a_person_chose() {
+        use crate::{prefs::ShortcutPref, shortcuts::Shortcuts};
+        let place = Place::default();
+        let before = commands_key(place, EditCommand::Copy);
+        let prefs = [(
+            "app.copy".to_owned(),
+            ShortcutPref {
+                key: "<Super>F2".into(),
+                enabled: false,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let shortcuts = Shortcuts::new(&prefs);
+        assert_eq!(
+            shortcuts.lookup(crate::shortcuts::Accel::parse("<Super>c").unwrap(), place),
+            Some(Hit::Send {
+                keys: vec![crate::shortcuts::Key {
+                    mods: crate::shortcuts::Mods {
+                        ctrl: true,
+                        ..Default::default()
+                    },
+                    sym: Keysym::c,
+                }],
+                repeat: false,
+            }),
+            "표에 없는 ⌘ 단축키로 앱의 Ctrl 단축키에 간다"
+        );
+        assert_eq!(commands_key(place, EditCommand::Copy), before);
+    }
+
+    #[test]
+    fn password_fields_only_offer_paste() {
+        let app = Place::default();
+        let terminal = Place {
+            typing: true,
+            terminal: true,
+        };
+        assert_eq!(offered(false, app), EditCommands::ALL);
+        let password = EditCommands {
+            cut: false,
+            copy: false,
+            paste: true,
+        };
+        assert_eq!(offered(true, app), password);
+        assert!(!password.contains(EditCommand::Cut));
+        assert!(!password.contains(EditCommand::Copy));
+        assert!(password.contains(EditCommand::Paste));
+        // 터미널에는 오려두기가 없다. 터미널의 암호 칸은 없지만 알려도 붙여넣기만이다
+        assert_eq!(
+            offered(false, terminal),
+            EditCommands {
+                cut: false,
+                copy: true,
+                paste: true,
+            }
+        );
+        assert_eq!(offered(true, terminal), password);
+    }
+
+    /// 앱이 알린 내용의 종류로 암호 칸을 안다. 알리지 않으면 보통 칸이다
+    #[test]
+    fn secret_fields_are_passwords_pins_and_hidden_text() {
+        let normal = WEnum::Value(ContentPurpose::Normal);
+        let none = WEnum::Value(ContentHint::None);
+        assert!(!is_secret(none, normal));
+        assert!(is_secret(none, WEnum::Value(ContentPurpose::Password)));
+        assert!(is_secret(none, WEnum::Value(ContentPurpose::Pin)));
+        assert!(is_secret(WEnum::Value(ContentHint::HiddenText), normal));
+        // GTK의 암호 칸은 둘 다 알린다
+        assert!(is_secret(
+            WEnum::Value(ContentHint::HiddenText | ContentHint::SensitiveData),
+            WEnum::Value(ContentPurpose::Password)
+        ));
+        // 사생활 보호 창의 보통 칸은 고른 글자를 복사할 수 있다
+        assert!(!is_secret(WEnum::Value(ContentHint::SensitiveData), normal));
+        assert!(!is_secret(none, WEnum::Value(ContentPurpose::Terminal)));
+        assert!(!is_secret(none, WEnum::Value(ContentPurpose::Email)));
+        // 이 컴포지터가 모르는 값은 알리지 않은 것과 같다
+        assert!(!is_secret(WEnum::Unknown(0x1000_0000), WEnum::Unknown(99)));
     }
 
     /// 화면 키보드 프로토콜은 컴포지터가 셸로 띄운 클라이언트만 쓴다. 앱(컴포지터가 띄우지 않았다), 입력기, 잠금

@@ -27,17 +27,18 @@
       <description summary="키 하나를 눌렀다 뗀다">
         실제 키보드처럼 키 하나를 눌렀다 뗀다. 키는 인쇄할 수 있는 ASCII 글자 하나(U+0020~U+007E. 대문자와 Shift
         기호는 Shift를 함께 누른다)나 키 이름 "BackSpace", "Return"이다. 한글 자모는 2벌식 자리의 라틴 글자로
-        보내고(ㅂ은 q, ㅃ은 Q) 입력기가 조합한다. 컴포지터 단축키는 이 키를 보지 않는다. 컴포지터는 누를 수 없는
-        키를 버린다: 다른 이름, 지금 키 배열에 없는 글자, 화면이 잠긴 동안의 키(잠금 화면은 제 창 안의 키보드를
-        쓴다).
+        보내고(ㅂ은 q, ㅃ은 Q) 입력기가 조합한다. 컴포지터 단축키는 이 키를 보지 않는다. 단축 줄의 명령 "Cut", "Copy",
+        "Paste"는 ⌘X, ⌘C, ⌘V와 같은 키를 앱에 보낸다(앱에는 Ctrl+C, 터미널에는 Ctrl+Shift+C처럼 앱 종류마다 맞는 키다).
+        컴포지터는 누를 수 없는 키를 버린다: 다른 이름, 지금 키 배열에 없는 글자, 화면이 잠긴 동안의 키(잠금 화면은
+        제 창 안의 키보드를 쓴다), edit_commands로 내놓지 않은 명령.
       </description>
-      <arg name="key" type="string" summary="인쇄할 수 있는 ASCII 글자 하나, BackSpace 또는 Return"/>
+      <arg name="key" type="string" summary="인쇄할 수 있는 ASCII 글자 하나, BackSpace, Return, Cut, Copy 또는 Paste"/>
     </request>
 
     <request name="watch_text_input">
       <description summary="text_input 이벤트를 받기 시작한다">
-        이 요청 뒤로 컴포지터는 지금 상태를 바로 text_input으로 보내고, 바뀔 때마다 다시 보낸다. 사람이 글 칸을
-        누르면 tapped를 보낸다. 다시 보내도 아무 일도 없다. 키만 누르는 클라이언트(로그인 화면)는 보내지 않는다.
+        이 요청 뒤로 컴포지터는 지금 상태를 바로 text_input과 edit_commands로 보내고, 바뀔 때마다 다시 보낸다. 사람이
+        글 칸을 누르면 tapped를 보낸다. 다시 보내도 아무 일도 없다. 키만 누르는 클라이언트(로그인 화면)는 보내지 않는다.
       </description>
     </request>
 
@@ -48,6 +49,18 @@
         이것만으로 뜨지 않는다.
       </description>
       <arg name="active" type="uint" summary="글 입력이 켜졌으면 1, 꺼졌으면 0"/>
+    </event>
+
+    <event name="edit_commands">
+      <description summary="화면 키보드의 단축 줄에 내놓을 명령">
+        키보드 포커스를 가진 클라이언트의 켜진 글 칸에 내놓을 명령이다. 암호 칸(content purpose password·pin,
+        content hint hidden_text)에는 오려두기와 복사하기를 내놓지 않고, 터미널에는 오려두기가 없다. 앱이 내용의 종류를
+        알리지 않으면 보통 칸으로 본다. 켜진 글 칸이 바뀔 때만 보낸다: 글 입력이 꺼진 동안에는 보내지 않고, text_input
+        1 뒤와 tapped 앞에 온다. 글 내용과 칸의 종류는 보내지 않는다.
+      </description>
+      <arg name="cut" type="uint" summary="오려두기를 내놓으면 1"/>
+      <arg name="copy" type="uint" summary="복사하기를 내놓으면 1"/>
+      <arg name="paste" type="uint" summary="붙여넣기를 내놓으면 1"/>
     </event>
 
     <event name="tapped">

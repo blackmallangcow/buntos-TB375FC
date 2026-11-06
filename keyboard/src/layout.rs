@@ -7,9 +7,13 @@
 //! - 글자 키가 보내는 것은 지금 키 배열(us)의 글자다. 한글(2벌식)은 자모 자리의 라틴 글자를 보내고 입력기(fcitx5)가
 //!   조합한다(ㅂ은 q, Shift의 ㅃ은 Q). Shift를 눌러도 같은 자모인 키는 소문자를 보낸다.
 //! - 지금 키 배열에 없는 글자(€ £ ¥ • ₩)는 키로 칠 수 없어 넣지 않았다. iPadOS의 #+= 둘째 줄과 다르다.
+//! - 단축 줄(iPadOS의 shortcuts bar): 키 줄 위의 줄이고 왼쪽 끝에 오려두기, 복사하기, 붙여넣기가 그림으로 놓인다. 키의
+//!   바탕이 없고, 내놓지 않는 단추의 자리는 비워 둔다(붙여넣기가 움직이지 않는다).
 
 /// 한 줄의 칸 수 (1/4 키 단위)
 pub const COLUMNS: u8 = 46;
+/// 단축 줄의 단추 하나의 칸 수. iPadOS 26의 단추는 글자 키보다 좁은 간격으로 놓인다(글자 키의 약 3/4)
+const BAR_BUTTON: u8 = 3;
 
 /// 글자 배열. 지금 입력 소스를 따른다(한글이면 2벌식, 나머지는 QWERTY)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -37,6 +41,32 @@ pub enum Shift {
     Locked,
 }
 
+/// 단축 줄의 명령. 앱 메뉴의 오려두기, 복사하기, 붙여넣기와 ⌘X, ⌘C, ⌘V와 같은 일을 한다
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    Cut,
+    Copy,
+    Paste,
+}
+
+/// 단축 줄에 내놓는 명령. 컴포지터가 글 칸마다 정해 알린다(comp/src/osk.rs). 알리기 전에는 모두 내놓는다
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Commands {
+    pub cut: bool,
+    pub copy: bool,
+    pub paste: bool,
+}
+
+impl Default for Commands {
+    fn default() -> Self {
+        Self {
+            cut: true,
+            copy: true,
+            paste: true,
+        }
+    }
+}
+
 /// 키가 하는 일
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -53,6 +83,8 @@ pub enum Action {
     Hide,
     /// 다른 쪽으로 간다 (.?123, #+=, 123, ABC·한글)
     Turn(Page),
+    /// 단축 줄의 명령
+    Command(Command),
 }
 
 /// 기능 키의 접근성 이름 (i18n/<언어>/bunt-keyboard.ftl의 메시지 ID). 글자 키는 그 글자가 이름이다
@@ -68,6 +100,9 @@ pub enum Name {
     Numbers,
     Symbols,
     Letters,
+    Cut,
+    Copy,
+    Paste,
 }
 
 impl Name {
@@ -83,6 +118,9 @@ impl Name {
             Name::Numbers => "keyboard-numbers",
             Name::Symbols => "keyboard-symbols",
             Name::Letters => "keyboard-letters",
+            Name::Cut => "keyboard-cut",
+            Name::Copy => "keyboard-copy",
+            Name::Paste => "keyboard-paste",
         }
     }
 }
@@ -97,6 +135,9 @@ pub enum Icon {
     Return,
     Globe,
     Hide,
+    Cut,
+    Copy,
+    Paste,
 }
 
 impl Icon {
@@ -109,6 +150,9 @@ impl Icon {
             Icon::Return => "org.buntos.KeyReturn-symbolic",
             Icon::Globe => "org.buntos.KeyGlobe-symbolic",
             Icon::Hide => "org.buntos.KeyboardHide-symbolic",
+            Icon::Cut => "org.buntos.KeyCut-symbolic",
+            Icon::Copy => "org.buntos.KeyCopy-symbolic",
+            Icon::Paste => "org.buntos.KeyPaste-symbolic",
         }
     }
 
@@ -122,6 +166,9 @@ impl Icon {
             Icon::Return => "⏎",
             Icon::Globe => "🌐",
             Icon::Hide => "⌨",
+            Icon::Cut => "✂",
+            Icon::Copy => "⧉",
+            Icon::Paste => "📋",
         }
     }
 }
@@ -338,6 +385,24 @@ fn shift_key(shift: Shift) -> Slot {
     Slot::Key(key)
 }
 
+/// 단축 줄: 왼쪽 끝에 오려두기, 복사하기, 붙여넣기. 내놓지 않는 단추와 나머지 자리는 빈 칸이다. 빈 칸은 눌러도 아무 일이
+/// 없다(키 줄과 다르다. view.rs)
+pub fn bar(commands: Commands) -> Vec<Slot> {
+    let button = |offered, command, icon, name| {
+        if offered {
+            function(Action::Command(command), Face::Icon(icon), name, BAR_BUTTON)
+        } else {
+            Slot::Gap(BAR_BUTTON)
+        }
+    };
+    vec![
+        button(commands.cut, Command::Cut, Icon::Cut, Name::Cut),
+        button(commands.copy, Command::Copy, Icon::Copy, Name::Copy),
+        button(commands.paste, Command::Paste, Icon::Paste, Name::Paste),
+        Slot::Gap(COLUMNS - 3 * BAR_BUTTON),
+    ]
+}
+
 /// 그 쪽의 네 줄. `globe`는 입력 소스를 바꾸는 지구본 키를 둘지(입력 소스가 둘 이상일 때)
 pub fn rows(script: Script, page: Page, shift: Shift, globe: bool) -> [Vec<Slot>; 4] {
     let shifted = shift != Shift::Off;
@@ -461,6 +526,58 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// 단축 줄의 단추가 앞에서부터 차례로 놓인 자리 (칸 수) 와 하는 일
+    fn bar_buttons(commands: Commands) -> Vec<(u8, Action)> {
+        let mut column = 0;
+        let mut buttons = Vec::new();
+        for slot in bar(commands) {
+            if let Slot::Key(key) = &slot {
+                buttons.push((column, key.action));
+            }
+            column += slot.width();
+        }
+        buttons
+    }
+
+    #[test]
+    fn the_bar_fills_the_keyboard_width_and_keeps_paste_in_place() {
+        let cut = Action::Command(Command::Cut);
+        let copy = Action::Command(Command::Copy);
+        let paste = Action::Command(Command::Paste);
+        let all = Commands::default();
+        assert_eq!(
+            bar_buttons(all),
+            [(0, cut), (BAR_BUTTON, copy), (2 * BAR_BUTTON, paste)]
+        );
+        // 암호 칸: 붙여넣기만, 자리는 그대로다
+        let password = Commands {
+            cut: false,
+            copy: false,
+            paste: true,
+        };
+        assert_eq!(bar_buttons(password), [(2 * BAR_BUTTON, paste)]);
+        // 터미널: 오려두기가 없다
+        let terminal = Commands { cut: false, ..all };
+        assert_eq!(
+            bar_buttons(terminal),
+            [(BAR_BUTTON, copy), (2 * BAR_BUTTON, paste)]
+        );
+        for commands in [all, password, terminal] {
+            let width: u32 = bar(commands)
+                .iter()
+                .map(|slot| u32::from(slot.width()))
+                .sum();
+            assert_eq!(width, u32::from(COLUMNS));
+        }
+        // 그림과 접근성 이름이 있다
+        for slot in bar(all) {
+            if let Slot::Key(key) = slot {
+                assert!(key.name.is_some(), "{key:?}");
+                assert!(matches!(key.face, Face::Icon(_)), "{key:?}");
             }
         }
     }

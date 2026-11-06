@@ -192,7 +192,7 @@ pub struct LayerInfo {
 /// 에이전트의 입력을 받지 않은 까닭
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
-    /// 관리자 인증 창이 떠 있다. 그 창은 사람만 답한다
+    /// 사람만 답하는 창(관리자 인증 창 등)이 떠 있다
     AuthDialog,
     /// 키 배열에 없는 글자 (글 입력을 켜지 않은 앱에 글을 칠 때)
     NotOnLayout(char),
@@ -222,7 +222,9 @@ fn answer_within<T>(answer: mpsc::Receiver<Result<T, Refused>>, wait: Duration) 
     match answer.recv_timeout(wait) {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(Refused::AuthDialog)) => Err(fdo::Error::AccessDenied(
-            "an authentication dialog is open; only the user can answer it".into(),
+            "a window only the user can answer is open (authentication, network password, Bluetooth \
+             pairing or clipboard history)"
+                .into(),
         )),
         Ok(Err(Refused::NotOnLayout(missing))) => Err(fdo::Error::InvalidArgs(format!(
             "{missing:?} is not on the keyboard layout; fill the field instead"

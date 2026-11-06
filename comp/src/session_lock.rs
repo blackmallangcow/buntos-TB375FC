@@ -367,6 +367,7 @@ impl BuntState {
     fn publish_lock(&mut self, locked: bool) {
         self.dbus.update(|snapshot| snapshot.locked = locked);
         self.dbus.send(Command::LockedChanged(locked));
+        self.clipboard_access.set_locked(locked);
         self.session.set_locked_hint(locked);
     }
 

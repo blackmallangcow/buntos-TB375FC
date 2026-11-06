@@ -21,6 +21,11 @@
                    손가락 하나로 (X1, Y1)에서 (X2, Y2)로 끈다. STEPS번에 나눠 옮긴다 (기본 12)
   sleep:SECONDS    기다린다
   screen:PATH      화면을 PNG로 저장한다 (경로는 QEMU가 보는 경로)
+  dark:PATH,X1,Y1,X2,Y2
+                   화면을 PATH에 PPM으로 저장하고 그 사각형의 어두운 점 수를 찍는다 (밝은 판 위의 그림이 있는지 볼 때)
+  plug:DRIVER,ID,BUS
+                   장치를 PCIe 포트에 붙인다 (device_add. 입력 모드 시험)
+  unplug:ID        장치를 뗀다 (device_del. 게스트가 몇 초 뒤에 떼어 낸다)
 """
 
 import json
@@ -30,6 +35,8 @@ import time
 
 # QMP 절대 좌표 범위 (가상 태블릿과 가상 터치 화면이 같다)
 ABS_MAX = 0x7FFF
+# dark: 어두운 점으로 보는 R+G+B의 상한 (밝은 판 위의 검은 그림. 안티에일리어싱한 가장자리는 세지 않는다)
+DARK = 300
 # 손가락 하나만 쓴다. QEMU의 GTK 화면처럼 손가락 번호(tracking id)도 슬롯 번호로 둔다
 TOUCH_SLOT = 0
 # mkosi가 이미지 디스크에 붙이는 블록 노드 이름
@@ -170,6 +177,18 @@ class Qmp:
         self.finger("end")
         time.sleep(0.1)
 
+    def dark_pixels(self, path, x1, y1, x2, y2):
+        """화면의 사각형에서 밝기가 어두운 점의 수. QEMU가 쓴 PPM(P6)을 읽는다"""
+        self.command("screendump", filename=path)
+        with open(path, "rb") as ppm:
+            _, size, _, pixels = ppm.read().split(b"\n", 3)
+        width = int(size.split()[0])
+        count = 0
+        for y in range(y1, y2):
+            row = pixels[y * width * 3 + x1 * 3 : y * width * 3 + x2 * 3]
+            count += sum(1 for i in range(0, len(row), 3) if row[i] + row[i + 1] + row[i + 2] < DARK)
+        return count
+
     def tdrag(self, x1, y1, x2, y2, steps=12):
         # 한 번에 30ms씩 옮긴다. 가장자리 스와이프(comp/src/touch.rs)는 44px을 밀거나 빠르게 튕기면 알아본다
         steps = max(steps, 1)
@@ -227,6 +246,14 @@ def main():
             time.sleep(float(argument))
         elif kind == "screen":
             qmp.command("screendump", filename=argument, format="png")
+        elif kind == "dark":
+            path, *corners = argument.rsplit(",", 4)
+            print(qmp.dark_pixels(path, *(int(value) for value in corners)))
+        elif kind == "plug":
+            driver, device, bus = argument.split(",")
+            qmp.command("device_add", driver=driver, id=device, bus=bus)
+        elif kind == "unplug":
+            qmp.command("device_del", id=argument)
         else:
             raise SystemExit(f"unknown action: {action}")
 

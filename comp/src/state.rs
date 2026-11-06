@@ -20,9 +20,10 @@ use std::{
 
 use smithay::{
     backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state},
-    delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_fractional_scale,
-    delegate_keyboard_shortcuts_inhibit, delegate_output, delegate_seat, delegate_shm,
-    delegate_viewporter, delegate_xdg_dialog, delegate_xdg_shell,
+    delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
+    delegate_ext_data_control, delegate_fractional_scale, delegate_keyboard_shortcuts_inhibit,
+    delegate_output, delegate_seat, delegate_security_context, delegate_shm, delegate_viewporter,
+    delegate_xdg_dialog, delegate_xdg_shell,
     desktop::{
         LayerSurface, PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab,
         PopupUngrabStrategy, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -104,6 +105,7 @@ use smithay::{
 };
 
 use crate::{
+    clipboard::ClipboardAccess,
     config::Config,
     dbus::{self, Request},
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, handle_resize_commit},
@@ -162,6 +164,8 @@ pub struct BuntState {
     pub _output_manager_state: OutputManagerState,
     pub seat_state: SeatState<BuntState>,
     pub data_device_state: DataDeviceState,
+    /// 포커스 없이 클립보드를 읽고 쓰는 길 (clipboard.rs)
+    pub clipboard_access: ClipboardAccess,
     pub foreign_toplevels: ForeignToplevelState,
     pub seat: Seat<BuntState>,
     pub cursor_status: CursorImageStatus,
@@ -257,6 +261,7 @@ impl BuntState {
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let clipboard_access = ClipboardAccess::new(&dh);
         let foreign_toplevels = ForeignToplevelState::new(&dh);
         // 입력기: 앱 쪽(text-input)은 모두에게, 입력기 쪽은 컴포지터가 띄운 입력기에만 연다
         TextInputManagerState::new::<Self>(&dh);
@@ -364,6 +369,7 @@ impl BuntState {
             _output_manager_state: output_manager_state,
             seat_state,
             data_device_state,
+            clipboard_access,
             foreign_toplevels,
             seat,
             cursor_status: CursorImageStatus::default_named(),
@@ -1265,6 +1271,8 @@ pub struct ClientState {
     pub input_method: bool,
     /// 컴포지터가 직접 띄운 잠금 화면. 화면 잠금 프로토콜(ext-session-lock)을 쓸 수 있다 (session_lock.rs)
     pub lock_screen: bool,
+    /// 샌드박스 앱. 보안 컨텍스트(wp_security_context_v1)로 만든 소켓으로 붙었다 (clipboard.rs)
+    pub sandboxed: bool,
     /// 컴포지터가 띄운 프로그램(spawn_trusted)의 pid. 모르면 0. 미리 만든 연결(socketpair)은 SO_PEERCRED가
     /// 그 쌍을 만든 컴포지터 자신이라, 셸의 표면이 컴포지터의 pid로 알려졌다 (surface_pid)
     pub spawned_pid: AtomicU32,
@@ -2333,6 +2341,10 @@ impl Dispatch<ZwlrLayerSurfaceV1, WlrLayerSurfaceUserData> for BuntState {
 delegate_seat!(BuntState);
 delegate_keyboard_shortcuts_inhibit!(BuntState);
 delegate_data_device!(BuntState);
+// 포커스 없이 클립보드를 읽고 쓰는 길과 그것을 샌드박스 앱에 닫는 보안 컨텍스트 (clipboard.rs)
+delegate_data_control!(BuntState);
+delegate_ext_data_control!(BuntState);
+delegate_security_context!(BuntState);
 delegate_output!(BuntState);
 delegate_viewporter!(BuntState);
 delegate_fractional_scale!(BuntState);

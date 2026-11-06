@@ -9,10 +9,11 @@
 # 에이전트의 읽기 경로(bunt agent snapshot, ADR-009)로 본다. 이어서 e2e 8번(데스크탑 항목, tests/e2e/desktop.sh),
 # e2e 5번(에이전트가 앱 A의 값을 읽어 앱 B에 넣는다, tests/e2e/agent-apps.sh), e2e 6번(키보드 단축키,
 # tests/e2e/shortcuts.sh), e2e 4번(한글 입력, tests/e2e/hangul.sh), e2e 7번(화면 잠금과 VM의 잠자기,
-# tests/e2e/session-lock.sh), e2e 9번(패키지 매니저, tests/e2e/packages.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는
-# 이미지(그래픽 세션이 없는 x86-64)에서는 8·5·6·4·7·9번을 건너뛴다.
+# tests/e2e/session-lock.sh), e2e 10번(클립보드, tests/e2e/clipboard.sh), e2e 9번(패키지 매니저, tests/e2e/packages.sh),
+# e2e 11번(화면 키보드와 단축 줄, tests/e2e/touch-keyboard.sh)을 돌린 뒤 끈다. 자체 컴포넌트가 없는 이미지(그래픽 세션이
+# 없는 x86-64)에서는 8·5·6·4·7·10·9·11번을 건너뛴다.
 # 사용법: tests/e2e/boot-to-shell.sh <보드>   (먼저 tools/image/build.sh <보드>로 빌드한다)
-# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 8·5·6·4·7·9번에 10분 넘게 걸린다)
+# 환경 변수: E2E_TIMEOUT 전체 제한 시간(초, 기본 1200. 바쁜 Mac에서는 8·5·6·4·7·10·9·11번에 10분 넘게 걸린다)
 #            BUNTOS_IMAGE_DIR 띄울 이미지의 디렉터리 (tools/image/build.sh·vmctl.sh와 같다. 기본
 #            $BUNTOS_BUILD_DIR/<보드>, BUNTOS_BUILD_DIR의 기본은 ~/buntos-build)
 #            E2E_LOG_DIR 기록을 남길 디렉터리. 주면 끝날 때(실패해도) 직렬 콘솔 기록(console.log)과 게스트의 저널
@@ -105,7 +106,8 @@ push() {
 # 테스트가 빌드한 이미지를 바꾸지 않게, 멈춘 상태로 띄워 디스크에 임시 덮어쓰기를 씌운 뒤 실행한다.
 # mkosi는 이미지를 -blockdev로 붙여 QEMU의 -snapshot이 효과가 없고, --ephemeral은 이미지 전체를 복사한다
 # 그래픽 세션이 뜨도록 가상 GPU를 붙이고(화면은 내보내지 않는다), 로그인 화면에 암호를 치도록 가상 키보드를,
-# 데스크탑을 누르고 드래그하도록(e2e 8번) 가상 태블릿을 붙인다
+# 데스크탑을 누르고 드래그하도록(e2e 8번) 가상 태블릿을 붙인다. 키보드와 태블릿은 PCIe 루트 포트에 꽂아 e2e 11번이 떼고
+# 그 자리에 가상 터치 화면을 붙일 수 있게 한다(태블릿의 키보드 덮개를 뗀 것과 같다. 입력 모드가 터치가 된다)
 # E2E_LOG_DIR이 있으면 게스트 저널을 받을 virtio 직렬 포트를 더한다(셸에 들어간 뒤 journalctl -f를 이 포트로 보낸다)
 journal_port=()
 if [[ -n "${E2E_LOG_DIR:-}" ]]; then
@@ -114,7 +116,12 @@ if [[ -n "${E2E_LOG_DIR:-}" ]]; then
 		-device "virtserialport,bus=e2e-serial.0,chardev=e2e-journal,name=org.buntos.e2e.journal")
 fi
 BUNTOS_IMAGE_DIR="$image_dir" "$repo/tools/image/build.sh" "$board" vm -- -S -qmp "unix:$work/qmp.sock,server=on,wait=off" \
-	-device virtio-gpu-pci -device virtio-keyboard-pci -device virtio-tablet-pci "${journal_port[@]}" \
+	-device virtio-gpu-pci \
+	-device pcie-root-port,id=e2e-keyboard-port,chassis=11,slot=11 \
+	-device virtio-keyboard-pci,id=e2e-keyboard,bus=e2e-keyboard-port \
+	-device pcie-root-port,id=e2e-tablet-port,chassis=12,slot=12 \
+	-device virtio-tablet-pci,id=e2e-tablet,bus=e2e-tablet-port \
+	-device pcie-root-port,id=e2e-touch-port,chassis=13,slot=13 "${journal_port[@]}" \
 	-smbios "type=11,value=io.systemd.credential:buntos.account=$account" \
 	<"$work/console.in" >"$log" 2>&1 &
 vm_pid=$!
@@ -538,6 +545,206 @@ if [[ "$agent_refs" != NONE ]]; then
 	echo "e2e 7번(화면 잠금): ${SECONDS}초, ${passed}개 통과"
 fi
 
+# e2e 10번: 터미널의 클립보드와 클립보드 기록(ARCHITECTURE 5.2). wl-copy·wl-paste는 포커스 없이 돌고, 샌드박스 앱과 잠긴 동안의
+# 새 연결에는 프로토콜이 보이지 않는다. 클립보드 기록은 사람만 답하는 창이라 에이전트로 읽지 못한다. 그래서 키(QMP)로 항목을
+# 골라 wl-paste로 무엇이 들어왔는지 보고, 에이전트와 접근성 버스에서 글이 보이지 않는지 본다. 화면은 E2E_LOG_DIR에 남긴다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/clipboard.sh /tmp/e2e-clipboard.sh
+	push tests/e2e/wayland-probe.py /tmp/e2e-wayland-probe.py
+	echo 'chmod 755 /tmp/e2e-clipboard.sh /tmp/e2e-wayland-probe.py' >&3
+	begin 10 /tmp/e2e-clipboard.sh
+	shot() {
+		if [[ -n "${E2E_LOG_DIR:-}" ]]; then
+			keys "screen:$E2E_LOG_DIR/$1.png"
+		fi
+	}
+	# 모든 앱을 열고 클립보드 기록으로 넘어간다. 바쁜 VM에서는 패널을 여는 데 몇 초 걸리므로 키보드를 받기를 기다린다
+	open_history() {
+		keys keys:meta_l+spc
+		guest wait-focus bunt-launcher
+		[[ "$answer" == bunt-launcher ]] || fail "e2e 10번: 모든 앱이 뜨지 않았다 ($answer)"
+		keys sleep:0.3 keys:meta_l+4
+		guest wait-focus bunt-clipboard
+		[[ "$answer" == bunt-clipboard ]] || fail "e2e 10번: 클립보드 기록이 뜨지 않았다 ($answer)"
+		keys sleep:0.5
+	}
+	# 패널이 닫혀 앞의 앱이 키보드를 돌려받기를 기다린다
+	closed() {
+		guest wait-focus org.gnome.TextEditor
+	}
+	# 잠금 화면에 암호를 쳐 푼다 (e2e 7번과 같다)
+	unlock() {
+		for attempt in 1 2 3; do
+			keys keys:esc sleep:0.5 "type:$password" sleep:0.5 keys:ret sleep:4
+			guest locked
+			if [[ "$answer" == false ]]; then
+				break
+			fi
+		done
+	}
+
+	guest globals
+	check "일반 클라이언트에는 클립보드 프로토콜(ext, zwlr)과 보안 컨텍스트가 보인다" "$answer" "ext=1 zwlr=1 security=1"
+	guest sandbox-globals
+	check "샌드박스(보안 컨텍스트) 클라이언트에는 보이지 않는다" "$answer" "ext=0 zwlr=0 security=0"
+	guest roundtrip
+	check "wl-copy와 wl-paste가 포커스를 옮기지 않고 왕복한다 (UTF-8)" "$answer" "[왕복 e2e 클립보드] same"
+
+	# 앱과의 복사와 붙여넣기: 같은 클립보드다
+	guest prepare
+	[[ "$answer" == ready ]] || fail "e2e 10번: 텍스트 편집기를 준비하지 못했다 ($answer)"
+	keys keys:meta_l+a sleep:0.3 keys:meta_l+c sleep:0.5
+	guest paste
+	check "앱에서 ⌘C로 복사한 글을 wl-paste가 읽는다" "$answer" "[from editor]"
+	guest copy fromcli
+	keys keys:meta_l+a sleep:0.3 keys:meta_l+v sleep:1
+	guest value
+	check "wl-copy로 넣은 글을 앱에서 ⌘V로 붙인다" "$answer" "[fromcli]"
+
+	# 처음 쓸 때 허용한다 (macOS와 같다)
+	guest setting
+	check "클립보드 기록은 처음에 꺼져 있다" "$answer" false
+	open_history
+	check "⌘스페이스 뒤 ⌘4로 클립보드 기록으로 넘어간다" "$answer" bunt-clipboard
+	shot clipboard-allow
+	keys keys:ret sleep:1
+	guest setting
+	check "허용을 묻는 화면에서 Enter로 켠다" "$answer" true
+	shot clipboard-allowed
+	keys keys:esc
+	closed
+	check "Esc로 닫으면 앞의 앱이 키보드를 돌려받는다" "$answer" org.gnome.TextEditor
+
+	# 복사가 기록에 남고, 고르면 클립보드에 들어온다. 허용하기 전에 복사한 fromcli가 첫 항목이다
+	guest copy alphatoken
+	guest copy betatoken
+	guest copy-secret hunter2secret
+	guest paste
+	check "비밀번호 관리자의 복사도 클립보드로는 쓴다" "$answer" "[hunter2secret]"
+	open_history
+	shot clipboard-list
+	guest agent-refused betatoken
+	check "기록이 떠 있는 동안 에이전트의 키를 거절하고 셸을 읽어도 창과 글이 없다" "$answer" "1 0"
+	guest a11y-scan betatoken
+	check "같은 사용자의 프로그램이 접근성 버스에서 기록의 글을 읽지 못한다" "$answer" "0 1"
+	keys keys:ret
+	closed
+	check "고르면 패널이 닫힌다" "$answer" org.gnome.TextEditor
+	guest paste
+	check "Enter로 첫 항목을 고른다. 비밀번호 관리자의 복사는 기록에 없다" "$answer" "[betatoken]"
+	open_history
+	keys keys:down sleep:0.3 keys:ret
+	closed
+	guest paste
+	check "↓로 다음 항목을 고른다" "$answer" "[alphatoken]"
+	keys keys:meta_l+a sleep:0.3 keys:meta_l+v sleep:1
+	guest value
+	check "고른 항목을 앞의 앱에 ⌘V로 붙인다" "$answer" "[alphatoken]"
+	open_history
+	keys keys:down sleep:0.3 keys:meta_l+c
+	closed
+	guest paste
+	check "⌘C로 고른 항목을 복사한다" "$answer" "[betatoken]"
+	open_history
+	keys type:fromc sleep:1 keys:ret
+	closed
+	guest paste
+	check "검색한 항목을 고른다" "$answer" "[fromcli]"
+	open_history
+	keys type:nosuchthing sleep:1 keys:ret sleep:0.5
+	guest focus
+	check "찾은 것이 없으면 Enter는 아무것도 하지 않는다" "$answer" bunt-clipboard
+	keys keys:esc sleep:0.5
+	guest focus
+	check "검색어가 있으면 Esc는 검색어만 지운다" "$answer" bunt-clipboard
+	keys keys:esc
+	closed
+
+	# 그림: 스크린샷을 클립보드로 찍으면 컴포지터가 내놓은 PNG가 기록에 남는다
+	keys keys:ctrl+shift+meta_l+3 sleep:2
+	guest types
+	check "⌃⇧⌘3의 스크린샷을 wl-paste가 PNG로 본다" "$answer" "image/png "
+	open_history
+	shot clipboard-image
+	keys keys:down sleep:0.3 keys:ret
+	closed
+	guest paste
+	check "그림 다음 항목을 고른다" "$answer" "[fromcli]"
+	open_history
+	keys keys:down sleep:0.3 keys:ret
+	closed
+	guest png
+	check "기록의 그림을 고르면 PNG로 내놓는다" "$answer" PNG
+
+	# 지우기: 더 보기(검색 칸에서 ⇥ 세 번)의 기록 지우기
+	guest copy keptinclipboard
+	open_history
+	keys keys:tab sleep:0.2 keys:tab sleep:0.2 keys:tab sleep:0.2 keys:ret sleep:0.8
+	shot clipboard-more
+	keys keys:ret sleep:1
+	shot clipboard-cleared
+	guest paste
+	check "기록을 지워도 지금 클립보드는 그대로다" "$answer" "[keptinclipboard]"
+	keys keys:esc
+	closed
+	guest copy aftercleartoken
+	open_history
+	keys keys:down sleep:0.3 keys:ret
+	closed
+	guest paste
+	check "지운 뒤에는 새 복사만 있다" "$answer" "[aftercleartoken]"
+
+	# 잠금: 패널이 닫히고, 새 연결이 클립보드를 읽지 못하고, 풀린 뒤에도 패널이 저절로 뜨지 않는다
+	open_history
+	check "잠그기 전에 기록을 연다" "$answer" bunt-clipboard
+	keys keys:ctrl+meta_l+q sleep:3
+	guest locked
+	check "기록을 연 채로 잠근다" "$answer" true
+	shot clipboard-locked
+	guest paste-locked
+	check "잠긴 동안 새 wl-paste는 클립보드를 읽지 못한다" "$answer" refused
+	guest globals
+	check "잠긴 동안 새 연결에는 클립보드 프로토콜이 보이지 않는다" "$answer" "ext=0 zwlr=0 security=1"
+	unlock
+	check "잠금을 푼다" "$answer" false
+	closed
+	check "풀린 뒤 기록이 떠 있지 않고 앞의 앱이 키보드를 받는다" "$answer" org.gnome.TextEditor
+	shot clipboard-unlocked
+	guest paste
+	check "풀린 뒤 wl-paste가 다시 읽는다" "$answer" "[aftercleartoken]"
+	guest globals
+	check "풀린 뒤 새 연결에 클립보드 프로토콜이 다시 보인다" "$answer" "ext=1 zwlr=1 security=1"
+
+	# 시스템 설정: 지우기 단추, 끄기
+	guest copy settingstoken
+	guest clear-from-settings
+	open_history
+	keys keys:ret sleep:1
+	guest focus
+	check "시스템 설정의 지우기로 비면 Enter가 아무것도 하지 않는다" "$answer" bunt-clipboard
+	keys keys:esc
+	closed
+	guest set-setting false
+	check "시스템 설정의 스위치로 끈다" "$answer" false
+	guest copy offtoken
+	open_history
+	shot clipboard-off
+	keys keys:ret sleep:1
+	guest setting
+	check "끄면 다시 허용을 묻는다" "$answer" true
+	guest copy backontoken
+	keys keys:down sleep:0.3 keys:ret
+	closed
+	guest paste
+	check "다시 켜면 켠 때의 클립보드부터 남는다" "$answer" "[offtoken]"
+	guest set-setting false
+
+	guest no-trace betatoken
+	check "기록의 글이 파일과 저널에 남지 않는다" "$answer" "0 0"
+	((failed == 0)) || fail "e2e 10번(클립보드): ${failed}개 실패"
+	echo "e2e 10번(클립보드): ${SECONDS}초, ${passed}개 통과"
+fi
+
 # e2e 9번: 패키지 매니저(ARCHITECTURE 5.5). 받은 .deb와 AppImage를 기본 앱으로 열어 설치하고, 실행하고, 목록 창에서 지운다.
 # 창은 에이전트로 읽고 누른다. .deb의 관리자 인증 창은 사람만 답하므로 암호를 QMP로 친다. 처음 열 때 apt 목록을 받으므로
 # 오래 걸릴 수 있고, 인터넷이 없어도 의존성 없는 패키지는 설치된다
@@ -622,6 +829,141 @@ if [[ "$agent_refs" != NONE ]]; then
 	keys keys:esc sleep:1
 	((failed == 0)) || fail "e2e 9번(패키지 매니저): ${failed}개 실패"
 	echo "e2e 9번(패키지 매니저): ${SECONDS}초, ${passed}개 통과"
+fi
+
+# e2e 11번: 화면 키보드와 단축 줄(ARCHITECTURE 5.1, 5.2). 키보드와 태블릿을 떼고 터치 화면을 붙여 터치 모드로 간 뒤, 손가락만으로
+# 친 글을 단축 줄로 오려두고 복사해 붙여 넣는다. 결과는 게스트 쪽 도우미(tests/e2e/touch-keyboard.sh)가 앱의 글과 터미널이 받은
+# 바이트로 읽는다. 화면 키보드는 에이전트에 보이지 않으므로(6.3절) 단추는 화면의 픽셀로 본다
+if [[ "$agent_refs" != NONE ]]; then
+	push tests/e2e/touch-keyboard.sh /tmp/e2e-touch-keyboard.sh
+	begin 11 /tmp/e2e-touch-keyboard.sh
+	# 1280×800에서 판은 472에서 시작한다(단축 줄 48px + 줄 68px × 4 + 위아래 여백 4px씩). 칸은 (1280 - 8) / 46 픽셀이다
+	bar_y=500
+	key_top=472
+	cut_key=touch:45,$bar_y
+	copy_key=touch:128,$bar_y
+	paste_key=touch:211,$bar_y
+	return_key=touch:1168,626
+	# 글자 하나의 손가락 동작 (글자 쪽의 QWERTY. 글자 키는 4칸이고, 둘째 줄은 2칸, 셋째 줄은 5칸 들였다)
+	osk_letter() {
+		local row letters start y head
+		for row in qwertyuiop:0:558 asdfghjkl:2:626 zxcvbnm:5:694; do
+			IFS=: read -r letters start y <<<"$row"
+			head=${letters%%"$1"*}
+			if ((${#head} < ${#letters})); then
+				echo "touch:$((4 + (2 * (start + 4 * ${#head}) + 4) * 1272 / 92)),$y"
+				return
+			fi
+		done
+	}
+	osk_type() {
+		local actions=() i
+		for ((i = 0; i < ${#1}; i++)); do
+			actions+=("$(osk_letter "${1:i:1}")" sleep:0.3)
+		done
+		keys "${actions[@]}"
+	}
+	# 단축 줄에 보이는 단추. 그림은 칸 가운데의 어두운 점으로 본다 (판은 밝다)
+	bar_buttons() {
+		local x name shown=()
+		for x in 45:cut 128:copy 211:paste; do
+			name=${x#*:}
+			x=${x%:*}
+			if (($(keys "dark:$work/bar.ppm,$((x - 16)),$((bar_y - 16)),$((x + 16)),$((bar_y + 16))") > 15)); then
+				shown+=("$name")
+			fi
+		done
+		echo "${shown[*]:-none}"
+	}
+
+	guest prepare
+	[[ "$answer" == ready ]] || fail "e2e 11번: 텍스트 편집기를 준비하지 못했다 ($answer)"
+	# 창을 화면에 채운다. 떠 있는 창은 키보드를 피해 옮기지 않는다 (디자인 스펙 15장)
+	keys keys:ctrl+meta_l+f sleep:2
+	keys plug:virtio-multitouch-pci,e2e-touch,e2e-touch-port unplug:e2e-keyboard unplug:e2e-tablet
+	guest mode touch
+	check "키보드와 태블릿을 떼고 터치 화면을 붙이면 터치 모드다" "$answer" touch
+
+	# 문서를 누르면 키보드가 뜨고 창이 판 위에서 끝난다 (창 자리 줄이기와 단축 줄이 있는 판의 높이가 맞다)
+	keys touch:640,200 sleep:2
+	guest window-height
+	check "키보드가 뜨면 창이 단축 줄 위에서 끝난다" "$answer" "$key_top"
+	check "보통 칸의 단축 줄에 오려두기, 복사하기, 붙여넣기가 있다" "$(bar_buttons)" "cut copy paste"
+	osk_type hello
+	keys sleep:1
+	guest value
+	check "손가락으로 친 글이 문서에 들어간다" "$answer" "[hello]"
+
+	# 글을 고르고 복사한 뒤, 줄의 끝을 눌러 글 커서를 옮기고 붙여 넣는다 (⌘C, ⌘V와 같은 키가 앱에 간다)
+	guest select-all
+	keys "$copy_key" sleep:1
+	guest value
+	check "복사하기는 글을 바꾸지 않는다" "$answer" "[hello]"
+	keys touch:1000,27 sleep:1 "$paste_key" sleep:1
+	guest value
+	check "복사하기와 붙여넣기: 고른 글이 글 커서 자리에 들어간다" "$answer" "[hellohello]"
+	guest select-all
+	keys "$cut_key" sleep:1
+	guest value
+	check "오려두기: 고른 글이 지워진다" "$answer" "[]"
+	keys "$paste_key" sleep:1
+	guest value
+	check "붙여넣기: 오려둔 글이 들어간다" "$answer" "[hellohello]"
+
+	# 암호 칸에는 붙여넣기만 있다. 붙여넣기는 자리가 그대로다
+	guest password-prepare
+	check "시스템 설정의 암호 시트를 연다" "$answer" 1
+	keys touch:677,392 sleep:2
+	check "암호 칸의 단축 줄에는 붙여넣기만 있다" "$(bar_buttons)" paste
+	guest password-cleanup
+	check "암호 시트를 닫으면 텍스트 편집기로 돌아온다" "$answer" org.gnome.TextEditor
+	keys sleep:1 touch:640,200 sleep:2
+	check "보통 칸으로 돌아오면 세 단추가 다시 있다" "$(bar_buttons)" "cut copy paste"
+
+	# 잠금 화면의 키보드에는 단축 줄이 없다. 단축 줄의 붙여넣기 자리를 눌러도 클립보드의 글이 암호 칸에 들어가지 않아, 그대로 친
+	# 암호로 풀린다
+	guest lock
+	check "화면을 잠근다" "$answer" true
+	keys touch:640,488 sleep:2 "$paste_key" sleep:0.5
+	osk_type "$password"
+	keys "$return_key" sleep:3
+	guest locked
+	check "잠금 화면에서 붙여넣기 자리를 눌러도 클립보드가 들어가지 않고 친 암호로 풀린다" "$answer" false
+
+	# 터미널에는 오려두기가 없고, 복사하기와 붙여넣기는 터미널의 키(Ctrl+Shift+C·V)로 간다. Ctrl+V로 갔으면 cat은 글이 아니라 ^V를 받는다
+	guest foot-prepare
+	check "터미널을 띄운다" "$answer" foot
+	keys touch:640,200 sleep:2
+	check "터미널의 단축 줄에는 복사하기와 붙여넣기만 있다" "$(bar_buttons)" "copy paste"
+	keys "$paste_key" sleep:1 "$return_key" sleep:1
+	guest foot
+	check "터미널에서 붙여넣기: 프로그램이 글을 받는다" "$answer" " h e l l o h e l l o \\n"
+	# 둘째 줄의 낱말을 손가락으로 두 번 눌러 고르면 복사하기와 붙여넣기로 다시 들어간다
+	osk_type xyz
+	keys "$return_key" sleep:1 touch:8,32 touch:8,32 sleep:1 "$copy_key" sleep:1 "$paste_key" sleep:1 \
+		"$return_key" sleep:1
+	guest foot
+	check "터미널에서 복사하기: 고른 낱말을 복사한다" "$answer" " h e l l o h e l l o \\n x y z \\n x y z \\n"
+	guest cleanup
+	keys sleep:2
+
+	# 키보드와 태블릿을 다시 붙이면 포인터 모드로 돌아온다
+	keys plug:virtio-keyboard-pci,e2e-keyboard,e2e-keyboard-port plug:virtio-tablet-pci,e2e-tablet,e2e-tablet-port \
+		unplug:e2e-touch
+	guest mode pointer
+	check "키보드와 태블릿을 다시 붙이면 포인터 모드다" "$answer" pointer
+
+	# 잠금 화면의 암호 칸은 물리 키보드의 ⌃V도 받지 않는다. 클립보드의 글이 들어갔으면 그 뒤에 친 암호가 틀린다
+	guest copy-prepare
+	[[ "$answer" == ready ]] || fail "e2e 11번: 복사할 글을 준비하지 못했다 ($answer)"
+	keys keys:meta_l+a sleep:0.3 keys:meta_l+c sleep:0.5
+	guest lock
+	check "클립보드에 글을 두고 화면을 잠근다" "$answer" true
+	keys keys:ctrl+v sleep:1 "type:$password" sleep:0.5 keys:ret sleep:3
+	guest locked
+	check "잠금 화면에서 ⌃V로 클립보드가 들어가지 않고 친 암호로 풀린다" "$answer" false
+	((failed == 0)) || fail "e2e 11번(화면 키보드와 단축 줄): ${failed}개 실패"
+	echo "e2e 11번(화면 키보드와 단축 줄): ${SECONDS}초, ${passed}개 통과"
 fi
 
 # 로그아웃: 로그인 화면이 다시 뜨고, 그 컴포지터도 사용자 세션의 CRTC와 모드를 끄지 않고 이어받는다 (comp/src/handover.rs)

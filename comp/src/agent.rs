@@ -45,11 +45,13 @@ use smithay::{
 /// evdev 키 코드 + 8 (xkb 키 코드)의 범위
 const KEYCODES: std::ops::RangeInclusive<u32> = 8..=255;
 /// 사람만 답하는 셸 창의 레이어 이름: 관리자 인증 창(polkit 인증 에이전트), Wi-Fi 암호 창(NetworkManager
-/// 비밀 에이전트), Bluetooth 페어링 창(BlueZ 페어링 에이전트). 하나였던 이름을 목록으로 넓혔다
-const AUTH_NAMESPACES: [&str; 3] = [
+/// 비밀 에이전트), Bluetooth 페어링 창(BlueZ 페어링 에이전트), 클립보드 기록(모든 앱 패널의 클립보드 보기.
+/// 에이전트가 읽거나 항목을 골라 앱에 붙이지 못하게 한다). 하나였던 이름을 목록으로 넓혔다
+const AUTH_NAMESPACES: [&str; 4] = [
     "bunt-polkit-agent",
     "bunt-secret-agent",
     "bunt-pairing-agent",
+    "bunt-clipboard",
 ];
 /// 글 입력에 한 번에 확정하는 바이트 수. Wayland 메시지 하나는 4KB를 넘지 못한다
 const COMMIT_BYTES: usize = 2048;

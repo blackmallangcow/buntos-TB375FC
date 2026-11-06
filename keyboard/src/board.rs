@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::layout::{self, Action, Page, Script, Shift, Slot};
+use crate::layout::{self, Action, Command, Page, Script, Shift, Slot};
 
 /// Shift를 이 안에 두 번 누르면 Caps Lock이다
 pub const DOUBLE_TAP: Duration = Duration::from_millis(350);
@@ -30,15 +30,20 @@ pub enum Output {
     Char(char),
     Delete,
     Return,
+    /// 단축 줄의 명령
+    Command(Command),
 }
 
 impl Output {
-    /// 컴포지터의 화면 키보드 프로토콜(bunt_osk_v1의 press)이 받는 이름 (comp/src/osk.rs의 parse_key)
+    /// 컴포지터의 화면 키보드 프로토콜(bunt_osk_v1의 press)이 받는 이름 (comp/src/osk.rs의 parse_key, EditCommand::parse)
     pub fn key_name(self) -> String {
         match self {
             Output::Char(character) => character.to_string(),
             Output::Delete => "BackSpace".into(),
             Output::Return => "Return".into(),
+            Output::Command(Command::Cut) => "Cut".into(),
+            Output::Command(Command::Copy) => "Copy".into(),
+            Output::Command(Command::Paste) => "Paste".into(),
         }
     }
 }
@@ -114,6 +119,11 @@ impl Board {
             },
             Action::Return => Outcome {
                 output: Some(Output::Return),
+                redraw: false,
+            },
+            // 글자를 친 것이 아니므로 한 번 누른 Shift와 쪽은 그대로다
+            Action::Command(command) => Outcome {
+                output: Some(Output::Command(command)),
                 redraw: false,
             },
             Action::Shift => {
@@ -240,12 +250,30 @@ mod tests {
         assert!(!board.reset());
     }
 
+    /// 단축 줄의 명령은 글자를 친 것이 아니다: 한 번 누른 Shift와 쪽이 그대로이고 배열을 다시 그리지 않는다
+    #[test]
+    fn commands_leave_the_shift_and_the_page_alone() {
+        let now = Instant::now();
+        let mut board = Board::default();
+        board.press(Action::Turn(Page::Numbers), now);
+        board.press(Action::Shift, now);
+        for command in [Command::Cut, Command::Copy, Command::Paste] {
+            let outcome = board.press(Action::Command(command), now);
+            assert_eq!(outcome.output, Some(Output::Command(command)));
+            assert!(!outcome.redraw);
+        }
+        assert_eq!((board.page(), board.shift()), (Page::Numbers, Shift::Once));
+    }
+
     #[test]
     fn keys_name_what_the_compositor_presses() {
         assert_eq!(Output::Char('q').key_name(), "q");
         assert_eq!(Output::Char(' ').key_name(), " ");
         assert_eq!(Output::Delete.key_name(), "BackSpace");
         assert_eq!(Output::Return.key_name(), "Return");
+        assert_eq!(Output::Command(Command::Cut).key_name(), "Cut");
+        assert_eq!(Output::Command(Command::Copy).key_name(), "Copy");
+        assert_eq!(Output::Command(Command::Paste).key_name(), "Paste");
         // 지우기와 Return은 누를 때 보낸다(되풀이는 view.rs). 지구본·가리기는 보낼 것이 없다
         let mut board = Board::default();
         let now = Instant::now();

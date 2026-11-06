@@ -20,6 +20,8 @@ window.bunt-volume-hud,
 window.bunt-volume-hud.background,
 window.bunt-launcher,
 window.bunt-launcher.background,
+window.bunt-clipboard,
+window.bunt-clipboard.background,
 window.bunt-wallpaper,
 window.bunt-wallpaper.background {
   background: none;
@@ -409,6 +411,161 @@ flowboxchild.launcher-tile:focus-visible {
 .launcher-empty {
   color: var(--label-secondary);
   font-size: var(--text-title3);
+}
+
+/* 패널 머리의 둥근 단추: 모든 앱, 클립보드, 더 보기 (macOS 26 Spotlight의 검색 칸 오른쪽 단추) */
+button.launcher-mode,
+menubutton.launcher-mode > button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--glass-fill);
+  box-shadow: none;
+  color: var(--label);
+  -gtk-icon-size: 14px;
+}
+
+button.launcher-mode:hover,
+menubutton.launcher-mode > button:hover {
+  background: var(--hover);
+}
+
+button.launcher-mode:active,
+menubutton.launcher-mode > button:active {
+  background: var(--pressed);
+}
+
+button.launcher-mode.active,
+button.launcher-mode.active:hover,
+button.launcher-mode.active:active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+button.launcher-mode:focus-visible,
+menubutton.launcher-mode > button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 클립보드 기록 (clipboard_panel.rs). 패널과 검색 칸은 모든 앱과 같다 */
+.clipboard-title {
+  min-height: 34px;
+  font-size: var(--text-title2);
+}
+
+.clipboard-list,
+.clipboard-list > row {
+  background: none;
+}
+
+.clipboard-list {
+  padding: var(--space-2) 0;
+}
+
+row.clipboard-item {
+  min-height: 44px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-md);
+  outline: none;
+}
+
+row.clipboard-item:hover {
+  background: var(--hover);
+}
+
+row.clipboard-item:active {
+  background: var(--pressed);
+}
+
+row.clipboard-item:selected,
+row.clipboard-item:selected:hover,
+row.clipboard-item:selected:active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.clipboard-row {
+  padding: var(--space-1) 0;
+}
+
+.clipboard-icon {
+  min-width: 40px;
+  color: var(--label-secondary);
+}
+
+row.clipboard-item:selected .clipboard-icon {
+  color: var(--accent-fg);
+}
+
+.clipboard-thumbnail {
+  min-width: 40px;
+}
+
+private-text {
+  font-size: var(--text-body);
+}
+
+.clipboard-time {
+  color: var(--label-secondary);
+  font-size: var(--text-footnote);
+}
+
+row.clipboard-item:selected .clipboard-time {
+  color: var(--accent-fg);
+}
+
+button.clipboard-copy {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  -gtk-icon-size: 14px;
+}
+
+button.clipboard-copy:hover {
+  background: var(--hover);
+}
+
+button.clipboard-copy:active {
+  background: var(--pressed);
+}
+
+button.clipboard-clear:hover {
+  background: var(--hover);
+}
+
+.clipboard-message-title {
+  font-size: var(--text-title3);
+  font-weight: 600;
+}
+
+.clipboard-message-description {
+  color: var(--label-secondary);
+  font-size: var(--text-body);
+}
+
+button.clipboard-allow {
+  min-height: 0;
+  margin-top: var(--space-2);
+  padding: 5px 18px;
+  border: none;
+  border-radius: var(--radius-capsule);
+  background: var(--accent);
+  box-shadow: none;
+  color: var(--accent-fg);
+  font-size: var(--text-body);
+}
+
+button.clipboard-allow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* 메뉴: 로고·앱 메뉴, 메뉴 막대 항목, 제어 센터. macOS 26의 유리 메뉴.
@@ -1253,6 +1410,29 @@ window.touch button.launcher-chip {
   border-left-width: 0;
   border-right-width: 0;
   background-clip: padding-box;
+}
+
+/* 패널 머리의 둥근 단추: 그림은 28px 그대로, 8px의 투명한 테두리로 44px. 옆 단추와 겹치지 않게 사이를 띄운다 */
+window.touch button.launcher-mode,
+window.touch menubutton.launcher-mode > button {
+  border: 8px solid transparent;
+  background-clip: padding-box;
+}
+
+/* 클립보드 기록의 줄은 포인터 모드에서도 44px이다. 복사 단추만 넓힌다 */
+window.touch button.clipboard-copy {
+  border: 10px solid transparent;
+  background-clip: padding-box;
+}
+
+window.touch .clipboard-title {
+  min-height: 44px;
+}
+
+window.touch button.clipboard-allow {
+  min-height: 44px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 /* Dock: 아이콘은 고른 크기 그대로, 단추는 44×44 이상(아이콘 32px에서 40×44였다). 내용 36×38에 안쪽 여백(좌우

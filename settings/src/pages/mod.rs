@@ -16,6 +16,8 @@ mod desktop_dock;
 mod display;
 mod keyboard;
 mod language;
+// 모든 앱 패널: 클립보드 기록 (macOS의 Spotlight 설정에 해당)
+mod launcher;
 mod menu_bar;
 mod mouse;
 mod network;
@@ -47,6 +49,7 @@ pub enum Page {
     Appearance,
     MenuBar,
     DesktopDock,
+    Launcher,
     Wallpaper,
     Display,
     Keyboard,
@@ -62,8 +65,8 @@ pub enum Page {
 }
 
 impl Page {
-    /// 왼쪽 목록에 놓는 순서. 알림과 사운드는 macOS처럼 디스플레이 다음 묶음이다
-    pub const ALL: [Page; 19] = [
+    /// 왼쪽 목록에 놓는 순서. 알림과 사운드는 macOS처럼 디스플레이 다음 묶음이다. 모든 앱은 macOS의 Spotlight 자리다
+    pub const ALL: [Page; 20] = [
         Page::Wifi,
         Page::Bluetooth,
         Page::Network,
@@ -71,6 +74,7 @@ impl Page {
         Page::Appearance,
         Page::MenuBar,
         Page::DesktopDock,
+        Page::Launcher,
         Page::Wallpaper,
         Page::Display,
         Page::Notifications,
@@ -95,6 +99,7 @@ impl Page {
             Self::Appearance => "appearance",
             Self::MenuBar => "menu-bar",
             Self::DesktopDock => "desktop-dock",
+            Self::Launcher => "launcher",
             Self::Wallpaper => "wallpaper",
             Self::Display => "display",
             Self::Keyboard => "keyboard",
@@ -124,6 +129,7 @@ impl Page {
             Self::Appearance => "page-appearance",
             Self::MenuBar => "page-menu-bar",
             Self::DesktopDock => "page-desktop-dock",
+            Self::Launcher => "page-launcher",
             Self::Wallpaper => "page-wallpaper",
             Self::Display => "page-display",
             Self::Keyboard => "page-keyboard",
@@ -154,6 +160,7 @@ impl Page {
             Self::MenuBar => "open-menu-symbolic",
             // 셸이 설치하는 아이콘 (shell/data/icons)
             Self::DesktopDock => "org.buntos.Dock-symbolic",
+            Self::Launcher => "system-search-symbolic",
             Self::Wallpaper => "preferences-desktop-wallpaper-symbolic",
             Self::Display => "video-display-symbolic",
             Self::Keyboard => "input-keyboard-symbolic",
@@ -175,7 +182,7 @@ impl Page {
         match self {
             Self::Wifi | Self::Bluetooth | Self::Network | Self::Display => Tint::Blue,
             Self::Battery => Tint::Green,
-            Self::Appearance | Self::MenuBar | Self::DesktopDock => Tint::Graphite,
+            Self::Appearance | Self::MenuBar | Self::DesktopDock | Self::Launcher => Tint::Graphite,
             Self::Wallpaper => Tint::Cyan,
             Self::DefaultApps | Self::Users => Tint::Blue,
             Self::Agent | Self::Sound => Tint::Pink,
@@ -192,6 +199,7 @@ impl Page {
             Self::Appearance
             | Self::MenuBar
             | Self::DesktopDock
+            | Self::Launcher
             | Self::Wallpaper
             | Self::Display => 1,
             // macOS의 알림·사운드 묶음. 뒤 묶음의 번호를 하나씩 밀었다
@@ -211,6 +219,7 @@ impl Page {
             Self::Appearance => appearance::build(context),
             Self::MenuBar => menu_bar::build(context),
             Self::DesktopDock => desktop_dock::build(context),
+            Self::Launcher => launcher::build(context),
             Self::Wallpaper => wallpaper::build(context),
             Self::Display => display::build(context),
             Self::Keyboard => keyboard::build(context),

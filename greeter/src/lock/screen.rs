@@ -7,6 +7,7 @@
 //! - 암호 칸은 첫 화면에만 두고 다른 화면에는 배경화면만 보인다. 그 화면이 빠지면 남은 화면으로 옮긴다.
 //! - 암호가 틀리면 칸이 흔들리고, 다섯 번째부터는 잠시 기다려야 다시 칠 수 있다(macOS처럼 기다리는 시간이 늘어난다).
 //! - Esc는 친 암호를 지운다. 창은 닫히지 않는다(Alt+F4).
+//! - 암호 칸은 붙여넣기를 받지 않는다. 화면 키보드에도 단축 줄이 없다(keyboard/src/embed.rs).
 
 use std::{
     cell::{Cell, RefCell},
@@ -45,6 +46,19 @@ pub fn retry_delay(failures: u32) -> Option<Duration> {
         _ => 300,
     };
     Some(Duration::from_secs(seconds))
+}
+
+/// 암호 칸이 붙여넣기를 받지 않게 한다: 잠긴 화면에 세션의 클립보드를 내놓지 않는다. 그러지 않으면 자리를 비운 사이 누구든
+/// 클립보드의 글을 암호로 넣어 볼 수 있다. ⌃V와 GTK의 메뉴(손가락의 말풍선 포함)가 모두 GtkText의 이 신호를 거친다
+fn refuse_paste(entry: &gtk::PasswordEntry) {
+    if let Some(text) = entry.delegate() {
+        text.connect_local("paste-clipboard", false, |values| {
+            if let Ok(text) = values[0].get::<glib::Object>() {
+                text.stop_signal_emission_by_name("paste-clipboard");
+            }
+            None
+        });
+    }
 }
 
 /// 남은 시간의 안내: 1분 이상이면 분, 아니면 초 (올림). (메시지 ID, 값)
@@ -298,6 +312,7 @@ impl LockScreen {
             .hexpand(true)
             .css_classes(["greeter-password"])
             .build();
+        refuse_paste(&entry);
         let go = gtk::Button::builder()
             .icon_name("go-next-symbolic")
             .tooltip_text(tr.get("login-submit"))

@@ -991,6 +991,13 @@ impl Shortcuts {
     }
 }
 
+/// 표의 그 줄이 그곳에서 할 일. 사람이 정한 키와 상관없다: 화면 키보드의 단축 줄(osk.rs)은 키 조합이 아니라 그 일을
+/// 고르는 단추이므로, 시스템 설정에서 ⌘C를 바꾸거나 꺼도 복사하기는 앱에 복사 키를 보낸다
+pub fn action_of(id: &str, place: Place) -> Option<Hit> {
+    let def = DEFS.iter().find(|def| def.id == id)?;
+    hit(def, place, false)
+}
+
 /// 표의 한 줄이 그곳에서 할 일. 글 입력 중이 아닌 곳의 텍스트 편집 키처럼 할 일이 없으면 None
 fn hit(def: &Def, place: Place, shifted: bool) -> Option<Hit> {
     let send = |keys: &[Key]| Hit::Send {

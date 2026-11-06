@@ -6,6 +6,7 @@
 mod agent;
 mod background_effect;
 mod blur;
+mod clipboard;
 mod config;
 mod cursor;
 mod dbus;

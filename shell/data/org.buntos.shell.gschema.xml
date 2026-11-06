@@ -3,7 +3,7 @@
 SPDX-FileCopyrightText: 2026 buntOS contributors
 SPDX-License-Identifier: GPL-3.0-or-later
 
-bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock", "키보드", "배터리", "알림", "사운드"
+bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock", "모든 앱", "키보드", "배터리", "알림", "사운드"
 페이지가 바꾸고 셸이 바로 따른다.
 배경화면은 공용 키(org.gnome.desktop.background picture-uri),
 방해 금지는 org.gnome.desktop.notifications show-banners를 쓴다.
@@ -94,6 +94,25 @@ bunt-shell 설정. 시스템 설정의 "메뉴 막대", "데스크탑 및 Dock",
     <key name="recent-apps" type="as">
       <default>[]</default>
       <summary>최근에 실행한 앱 (.desktop ID, 최근 것이 먼저). 모든 앱 패널의 첫 줄</summary>
+    </key>
+    <key name="clipboard-history" type="b">
+      <default>false</default>
+      <summary>복사한 항목을 모든 앱 패널의 클립보드 기록에 남긴다</summary>
+      <description>macOS처럼 처음 쓸 때 사람이 허용해야 켜진다. 끄면 기록을 지운다. 기록은 메모리에만 있다</description>
+    </key>
+    <key name="clipboard-history-period" type="s">
+      <choices>
+        <choice value="30m"/>
+        <choice value="8h"/>
+        <choice value="7d"/>
+      </choices>
+      <default>"8h"</default>
+      <summary>클립보드 기록을 두는 기간 (macOS Spotlight 설정의 30분, 8시간, 7일)</summary>
+    </key>
+    <key name="clipboard-history-clear" type="u">
+      <default>0</default>
+      <summary>시스템 설정의 클립보드 기록 지우기. 값이 바뀌면 셸이 기록을 지운다</summary>
+      <description>기록은 셸의 메모리에만 있어 설정 앱이 직접 지우지 못한다. 기록을 읽는 길을 열지 않으려고 D-Bus 메서드 대신 이 키를 쓴다</description>
     </key>
     <key name="screenshot-mode" type="s">
       <choices>

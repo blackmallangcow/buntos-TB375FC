@@ -30,8 +30,14 @@ pub const ROOT: &str = "/org/a11y/atspi/accessible/root";
 /// 조작하지도 않는다
 pub const AUTH_WINDOW: &str = "bunt-polkit-agent";
 /// 사람만 답하는 셸 창 모두: 관리자 인증 창, Wi-Fi 암호 창(비밀 에이전트), Bluetooth 페어링 창(페어링
-/// 에이전트). 하나였던 인증 창 검사를 이 목록으로 넓혔다
-pub const HUMAN_ONLY_WINDOWS: [&str; 3] = [AUTH_WINDOW, "bunt-secret-agent", "bunt-pairing-agent"];
+/// 에이전트), 클립보드 기록(모든 앱 패널의 클립보드 보기. 에이전트가 읽거나 항목을 골라 앱에 붙이지 못하게 한다).
+/// 하나였던 인증 창 검사를 이 목록으로 넓혔다
+pub const HUMAN_ONLY_WINDOWS: [&str; 4] = [
+    AUTH_WINDOW,
+    "bunt-secret-agent",
+    "bunt-pairing-agent",
+    "bunt-clipboard",
+];
 
 /// 사람만 답하는 셸 창의 이름(레이어 이름이나 창의 접근성 이름)인지
 pub fn is_human_only(name: &str) -> bool {
@@ -985,11 +991,12 @@ mod tests {
 
     #[test]
     fn human_only_windows_cover_every_secret_dialog() {
-        // 셸의 레이어 이름 (polkit_agent.rs, secret_agent.rs, pairing_agent.rs)
+        // 셸의 레이어 이름 (polkit_agent.rs, secret_agent.rs, pairing_agent.rs, clipboard_panel.rs)
         for name in [
             "bunt-polkit-agent",
             "bunt-secret-agent",
             "bunt-pairing-agent",
+            "bunt-clipboard",
         ] {
             assert!(is_human_only(name), "{name}");
         }

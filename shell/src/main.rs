@@ -6,6 +6,10 @@
 mod agent_access;
 mod appmenu;
 mod bluetooth;
+// 클립보드 기록: 복사를 받아 메모리에 남기고(clipboard, clipboard_history) 모든 앱 패널에서 다시 고른다(clipboard_panel)
+mod clipboard;
+mod clipboard_history;
+mod clipboard_panel;
 mod compositor;
 mod config;
 mod control_center;
@@ -121,7 +125,8 @@ fn main() -> glib::ExitCode {
             &services,
             &input_sources,
         );
-        let launcher = Launcher::new(app, &tr, toplevels.as_ref());
+        let clipboard_history = clipboard::ClipboardHistory::start();
+        let launcher = Launcher::new(app, &tr, toplevels.as_ref(), &clipboard_history);
         let dock = dock::build(app, &config, &tr, toplevels.as_ref(), &launcher);
         // 데스크탑 항목 창은 메뉴 막대와 Dock 다음에 띄운다. 컴포지터(smithay)가 레이어를 띄운 차례로 놓아,
         // 먼저 뜬 막대의 배타 영역만 피하기 때문이다
@@ -151,6 +156,7 @@ fn main() -> glib::ExitCode {
             dock,
             banner,
             launcher.window().clone(),
+            launcher.clipboard_window().clone(),
             switcher.window().clone(),
             screenshot_toolbar.window().clone(),
             screenshot_preview.window().clone(),

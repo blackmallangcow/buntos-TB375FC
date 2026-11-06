@@ -7,8 +7,8 @@
 //!
 //! - 키: 누른 키를 `press`로 보낸다. 컴포지터가 실제 키보드처럼 넣어 입력기(fcitx5)의 키보드 잡기를 거치므로 한글이
 //!   조합된다. 요청은 보낸 차례로 처리되므로 답을 기다리지 않는다.
-//! - 글 입력 상태와 눌린 칸: 셸만 받는다([`CompositorKeyboard::watch_text_input`]). 로그인 화면은 제 창의 글 칸을
-//!   본다(embed.rs).
+//! - 글 입력 상태, 단축 줄에 내놓을 명령, 눌린 칸: 셸만 받는다([`CompositorKeyboard::watch_text_input`]). 로그인 화면은
+//!   제 창의 글 칸을 본다(embed.rs).
 //! - GTK와 같은 Wayland 연결을 쓴다. 소켓은 GTK가 읽고, 이 객체의 이벤트는 따로 둔 큐에 쌓인다.
 //!   [`CompositorKeyboard::take_text_input`]이 그 큐를 처리한다(shell/src/toplevels.rs와 같은 방법).
 //! - 바꾼 점: 처음에는 세션 버스의 셸 전용 메서드(`PressOnScreenKeys`)로 보냈다. 같은 사용자의 프로그램이 세션
@@ -19,7 +19,7 @@ use std::{cell::RefCell, rc::Rc};
 use gtk4::{gdk, prelude::*};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, protocol::wl_registry};
 
-use crate::{KeySink, Output};
+use crate::{Commands, KeySink, Output};
 
 use protocol::bunt_osk_v1::{self, BuntOskV1};
 
@@ -54,6 +54,8 @@ const VERSION: u32 = 1;
 pub enum TextInputEvent {
     /// 키보드 포커스를 가진 앱의 글 입력이 켜졌거나 꺼졌다
     Changed(bool),
+    /// 그 글 칸의 단축 줄에 내놓을 명령
+    Commands(Commands),
     /// 사람이 그 앱의 글 칸을 눌렀다
     Tapped,
 }
@@ -164,6 +166,13 @@ impl Dispatch<BuntOskV1, ()> for Events {
     ) {
         state.text_input.push(match event {
             bunt_osk_v1::Event::TextInput { active } => TextInputEvent::Changed(active != 0),
+            bunt_osk_v1::Event::EditCommands { cut, copy, paste } => {
+                TextInputEvent::Commands(Commands {
+                    cut: cut != 0,
+                    copy: copy != 0,
+                    paste: paste != 0,
+                })
+            }
             bunt_osk_v1::Event::Tapped => TextInputEvent::Tapped,
         });
     }
@@ -185,6 +194,7 @@ mod tests {
     use wayland_server::{Client, DataInit, Display, DisplayHandle, GlobalDispatch, New};
 
     use super::*;
+    use crate::Command;
 
     /// 시험용 컴포지터의 bunt_osk_v1 (comp/src/osk.rs와 같은 XML)
     mod server {
@@ -291,6 +301,11 @@ mod tests {
                                     TextInputEvent::Changed(active) => {
                                         watcher.text_input(u32::from(active));
                                     }
+                                    TextInputEvent::Commands(commands) => watcher.edit_commands(
+                                        u32::from(commands.cut),
+                                        u32::from(commands.copy),
+                                        u32::from(commands.paste),
+                                    ),
                                     TextInputEvent::Tapped => watcher.tapped(),
                                 }
                             }
@@ -375,15 +390,16 @@ mod tests {
             Output::Char(' '),
             Output::Delete,
             Output::Return,
+            Output::Command(Command::Copy),
         ] {
             keyboard.send(output);
         }
         assert_eq!(
-            server.wait_for_keys(5),
-            ["a", "B", " ", "BackSpace", "Return"]
+            server.wait_for_keys(6),
+            ["a", "B", " ", "BackSpace", "Return", "Copy"]
         );
 
-        use TextInputEvent::{Changed, Tapped};
+        use TextInputEvent::{Changed, Commands as Offered, Tapped};
         // 지켜보기 전에는 글 입력 소식을 받지 않는다 (로그인 화면은 지켜보지 않는다)
         server.announce(Changed(true));
         read_socket(&keyboard);
@@ -391,7 +407,13 @@ mod tests {
         // 지켜보면 지금 상태가 바로 오고, 그 뒤로 바뀐 것과 눌린 칸이 차례로 온다
         keyboard.watch_text_input();
         read_socket(&keyboard);
+        let password = Commands {
+            cut: false,
+            copy: false,
+            paste: true,
+        };
         server.announce(Changed(true));
+        server.announce(Offered(password));
         server.announce(Tapped);
         server.announce(Changed(false));
         server.announce(Changed(true));
@@ -401,6 +423,7 @@ mod tests {
             [
                 Changed(false),
                 Changed(true),
+                Offered(password),
                 Tapped,
                 Changed(false),
                 Changed(true)

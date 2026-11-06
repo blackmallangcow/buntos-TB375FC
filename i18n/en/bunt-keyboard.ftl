@@ -13,3 +13,7 @@ keyboard-hide = Hide Keyboard
 keyboard-numbers = Numbers
 keyboard-symbols = Symbols
 keyboard-letters = Letters
+# Shortcuts bar buttons (the same names as the app menus)
+keyboard-cut = Cut
+keyboard-copy = Copy
+keyboard-paste = Paste

@@ -77,6 +77,8 @@ impl KeySink for EditableKeys {
                     focus.activate();
                 }
             }
+            // 이 창들(잠금·로그인 화면)의 키보드에는 단축 줄이 없다(view.rs). 혹시 와도 클립보드를 건드리지 않는다
+            Output::Command(_) => {}
         }
     }
 }

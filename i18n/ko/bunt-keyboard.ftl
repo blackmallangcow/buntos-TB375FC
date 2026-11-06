@@ -13,3 +13,7 @@ keyboard-hide = 키보드 가리기
 keyboard-numbers = 숫자
 keyboard-symbols = 기호
 keyboard-letters = 문자
+# 단축 줄의 단추 (앱 메뉴와 같은 이름)
+keyboard-cut = 오려두기
+keyboard-copy = 복사하기
+keyboard-paste = 붙여넣기

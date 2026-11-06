@@ -60,6 +60,25 @@ launcher-category-entertainment = Entertainment
 launcher-category-games = Games
 launcher-category-education = Education & Reference
 launcher-category-other = Other
+launcher-apps = Apps
+launcher-clipboard = Clipboard
+clipboard-title = Clipboard History
+clipboard-search = Search Clipboard History
+clipboard-empty = Items you copy appear here
+clipboard-no-match = No Matching Items
+clipboard-more = More
+clipboard-clear = Clear History
+clipboard-copy = Copy
+clipboard-image = Image
+clipboard-item = Clipboard item { $position }
+clipboard-allow-title = Allow Clipboard History?
+clipboard-allow-description = You can choose items you copied again here. Sensitive information may appear on the Clipboard. The history stays in this device's memory only and is gone when you log out.
+clipboard-allow = Allow
+clipboard-unavailable = Clipboard History Is Unavailable
+clipboard-time-now = Just now
+clipboard-time-minutes = { $count } min ago
+clipboard-time-hours = { $count } hr ago
+clipboard-time-days = { $count } d ago
 
 ## Menu bar extras (Wi-Fi, battery, sound, Bluetooth, input sources)
 
