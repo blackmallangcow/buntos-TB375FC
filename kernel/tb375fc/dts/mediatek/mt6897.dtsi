@@ -1034,6 +1034,12 @@
 			#performance-domain-cells = <1>;
 		};
 
+		/* Needed before the firmware accepts PSCI CPU_SUSPEND */
+		mcupm@c0bf600 {
+			compatible = "mediatek,mt6897-mcupm";
+			reg = <0 0x0c0bf600 0 0xa00>;
+		};
+
 		/*
 		 * Unlike MT8183..MT8195 the GIC is not at 0x0c000000: that
 		 * range is MCUSYS (mcucfg, CPU PLLs, MCUPM at 0x0c070000).
@@ -2260,7 +2266,6 @@
 			reg = <0 0x1cc10000 0 0x1000>;
 			interrupts = <GIC_SPI 330 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&clk13m>;
-			status = "disabled";
 		};
 
 		mminfra: clock-controller@1e800000 {

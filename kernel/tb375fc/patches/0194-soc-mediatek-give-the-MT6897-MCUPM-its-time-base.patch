@@ -1,0 +1,123 @@
+From: buntOS contributors
+Subject: [PATCH] soc: mediatek: give the MT6897 MCUPM its time base
+
+On the Lenovo TB375FC, cpuidle-psci counts millions of rejected entries and
+no use of cpu-off and cluster-off. Their parameters are the ones of the stock
+device tree.
+
+The firmware at EL3 accepts PSCI CPU_SUSPEND only after the task state in
+the MCUPM mailbox has gone from 1 to 2 or 3. On the first call it sets
+AP_READY, as in upstream TF-A, and then the state stays at 1. MCUPM itself
+is alive and answers an IPI within 10 ms.
+
+The vendor kernel writes a time base to MCUPM's mailbox memory when its
+mcupm module probes. Doing the same moved the state to 3 within 50 ms, and
+all eight CPUs then enter both idle states. Write it once, after AP_READY as
+in the vendor kernel. The vendor driver refreshes it around system sleep for
+MCUPM's logs, which nothing here reads.
+---
+diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
+--- a/drivers/soc/mediatek/Kconfig
++++ b/drivers/soc/mediatek/Kconfig
+@@ -74,6 +74,15 @@
+ 	default ARCH_MEDIATEK
+ 	depends on REGULATOR
+ 
++config MTK_MCUPM
++	bool "MediaTek MCUPM time base"
++	depends on ARCH_MEDIATEK && ARM64
++	help
++	  The MCUPM firmware of the MT6897 does not finish its init until the
++	  kernel has given it a time base. Until then the firmware at EL3
++	  rejects every PSCI CPU_SUSPEND, and the CPU idle states in the device
++	  tree are never entered. Say yes on that SoC.
++
+ config MTK_MMSYS
+ 	tristate "MediaTek MMSYS Support"
+ 	default ARCH_MEDIATEK
+diff --git a/drivers/soc/mediatek/Makefile b/drivers/soc/mediatek/Makefile
+--- a/drivers/soc/mediatek/Makefile
++++ b/drivers/soc/mediatek/Makefile
+@@ -6,6 +6,7 @@
+ obj-$(CONFIG_MTK_INFRACFG) += mtk-infracfg.o
+ obj-$(CONFIG_MTK_PMIC_WRAP) += mtk-pmic-wrap.o
+ obj-$(CONFIG_MTK_REGULATOR_COUPLER) += mtk-regulator-coupler.o
++obj-$(CONFIG_MTK_MCUPM) += mtk-mcupm.o
+ obj-$(CONFIG_MTK_MMSYS) += mtk-mmsys.o
+ obj-$(CONFIG_MTK_MMSYS) += mtk-mutex.o
+ obj-$(CONFIG_MTK_SVS) += mtk-svs.o
+diff --git a/drivers/soc/mediatek/mtk-mcupm.c b/drivers/soc/mediatek/mtk-mcupm.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/soc/mediatek/mtk-mcupm.c
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * The MCUPM firmware of the MT6897 does not finish its init until the kernel has
++ * written a time base to its mailbox memory. Until then its task state stays at
++ * "init", and the firmware at EL3 fails every PSCI CPU_SUSPEND.
++ */
++
++#include <clocksource/arm_arch_timer.h>
++#include <linux/bits.h>
++#include <linux/device.h>
++#include <linux/io.h>
++#include <linux/mod_devicetable.h>
++#include <linux/platform_device.h>
++#include <linux/sched/clock.h>
++
++#define MBOX_SIZE		0xa0
++#define MBOX_SLOT(mbox, slot)	((mbox) * MBOX_SIZE + (slot) * 4)
++
++/* EL3 sets this on the first PSCI CPU_SUSPEND */
++#define MCUPM_AP_READY		MBOX_SLOT(3, 0)
++
++#define MCUPM_TS_TICK_H		MBOX_SLOT(4, 12)
++#define MCUPM_TS_TICK_L		MBOX_SLOT(4, 13)
++#define MCUPM_TS_TIME_H		MBOX_SLOT(4, 14)
++#define MCUPM_TS_TIME_L		MBOX_SLOT(4, 15)
++/* In the high words, so that MCUPM can tell a torn read */
++#define MCUPM_TS_VERSION(ver)	((ver) << 28)
++
++static int mtk_mcupm_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	u32 version = MCUPM_TS_VERSION(1);
++	void __iomem *base;
++	u64 tick, time;
++
++	base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(base))
++		return PTR_ERR(base);
++
++	/* The order of the vendor kernel: the time base comes after EL3's turn */
++	if (!readl(base + MCUPM_AP_READY))
++		return dev_err_probe(dev, -EPROBE_DEFER,
++				     "waiting for the first CPU_SUSPEND\n");
++
++	tick = arch_timer_read_counter();
++	time = sched_clock();
++
++	/* The same order as the vendor kernel too, the tick first and high to low */
++	writel(upper_32_bits(tick) | version, base + MCUPM_TS_TICK_H);
++	writel(lower_32_bits(tick), base + MCUPM_TS_TICK_L);
++	writel(lower_32_bits(time), base + MCUPM_TS_TIME_L);
++	writel(upper_32_bits(time) | version, base + MCUPM_TS_TIME_H);
++
++	return 0;
++}
++
++static const struct of_device_id mtk_mcupm_of_match[] = {
++	{ .compatible = "mediatek,mt6897-mcupm" },
++	{ }
++};
++
++static struct platform_driver mtk_mcupm_driver = {
++	.probe = mtk_mcupm_probe,
++	.driver = {
++		.name = "mtk-mcupm",
++		.of_match_table = mtk_mcupm_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(mtk_mcupm_driver);

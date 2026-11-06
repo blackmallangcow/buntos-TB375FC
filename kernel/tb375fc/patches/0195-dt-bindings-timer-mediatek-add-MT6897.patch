@@ -1,0 +1,20 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: timer: mediatek: add MT6897
+
+The MT6897 has the same system timer as the MT6765. The local timers stop
+in the CPU idle states, so it is what wakes the CPUs from those.
+---
+ Documentation/devicetree/bindings/timer/mediatek,timer.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/timer/mediatek,timer.yaml b/Documentation/devicetree/bindings/timer/mediatek,timer.yaml
+--- a/Documentation/devicetree/bindings/timer/mediatek,timer.yaml
++++ b/Documentation/devicetree/bindings/timer/mediatek,timer.yaml
+@@ -40,6 +40,7 @@
+       # SYST Timers
+       - items:
+           - enum:
++              - mediatek,mt6897-timer
+               - mediatek,mt7629-timer
+               - mediatek,mt8183-timer
+               - mediatek,mt8186-timer

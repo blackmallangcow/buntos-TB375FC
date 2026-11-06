@@ -191,39 +191,6 @@
 	status = "okay";
 };
 
-// 2e 유휴: 펌웨어가 PSCI CPU_SUSPEND를 거절해 상태마다 rejected만 쌓인다(2026-11-04). 까닭을 찾을 때까지 뺀다.
-&cpu0 {
-	/delete-property/ cpu-idle-states;
-};
-
-&cpu1 {
-	/delete-property/ cpu-idle-states;
-};
-
-&cpu2 {
-	/delete-property/ cpu-idle-states;
-};
-
-&cpu3 {
-	/delete-property/ cpu-idle-states;
-};
-
-&cpu4 {
-	/delete-property/ cpu-idle-states;
-};
-
-&cpu5 {
-	/delete-property/ cpu-idle-states;
-};
-
-&cpu6 {
-	/delete-property/ cpu-idle-states;
-};
-
-&cpu7 {
-	/delete-property/ cpu-idle-states;
-};
-
 // 9.3 B 충전 넘겨받기. 모듈은 명령줄의 modprobe.blacklist로 막고, 멈추는 스크립트를 건 뒤에 손으로 올린다.
 &battery {
 	status = "okay";

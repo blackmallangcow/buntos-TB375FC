@@ -1,0 +1,52 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: soc: mediatek: add the MT6897 MCUPM
+
+Describe the part of MCUPM's memory that the kernel writes its time base to.
+---
+diff --git a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-mcupm.yaml b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-mcupm.yaml
+new file mode 100644
+--- /dev/null
++++ b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-mcupm.yaml
+@@ -0,0 +1,42 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6897-mcupm.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6897 MCUPM mailbox memory
++
++maintainers:
++  - Matthias Brugger <matthias.bgg@gmail.com>
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++
++description:
++  MCUPM is the small processor that looks after power in the CPU subsystem. The
++  bootloader starts it. Its mailboxes live at the top of its memory, and part of
++  that memory is also the way to give it the time base of the application
++  processors, which it needs to finish its init.
++
++properties:
++  compatible:
++    const: mediatek,mt6897-mcupm
++
++  reg:
++    maxItems: 1
++
++required:
++  - compatible
++  - reg
++
++additionalProperties: false
++
++examples:
++  - |
++    soc {
++        #address-cells = <2>;
++        #size-cells = <2>;
++
++        mcupm@c0bf600 {
++            compatible = "mediatek,mt6897-mcupm";
++            reg = <0 0x0c0bf600 0 0xa00>;
++        };
++    };
