@@ -304,6 +304,7 @@ Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`
 | UFS 기록 | `vufs_vccq: mode operation not allowed`가 절전 전환마다 남는다(보드가 MT6319 모드를 막았다). 약 3분에 18번이고 동작에는 영향이 없다. HS-G5 속성(`0x15d6`)을 UFS 3.1 장치가 거부해 나던 오류와 7.2.12의 재시도 경고는 패치 0144로 사라졌다 |
 | 화면이 희게 깨짐 | UFS를 켠 시험 커널에서 커널 글자가 잠깐 보인 뒤 화면 전체가 희게 변하고, 세로줄이 섞인 회백색으로 남았다(영상으로 확인). 화면 메모리는 그대로 정상이었다. `ufs`의 부모 `mmpll_d6`와 `disp0`, `ovl0`, `mminfra`의 부모 `mmpll_d4`가 같은 PLL이다. 커널은 화면 드라이버가 없어 이 사용자를 모르므로, UFS가 클럭을 내리면 사용자 수가 0이 되어 PLL을 끄는 투표를 보낸다. 그 뒤로 CPU가 `dispsys0`, `mipitx`를 읽으면 버스가 멈추거나 SError가 난다. `simple-framebuffer`의 `clocks`로 `mmpll`을 잡아 두자 UFS 절전과 복귀를 오가도 양쪽 경로 레지스터가 읽히고, 화면도 사용자가 눈으로 보아 정상이다 |
 | 화면 경로 값(LK 그대로) | OVL0 주소 `0xFC16F000`, OVL1 `0xFC1706D4`(1461화소 뒤), 피치 `0x2E00`, ROI 1483×1840(겹침 11화소). DSC `0x10081`, 조각 너비 736. DSI 둘 다 4레인 영상 모드, VSA 2, VBP 182, VFP 26, 세로 1840, 줄당 `0x5C0`바이트. `DSI_INTSTA`의 언더런 비트(bit 12)는 0이다. HW voter의 화면 비트는 LK가 넘길 때부터 0이고 전원은 SPM에서 켜져 있다(`0xe9c`~`0xeac`) |
+| 화면 설정 반영 | OVL 레이어 레지스터는 그림자이고 다음 프레임 시작(SOF)에 반영된다. 작업 레지스터는 OVL_EN bit 20(READ_WRK_REG)으로 읽는다. 상태 기계는 FLOW_CTRL_DBG(0x240)의 [9:0](1 idle, 2 wait_SOF, 0x20 처리 중). 프레임 끝에서 다음 SOF까지 약 0.30 ms. 두 파이프는 커밋 때 쓰고 반영을 확인한 뒤 flip을 끝낸다(0197). mutex의 0x24 칸은 이 세대에서 GET이 아니다(모두 3으로 읽힌다) |
 | 프리로더 포트 | 부팅마다 프리로더가 약 3초 동안 `MT65xx Preloader`(ACM)로 뜬다. 우리 가젯과 같은 `/dev/cu.usbmodem*`로 보이니 제품 이름으로 가린다 |
 | pstore | ECC가 없다. 2단계 기록 한 벌에서 글자 몇 개가 깨졌다(`368x115`가 `3688115`, `simple`이 `simpLe`). 다른 기록에서는 보지 못했고 원인은 모른다 |
 
@@ -339,7 +340,7 @@ Magisk 31.1로 읽었다. 원본은 `.handoff/tb375fc-device-readings/root-091/`
 | Wi-Fi | 2.4 GHz WPA2-PSK 연결이 인터넷까지 된다(비밀번호는 사용자가 직접 넣었다). 인증부터 연결까지 0.24초, DHCP 2초, 내려받기 38, 107, 138 Mbit/s, 올리기 87 Mbit/s, 신호 −51~−41 dBm, 수신 최고 HE-MCS 11 2x2, 약 10분 유지, `tx failed` 0, 연결 중 스캔 정상. 펌웨어 빌드 `t-neptune-main-soc7_0-2104-PONSOT_SOC7_0_E1_ASIC-20250320113502`. uni 명령에는 멀쩡한 펌웨어에서도 답이 없어 레거시 명령으로 보낸다(패치 0061~0065). 칩 리셋은 첫 시도에 돌아오고 리셋 뒤 스캔이 된다(패치 0066, 12번). 연결 중 리셋 뒤에는 약 9초에 다시 붙고 인터넷까지 돌아온다(패치 0067, 6번). `regulatory.db`가 거부되어 규제가 `00`이다. 5 GHz(5745 MHz) WPA2-PSK 연결도 DHCP와 인터넷까지 된다. 표시 속도는 수신 720.6 Mbit/s(80 MHz, HE-MCS 7, 2x2), 송신 286.7 Mbit/s이고 `tx failed` 0이다. 짧은 시험이라 처리량과 오래 유지는 보지 않았다. RX 순서 정리는 못 봤다 |
 | 열 센서 | MCU, AP 유휴 38~42도. 컨트롤러에 PROTCTL 전략, PROTTC 약 119도, MONINT bit 31이 서 있어 하드웨어 리셋이 켜진 것으로 본다. AP 셋째 컨트롤러(모뎀 센서)만 `PROTCTL` 낮은 절반에 `0x3FFF`가 남아 리셋이 미뤄져 있다. 측정값은 다른 컨트롤러와 같은 범위다. GPU·APU 컨트롤러는 그쪽 전원이 꺼지면 `CLKEN`이 0이다 |
 | CPU 냉각 | 냉각 없이 전 코어 부하에서 5초 안에 93도. passive 85도와 cpufreq 냉각을 넣으면 40초 동안 87~93도, cpu7 약 2.0 GHz. 멈추면 5초 안에 46~53도 |
-| CPU 유휴 | `cpu-off`, `cluster-off`는 사용 0, `rejected`만 쌓인다(1천만 회 이상). 유휴 상태를 끄면 전류가 약 30 mA 준다. PSCI CPU_SUSPEND 거절로 본다. 벤더 쪽 초기화가 필요한지는 모른다 |
+| CPU 유휴 | `cpu-off`, `cluster-off`를 쓴다(2026-11-07). BL31은 MCUPM 메일박스의 작업 상태가 2나 3이 되어야 CPU_SUSPEND를 받고, MCUPM은 AP가 시간 기준을 써야 그 상태로 간다(패치 0193~0194). 그 전에는 사용 0, `rejected`만 1천만 회 넘게 쌓였다. 화면만 켠 상태에서 cluster-off로 약 0.06~0.07 W 준다. cpu-off만으로는 차이가 없다 |
 | 게이지 | MM8013. 4.27 V, 87%, 28.7도, `charge_full` 9676 mAh, 설계 10000 mAh, 사이클 23. `current_now`는 방전이 양수다. `0x30`은 이번에 `0x11b2`(4530)였다 |
 | 충전 칩 | MT6375 `0x72`, TCPC `cf 29 75 63`, 차지 펌프 UPM6720 @0x65. LK 값: CV 4.35 V, ICHG·AICR 0.5 A, CHG_EN 1, 워치독 꺼짐, `0x33` = `0x80`. 읽기 전용 드라이버에서 쓰기 0 |
 | 충전 넘겨받기 | CV 4.34 V, 입력·충전 0.5 A. `inhibit-charge`로 `CHG_EN` 0, `auto`로 복귀. 게이지를 떼면 27초 뒤 `Lost the fuel gauge`로 멈추고 다시 묶으면 돌아온다 |
