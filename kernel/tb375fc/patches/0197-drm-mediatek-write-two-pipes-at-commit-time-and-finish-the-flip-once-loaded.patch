@@ -1,0 +1,340 @@
+From: buntOS contributors
+Subject: [PATCH] drm/mediatek: write two pipes at commit time and finish the flip once loaded
+
+With CPU idle states on, the Lenovo TB375FC (MT6897) shows single frames
+with the lower part of the screen in pink while a text cursor moves.
+Keeping CPU0, which takes the vblank interrupt, out of its power-down
+states hides it.
+
+Each layer register of the MT6897 overlays has a shadow copy, which takes
+the writes, and a working copy, which the overlay loads from it at the
+start of each frame. Two pipes wrote the layers from the frame done
+interrupt and sent the flip event right after. The next frame starts
+about 0.3 ms after that interrupt, and a CPU coming back from power-down
+needs up to 0.4 ms before it runs the handler. When it came late, the
+layers waited for one more frame while the event already let userspace
+render into the buffer that was still on screen, which then showed its
+half drawn lower part.
+
+Write the layers at commit time instead, as the overlays load them at the
+next start of frame anyway. The interrupt only sends the event, once each
+overlay is done with the old buffers: it waits for its next frame, or its
+working copy already holds the new layers. MT6897 has both in registers.
+Where neither can be read, the event goes out at the third vblank after
+the writes, when a start of frame has loaded them for sure. A layer that
+turns off in the middle of a frame keeps its RDMA on, as in the vendor
+driver, so that only the source enable, which waits for the next frame,
+changes.
+
+On the TB375FC with the idle states of all CPUs on, about one check in
+nine at the vblank interrupt found the next frame already running, each
+time with the new layers loaded, and the broken frames were gone.
+---
+ drivers/gpu/drm/mediatek/mtk_crtc.c     | 89 ++++++++++++++++++++-----
+ drivers/gpu/drm/mediatek/mtk_ddp_comp.c |  1 +
+ drivers/gpu/drm/mediatek/mtk_ddp_comp.h | 10 +++
+ drivers/gpu/drm/mediatek/mtk_disp_drv.h |  1 +
+ drivers/gpu/drm/mediatek/mtk_disp_ovl.c | 58 +++++++++++++++-
+ 5 files changed, 139 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/mediatek/mtk_crtc.c b/drivers/gpu/drm/mediatek/mtk_crtc.c
+--- a/drivers/gpu/drm/mediatek/mtk_crtc.c
++++ b/drivers/gpu/drm/mediatek/mtk_crtc.c
+@@ -45,6 +45,8 @@
+  * @boot_power: this holds the power domains of the bootloader's display, which still
+  *              runs until the first commit, and keeps them on from there: the hardware
+  *              voter of MT6897 does not finish turning them off
++ * @latch_vblanks: with a second pipe, the vblanks that a flip has waited since the
++ *                 layers were last written
+  * @ddp_comp_nr: number of components in ddp_comp
+  * @ddp_comp: array of pointers the mtk_ddp_comp structures used by this crtc
+  *
+@@ -80,6 +82,7 @@ struct mtk_crtc {
+ 	unsigned int			second_pipe;
+ 	unsigned int			pipe_width;
+ 	bool				boot_power;
++	unsigned int			latch_vblanks;
+ 	unsigned int			ddp_comp_nr;
+ 	unsigned int			num_conn_routes;
+ 	const struct mtk_drm_route	*conn_routes;
+@@ -843,6 +846,49 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
+ 	}
+ }
+ 
++/*
++ * Two pipes have no CMDQ. Their overlays keep each layer register in a shadow copy that
++ * takes the writes, and load it into the working copy at the start of the next frame,
++ * so the registers go out at once, from the commit. Writing them from the vblank
++ * interrupt instead raced the start of the next frame: a CPU slow to take the
++ * interrupt, as one coming back from a power-down idle state, wrote them after it, and
++ * the event went out while the old buffers were still on screen for another frame.
++ * The interrupt now only sends the event, once the overlays are done with the old
++ * buffers.
++ */
++static void mtk_crtc_two_pipes_update(struct mtk_crtc *mtk_crtc, bool needs_vblank)
++{
++	unsigned long flags;
++	int i;
++
++	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
++
++	if (needs_vblank)
++		mtk_crtc->pending_needs_vblank = true;
++
++	for (i = 0; i < mtk_crtc->layer_nr; i++) {
++		struct mtk_plane_state *plane_state;
++
++		plane_state = to_mtk_plane_state(mtk_crtc->planes[i].state);
++		if (plane_state->pending.dirty) {
++			plane_state->pending.config = true;
++			plane_state->pending.dirty = false;
++			mtk_crtc->pending_planes = true;
++		} else if (plane_state->pending.async_dirty) {
++			plane_state->pending.async_config = true;
++			plane_state->pending.async_dirty = false;
++			mtk_crtc->pending_async_planes = true;
++		}
++	}
++
++	if (mtk_crtc->enabled) {
++		mtk_crtc_ddp_config(&mtk_crtc->base, NULL);
++		mtk_crtc->latch_vblanks = 0;
++	}
++
++	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
++}
++
+ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
+ {
+ #if IS_REACHABLE(CONFIG_MTK_CMDQ)
+@@ -856,6 +902,12 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
+ 
+ 	mutex_lock(&mtk_crtc->hw_lock);
+ 
++	if (mtk_crtc->second_pipe) {
++		mtk_crtc_two_pipes_update(mtk_crtc, needs_vblank);
++		mutex_unlock(&mtk_crtc->hw_lock);
++		return;
++	}
++
+ 	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+ 	mtk_crtc->config_updating = true;
+ 	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+@@ -932,23 +984,32 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
+ }
+ 
+ /*
+- * Two pipes have no CMDQ, and the registers only go out from here. A commit in
+- * the middle of its update waits for the next vblank, or its planes would stay
+- * behind while its event goes out.
++ * A start of frame after the last writes has loaded them by the third vblank since:
++ * the first can still be the one of a frame that ended before them, and the second the
++ * one of the frame that was running when they were written.
++ */
++#define MTK_CRTC_LATCH_VBLANKS	3
++
++/*
++ * The overlays read the old buffers until they load the layers written for the flip.
++ * The flip is done once each overlay either waits for its next frame, which starts with
++ * the new layers, or has loaded them already. This holds however late the interrupt
++ * comes, as it looks at the hardware and not at the time.
+  */
+ static void mtk_crtc_two_pipes_irq(struct mtk_crtc *mtk_crtc)
+ {
++	struct mtk_ddp_comp *second = mtk_crtc->ddp_comp[mtk_crtc->second_pipe];
+ 	struct drm_crtc *crtc = &mtk_crtc->base;
+ 
+ 	drm_crtc_handle_vblank(crtc);
+ 
+ 	spin_lock(&mtk_crtc->config_lock);
+-	if (!mtk_crtc->config_updating) {
+-		mtk_crtc_ddp_config(crtc, NULL);
+-		if (mtk_crtc->pending_needs_vblank) {
+-			mtk_crtc_finish_page_flip(mtk_crtc);
+-			mtk_crtc->pending_needs_vblank = false;
+-		}
++	if (mtk_crtc->pending_needs_vblank &&
++	    ((mtk_ddp_comp_layers_latched(mtk_crtc->ddp_comp[0]) &&
++	      mtk_ddp_comp_layers_latched(second)) ||
++	     ++mtk_crtc->latch_vblanks >= MTK_CRTC_LATCH_VBLANKS)) {
++		mtk_crtc_finish_page_flip(mtk_crtc);
++		mtk_crtc->pending_needs_vblank = false;
+ 	}
+ 	spin_unlock(&mtk_crtc->config_lock);
+ }
+@@ -1087,14 +1148,6 @@ void mtk_crtc_async_update(struct drm_crtc *crtc, struct drm_plane *plane,
+ 		return;
+ 
+ 	mtk_crtc_update_config(mtk_crtc, false);
+-
+-	/*
+-	 * With two pipes the registers go out from the vblank interrupt, which is
+-	 * off when nothing asked for a vblank in a while. This turns it on, and it
+-	 * stays on until the delay of the vblank code has passed.
+-	 */
+-	if (mtk_crtc->second_pipe && !drm_crtc_vblank_get(crtc))
+-		drm_crtc_vblank_put(crtc);
+ }
+ 
+ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
+@@ -1180,7 +1233,7 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
+ 	/*
+ 	 * Wait for planes to be disabled. With two pipes the DSI has stopped the
+ 	 * video already, for the last commands of the panel: no more vblanks, and
+-	 * what is still pending would go out with the next commit.
++	 * a flip that still waits for one would only go out with the next commit.
+ 	 */
+ 	if (!mtk_crtc->second_pipe)
+ 		drm_crtc_wait_one_vblank(crtc);
+diff --git a/drivers/gpu/drm/mediatek/mtk_ddp_comp.c b/drivers/gpu/drm/mediatek/mtk_ddp_comp.c
+--- a/drivers/gpu/drm/mediatek/mtk_ddp_comp.c
++++ b/drivers/gpu/drm/mediatek/mtk_ddp_comp.c
+@@ -321,6 +321,7 @@ static const struct mtk_ddp_comp_funcs ddp_ovl = {
+ 	.unregister_vblank_cb = mtk_ovl_unregister_vblank_cb,
+ 	.enable_vblank = mtk_ovl_enable_vblank,
+ 	.disable_vblank = mtk_ovl_disable_vblank,
++	.layers_latched = mtk_ovl_layers_latched,
+ 	.supported_rotations = mtk_ovl_supported_rotations,
+ 	.layer_nr = mtk_ovl_layer_nr,
+ 	.layer_check = mtk_ovl_layer_check,
+diff --git a/drivers/gpu/drm/mediatek/mtk_ddp_comp.h b/drivers/gpu/drm/mediatek/mtk_ddp_comp.h
+--- a/drivers/gpu/drm/mediatek/mtk_ddp_comp.h
++++ b/drivers/gpu/drm/mediatek/mtk_ddp_comp.h
+@@ -66,6 +66,7 @@ struct mtk_ddp_comp_funcs {
+ 	void (*unregister_vblank_cb)(struct device *dev);
+ 	void (*enable_vblank)(struct device *dev);
+ 	void (*disable_vblank)(struct device *dev);
++	bool (*layers_latched)(struct device *dev);
+ 	unsigned int (*supported_rotations)(struct device *dev);
+ 	unsigned int (*layer_nr)(struct device *dev);
+ 	int (*layer_check)(struct device *dev,
+@@ -304,6 +305,15 @@ size_t mtk_ddp_comp_get_num_formats(struct mtk_ddp_comp *comp)
+ 	return 0;
+ }
+ 
++/* Whether the component is done with what its layers had before the last writes */
++static inline bool mtk_ddp_comp_layers_latched(struct mtk_ddp_comp *comp)
++{
++	if (comp->funcs && comp->funcs->layers_latched)
++		return comp->funcs->layers_latched(comp->dev);
++
++	return false;
++}
++
+ static inline bool mtk_ddp_comp_is_afbc_supported(struct mtk_ddp_comp *comp)
+ {
+ 	if (comp->funcs && comp->funcs->is_afbc_supported)
+diff --git a/drivers/gpu/drm/mediatek/mtk_disp_drv.h b/drivers/gpu/drm/mediatek/mtk_disp_drv.h
+--- a/drivers/gpu/drm/mediatek/mtk_disp_drv.h
++++ b/drivers/gpu/drm/mediatek/mtk_disp_drv.h
+@@ -112,6 +112,7 @@ void mtk_ovl_register_vblank_cb(struct device *dev,
+ void mtk_ovl_unregister_vblank_cb(struct device *dev);
+ void mtk_ovl_enable_vblank(struct device *dev);
+ void mtk_ovl_disable_vblank(struct device *dev);
++bool mtk_ovl_layers_latched(struct device *dev);
+ u32 mtk_ovl_get_blend_modes(struct device *dev);
+ const u32 *mtk_ovl_get_formats(struct device *dev);
+ size_t mtk_ovl_get_num_formats(struct device *dev);
+diff --git a/drivers/gpu/drm/mediatek/mtk_disp_ovl.c b/drivers/gpu/drm/mediatek/mtk_disp_ovl.c
+--- a/drivers/gpu/drm/mediatek/mtk_disp_ovl.c
++++ b/drivers/gpu/drm/mediatek/mtk_disp_ovl.c
+@@ -24,6 +24,7 @@
+ #define OVL_FME_CPL_INT					BIT(1)
+ #define DISP_REG_OVL_INTSTA			0x0008
+ #define DISP_REG_OVL_EN				0x000c
++#define OVL_READ_WORK_REG				BIT(20)
+ #define DISP_REG_OVL_RST			0x0014
+ #define DISP_REG_OVL_ROI_SIZE			0x0020
+ #define DISP_REG_OVL_DATAPATH_CON		0x0024
+@@ -57,6 +58,10 @@
+ #define DISP_REG_OVL_RDMA_BUF_LOW(n)		(0x0210 + 0x04 * (n))
+ #define DISP_REG_OVL_RDMA_BUF_HIGH(n)		(0x0220 + 0x04 * (n))
+ #define OVL_RDMA_BUF_HIGH_PREULTRA_DIS			BIT(31)
++#define DISP_REG_OVL_FLOW_CTRL_DBG		0x0240
++#define OVL_FSM_STATE					GENMASK(9, 0)
++#define OVL_FSM_IDLE					BIT(0)
++#define OVL_FSM_WAIT_SOF				BIT(1)
+ #define DISP_REG_OVL_ROI_TIMING_0		0x0740
+ #define DISP_REG_OVL_ADDR_MT2701		0x0040
+ #define DISP_REG_OVL_CLRFMT_EXT			0x02d0
+@@ -190,6 +195,11 @@ struct mtk_disp_ovl_data {
+ 	unsigned int golden_greq_num;
+ 	/* The interrupt is on only with the clock, to be clear of the bootloader */
+ 	bool irq_with_clk;
++	/*
++	 * The layers load their registers at the start of a frame, and the state of
++	 * the frame and the working copy of the registers can be read
++	 */
++	bool double_buffered;
+ };
+ 
+ /*
+@@ -256,6 +266,43 @@ void mtk_ovl_disable_vblank(struct device *dev)
+ 	writel_relaxed(0x0, ovl->regs + DISP_REG_OVL_INTEN);
+ }
+ 
++/*
++ * The layer registers have a shadow copy, which takes the writes, and a working copy,
++ * which the hardware loads from it at the start of a frame. This tells whether the
++ * overlay is done with what the layers had before the last writes: either it is
++ * between two frames, and the next one starts with the new values, or the working
++ * copy already has them. Without a way to tell, the answer is no.
++ *
++ * The caller keeps the layer registers from changing while this runs.
++ */
++bool mtk_ovl_layers_latched(struct device *dev)
++{
++	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
++	u32 shadow_src_con, shadow_addr[4], en, state;
++	unsigned int i, layer_nr = min(ovl->data->layer_nr, 4U);
++	bool same;
++
++	if (!ovl->data->double_buffered)
++		return false;
++
++	state = readl(ovl->regs + DISP_REG_OVL_FLOW_CTRL_DBG) & OVL_FSM_STATE;
++	if (state == OVL_FSM_IDLE || state == OVL_FSM_WAIT_SOF)
++		return true;
++
++	shadow_src_con = readl(ovl->regs + DISP_REG_OVL_SRC_CON);
++	for (i = 0; i < layer_nr; i++)
++		shadow_addr[i] = readl(ovl->regs + DISP_REG_OVL_ADDR(ovl, i));
++
++	en = readl(ovl->regs + DISP_REG_OVL_EN);
++	writel(en | OVL_READ_WORK_REG, ovl->regs + DISP_REG_OVL_EN);
++	same = readl(ovl->regs + DISP_REG_OVL_SRC_CON) == shadow_src_con;
++	for (i = 0; same && i < layer_nr; i++)
++		same = readl(ovl->regs + DISP_REG_OVL_ADDR(ovl, i)) == shadow_addr[i];
++	writel(en, ovl->regs + DISP_REG_OVL_EN);
++
++	return same;
++}
++
+ u32 mtk_ovl_get_blend_modes(struct device *dev)
+ {
+ 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+@@ -507,8 +554,14 @@ void mtk_ovl_layer_off(struct device *dev, unsigned int idx,
+ 
+ 	mtk_ddp_write_mask(cmdq_pkt, 0, &ovl->cmdq_reg, ovl->regs,
+ 			   DISP_REG_OVL_SRC_CON, BIT(idx));
+-	mtk_ddp_write(cmdq_pkt, 0, &ovl->cmdq_reg, ovl->regs,
+-		      DISP_REG_OVL_RDMA_CTRL(idx));
++	/*
++	 * Layers may be written in the middle of a frame, and the source enable
++	 * alone turns a layer off at the next one. The vendor driver also leaves
++	 * the RDMA of a layer on when it turns the layer off.
++	 */
++	if (!ovl->data->double_buffered)
++		mtk_ddp_write(cmdq_pkt, 0, &ovl->cmdq_reg, ovl->regs,
++			      DISP_REG_OVL_RDMA_CTRL(idx));
+ }
+ 
+ static unsigned int mtk_ovl_fmt_convert(struct mtk_disp_ovl *ovl,
+@@ -880,6 +933,7 @@ static const struct mtk_disp_ovl_data mt6897_ovl_2l_driver_data = {
+ 	.golden_issue_req_urg = 255,
+ 	.golden_greq_num = 0xffff,
+ 	.irq_with_clk = true,
++	.double_buffered = true,
+ };
+ 
+ static const struct of_device_id mtk_disp_ovl_driver_dt_match[] = {

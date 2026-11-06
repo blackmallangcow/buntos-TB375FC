@@ -255,3 +255,5 @@
 0188-pmdomain-mediatek-mt6897-keep-the-display-domains-on.patch
 0189-drm-mediatek-do-not-ask-for-a-VT-switch-on-system-sleep.patch
 0190-Bluetooth-btmtkbeif-keep-the-MCU-awake-in-a-system-sleep.patch
+# 0197 mediatek-drm: 두 파이프는 커밋 때 OVL의 그림자 레지스터에 쓰고, 두 OVL이 다음 프레임을 기다리거나 새 레이어를 넣은 뒤에야 flip을 끝낸다. 인터럽트에서 쓰던 때는 CPU0이 cpu-off에서 늦게 깨면 이벤트가 먼저 나가 화면 아래쪽이 깨졌다(기기, 2026-11-06·07)
+0197-drm-mediatek-write-two-pipes-at-commit-time-and-finish-the-flip-once-loaded.patch
