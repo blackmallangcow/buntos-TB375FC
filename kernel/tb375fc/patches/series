@@ -202,7 +202,7 @@
 # 0154, 0155 밝기: 패널의 DCS 0x51은 듣지 않는다. SoC의 disp_pwm0이 SGM37604A 둘을 움직인다(기기, 2026-11-04). 0155는 0084의 DCS 밝기를 뺀다. 업스트림에 낼 때 0084와 합친다
 0154-dt-bindings-pwm-mediatek-pwm-disp-add-MT6897.patch
 0155-drm-panel-novatek-nt36532-take-an-external-backlight-on-the-TB375FC-panels.patch
-# 0170~0177 고속 충전(기기, 2026-11-05). 0170 0151의 재확인을 지킨다, 0171 충전기가 보낸 하드 리셋에서 돌아온다, 0172 전압 한계 아래에서 끝나는 가짜 Full, 0173 새 계약을 바로 따른다, 0174 순정의 3 A, 0175~0177 9 V와 직충전. 9 V를 PDO에 넣으려면 0176이 먼저다(UPM6720의 VAC OVP 리셋 값이 6.5 V다). 직충전은 direct_charge로 기본 꺼짐이고 아직 켜지 않는다
+# 0170~0177 고속 충전(기기, 2026-11-05). 0170 0151의 재확인을 지킨다, 0171 충전기가 보낸 하드 리셋에서 돌아온다, 0172 전압 한계 아래에서 끝나는 가짜 Full, 0173 새 계약을 바로 따른다, 0174 순정의 3 A, 0175~0177 9 V와 직충전. 9 V를 PDO에 넣으려면 0176이 먼저다(UPM6720의 VAC OVP 리셋 값이 6.5 V다). 직충전은 direct_charge로 기본 꺼짐이고 BSP의 modprobe 설정이 켠다
 0170-usb-typec-tcpci_mt6375-keep-the-recheck-after-the-port-reset.patch
 0171-usb-typec-tcpci_mt6375-get-through-a-hard-reset-from-the-source.patch
 0172-power-supply-mt6375-charger-do-not-end-a-charge-far-under-the-voltage-limit.patch
