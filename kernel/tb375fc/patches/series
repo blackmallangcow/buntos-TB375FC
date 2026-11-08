@@ -261,3 +261,7 @@
 0195-dt-bindings-timer-mediatek-add-MT6897.patch
 # 0197 mediatek-drm: 두 파이프는 커밋 때 OVL의 그림자 레지스터에 쓰고, 두 OVL이 다음 프레임을 기다리거나 새 레이어를 넣은 뒤에야 flip을 끝낸다. 인터럽트에서 쓰던 때는 CPU0이 cpu-off에서 늦게 깨면 이벤트가 먼저 나가 화면 아래쪽이 깨졌다(기기, 2026-11-06·07)
 0197-drm-mediatek-write-two-pipes-at-commit-time-and-finish-the-flip-once-loaded.patch
+# 0191 GPUEB는 전원을 켜는 동안 OPP 명령을 버린다. 깨어나면 최고 OPP로 남으니 다시 보낸다.
+0191-pmdomain-mediatek-mtk-mfg-commit-the-OPP-again-after-the-MT6897-GPU-powers-on.patch
+# 0192 panthor의 busy는 실제 일보다 길다. 기준이 낮으면 화면만 움직여도 최고 클럭이다.
+0192-drm-panthor-raise-the-simple_ondemand-thresholds.patch

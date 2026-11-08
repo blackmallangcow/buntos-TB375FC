@@ -1,0 +1,38 @@
+From: buntOS contributors
+Subject: [PATCH] drm/panthor: raise the simple_ondemand thresholds
+
+The GPU counts as busy from the moment a job is queued until a scheduler
+tick finds every group idle, with a tick every 10 ms and an idle hysteresis
+of 800 us. At 144 Hz this reads as busy most of the time, and with an
+upthreshold of 45 the GPU goes to its fastest OPP for anything that moves
+on the screen.
+
+On the Lenovo TB375FC, a light page scrolling in a browser keeps the GPU at
+1400 MHz. The power parts of the GPU rail are audible at the high OPPs.
+
+Raise the thresholds, so the OPP settles lower. A load above the
+upthreshold still goes straight to the fastest OPP. The values are not
+final, this trades frames on light pages for less power and noise.
+---
+ drivers/gpu/drm/panthor/panthor_devfreq.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/panthor/panthor_devfreq.c b/drivers/gpu/drm/panthor/panthor_devfreq.c
+--- a/drivers/gpu/drm/panthor/panthor_devfreq.c
++++ b/drivers/gpu/drm/panthor/panthor_devfreq.c
+@@ -241,10 +241,12 @@ int panthor_devfreq_init(struct panthor_device *ptdev)
+ 
+ 	/*
+ 	 * Setup default thresholds for the simple_ondemand governor.
+-	 * The values are chosen based on experiments.
++	 * The GPU counts as busy from the moment a job is queued until a
++	 * scheduler tick finds every group idle, which is much more than the
++	 * time it works: leave room for that.
+ 	 */
+-	pdevfreq->gov_data.upthreshold = 45;
+-	pdevfreq->gov_data.downdifferential = 5;
++	pdevfreq->gov_data.upthreshold = 85;
++	pdevfreq->gov_data.downdifferential = 10;
+ 
+ 	pdevfreq->devfreq = devm_devfreq_add_device(dev, &panthor_devfreq_profile,
+ 						    DEVFREQ_GOV_SIMPLE_ONDEMAND,

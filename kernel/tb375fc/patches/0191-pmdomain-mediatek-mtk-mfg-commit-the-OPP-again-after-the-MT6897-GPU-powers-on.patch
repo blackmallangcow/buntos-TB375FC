@@ -1,0 +1,166 @@
+From: buntOS contributors
+Subject: [PATCH] pmdomain: mediatek: mtk-mfg: commit the OPP again after the MT6897 GPU powers on
+
+The GPUEB firmware of the MT6897 comes back from a power cycle at OPP 0,
+the fastest one. The commit that follows CMD_POWER_CONTROL does not move
+it. __gpufreq_generic_commit_gpu() in the vendor kernel drops a commit and
+reports success while DVFS_SLEEP is set, and the DVFS state in the shared
+memory still has that bit when mtk_mfg_power_on() returns, even after
+waiting 5 ms there. It clears once the GPU driver has resumed.
+
+Nothing sends another commit while devfreq asks for the same OPP, because
+the OPP core and genpd have nothing to do then. The GPU stays at 1400 MHz
+and 943 mV for seconds while devfreq and the domain report what they asked
+for. Seen on the Lenovo TB375FC in GF_REG_GPU_OPP_IDX of the shared memory:
+with max_freq at 502 MHz, 23 of 36 samples taken while scrolling were at
+OPP 0, and in short bursts of GPU work all 17 samples were. The firmware
+reports the OPP it had before until DVFS_SLEEP clears, and OPP 0 after.
+
+Look shortly after power on, once the firmware accepts commits again, and
+commit the OPP if it is not the one asked for. In the same bursts, 17 of 18
+samples are then at the OPP asked for.
+---
+ drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c | 60 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -5,6 +5,7 @@
+  * Copyright (C) 2025, Collabora Ltd.
+  */
+ 
++#include <linux/cleanup.h>
+ #include <linux/completion.h>
+ #include <linux/clk.h>
+ #include <linux/clk-provider.h>
+@@ -14,6 +15,7 @@
+ #include <linux/nvmem-provider.h>
+ #include <linux/mailbox_client.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/of_platform.h>
+@@ -25,6 +27,7 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/sizes.h>
+ #include <linux/units.h>
++#include <linux/workqueue.h>
+ 
+ #define GPR_INIT_FOOTPRINT	0x0008
+ #define   EB_INIT_DONE		0x55667788
+@@ -134,10 +137,18 @@
+  * fields. It has no DAC, chip type, kernel debug or DFD fields, and more room
+  * for register dumps before the tables.
+  */
++#define GF_REG_MT6897_DVFS_STATE	0x00CC
+ #define GF_REG_MT6897_SHADER_PRESENT	0x00D0
+ #define GF_REG_MT6897_OPP_TABLE_GPU	0x03EC
+ #define GF_REG_MT6897_OPP_TABLE_STK	0x0A7C
+ 
++/* Bits of the DVFS state, the GPUEB drops a commit while one of these is set */
++#define MT6897_DVFS_POWEROFF		BIT(1)
++#define MT6897_DVFS_SLEEP		BIT(5)
++
++/* How many times to look for the GPUEB to finish powering on, a jiffy apart */
++#define MT6897_OPP_TRIES		25
++
+ #define MT6897_SHARED_MEM_SIZE		SZ_16K
+ #define MT6897_IPI_TIMEOUT_MS		10000	/* as in the vendor driver */
+ /* What the GPUEB can reach through its remapper, as checked by the vendor */
+@@ -305,6 +316,12 @@ struct mtk_mfg {
+ 	struct mtk_mfg_mbox *gf_mbox;
+ 	struct mtk_mfg_mbox *slp_mbox;
+ 	const struct mtk_mfg_variant *variant;
++	/* Serializes @opp_work with OPP changes while the domain is on */
++	struct mutex opp_lock;
++	/* See mtk_mfg_opp_work() */
++	struct delayed_work opp_work;
++	unsigned int opp_idx;
++	unsigned int opp_tries;
+ };
+ 
+ struct mtk_mfg_variant {
+@@ -658,6 +675,31 @@ static int mtk_mfg_set_oppidx(struct mtk_mfg *mfg, uns
+ 	}
+ 
+ 	return 0;
++}
++
++/*
++ * The GPUEB of a firmware-run variant comes back from a power cycle at its
++ * fastest OPP. The commit in mtk_mfg_power_on() gets there while it is still
++ * powering on the GPU, when it drops commits and reports success. Nothing else
++ * sends one while the OPP asked for stays the same, so the GPU would stay at
++ * its fastest OPP. Check once the GPUEB is done.
++ */
++static void mtk_mfg_opp_work(struct work_struct *work)
++{
++	struct mtk_mfg *mfg = container_of(to_delayed_work(work),
++					   struct mtk_mfg, opp_work);
++	u32 state = readl(mfg->shared_mem + GF_REG_MT6897_DVFS_STATE);
++
++	guard(mutex)(&mfg->opp_lock);
++
++	if (state & (MT6897_DVFS_POWEROFF | MT6897_DVFS_SLEEP)) {
++		if (--mfg->opp_tries)
++			mod_delayed_work(system_dfl_wq, &mfg->opp_work, 1);
++		return;
++	}
++
++	if (readl(mfg->shared_mem + GF_REG_GPU_OPP_IDX) != mfg->opp_idx)
++		mtk_mfg_set_oppidx(mfg, mfg->opp_idx);
+ }
+ 
+ static int mtk_mfg_read_opp_tables(struct mtk_mfg *mfg)
+@@ -965,6 +1007,10 @@ static int mtk_mfg_set_performance(struct generic_pm_d
+ 	if (mfg->pd.status != GENPD_STATE_ON)
+ 		return 0;
+ 
++	guard(mutex)(&mfg->opp_lock);
++
++	mfg->opp_idx = state;
++
+ 	return mtk_mfg_set_oppidx(mfg, state);
+ }
+ 
+@@ -1007,9 +1053,15 @@ static int mtk_mfg_power_on(struct generic_pm_domain *
+ 	/* Don't try to set a OPP in probe before OPPs have been read from EB */
+ 	if (mfg->gpu_opps) {
+ 		/* The aforementioned deferred setting of pmdomain's state */
++		mfg->opp_idx = pd->performance_state;
+ 		ret = mtk_mfg_set_oppidx(mfg, pd->performance_state);
+ 		if (ret)
+ 			dev_warn(&mfg->pdev->dev, "Failed to set oppidx in %s\n", __func__);
++
++		if (mfg->variant->fw_runs_eb) {
++			mfg->opp_tries = MT6897_OPP_TRIES;
++			mod_delayed_work(system_dfl_wq, &mfg->opp_work, 1);
++		}
+ 	}
+ 
+ 	return 0;
+@@ -1031,6 +1083,8 @@ static int mtk_mfg_power_off(struct generic_pm_domain 
+ 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+ 	struct device *dev = &mfg->pdev->dev;
+ 	int ret;
++
++	cancel_delayed_work_sync(&mfg->opp_work);
+ 
+ 	ret = mtk_mfg_power_control(mfg, false);
+ 	if (ret) {
+@@ -1198,7 +1252,13 @@ static int mtk_mfg_probe(struct platform_device *pdev)
+ 	mfg = devm_kzalloc(dev, sizeof(*mfg), GFP_KERNEL);
+ 	if (!mfg)
+ 		return -ENOMEM;
++
++	ret = devm_mutex_init(dev, &mfg->opp_lock);
++	if (ret)
++		return ret;
+ 
++	INIT_DELAYED_WORK(&mfg->opp_work, mtk_mfg_opp_work);
++
+ 	mfg->pdev = pdev;
+ 	mfg->variant = data;
+ 
