@@ -1,0 +1,99 @@
+From: buntOS contributors
+Subject: [PATCH] linux: read any non-zero online value as online
+
+The kernel documents 2 as a valid value of the online attribute of a power
+supply, "Online Programmable", in Documentation/ABI/testing/sysfs-class-power.
+The USB Type-C port manager reports it while a USB PD PPS source is in use.
+
+up_device_supply_refresh_line_power() puts the value as it is into a boolean
+property. GLib refuses it with a critical, stores nothing, and still emits
+notify. The stored value stays what it was, so this happens again on every
+uevent of the supply. Each notify makes the daemon refresh the batteries with
+UP_REFRESH_LINE_POWER, which discards the rate for 10 seconds. A battery that
+charges from such a supply then reports 0 W and no time to full for as long as
+the supply stays programmable.
+
+Seen on a Lenovo TB375FC charging through a charge pump from a PPS charger:
+energy-rate 0 W on every update while the port read online 2, and 11.7 W with
+26.8 minutes to full right after it went back to 1.
+
+The new test fails without the change: the daemon aborts under
+G_DEBUG=fatal-warnings, and without that EnergyRate reads 0 instead of 9.444.
+---
+--- a/src/linux/up-device-supply.c
++++ b/src/linux/up-device-supply.c
+@@ -64,7 +64,9 @@
+ 	g_object_get (device,
+ 		      "online", &online_old,
+ 		      NULL);
+-	online_new = g_udev_device_get_sysfs_attr_as_int_uncached (native, "online");
++	/* Anything but 0 is online: a USB PD PPS supply reports 2, "Online
++	 * Programmable", which a boolean property does not take. */
++	online_new = g_udev_device_get_sysfs_attr_as_int_uncached (native, "online") != 0;
+ 	/* Avoid notification if the value did not change. */
+ 	if (online_old != online_new)
+ 		g_object_set (device,
+--- a/src/linux/integration-test.py
++++ b/src/linux/integration-test.py
+@@ -477,6 +477,61 @@
+         )
+         self.stop_daemon()
+ 
++    def test_props_online_programmable_ac(self):
++        """line power reporting Online Programmable, as a USB PD PPS supply does"""
++
++        ac = self.testbed.add_device(
++            "power_supply",
++            "AC",
++            None,
++            ["type", "USB", "usb_type", "C PD [PD_PPS]", "online", "1"],
++            [],
++        )
++        self.testbed.add_device(
++            "power_supply",
++            "BAT0",
++            None,
++            [
++                "type",
++                "Battery",
++                "present",
++                "1",
++                "status",
++                "Charging",
++                "charge_full",
++                "10500000",
++                "charge_full_design",
++                "11000000",
++                "charge_now",
++                "7875000",
++                "current_now",
++                "787000",
++                "voltage_now",
++                "12000000",
++            ],
++            [],
++        )
++
++        self.start_daemon()
++        devs = self.proxy.EnumerateDevices()
++        self.assertEqual(len(devs), 2)
++        ac_up = next(d for d in devs if "line_power_AC" in d)
++        bat0_up = next(d for d in devs if "battery_BAT0" in d)
++        self.assertAlmostEqual(self.get_dbus_dev_property(bat0_up, "EnergyRate"), 9.444)
++
++        # The supply stays the same, so the rate must stay trusted
++        self.testbed.set_attribute(ac, "online", "2")
++        self.testbed.uevent(ac, "change")
++        time.sleep(1)
++        self.testbed.uevent(ac, "change")
++        time.sleep(1)
++
++        self.assertEqual(self.daemon.poll(), None, "daemon crashed")
++        self.assertEqual(self.get_dbus_dev_property(ac_up, "Online"), True)
++        self.assertEqual(self.get_dbus_property("OnBattery"), False)
++        self.assertAlmostEqual(self.get_dbus_dev_property(bat0_up, "EnergyRate"), 9.444)
++        self.stop_daemon()
++
+     def test_props_online_ac(self):
+         """properties with online AC"""
+ 

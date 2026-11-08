@@ -13,6 +13,7 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `mkosi.postinst.chroot` | systemd-repart와 gpt-auto 생성기를 가리고, 파일 시스템 늘리기를 켠다. 이 기기에서는 GPT를 고치면 안 된다 |
 | `firmware/` | 기기에서 받은 원천(파티션 백업, vendor 파일)에서 펌웨어와 보정값을 고른다(`manifest.tsv`). 뽑은 파일은 저장소에 넣지 않는다 |
 | `mesa/build.sh` | Mesa 26.3을 이미지와 같은 Debian 스냅숏의 컨테이너에서 빌드해 꾸러미로 만든다 |
+| `upower/` | 직충전 중에도 남은 시간이 나오도록 고친 UPower 데몬을 같은 방식으로 꾸러미로 만든다(패치와 `build.sh`) |
 | `mkosi.conf` | mkosi 보드 프로필(`tools/image/build.sh lenovo-tb375fc`). Debian 커널 대신 `kernel/tb375fc/build.sh image`가 만든 커널 .deb를 넣고, 루트 파티션 파일과 UKI에서 꺼낸 커널·initrd를 따로 낸다 |
 
 
@@ -34,6 +35,8 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 Wi-Fi, 소리, 충전은 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
 
 GPU에는 Mesa 26.3이 있어야 한다(G615는 26.3부터 돈다. 이미지의 Debian 스냅숏은 26.1이다). `mesa/build.sh`가 꾸러미 `buntos-mesa`로 만들어 `/opt/mesa`에 넣고 `/etc/ld.so.conf.d/00-opt-mesa.conf`로 Debian의 Mesa보다 먼저 찾게 한다. GPU 펌웨어(`arm/mali/arch11.8/mali_csffw.bin`)는 Debian의 `firmware-misc-nonfree`에 있다.
+
+UPower 1.91.5는 PPS 충전기를 쓰는 동안 USB 포트의 `online` 값 2를 받지 못해 충전 속도를 0으로 둔다. 그래서 직충전 중에는 남은 시간이 나오지 않는다. `upower/build.sh`가 고친 데몬을 꾸러미 `buntos-upower`로 만들어 `/opt/upower`에 넣고, systemd drop-in이 그 데몬을 띄운다. Debian의 `upower`는 그대로 둔다. 꾸러미를 지우면 Debian의 데몬으로 돌아가고, UPower에 이 고침이 들어오면 폴더와 `mkosi.conf`의 항목을 지운다.
 
 레시피에 넣지 않은 것: 터치 펌웨어, Wi-Fi 보정 파일, 스피커 앰프의 튜닝 파일(`/usr/lib/firmware/lenovo/tb375fc/`). 제조사와 기기의 파일이라 저장소에 넣지 않는다. 이미지를 구운 뒤 따로 넣는다.
 
@@ -97,7 +100,8 @@ buntOS 이미지는 공통 레시피(`image/`)에 이 폴더의 `mkosi.conf`를 
 
 1. 커널 꾸러미: `kernel/tb375fc/build.sh image`(출력 `~/buntos-build/tb375fc/deb/`)
 2. Mesa 꾸러미: `bsp/lenovo-tb375fc/mesa/build.sh`(출력 `~/buntos-build/tb375fc/mesa-deb/`). 처음 약 20분, 디스크 약 5GB다. 판이 그대로면 다시 돌리지 않아도 된다
-3. 이미지: `tools/image/build.sh lenovo-tb375fc`. 맥 여유가 30GB 이상일 때 한다(자체 컴포넌트를 cargo로 빌드하고 mkosi가 최대 약 14GB를 쓴다)
+3. UPower 꾸러미: `bsp/lenovo-tb375fc/upower/build.sh`(출력 `~/buntos-build/tb375fc/upower-deb/`). 처음 몇 분 걸리고, 판이 그대로면 다시 돌리지 않아도 된다
+4. 이미지: `tools/image/build.sh lenovo-tb375fc`. 맥 여유가 30GB 이상일 때 한다(자체 컴포넌트를 cargo로 빌드하고 mkosi가 최대 약 14GB를 쓴다)
 
 - 공통 레시피의 `Bootable=yes`, `Bootloader=systemd-boot`는 보드 프로필에서 바꿀 수 없다(mkosi가 보드 프로필을 먼저 읽는다). 그래서 이미지에는 ESP, systemd-boot, UKI가 그대로 생긴다. U-Boot로 EFI 부팅을 하게 되면(설계안 D3) 그대로 쓴다.
 - 커널 꾸러미는 커널을 `/boot/vmlinuz-<판>`에 두고, mkosi가 그것을 `/usr/lib/modules/<판>/vmlinuz`로 복사해 UKI를 만든다.
