@@ -1,0 +1,282 @@
+From: buntOS contributors
+Subject: [PATCH] drm/panthor: take the busy time from job timestamps
+
+The GPU counts as busy from the moment a job is queued until a scheduler
+tick finds every group idle. Frames that wait on each other, groups that
+stay resident and the idle hysteresis all count, so the load devfreq sees
+is much higher than the time the GPU works. On the Lenovo TB375FC, a
+browser scrolling by itself reads 66 to 71 percent busy at 265 MHz, while
+the jobs themselves cover 40 to 44 percent of the time.
+
+Panthor can already timestamp every job for fdinfo. Turn the timestamps on
+for every job while devfreq runs, collect the start and end of the jobs
+that finished since the last poll, and use the time covered by at least
+one of them as the busy time. Keep the old estimate for a window in which
+no job finished, which covers a job longer than the polling interval.
+
+With a load that matches the work, the 85/10 thresholds that made room
+for the overestimate keep the GPU at its slowest OPP while scrolling,
+which felt like under 30 frames a second in a test. Aim at about half load
+instead: interactive frames are latency bound and need headroom.
+---
+ drivers/gpu/drm/panthor/panthor_devfreq.c |  148 +++++++++++++++++++++++++++--
+ drivers/gpu/drm/panthor/panthor_devfreq.h |    5 +
+ drivers/gpu/drm/panthor/panthor_sched.c   |    6 +
+ 3 files changed, 149 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/panthor/panthor_devfreq.c b/drivers/gpu/drm/panthor/panthor_devfreq.c
+--- a/drivers/gpu/drm/panthor/panthor_devfreq.c
++++ b/drivers/gpu/drm/panthor/panthor_devfreq.c
+@@ -4,8 +4,15 @@
+ #include <linux/clk.h>
+ #include <linux/devfreq.h>
+ #include <linux/devfreq_cooling.h>
++#include <linux/math64.h>
++#include <linux/minmax.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_opp.h>
++#include <linux/sort.h>
++
++#ifdef CONFIG_ARM_ARCH_TIMER
++#include <asm/arch_timer.h>
++#endif
+ 
+ #include <drm/drm_managed.h>
+ #include <drm/drm_print.h>
+@@ -13,6 +20,20 @@
+ #include "panthor_devfreq.h"
+ #include "panthor_device.h"
+ 
++/* Jobs that finished between two polls. More than this are summed instead. */
++#define PANTHOR_DEVFREQ_MAX_SPANS	256
++
++/**
++ * struct panthor_devfreq_span - GPU timestamps of one finished job
++ */
++struct panthor_devfreq_span {
++	/** @start: GPU timestamp before the job's command stream. */
++	u64 start;
++
++	/** @end: GPU timestamp after the job's command stream. */
++	u64 end;
++};
++
+ /**
+  * struct panthor_devfreq - Device frequency management
+  */
+@@ -35,12 +56,21 @@ struct panthor_devfreq {
+ 	/** @last_busy_state: True if the GPU was busy last time we updated the state. */
+ 	bool last_busy_state;
+ 
++	/** @spans: Jobs that finished since the last poll. */
++	struct panthor_devfreq_span spans[PANTHOR_DEVFREQ_MAX_SPANS];
++
++	/** @span_count: Number of valid entries in @spans. */
++	unsigned int span_count;
++
++	/** @span_overflow: Summed ticks of the jobs that did not fit in @spans. */
++	u64 span_overflow;
++
+ 	/**
+-	 * @lock: Lock used to protect busy_time, idle_time, time_last_update and
+-	 * last_busy_state.
++	 * @lock: Lock used to protect busy_time, idle_time, time_last_update,
++	 * last_busy_state and the spans.
+ 	 *
+ 	 * These fields can be accessed concurrently by panthor_devfreq_get_dev_status()
+-	 * and panthor_devfreq_record_{busy,idle}().
++	 * and panthor_devfreq_record_{busy,idle,job}().
+ 	 */
+ 	spinlock_t lock;
+ };
+@@ -81,6 +111,49 @@ static void panthor_devfreq_reset(struct panthor_devfreq *pdevfreq)
+ 	pdevfreq->busy_time = 0;
+ 	pdevfreq->idle_time = 0;
+ 	pdevfreq->time_last_update = ktime_get();
++	pdevfreq->span_count = 0;
++	pdevfreq->span_overflow = 0;
++}
++
++static int panthor_devfreq_span_cmp(const void *a, const void *b)
++{
++	const struct panthor_devfreq_span *x = a, *y = b;
++
++	if (x->start < y->start)
++		return -1;
++	return x->start > y->start;
++}
++
++/* Time covered by at least one finished job, in GPU timestamp ticks. */
++static u64 panthor_devfreq_job_ticks(struct panthor_devfreq *pdevfreq)
++{
++	u64 ticks = pdevfreq->span_overflow, until = 0;
++	unsigned int i;
++
++	sort(pdevfreq->spans, pdevfreq->span_count, sizeof(pdevfreq->spans[0]),
++	     panthor_devfreq_span_cmp, NULL);
++
++	for (i = 0; i < pdevfreq->span_count; i++) {
++		const struct panthor_devfreq_span *s = &pdevfreq->spans[i];
++		u64 start = max(s->start, until);
++
++		if (s->end > start)
++			ticks += s->end - start;
++		until = max(until, s->end);
++	}
++
++	return ticks;
++}
++
++static u64 panthor_devfreq_ticks_to_ns(u64 ticks)
++{
++#ifdef CONFIG_ARM_ARCH_TIMER
++	u32 rate = arch_timer_get_cntfrq();
++
++	if (rate)
++		return mul_u64_u64_div_u64(ticks, NSEC_PER_SEC, rate);
++#endif
++	return 0;
+ }
+ 
+ static int panthor_devfreq_get_dev_status(struct device *dev,
+@@ -89,6 +162,7 @@ static int panthor_devfreq_get_dev_status(struct device *dev,
+ 	struct panthor_device *ptdev = dev_get_drvdata(dev);
+ 	struct panthor_devfreq *pdevfreq = ptdev->devfreq;
+ 	unsigned long irqflags;
++	u64 job_ns = 0;
+ 
+ 	status->current_frequency = clk_get_rate(ptdev->clks.core);
+ 
+@@ -99,7 +173,23 @@ static int panthor_devfreq_get_dev_status(struct device *dev,
+ 	status->total_time = ktime_to_ns(ktime_add(pdevfreq->busy_time,
+ 						   pdevfreq->idle_time));
+ 
+-	status->busy_time = ktime_to_ns(pdevfreq->busy_time);
++	if (pdevfreq->span_count || pdevfreq->span_overflow) {
++		u64 ticks = panthor_devfreq_job_ticks(pdevfreq);
++
++		job_ns = min_t(u64, panthor_devfreq_ticks_to_ns(ticks), status->total_time);
++	}
++
++	/*
++	 * The GPU counts as busy from the moment a job is queued until a
++	 * scheduler tick finds every group idle, which is much more than the
++	 * time it works. Prefer the time the finished jobs spent on the GPU,
++	 * and keep the old estimate for a window where no job finished (a
++	 * long job, or none at all).
++	 */
++	if (job_ns)
++		status->busy_time = job_ns;
++	else
++		status->busy_time = ktime_to_ns(pdevfreq->busy_time);
+ 
+ 	panthor_devfreq_reset(pdevfreq);
+ 
+@@ -240,12 +330,11 @@ int panthor_devfreq_init(struct panthor_device *ptdev)
+ 	dev_pm_opp_put(opp);
+ 
+ 	/*
+-	 * Setup default thresholds for the simple_ondemand governor.
+-	 * The GPU counts as busy from the moment a job is queued until a
+-	 * scheduler tick finds every group idle, which is much more than the
+-	 * time it works: leave room for that.
++	 * Setup default thresholds for the simple_ondemand governor. Busy time
++	 * comes from job timestamps, and interactive frames are latency bound,
++	 * so aim at about half load to keep headroom for the next frame.
+ 	 */
+-	pdevfreq->gov_data.upthreshold = 85;
++	pdevfreq->gov_data.upthreshold = 50;
+ 	pdevfreq->gov_data.downdifferential = 10;
+ 
+ 	pdevfreq->devfreq = devm_devfreq_add_device(dev, &panthor_devfreq_profile,
+@@ -319,6 +408,47 @@ void panthor_devfreq_record_idle(struct panthor_device *ptdev)
+ 	spin_unlock_irqrestore(&pdevfreq->lock, irqflags);
+ }
+ 
++/**
++ * panthor_devfreq_profile_mask() - Job profiling the governor needs
++ * @ptdev: Device.
++ *
++ * Return: PANTHOR_DEVICE_PROFILING_TIMESTAMP when devfreq is in use, 0 otherwise.
++ */
++u32 panthor_devfreq_profile_mask(struct panthor_device *ptdev)
++{
++	if (!ptdev->devfreq || !ptdev->devfreq->devfreq)
++		return 0;
++
++	return PANTHOR_DEVICE_PROFILING_TIMESTAMP;
++}
++
++/**
++ * panthor_devfreq_record_job() - Account a finished job
++ * @ptdev: Device.
++ * @start: GPU timestamp before the job's command stream.
++ * @end: GPU timestamp after it.
++ */
++void panthor_devfreq_record_job(struct panthor_device *ptdev, u64 start, u64 end)
++{
++	struct panthor_devfreq *pdevfreq = ptdev->devfreq;
++	unsigned long irqflags;
++
++	if (!pdevfreq || !pdevfreq->devfreq || end <= start)
++		return;
++
++	spin_lock_irqsave(&pdevfreq->lock, irqflags);
++
++	if (pdevfreq->span_count < ARRAY_SIZE(pdevfreq->spans)) {
++		pdevfreq->spans[pdevfreq->span_count].start = start;
++		pdevfreq->spans[pdevfreq->span_count].end = end;
++		pdevfreq->span_count++;
++	} else {
++		pdevfreq->span_overflow += end - start;
++	}
++
++	spin_unlock_irqrestore(&pdevfreq->lock, irqflags);
++}
++
+ unsigned long panthor_devfreq_get_freq(struct panthor_device *ptdev)
+ {
+ 	struct panthor_devfreq *pdevfreq = ptdev->devfreq;
+diff --git a/drivers/gpu/drm/panthor/panthor_devfreq.h b/drivers/gpu/drm/panthor/panthor_devfreq.h
+--- a/drivers/gpu/drm/panthor/panthor_devfreq.h
++++ b/drivers/gpu/drm/panthor/panthor_devfreq.h
+@@ -4,6 +4,8 @@
+ #ifndef __PANTHOR_DEVFREQ_H__
+ #define __PANTHOR_DEVFREQ_H__
+ 
++#include <linux/types.h>
++
+ struct devfreq;
+ struct thermal_cooling_device;
+ 
+@@ -20,4 +22,7 @@ void panthor_devfreq_record_idle(struct panthor_device *ptdev);
+ 
+ unsigned long panthor_devfreq_get_freq(struct panthor_device *ptdev);
+ 
++u32 panthor_devfreq_profile_mask(struct panthor_device *ptdev);
++void panthor_devfreq_record_job(struct panthor_device *ptdev, u64 start, u64 end);
++
+ #endif /* __PANTHOR_DEVFREQ_H__ */
+diff --git a/drivers/gpu/drm/panthor/panthor_sched.c b/drivers/gpu/drm/panthor/panthor_sched.c
+--- a/drivers/gpu/drm/panthor/panthor_sched.c
++++ b/drivers/gpu/drm/panthor/panthor_sched.c
+@@ -3032,6 +3032,9 @@ static void update_fdinfo_stats(struct panthor_job *job)
+ 		if (job->profiling.mask & PANTHOR_DEVICE_PROFILING_TIMESTAMP)
+ 			fdinfo->time += data->time.after - data->time.before;
+ 	}
++
++	if (job->profiling.mask & PANTHOR_DEVICE_PROFILING_TIMESTAMP)
++		panthor_devfreq_record_job(group->ptdev, data->time.before, data->time.after);
+ }
+ 
+ void panthor_fdinfo_gather_group_samples(struct panthor_file *pfile)
+@@ -4037,7 +4040,8 @@ panthor_job_create(struct panthor_file *pfile,
+ 		}
+ 	}
+ 
+-	job->profiling.mask = pfile->ptdev->profile_mask;
++	job->profiling.mask = pfile->ptdev->profile_mask |
++			      panthor_devfreq_profile_mask(pfile->ptdev);
+ 	credits = calc_job_credits(job->profiling.mask);
+ 	if (credits == 0) {
+ 		ret = -EINVAL;

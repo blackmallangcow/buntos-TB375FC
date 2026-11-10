@@ -1,0 +1,198 @@
+From: buntOS contributors
+Subject: [PATCH] drm/panthor: add an optional soft frequency ceiling
+
+Scrolling and moving windows are latency bound: they render as many
+frames as the GPU allows, and the job load stays near 55 to 60 percent
+at any frequency. A load based governor keeps raising the frequency for
+them. On the Lenovo TB375FC this means 1400 MHz for a finger scroll in a
+browser, and the GPU supply is audible above about 550 MHz.
+
+Add an optional soft ceiling, set in MHz with the soft_max_mhz module
+parameter (0, the default, turns it off). Below it nothing changes. The
+ceiling lifts after the GPU has been saturated at it for two seconds,
+counting time at or above 75 percent load up and time below it down, so
+games and other GPU bound work still reach the fastest OPP. It comes back
+after a second of load below 40 percent counted the same way, or as soon
+as the governor asks for the ceiling or less. A minimum frequency set
+through sysfs or PM QoS above the ceiling wins.
+
+On the TB375FC with the ceiling at 542 MHz, a finger scroll stays at or
+under 542 MHz and is quiet, and a GPU bound benchmark lifts the ceiling
+after 3.5 seconds and runs at 1400 MHz.
+---
+ drivers/gpu/drm/panthor/panthor_devfreq.c |  126 +++++++++++++++++++++++++++++
+ 1 file changed, 126 insertions(+)
+
+diff --git a/drivers/gpu/drm/panthor/panthor_devfreq.c b/drivers/gpu/drm/panthor/panthor_devfreq.c
+--- a/drivers/gpu/drm/panthor/panthor_devfreq.c
++++ b/drivers/gpu/drm/panthor/panthor_devfreq.c
+@@ -6,8 +6,10 @@
+ #include <linux/devfreq_cooling.h>
+ #include <linux/math64.h>
+ #include <linux/minmax.h>
++#include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_opp.h>
++#include <linux/pm_qos.h>
+ #include <linux/sort.h>
+ 
+ #ifdef CONFIG_ARM_ARCH_TIMER
+@@ -65,6 +67,15 @@ struct panthor_devfreq {
+ 	/** @span_overflow: Summed ticks of the jobs that did not fit in @spans. */
+ 	u64 span_overflow;
+ 
++	/** @unlocked: True while the GPU may go above the soft ceiling. */
++	bool unlocked;
++
++	/** @saturated_ms: Balance of saturated time at the soft ceiling. */
++	u32 saturated_ms;
++
++	/** @quiet_ms: Balance of light-load time while unlocked. */
++	u32 quiet_ms;
++
+ 	/**
+ 	 * @lock: Lock used to protect busy_time, idle_time, time_last_update,
+ 	 * last_busy_state and the spans.
+@@ -90,6 +101,112 @@ static void panthor_devfreq_update_utilization(struct panthor_devfreq *pdevfreq)
+ 	pdevfreq->time_last_update = now;
+ }
+ 
++static unsigned int soft_max_mhz;
++module_param(soft_max_mhz, uint, 0644);
++MODULE_PARM_DESC(soft_max_mhz,
++		 "Highest GPU frequency in MHz for everyday work, 0 for none (default: 0)");
++
++/* Load, in percent, and time at the soft ceiling that lift it. */
++#define PANTHOR_DEVFREQ_UNLOCK_PCT	75
++#define PANTHOR_DEVFREQ_UNLOCK_MS	2000
++
++/* Load, in percent, and time that put the soft ceiling back. */
++#define PANTHOR_DEVFREQ_RELOCK_PCT	40
++#define PANTHOR_DEVFREQ_RELOCK_MS	1000
++
++/*
++ * The soft ceiling as an OPP frequency, or 0 when there is none. A minimum
++ * frequency requested through sysfs or PM QoS above it wins.
++ */
++static unsigned long panthor_devfreq_soft_max(struct device *dev)
++{
++	unsigned long f = (unsigned long)READ_ONCE(soft_max_mhz) * 1000000UL;
++	struct dev_pm_opp *opp;
++	s32 qos_min_khz;
++
++	if (!f)
++		return 0;
++
++	opp = dev_pm_opp_find_freq_floor(dev, &f);
++	if (IS_ERR(opp))
++		return 0;
++	dev_pm_opp_put(opp);
++
++	qos_min_khz = dev_pm_qos_read_value(dev, DEV_PM_QOS_MIN_FREQUENCY);
++	if (qos_min_khz > 0 && (unsigned long)qos_min_khz * 1000UL > f)
++		f = (unsigned long)qos_min_khz * 1000UL;
++
++	return f;
++}
++
++/*
++ * Keep everyday work under the soft ceiling. Scrolling and window motion are
++ * latency bound: they render as many frames as the GPU allows, so a load
++ * based governor climbs to the fastest OPP for them, and on some boards the
++ * GPU supply is audible there. Only lift the ceiling for work that keeps the
++ * GPU saturated at it (see panthor_devfreq_track_ceiling()), and put it back
++ * once the governor asks for the ceiling or less.
++ */
++static void panthor_devfreq_limit_ceiling(struct device *dev, unsigned long *freq,
++					  u32 *flags)
++{
++	struct panthor_device *ptdev = dev_get_drvdata(dev);
++	struct panthor_devfreq *pdevfreq = ptdev->devfreq;
++	unsigned long ceil = panthor_devfreq_soft_max(dev);
++
++	if (!ceil || !pdevfreq)
++		return;
++
++	if (pdevfreq->unlocked) {
++		if (*freq > ceil)
++			return;
++		pdevfreq->unlocked = false;
++		pdevfreq->saturated_ms = 0;
++		pdevfreq->quiet_ms = 0;
++	}
++
++	if (*freq > ceil) {
++		*freq = ceil;
++		*flags &= ~DEVFREQ_FLAG_LEAST_UPPER_BOUND;
++	}
++}
++
++/*
++ * Count up while the condition holds and down while it does not, so short
++ * dips in a saturated load do not restart the wait and short spikes in an
++ * interactive load do not add up. Called with the devfreq lock held, which
++ * serializes it with panthor_devfreq_limit_ceiling().
++ */
++static void panthor_devfreq_track_ceiling(struct panthor_devfreq *pdevfreq,
++					  unsigned long ceil, u64 load, u32 window_ms)
++{
++	if (!ceil || !pdevfreq->devfreq) {
++		pdevfreq->unlocked = false;
++		return;
++	}
++
++	if (!pdevfreq->unlocked) {
++		if (pdevfreq->devfreq->previous_freq >= ceil &&
++		    load >= PANTHOR_DEVFREQ_UNLOCK_PCT)
++			pdevfreq->saturated_ms += window_ms;
++		else
++			pdevfreq->saturated_ms -= min(pdevfreq->saturated_ms, window_ms);
++		if (pdevfreq->saturated_ms >= PANTHOR_DEVFREQ_UNLOCK_MS) {
++			pdevfreq->unlocked = true;
++			pdevfreq->quiet_ms = 0;
++		}
++	} else {
++		if (load < PANTHOR_DEVFREQ_RELOCK_PCT)
++			pdevfreq->quiet_ms += window_ms;
++		else
++			pdevfreq->quiet_ms -= min(pdevfreq->quiet_ms, window_ms);
++		if (pdevfreq->quiet_ms >= PANTHOR_DEVFREQ_RELOCK_MS) {
++			pdevfreq->unlocked = false;
++			pdevfreq->saturated_ms = 0;
++		}
++	}
++}
++
+ /* How far, in percent, the frequency may rise in one poll. */
+ #define PANTHOR_DEVFREQ_STEP_PCT	25
+ 
+@@ -143,6 +260,7 @@ static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
+ 	struct dev_pm_opp *opp;
+ 	int err;
+ 
++	panthor_devfreq_limit_ceiling(dev, freq, &flags);
+ 	panthor_devfreq_limit_step(dev, freq, &flags);
+ 
+ 	opp = devfreq_recommended_opp(dev, freq, flags);
+@@ -210,6 +328,7 @@ static int panthor_devfreq_get_dev_status(struct device *dev,
+ {
+ 	struct panthor_device *ptdev = dev_get_drvdata(dev);
+ 	struct panthor_devfreq *pdevfreq = ptdev->devfreq;
++	unsigned long ceil = panthor_devfreq_soft_max(dev);
+ 	unsigned long irqflags;
+ 	u64 job_ns = 0;
+ 
+@@ -244,6 +363,13 @@ static int panthor_devfreq_get_dev_status(struct device *dev,
+ 
+ 	spin_unlock_irqrestore(&pdevfreq->lock, irqflags);
+ 
++	if (status->total_time) {
++		u64 load = div64_u64(status->busy_time * 100, status->total_time);
++
++		panthor_devfreq_track_ceiling(pdevfreq, ceil, load,
++					      div_u64(status->total_time, NSEC_PER_MSEC));
++	}
++
+ 	drm_dbg(&ptdev->base, "busy %lu total %lu %lu %% freq %lu MHz\n",
+ 		status->busy_time, status->total_time,
+ 		status->busy_time / (status->total_time / 100),

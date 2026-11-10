@@ -1,0 +1,81 @@
+From: buntOS contributors
+Subject: [PATCH] drm/panthor: raise the GPU frequency in steps
+
+simple_ondemand goes straight to the fastest OPP once the load crosses
+its upthreshold. On the Lenovo TB375FC the GPU then jumps from 265 MHz
+to 1400 MHz in one poll for a moment of work, and the GPU supply is
+audible at the high OPPs.
+
+Let the frequency rise by at most 25 percent per poll, rounded down to
+an OPP, or by one OPP when none lies in between. A load that stays high
+reaches the fastest OPP after a few polls (265 to 1400 MHz takes about
+eight, 400 ms at the 50 ms polling interval). Drops are not limited.
+---
+ drivers/gpu/drm/panthor/panthor_devfreq.c |   49 +++++++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/drivers/gpu/drm/panthor/panthor_devfreq.c b/drivers/gpu/drm/panthor/panthor_devfreq.c
+--- a/drivers/gpu/drm/panthor/panthor_devfreq.c
++++ b/drivers/gpu/drm/panthor/panthor_devfreq.c
+@@ -90,12 +90,61 @@ static void panthor_devfreq_update_utilization(struct panthor_devfreq *pdevfreq)
+ 	pdevfreq->time_last_update = now;
+ }
+ 
++/* How far, in percent, the frequency may rise in one poll. */
++#define PANTHOR_DEVFREQ_STEP_PCT	25
++
++/*
++ * Limit how fast the frequency rises. simple_ondemand jumps straight to the
++ * fastest OPP once the load crosses its threshold; climb at most
++ * PANTHOR_DEVFREQ_STEP_PCT per poll instead, and let the next polls go
++ * further if the load stays high.
++ */
++static void panthor_devfreq_limit_step(struct device *dev, unsigned long *freq,
++				       u32 *flags)
++{
++	struct panthor_device *ptdev = dev_get_drvdata(dev);
++	struct devfreq *devfreq = ptdev->devfreq ? ptdev->devfreq->devfreq : NULL;
++	unsigned long cur, limit, f;
++	struct dev_pm_opp *opp;
++
++	if (!devfreq)
++		return;
++
++	cur = devfreq->previous_freq;
++	if (!cur || *freq <= cur)
++		return;
++
++	limit = cur + (unsigned long)div_u64((u64)cur * PANTHOR_DEVFREQ_STEP_PCT, 100);
++	if (*freq <= limit)
++		return;
++
++	/* Highest OPP under the limit, or the next one up if none lies between. */
++	f = limit;
++	opp = dev_pm_opp_find_freq_floor(dev, &f);
++	if (IS_ERR(opp))
++		return;
++	dev_pm_opp_put(opp);
++
++	if (f <= cur) {
++		f = cur + 1;
++		opp = dev_pm_opp_find_freq_ceil(dev, &f);
++		if (IS_ERR(opp))
++			return;
++		dev_pm_opp_put(opp);
++	}
++
++	*freq = f;
++	*flags &= ~DEVFREQ_FLAG_LEAST_UPPER_BOUND;
++}
++
+ static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
+ 				  u32 flags)
+ {
+ 	struct dev_pm_opp *opp;
+ 	int err;
+ 
++	panthor_devfreq_limit_step(dev, freq, &flags);
++
+ 	opp = devfreq_recommended_opp(dev, freq, flags);
+ 	if (IS_ERR(opp))
+ 		return PTR_ERR(opp);
