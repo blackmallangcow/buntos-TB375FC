@@ -63,7 +63,7 @@ use smithay::{
                 Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, connector, crtc, plane,
             },
         },
-        input::{Device as InputDevice, DeviceCapability, Libinput},
+        input::{ClickMethod, Device as InputDevice, DeviceCapability, Libinput, TapButtonMap},
         rustix::fs::OFlags,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{Display, backend::GlobalId, protocol::wl_surface::WlSurface},
@@ -84,7 +84,7 @@ use crate::{
     dmabuf::{self, Dmabufs},
     gpu::{GSK_RENDERER, Rendering, renderer_name},
     handover::{self, Wanted},
-    prefs::{ModePref, PointerPrefs},
+    prefs::{ModePref, PointerPrefs, SecondaryClick, TouchpadPrefs},
     render::{self, OutputRenderElements},
     screenshot,
     state::BuntState,
@@ -1128,7 +1128,7 @@ impl BuntState {
             return;
         }
         let mut device = device.clone();
-        apply_pointer(&mut device, self.pointer_prefs());
+        apply_pointer(&mut device, self.pointer_prefs(), self.touchpad_prefs());
         tracing::info!("pointer device: {}", device.name());
         self.backend.pointer_devices.push(device);
         self.publish_pointer_devices();
@@ -1169,14 +1169,36 @@ impl BuntState {
         );
     }
 
-    /// 마우스 설정을 연결된 장치와 커서에 쓴다
+    /// 시스템 설정이 트랙패드 설정을 바꿨다. 다음 로그인에도 쓴다. 자연스러운 스크롤은 마우스와 같은
+    /// 값이라 마우스 설정에도 쓴다(macOS와 같다)
+    pub fn set_touchpad_prefs(&mut self, prefs: TouchpadPrefs, natural_scroll: bool) {
+        let mut pointer = self.pointer_prefs();
+        pointer.natural_scroll = natural_scroll;
+        self.prefs.pointer = Some(pointer);
+        self.prefs.touchpad = Some(prefs);
+        self.prefs.save();
+        self.apply_pointer_prefs();
+        tracing::info!(
+            "touchpad: tap to click {}, secondary click {}, speed {}, natural scroll {}",
+            prefs.tap_to_click,
+            prefs.secondary_click.name(),
+            prefs.speed,
+            natural_scroll
+        );
+    }
+
+    /// 마우스와 트랙패드 설정을 연결된 장치와 커서에 쓴다
     pub fn apply_pointer_prefs(&mut self) {
         let prefs = self.pointer_prefs();
+        let touchpad = self.touchpad_prefs();
         for device in &mut self.backend.pointer_devices {
-            apply_pointer(device, prefs);
+            apply_pointer(device, prefs, touchpad);
         }
         self.backend.cursor.set_size(prefs.cursor_size);
-        self.dbus.update(|snapshot| snapshot.pointer = prefs);
+        self.dbus.update(|snapshot| {
+            snapshot.pointer = prefs;
+            snapshot.touchpad = touchpad;
+        });
     }
 
     /// 표면마다 이번 프레임에 그 출력에 보였는지 적는다 (프레임 알림을 줄 표면을 고를 때 쓴다)
@@ -1821,16 +1843,43 @@ fn parse_edid(edid: &[u8]) -> (String, String) {
     (letters.unwrap_or_default(), name)
 }
 
-/// 장치가 지원하는 마우스 설정만 쓴다 (절대 좌표 장치에는 가속이 없다)
-fn apply_pointer(device: &mut InputDevice, prefs: PointerPrefs) {
+/// 장치가 지원하는 설정만 쓴다 (절대 좌표 장치에는 가속이 없다). 탭을 아는 장치는 트랙패드다. 트랙패드는
+/// 트랙패드의 이동 속도와 클릭 설정을 쓰고, 마우스의 보조 클릭(왼손잡이)은 쓰지 않는다(macOS와 같다).
+/// 자연스러운 스크롤은 함께 쓴다
+fn apply_pointer(device: &mut InputDevice, prefs: PointerPrefs, touchpad: TouchpadPrefs) {
+    let is_touchpad = device.config_tap_finger_count() > 0;
     if device.config_accel_is_available() {
-        let _ = device.config_accel_set_speed(prefs.speed.clamp(-1.0, 1.0));
+        let speed = if is_touchpad {
+            touchpad.speed
+        } else {
+            prefs.speed
+        };
+        let _ = device.config_accel_set_speed(speed.clamp(-1.0, 1.0));
     }
     if device.config_scroll_has_natural_scroll() {
         let _ = device.config_scroll_set_natural_scroll_enabled(prefs.natural_scroll);
     }
+    let left_handed = prefs.left_handed && !is_touchpad;
     if device.config_left_handed_is_available() {
-        let _ = device.config_left_handed_set(prefs.left_handed);
+        let _ = device.config_left_handed_set(left_handed);
+    }
+    if is_touchpad {
+        apply_touchpad(device, touchpad);
+    }
+}
+
+/// 탭하여 클릭하기와 보조 클릭. 탭은 한 손가락이 클릭, 두 손가락이 보조 클릭, 세 손가락이 가운데
+/// 클릭이다. 누르는 트랙패드(clickpad)는 보조 클릭 방식에 따라 두 손가락으로 누르거나 오른쪽 아래
+/// 모서리를 누르면 보조 클릭이다. libinput은 누르는 트랙패드에서 탭을 기본으로 끈다
+fn apply_touchpad(device: &mut InputDevice, prefs: TouchpadPrefs) {
+    let _ = device.config_tap_set_enabled(prefs.tap_to_click);
+    let _ = device.config_tap_set_button_map(TapButtonMap::LeftRightMiddle);
+    let method = match prefs.secondary_click {
+        SecondaryClick::TwoFingers => ClickMethod::Clickfinger,
+        SecondaryClick::BottomRight => ClickMethod::ButtonAreas,
+    };
+    if device.config_click_methods().contains(&method) {
+        let _ = device.config_click_set_method(method);
     }
 }
 
