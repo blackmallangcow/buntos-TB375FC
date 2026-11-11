@@ -27,6 +27,7 @@ mod wifi;
 // macOS처럼 디스플레이 다음 묶음에 놓는 페이지
 mod notifications;
 mod sound;
+mod trackpad;
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -54,6 +55,7 @@ pub enum Page {
     Display,
     Keyboard,
     Mouse,
+    Trackpad,
     Language,
     DateTime,
     DefaultApps,
@@ -66,7 +68,7 @@ pub enum Page {
 
 impl Page {
     /// 왼쪽 목록에 놓는 순서. 알림과 사운드는 macOS처럼 디스플레이 다음 묶음이다. 모든 앱은 macOS의 Spotlight 자리다
-    pub const ALL: [Page; 20] = [
+    pub const ALL: [Page; 21] = [
         Page::Wifi,
         Page::Bluetooth,
         Page::Network,
@@ -81,6 +83,7 @@ impl Page {
         Page::Sound,
         Page::Keyboard,
         Page::Mouse,
+        Page::Trackpad,
         Page::Language,
         Page::DateTime,
         Page::DefaultApps,
@@ -104,6 +107,7 @@ impl Page {
             Self::Display => "display",
             Self::Keyboard => "keyboard",
             Self::Mouse => "mouse",
+            Self::Trackpad => "trackpad",
             Self::Language => "language",
             Self::DateTime => "datetime",
             Self::DefaultApps => "default-apps",
@@ -134,6 +138,7 @@ impl Page {
             Self::Display => "page-display",
             Self::Keyboard => "page-keyboard",
             Self::Mouse => "page-mouse",
+            Self::Trackpad => "page-trackpad",
             Self::Language => "page-language",
             Self::DateTime => "page-datetime",
             Self::DefaultApps => "page-default-apps",
@@ -165,6 +170,7 @@ impl Page {
             Self::Display => "video-display-symbolic",
             Self::Keyboard => "input-keyboard-symbolic",
             Self::Mouse => "input-mouse-symbolic",
+            Self::Trackpad => "input-touchpad-symbolic",
             Self::Language => "preferences-desktop-locale-symbolic",
             Self::DateTime => "preferences-system-time-symbolic",
             Self::DefaultApps => "view-app-grid-symbolic",
@@ -186,7 +192,9 @@ impl Page {
             Self::Wallpaper => Tint::Cyan,
             Self::DefaultApps | Self::Users => Tint::Blue,
             Self::Agent | Self::Sound => Tint::Pink,
-            Self::Keyboard | Self::Mouse | Self::DateTime | Self::About => Tint::Gray,
+            Self::Keyboard | Self::Mouse | Self::Trackpad | Self::DateTime | Self::About => {
+                Tint::Gray
+            }
             Self::Language => Tint::Indigo,
             Self::Notifications => Tint::Red,
         }
@@ -204,7 +212,12 @@ impl Page {
             | Self::Display => 1,
             // macOS의 알림·사운드 묶음. 뒤 묶음의 번호를 하나씩 밀었다
             Self::Notifications | Self::Sound => 2,
-            Self::Keyboard | Self::Mouse | Self::Language | Self::DateTime | Self::DefaultApps => 3,
+            Self::Keyboard
+            | Self::Mouse
+            | Self::Trackpad
+            | Self::Language
+            | Self::DateTime
+            | Self::DefaultApps => 3,
             Self::Agent | Self::Users => 4,
             Self::About => 5,
         }
@@ -224,6 +237,7 @@ impl Page {
             Self::Display => display::build(context),
             Self::Keyboard => keyboard::build(context),
             Self::Mouse => mouse::build(context),
+            Self::Trackpad => trackpad::build(context),
             Self::Language => language::build(context),
             Self::DateTime => datetime::build(context),
             Self::DefaultApps => default_apps::build(context),
