@@ -32,7 +32,7 @@ use crate::{
     cursor,
     minimize::{self, Effect},
     panels::{Autohide, Panels},
-    prefs::PointerPrefs,
+    prefs::{PointerPrefs, SecondaryClick, TouchpadPrefs},
     recording,
     session::SessionRequest,
     shortcuts::{self, Category, ShortcutInfo},
@@ -144,6 +144,7 @@ pub struct Snapshot {
     pub repeat_delay: u32,
     pub repeat_rate: u32,
     pub pointer: PointerPrefs,
+    pub touchpad: TouchpadPrefs,
     pub pointer_devices: Vec<PointerDevice>,
     pub focus: Option<Focus>,
     pub shortcuts: Vec<ShortcutInfo>,
@@ -383,6 +384,11 @@ pub enum Request {
     },
     Panels(Panels),
     Pointer(PointerPrefs),
+    /// 트랙패드 설정. 자연스러운 스크롤은 마우스와 같은 값이다
+    Touchpad {
+        prefs: TouchpadPrefs,
+        natural_scroll: bool,
+    },
     /// 단축키 하나를 바꾼다 (가속기는 확인해 바르게 썼다. 비면 키가 없다)
     Shortcut {
         id: String,
@@ -1212,6 +1218,48 @@ impl Api {
             scroll_speed,
             cursor_size,
         }))
+    }
+
+    /// 트랙패드 설정: (탭하여 클릭하기, 보조 클릭 "two-fingers" 또는 "bottom-right", 이동 속도 -1~1,
+    /// 자연스러운 스크롤). 자연스러운 스크롤은 macOS처럼 마우스와 같은 값이다
+    fn get_touchpad(&self) -> (bool, String, f64, bool) {
+        let snapshot = self.snapshot.lock().unwrap();
+        let touchpad = snapshot.touchpad;
+        (
+            touchpad.tap_to_click,
+            touchpad.secondary_click.name().to_owned(),
+            touchpad.speed,
+            snapshot.pointer.natural_scroll,
+        )
+    }
+
+    /// 트랙패드 설정을 바꾸고 다음 로그인에도 쓴다. 연결된 트랙패드와 나중에 연결하는 트랙패드에 모두
+    /// 쓴다. 자연스러운 스크롤은 마우스 설정에도 쓴다
+    fn set_touchpad(
+        &self,
+        tap_to_click: bool,
+        secondary_click: &str,
+        speed: f64,
+        natural_scroll: bool,
+    ) -> fdo::Result<()> {
+        let Some(secondary_click) = SecondaryClick::from_name(secondary_click) else {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "secondary click must be two-fingers or bottom-right (got {secondary_click})"
+            )));
+        };
+        if !(-1.0..=1.0).contains(&speed) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "speed must be -1..=1 (got {speed})"
+            )));
+        }
+        self.request(Request::Touchpad {
+            prefs: TouchpadPrefs {
+                tap_to_click,
+                secondary_click,
+                speed,
+            },
+            natural_scroll,
+        })
     }
 
     /// 연결된 포인터 장치. 장치마다 name(s), vendor(u), product(u), bus(s: usb, bluetooth 등.

@@ -113,7 +113,7 @@ use crate::{
     input::ModifierChord,
     minimize,
     panels::{self, Bar, BarInput, Edge, Fill, Panels, Reveal},
-    prefs::{KeyRepeat, PointerPrefs, Prefs},
+    prefs::{KeyRepeat, PointerPrefs, Prefs, TouchpadPrefs},
     recording::Recording,
     render,
     screenshot::{self as screenshots, AreaSelection, Capture, Image},
@@ -2167,6 +2167,10 @@ impl BuntState {
             Request::KeyboardRepeat { delay, rate } => self.set_keyboard_repeat(delay, rate),
             Request::Panels(panels) => self.set_panels(panels),
             Request::Pointer(pointer) => self.set_pointer_prefs(pointer),
+            Request::Touchpad {
+                prefs,
+                natural_scroll,
+            } => self.set_touchpad_prefs(prefs, natural_scroll),
             Request::Shortcut {
                 id,
                 accelerator,
@@ -2209,6 +2213,11 @@ impl BuntState {
         self.prefs
             .pointer
             .unwrap_or_else(|| PointerPrefs::with_cursor_size(self.config.cursor.size))
+    }
+
+    /// 지금 쓰는 트랙패드 설정. 고른 적이 없으면 기본값이다
+    pub fn touchpad_prefs(&self) -> TouchpadPrefs {
+        self.prefs.touchpad.unwrap_or_default()
     }
 
     fn set_keyboard_repeat(&mut self, delay: u32, rate: u32) {

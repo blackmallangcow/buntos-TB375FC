@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! 사용자가 시스템 설정에서 고른 값(화면 모드와 배율, 키 반복, 마우스, 키보드 단축키). 다음
+//! 사용자가 시스템 설정에서 고른 값(화면 모드와 배율, 키 반복, 마우스, 트랙패드, 키보드 단축키). 다음
 //! 로그인에도 쓰도록 `$XDG_CONFIG_HOME/buntos/comp-state.toml`에 저장하며, 시스템 기본값(comp.toml,
 //! 단축키 표)보다 앞선다.
 
@@ -17,6 +17,8 @@ pub struct Prefs {
     pub keyboard: Option<KeyRepeat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer: Option<PointerPrefs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touchpad: Option<TouchpadPrefs>,
     #[serde(default, rename = "output", skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputPrefs>,
     /// 기본값과 다르게 바꾼 단축키 (단축키 ID → 값)
@@ -71,6 +73,56 @@ impl PointerPrefs {
 impl Default for PointerPrefs {
     fn default() -> Self {
         Self::with_cursor_size(24)
+    }
+}
+
+/// 트랙패드 (macOS 26의 트랙패드 > 포인트 및 클릭): 탭하여 클릭하기, 보조 클릭 방식, 이동 속도(libinput
+/// 가속, -1~1). 이동 속도는 macOS처럼 마우스와 따로 둔다. 자연스러운 스크롤은 macOS처럼 마우스와 같은
+/// 값(PointerPrefs)이다. 빠진 칸은 기본값이다
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TouchpadPrefs {
+    pub tap_to_click: bool,
+    pub secondary_click: SecondaryClick,
+    pub speed: f64,
+}
+
+impl Default for TouchpadPrefs {
+    /// 탭하여 클릭하기는 macOS(기본 꺼짐)와 달리 켠다. 키보드 덮개의 트랙패드를 두고 사용자가
+    /// 골랐다(2026-11-11)
+    fn default() -> Self {
+        Self {
+            tap_to_click: true,
+            secondary_click: SecondaryClick::TwoFingers,
+            speed: 0.0,
+        }
+    }
+}
+
+/// 트랙패드의 보조 클릭. macOS의 "왼쪽 아래 모서리 클릭"과 "끔"은 libinput에 맞는 방식이 없어 두지
+/// 않는다(왼손잡이 설정은 가운데 누름까지 오른쪽 클릭으로 바꾸고, 소프트웨어 단추를 끄는 방식은 없다)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecondaryClick {
+    /// 두 손가락으로 누르거나 탭한다 (libinput clickfinger)
+    TwoFingers,
+    /// 오른쪽 아래 모서리를 누른다 (libinput 소프트웨어 단추 영역)
+    BottomRight,
+}
+
+impl SecondaryClick {
+    /// D-Bus와 저장 파일에서 쓰는 이름
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::TwoFingers => "two-fingers",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::TwoFingers, Self::BottomRight]
+            .into_iter()
+            .find(|choice| choice.name() == name)
     }
 }
 
@@ -193,5 +245,39 @@ mod tests {
     #[test]
     fn empty_file_is_default() {
         assert_eq!(toml::from_str::<Prefs>("").unwrap(), Prefs::default());
+    }
+
+    #[test]
+    fn touchpad_round_trip_and_defaults() {
+        let prefs = Prefs {
+            touchpad: Some(TouchpadPrefs {
+                tap_to_click: false,
+                secondary_click: SecondaryClick::BottomRight,
+                speed: 0.5,
+            }),
+            ..Prefs::default()
+        };
+        let text = toml::to_string(&prefs).unwrap();
+        assert!(text.contains("secondary_click = \"bottom-right\""));
+        assert_eq!(toml::from_str::<Prefs>(&text).unwrap(), prefs);
+
+        // 빠진 칸은 기본값이다. 탭하여 클릭하기는 켜져 있다
+        let partial: Prefs = toml::from_str("[touchpad]\nspeed = -0.5\n").unwrap();
+        assert_eq!(
+            partial.touchpad,
+            Some(TouchpadPrefs {
+                speed: -0.5,
+                ..TouchpadPrefs::default()
+            })
+        );
+        assert!(TouchpadPrefs::default().tap_to_click);
+    }
+
+    #[test]
+    fn secondary_click_names() {
+        for choice in [SecondaryClick::TwoFingers, SecondaryClick::BottomRight] {
+            assert_eq!(SecondaryClick::from_name(choice.name()), Some(choice));
+        }
+        assert_eq!(SecondaryClick::from_name("off"), None);
     }
 }
