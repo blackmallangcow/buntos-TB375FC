@@ -1,0 +1,296 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: keep charging gently in suspend
+
+Charging stopped at every suspend once the driver had taken it over, as
+nothing follows the temperature of the battery while the work is frozen.
+Stock keeps the chip charging and wakes every 10 seconds to look, with an
+RTC alarm. The RTC cannot wake this system yet, so a Lenovo TB375FC that
+went to sleep on a charger did not charge: on 2026-11-11 it slept from 3 %
+down to 1 % in four hours on a USB port, after UPower had put it to sleep
+at 2 %.
+
+Let charging go on in suspend where the work would charge now and the chip
+keeps it safe alone: a good reading of the gauge from the last poll, the
+normal temperature range and 5 to 40 C in it, five degrees inside of where
+charging stops and where the voltage limit comes down, no fault, no failed
+setup, the boost off, the charge pump known to be off and a source there
+already, as one that comes later would charge on an old temperature. Both
+currents go to the USB default of
+500 mA, or lower where user space asks for that. That is what this driver
+already leaves when nobody watches the battery, and it warms the battery
+by little. The chip still holds the voltage limit and its own thermal
+regulation and overvoltage protection. Turning charging off and on starts
+the safety timer anew, here at 20 hours, about what 500 mA takes to fill
+this battery. Anything that fails on the way stops charging, as before.
+
+After every resume the work turns charging off once and puts the timer
+back at 10 hours, so that it all starts anew as after suspend before. That
+includes restoring a hibernation image, where the suspend ran in the kernel
+that booted first. A fault from the time asleep stays until the source
+goes, as the timer may have run out there.
+
+On the TB375FC on a PPS charger, 44 minutes of sleep put 367 mAh into
+the battery by the gauge, from 77 to 82 %, about the 500 mA allowed. The
+battery went from 27 to 21 C, and the timer was back at 10 hours after
+the wake.
+
+Waking up to look, as stock does, would need the RTC as a wake-up source
+and a wake that leaves the screen dark. That is left for later.
+---
+ drivers/power/supply/mt6375-charger.c |  151 ++++++++++++++++++++++++++++++---
+ 1 file changed, 137 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -13,7 +13,9 @@
+  * voltage. Until then the chip goes on as the bootloader set it, unless told to
+  * stop or the gauge keeps giving values that make no sense. After that the
+  * driver follows the temperature in software as stock does, and stops charging
+- * when it no longer knows the temperature.
++ * when it no longer knows the temperature. In suspend, where nothing follows
++ * it, charging goes on only at the USB default and from well inside of the
++ * normal temperature range.
+  *
+  * The registers, the parameters and their order come from the MediaTek driver
+  * in the OnePlus MT6897 kernel, and the limits from the stock kernel of the
+@@ -131,6 +133,9 @@
+  * temp-t1-thres-plus-x-degree
+  */
+ #define MT6375_CHG_TEMP_HYST		2
++/* Charging in suspend: 5 C inside of cold and warm, as nothing follows it */
++#define MT6375_CHG_ASLEEP_TEMP_MIN	5
++#define MT6375_CHG_ASLEEP_TEMP_MAX	40
+ /* The gauge reads below absolute zero or wildly hot when something is wrong */
+ #define MT6375_CHG_TEMP_SANE_MIN	-40
+ #define MT6375_CHG_TEMP_SANE_MAX	100
+@@ -148,6 +153,8 @@
+ #define MT6375_CHG_EOC_MARGIN_UV	100000
+ /* chg-tmr, chg-tmr-en: 5 hours from 0 in steps of 5 hours */
+ #define MT6375_CHG_TMR_10H		1
++/* For charging in suspend: about what 500 mA takes to fill the battery */
++#define MT6375_CHG_TMR_20H		3
+ /* The stock charger thread looks every 10 seconds */
+ #define MT6375_CHG_POLL_MS		10000
+ #define MT6375_CHG_MAX_READ_FAILS	3
+@@ -289,6 +296,7 @@ struct mt6375_chg {
+ 	unsigned int conn_clear;	/* low readings since then */
+ 	bool conn_unknown;		/* its sensor cannot be read */
+ 	enum mt6375_chg_temp temp;	/* the last one known, for hysteresis */
++	int last_temp;			/* of the last good reading, in C */
+ 	bool gauge_lost;
+ 	bool gauge_warned;
+ 	bool setup_failed;
+@@ -308,6 +316,7 @@ struct mt6375_chg {
+ 	unsigned long dc_first_at;	/* since then */
+ 	bool dc_no_source;
+ 	unsigned long dc_no_source_at;
++	bool asleep;			/* set up for suspend, until the work */
+ };
+ 
+ /* The chip wants these set differently for the boost than for charging */
+@@ -1100,6 +1109,28 @@ static void mt6375_chg_set_unsupervised(struct mt6375_chg *chg)
+ 	dev_err(chg->dev, "Failed to lower the charge current\n");
+ }
+ 
++/*
++ * After resume, where charging may have gone on: off, and the safety timer back
++ * at 10 hours, so that it all starts anew as after suspend before. A fault from
++ * the time asleep stays, as the timer may have run out there.
++ */
++static int mt6375_chg_end_asleep(struct mt6375_chg *chg)
++{
++	int ret;
++
++	ret = mt6375_chg_stop_charging(chg);
++	if (ret)
++		return ret;
++
++	ret = regmap_field_write(chg->fields[F_CHG_TMR], MT6375_CHG_TMR_10H);
++	if (ret)
++		return ret;
++
++	chg->asleep = false;
++
++	return 0;
++}
++
+ /*
+  * Only an actual reading counts. A gauge that is not there yet is a failed
+  * read, and it is looked up each time because it may be a module that comes and
+@@ -1292,6 +1323,7 @@ static void mt6375_chg_update_battery(struct mt6375_chg *chg, int temp,
+ 		dev_info(chg->dev, "Battery at %d C, temperature state %d\n",
+ 			 temp, next);
+ 	chg->temp = next;
++	chg->last_temp = temp;
+ 	chg->gauge_lost = false;
+ 	chg->read_fails = 0;
+ 
+@@ -1443,6 +1475,12 @@ static void mt6375_chg_control(struct mt6375_chg *chg,
+ 		dev_info(chg->dev, "Took over charging\n");
+ 	}
+ 
++	if (chg->asleep) {
++		ret = mt6375_chg_end_asleep(chg);
++		if (ret)
++			goto stop;
++	}
++
+ 	ret = regmap_field_read(chg->fields[F_ST_PWR_RDY], &pwr_rdy);
+ 	if (ret)
+ 		goto stop;
+@@ -1796,10 +1834,13 @@ static int mt6375_chg_init_irqs(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static void mt6375_chg_stop_control(struct mt6375_chg *chg)
++/* 0 with the charge pump known to be off afterwards */
++static int mt6375_chg_stop_control(struct mt6375_chg *chg)
+ {
++	int ret;
++
+ 	disable_delayed_work_sync(&chg->work);
+-	mt6375_chg_dc_set(chg, false);
++	ret = mt6375_chg_dc_set(chg, false);
+ 
+ 	mutex_lock(&chg->lock);
+ 	WRITE_ONCE(chg->dc_hold, false);
+@@ -1807,6 +1848,8 @@ static void mt6375_chg_stop_control(struct mt6375_chg *chg)
+ 	if (mt6375_chg_check_boost(chg) <= 0 && chg->taken_over)
+ 		mt6375_chg_set_unsupervised(chg);
+ 	mutex_unlock(&chg->lock);
++
++	return ret == -ENODEV ? 0 : ret;
+ }
+ 
+ static void mt6375_chg_release_control(void *data)
+@@ -1964,25 +2007,94 @@ static void mt6375_chg_shutdown(struct platform_device *pdev)
+ }
+ 
+ /*
+- * The work does not run in suspend, so nothing would follow the temperature,
+- * and charging stops until resume once it is taken over. Stock wakes every 10
+- * seconds to look instead. Before that it stops if it should have already. The
+- * boost is no exception, as it can end with the system asleep: only CHG_EN
+- * changes, and the work turns that on again after the boost. If this fails the
+- * system must stay up, and no resume comes to start the work again.
++ * The work does not run in suspend, so nothing follows the temperature there.
++ * Stock wakes every 10 seconds to look, with an RTC alarm that cannot wake this
++ * system yet. So charging goes on asleep only from where the work would charge
++ * now: a good reading of the gauge one poll old at most, a temperature well
++ * inside of the normal range, no fault, and the boost off.
++ */
++static bool mt6375_chg_may_charge_asleep(struct mt6375_chg *chg)
++{
++	return chg->taken_over && !mt6375_chg_must_stop(chg) &&
++	       chg->temp == MT6375_CHG_TEMP_NORMAL &&
++	       chg->last_temp >= MT6375_CHG_ASLEEP_TEMP_MIN &&
++	       chg->last_temp <= MT6375_CHG_ASLEEP_TEMP_MAX &&
++	       !chg->read_fails && !chg->fault && !chg->setup_failed &&
++	       !mt6375_chg_check_boost(chg);
++}
++
++/*
++ * At the USB default for both currents, which warms the battery by little,
++ * under the voltage limit and the thermal regulation of the chip, and only
++ * with a source there now: a later one would charge on an old temperature.
++ * Turning charging off and on starts the safety timer anew, here at 20 hours.
++ * The work puts it all back after resume. Charging stops when any of this
++ * fails, and at a fault, which this would clear.
++ */
++static int mt6375_chg_charge_asleep(struct mt6375_chg *chg)
++{
++	unsigned int pwr_rdy, stat;
++	int ret;
++
++	chg->asleep = true;
++
++	ret = mt6375_chg_set_limit(chg, F_CC,
++				   min(MT6375_CHG_USB_UA, chg->user_cc_ua));
++	if (ret)
++		goto stop;
++
++	ret = mt6375_chg_set_limit(chg, F_IAICR,
++				   min(MT6375_CHG_USB_UA, chg->user_aicr_ua));
++	if (ret)
++		goto stop;
++
++	ret = regmap_field_read(chg->fields[F_ST_PWR_RDY], &pwr_rdy);
++	if (ret || !pwr_rdy)
++		goto stop;
++
++	ret = regmap_field_write(chg->fields[F_CHG_TMR], MT6375_CHG_TMR_20H);
++	if (ret)
++		goto stop;
++
++	/* Last thing before the toggle, which would clear it */
++	ret = regmap_field_read(chg->fields[F_IC_STAT], &stat);
++	if (ret || stat == MT6375_CHG_STAT_FAULT)
++		goto stop;
++
++	ret = regmap_field_write(chg->fields[F_CHG_EN], 0);
++	if (ret)
++		goto stop;
++
++	ret = regmap_field_write(chg->fields[F_CHG_EN], 1);
++	if (ret)
++		goto stop;
++
++	return 0;
++
++stop:
++	return mt6375_chg_stop_charging(chg);
++}
++
++/*
++ * Otherwise charging stops, as it does if it should have already. The boost is
++ * no exception, as it can end with the system asleep: only CHG_EN changes, and
++ * the work turns that on again after the boost. If this fails the system must
++ * stay up, and no resume comes to start the work again.
+  */
+ static int mt6375_chg_suspend(struct device *dev)
+ {
+ 	struct mt6375_chg *chg = dev_get_drvdata(dev);
+-	int ret = 0;
++	int pump, ret = 0;
+ 
+ 	if (!chg->can_control)
+ 		return 0;
+ 
+-	mt6375_chg_stop_control(chg);
++	pump = mt6375_chg_stop_control(chg);
+ 
+ 	mutex_lock(&chg->lock);
+-	if (chg->taken_over || mt6375_chg_must_stop(chg))
++	if (!pump && mt6375_chg_may_charge_asleep(chg))
++		ret = mt6375_chg_charge_asleep(chg);
++	else if (chg->taken_over || mt6375_chg_must_stop(chg))
+ 		ret = mt6375_chg_stop_charging(chg);
+ 	mutex_unlock(&chg->lock);
+ 
+@@ -1994,12 +2106,23 @@ static int mt6375_chg_suspend(struct device *dev)
+ 	return ret;
+ }
+ 
++/*
++ * Every resume goes through the work's putting back. Restoring a hibernation
++ * image runs the suspend above in the kernel that boots first, so this kernel
++ * would not know that charging went on.
++ */
+ static int mt6375_chg_resume(struct device *dev)
+ {
+ 	struct mt6375_chg *chg = dev_get_drvdata(dev);
+ 
+-	if (chg->can_control)
+-		mt6375_chg_start_work(chg);
++	if (!chg->can_control)
++		return 0;
++
++	mutex_lock(&chg->lock);
++	chg->asleep = true;
++	mutex_unlock(&chg->lock);
++
++	mt6375_chg_start_work(chg);
+ 
+ 	return 0;
+ }

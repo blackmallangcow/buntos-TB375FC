@@ -271,3 +271,6 @@
 0202-drm-panthor-raise-the-GPU-frequency-in-steps.patch
 # 0203 평소 상한(soft_max_mhz, 기본 0=끔). GPU가 상한에서 꽉 차면(75% 이상이 2초 쌓이면) 풀고, 40% 아래가 1초 쌓이면 다시 건다
 0203-drm-panthor-add-an-optional-soft-frequency-ceiling.patch
+# 0204 잠든 동안에도 충전한다. 잠들기 직전 판단이 충전이고 배터리가 40도 이하·정상 범위·고장 없음일 때만, 두 전류 모두 USB 기본 500 mA,
+#   칩 안전 타이머 20시간으로. 깨면 작업이 한 번 끄고 10시간으로 되돌린다. 순정은 RTC로 10초마다 깨어 보지만 여기서는 RTC가 못 깨운다(2026-11-11)
+0204-power-supply-mt6375-charger-keep-charging-gently-in-suspend.patch
