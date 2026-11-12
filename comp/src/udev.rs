@@ -1,5 +1,8 @@
+// SPDX-FileCopyrightText: 2017 Victor Berger and Victoria Brekenfeld
 // SPDX-FileCopyrightText: 2026 buntOS contributors
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later AND MIT
+//
+// Smithay anvil의 udev.rs(MIT)를 바탕으로 했다.
 
 //! DRM/KMS + libinput 백엔드 (GPU 하나). Smithay anvil의 udev 백엔드 구조를 단순화했다.
 //! 하드웨어 GPU가 없는 VM에서는 Mesa의 소프트웨어 렌더러(llvmpipe)로 그린다.
