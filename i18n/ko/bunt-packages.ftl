@@ -41,7 +41,7 @@ installer-count-names = { $count }개: { $names }
 installer-trust-deb = 이 파일은 buntOS 저장소에서 온 것이 아닙니다. 믿을 수 있는 곳에서 받은 파일만 설치하십시오. 설치할 때 패키지의 스크립트가 관리자 권한으로 실행됩니다.
 installer-trust-appimage = 믿을 수 있는 곳에서 받은 파일만 설치하십시오. 이 앱은 샌드박스 없이 이 사용자의 권한으로 실행됩니다.
 installer-trust-flatpak = 믿을 수 있는 곳에서 받은 파일만 설치하십시오. 앱은 샌드박스에서 실행됩니다.
-installer-trust-repo = 이 저장소의 앱을 앱 스토어에서 찾아 설치할 수 있게 됩니다. 믿을 수 있는 저장소만 더하십시오.
+installer-trust-repo = 이 저장소의 앱을 소프트웨어 앱에서 찾아 설치할 수 있게 됩니다. 믿을 수 있는 저장소만 더하십시오.
 installer-cancel = 취소
 installer-install = 설치
 installer-reinstall = 다시 설치
@@ -66,7 +66,7 @@ installer-status-cleanup = 정리하는 중…
 installer-success = 설치가 성공적으로 완료되었습니다.
 installer-success-details = 소프트웨어가 설치되었습니다.
 installer-repo-added = 저장소를 추가했습니다.
-installer-repo-added-details = 앱 스토어에서 이 저장소의 앱을 찾을 수 있습니다.
+installer-repo-added-details = 소프트웨어 앱에서 이 저장소의 앱을 찾을 수 있습니다.
 installer-repo-exists = 이 저장소는 이미 추가되어 있습니다.
 installer-removed = 제거했습니다.
 installer-failed = 설치하지 못했습니다.
@@ -105,7 +105,7 @@ remove-confirm = 제거
 
 ## 목록 창
 manager-open-file = 설치 파일 열기…
-manager-store = 앱 스토어
+manager-store = 소프트웨어
 manager-search = 찾기
 manager-file-filter = 설치 파일
 manager-footnote = 직접 설치한 앱과 패키지만 보입니다. buntOS에 들어 있는 앱은 제거할 수 없습니다.

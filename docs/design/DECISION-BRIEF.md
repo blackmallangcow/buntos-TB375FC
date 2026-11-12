@@ -413,7 +413,7 @@ v0.3.9: ADR-013으로 이 결정은 태블릿 라인(포크 `buntos-TB375FC`)의
 
 **결정 (2026-11-03)**
 - 이름은 사람이 정한 "패키지 매니저"다. 설치 파일 형식은 .deb, AppImage(2형 squashfs), .flatpak, .flatpakref, .flatpakrepo다. rpm과 snap은 까닭을 알린다.
-- 앱 스토어는 GNOME Software와 Flathub이고 모든 앱에는 "앱 스토어"로 보인다. Flathub는 이미지가 넣는다(사용자가 지우면 다시 생기지 않는다). 업데이트 자동 내려받기는 끈다.
+- 앱 스토어는 GNOME Software와 Flathub이고 모든 앱에는 "소프트웨어"로 보인다(처음의 "앱 스토어"는 Apple 상표 App Store와 겹쳐 2026-11-12에 바꿨다). Flathub는 이미지가 넣는다(사용자가 지우면 다시 생기지 않는다). 업데이트 자동 내려받기는 끈다.
 - 이미지에 든 패키지는 목록에 없고 지우지 못한다(`/usr/share/buntos/base-packages`).
 - 패키지 설치는 매번 관리자 인증을 받는다. PackageKit의 `auth_admin_keep`을 규칙으로 `auth_admin`으로 바꾼다(ARCHITECTURE 6.5절). Flatpak은 샌드박스이고 `--user`로는 어차피 인증 없이 설치되므로 flatpak의 기본 규칙(관리자는 암호 없음)을 둔다.
 
