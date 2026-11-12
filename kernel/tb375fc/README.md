@@ -18,7 +18,7 @@ TB375FC(Lenovo Xiaoxin Pad Pro 12.7 2025, MediaTek MT6897)용 mainline 커널 �
 
 ## 빌드
 
-빌드 VM(Lima `buntos-dev`, Debian 13 arm64) 안에서 한다. 처음 한 번은 빌드 도구를 설치한다.
+빌드 VM(Lima `buntos-dev`, Debian 13 arm64) 안에서 한다. 처음 한 번은 빌드 도구를 설치한다. 명령은 맥에서 저장소 맨 위 폴더에서 실행한다(VM은 저장소를 같은 경로로 마운트한다).
 
 ```bash
 limactl shell buntos-dev -- sudo apt-get install -y flex bison bc libssl-dev libelf-dev dwarves cpio kmod lz4 device-tree-compiler debhelper libdw-dev

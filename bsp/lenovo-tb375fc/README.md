@@ -48,6 +48,8 @@ UPower 1.91.5는 PPS 충전기를 쓰는 동안 USB 포트의 `online` 값 2를 
 limactl shell buntos-dev -- sudo apt-get install -y busybox-static mkbootimg
 ```
 
+명령은 맥에서 저장소 맨 위 폴더에서 실행한다(VM은 저장소를 같은 경로로 마운트한다).
+
 1. 커널: `kernel/tb375fc/build.sh all`
 2. initramfs: 커널 모듈을 함께 넣는다. 출력은 `~/buntos-build/tb375fc/images/initramfs.cpio.lz4`다.
 
