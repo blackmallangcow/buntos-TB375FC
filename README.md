@@ -1,70 +1,133 @@
-# buntOS
+<p align="right"><strong>English</strong> · <a href="README.ko.md">한국어</a></p>
 
-> **이 저장소는 buntOS 태블릿 라인의 첫 포크(`buntos-TB375FC`)입니다.**
-> buntOS 원본은 x86-64·arm64 데스크톱 라인이고, 태블릿은 원본의 arm64를 포크해 기기마다 최적화합니다. 이 포크는 Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)와 같은 하드웨어인 Idea Tab Pro(TB373FU)를 맡습니다.
-> - 커널 커스텀: [kernel/tb375fc](kernel/tb375fc/README.md)
-> - 부트 이미지: [bsp/lenovo-tb375fc](bsp/lenovo-tb375fc/README.md)
-> - 최종 설계안: [docs/tb375fc](docs/tb375fc/README.md)
->
-> 데스크톱(컴포지터, 셸, 시스템 설정, 에이전트)은 원본 buntOS(원격 `buntos`)에서 받아 합칩니다. 이 포크는 arm64만 빌드합니다.
+# buntOS on the Lenovo Xiaoxin Pad Pro 12.7 (TB375FC)
 
-개발용 Unix 워크스테이션을 목표로 하는 오픈소스 데스크톱 OS입니다. x86-64(Intel·AMD)와 arm64의 데스크톱·노트북을 GPU 가속으로 지원하고, 셸 제어, 개발환경 구성, 테스트 호스팅, 앱 간 제어를 완전히 열린 스택 위에서 제공하려고 합니다. 태블릿은 이 저장소를 arm64로 포크해 기기마다 최적화하는 별도 라인(태블릿 라인)에서 합니다.
+buntOS is an open desktop OS built on Debian, mainline Linux and its own Rust/Smithay Wayland compositor. This repository is the first device of its tablet line. It ports mainline Linux 7.2 to the **Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)**, a MediaTek Dimensity 8300 (MT6897) tablet, and runs the buntOS desktop on top.
 
-*English: buntOS is an open-source desktop OS for x86-64 and arm64 machines that aims to be a fully open Unix development workstation: Debian-based, mainline Linux, a GPU-accelerated Rust/Smithay Wayland compositor, and an AI-friendly control plane. The same image recipe builds and boots on x86-64 and arm64 QEMU with its own compositor, macOS-style shell, settings app and AI agent control plane (CLI, JavaScript REPL and MCP). Tablets are a separate line of device-specific arm64 forks, starting with the Lenovo Xiaoxin Pad Pro 12.7 (TB375FC). The design documents are written in Korean.*
+Everything that runs on the main CPU is open source. Firmware is the only exception. It is not distributed here; you extract it from your own device.
 
-## 현재 상태
+> [!WARNING]
+> This is a work in progress, not a release.
+> - There is no installer. Putting it on a tablet means unlocking the bootloader with community tools, repartitioning the internal storage and flashing by hand. A mistake can brick the device.
+> - The build is based on a Debian forky (testing) snapshot and has no security support.
+> - Most of the documentation is in Korean.
 
-x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅하며, 이미지에는 Wi-Fi·Bluetooth·오디오·GPU 펌웨어 같은 필수 드라이버가 들어 있습니다. 두 아키텍처 모두에서 e2e 시험(부팅과 로그인, AI 에이전트의 앱 간 제어, 키보드 단축키, 한글 입력, 화면 잠금)을 통과합니다(x86-64는 CI의 호스티드 러너에서). 기반 단계(Phase 0)는 끝났고, 다음은 데스크톱 실기기와 GPU 가속입니다.
+![The buntOS desktop on the TB375FC](docs/images/tb375fc/desktop.png)
+*The buntOS desktop on the tablet's 2944×1840 panel, with the UI in Korean. Both screenshots were taken on the device.*
 
-자체 컴포지터(bunt-comp), 셸(bunt-shell), 시스템 설정(bunt-settings), 로그인 화면(bunt-greeter)이 뜹니다. UI는 macOS 26을 기준으로 삼습니다([디자인 스펙](docs/design/DESIGN-SPEC.md)).
-- **메뉴 막대:** 앞에 있는 앱의 메뉴, 입력 소스·사운드·배터리·Wi-Fi 같은 메뉴 막대 항목, 제어 센터, 알림 센터
-- **Dock:** 최소화 칸과 최소화된 윈도우 애니메이션(지니 효과, 크기 조절 효과), 화면 가운데에 뜨는 모든 앱 패널, ⌘⇥ 앱 전환
-- **데스크탑:** 데스크탑 폴더의 파일과 폴더(열기, 이름 변경, 휴지통으로 이동, 드래그해 옮기기와 다른 앱에 놓기), 빈 곳에서 드래그해 여러 항목 선택
-- **터치:** 손가락 입력, 화면 가장자리에서 밀어 숨은 메뉴 막대·Dock 꺼내기, 키보드와 마우스가 없으면 누를 영역을 44px로 넓히는 터치 모드, 글 칸을 누르면 뜨는 iPadOS형 화면 키보드(2벌식 한글, 잠금·로그인 화면 포함)
-- **스크린샷과 화면 기록:** ⇧⌘3·⇧⌘4, ⇧⌘5 도구 막대(선택 영역을 옮기고 크기를 조절해 찍기, 전체 화면·선택 부분 기록)
-- **한글 입력:** fcitx5 두벌식. Ctrl+Space와 한/영 키로 바꾼다
-- **로그인과 잠금:** 처음 켤 때 계정 만들기, 로그인 화면, 화면 잠금, 관리자 인증 창
-- **시스템 설정:** Wi-Fi, Bluetooth, 디스플레이, 키보드, 사운드, 알림, 사용자 및 그룹, AI 에이전트 등 19개 페이지
-- **앱 설치:** 받은 설치 파일(.deb, AppImage, Flatpak)을 두 번 누르면 macOS 설치 프로그램 같은 패키지 매니저 창이 떠 터미널 없이 설치하고 지운다. 앱 스토어(GNOME Software, Flathub)에서 앱을 찾아 설치하고 업데이트한다
+![Orca running on the TB375FC](docs/images/tb375fc/orca.png)
+*Orca, an IDE for running AI coding agents in parallel, runs natively on the tablet (arm64, Wayland). The Claude chat in it is summing up the tablet's own development environment.*
 
-리눅스에서 널리 쓰는 기본 앱(웹 브라우저, 파일, 텍스트 편집기, 계산기, 이미지 보기, 문서 보기, 동영상 재생, 시스템 모니터, 터미널)도 함께 들어 있습니다. Apple Silicon Mac에서는 이 이미지를 QEMU 창으로 띄워 볼 수 있습니다([개발 환경](docs/dev/environment.md) 4장).
+## What works
 
-**AI 제어 계층:** AI는 접근성 트리를 읽어 앱을 다룹니다. `bunt agent`(스냅샷과 동작), Playwright 문법의 JavaScript REPL(`bunt agent repl`), 셸이 없는 AI 앱을 위한 MCP 어댑터(`bunt mcp`)가 있습니다. 사용자가 시스템 설정에서 허용한 AI만 제어할 수 있고, 관리자 인증·암호 창은 사람만 답하며, 화면이 잠긴 동안에는 아무것도 하지 못합니다.
+These were tested on the device.
 
-![buntOS 데스크톱: 메뉴 막대 오른쪽의 입력 소스(한)·사운드·전원·네트워크·제어 센터 아이콘, 흐린 유리 위에 열린 제어 센터, macOS 26형 시스템 설정의 키보드 페이지(입력 소스 ABC·한글, 전환 단축키), Dock](docs/images/desktop-v0.png)
-
-- 설계안: [docs/design/ARCHITECTURE.md](docs/design/ARCHITECTURE.md)
-- 결정 자료와 근거: [docs/design/DECISION-BRIEF.md](docs/design/DECISION-BRIEF.md)
-- 디자인 스펙(UI 규칙과 토큰): [docs/design/DESIGN-SPEC.md](docs/design/DESIGN-SPEC.md)
-- 개발 환경과 이미지 빌드: [docs/dev/environment.md](docs/dev/environment.md)
-
-## 핵심 방향
-
-- **완전히 열린 스택**: 메인 CPU에서 도는 커널·드라이버·사용자 공간은 전부 오픈소스입니다. 벤더 커널과 폐쇄 드라이버는 쓰지 않으며, 펌웨어만 예외입니다
-- **개발환경 비차단**: root, 패키지 설치, 컨테이너, 가상화, 커널 업그레이드를 OS가 막지 않습니다
-- **두 아키텍처 동등 지원**: x86-64와 arm64를 같은 소스와 같은 패키지 목록으로 빌드합니다
-- **제품 라인**: 이 저장소는 x86-64·arm64 데스크톱 라인입니다. 태블릿은 기기마다 arm64 포크(태블릿 라인)에서 최적화하고, 데스크톱 컴포넌트는 이 저장소에서 받아 갑니다
-- **기반**: mainline Linux 커널, Debian(glibc, systemd), Rust + Smithay 기반 Wayland 컴포지터(Mesa GPU 가속)
-- **AI 친화 제어 계층**: 접근성 트리를 바탕으로 권한을 확인하며 앱 간 제어를 제공합니다
-
-태블릿 라인의 첫 기기는 Lenovo Xiaoxin Pad Pro 12.7(TB375FC, MediaTek Dimensity 8300)이고, 별도 포크 저장소에서 mainline 커널 포팅으로 진행합니다.
-
-## 보안 지원
-
-buntOS는 Debian forky(testing) 스냅샷을 기반으로 합니다. forky가 정식 릴리스되기 전의 빌드는 **보안 지원이 없습니다**. 실사용 환경에 쓰지 마세요.
-
-## 라이선스
-
-[REUSE](https://reuse.software/) 규격을 따릅니다. 파일별 라이선스는 SPDX 헤더나 `REUSE.toml`에 표기합니다.
-
-| 대상 | 라이선스 |
+| Area | State |
 |---|---|
-| 컴포지터, 셸, 에이전트 등 핵심 컴포넌트 | GPL-3.0-or-later |
-| 외부 앱이 링크하는 SDK·프로토콜 크레이트 | MIT OR Apache-2.0 |
-| 문서 | CC-BY-SA-4.0 |
+| Boot | The stock bootloader (LK) boots mainline Linux 7.2.12 from slot `_b`. The root file system (btrfs) is on a new partition in the internal UFS storage, and Android stays on slot `_a`. |
+| Display | The 2944×1840 dual-DSI panel with DSC runs through mediatek-drm at 144, 120, 60 or 30 Hz, with backlight control. |
+| GPU | Mali-G615 MC6 runs on panthor with Mesa 26.3, and the compositor draws with GLES. A GPU clock policy keeps everyday work at or below 542 MHz, where the GPU supply stays quiet. The cap lifts for GPU-bound work. |
+| Input | Touchscreen and pogo-pin keyboard cover. Its touchpad does tap to click and two-finger scrolling. The cover sensor, power key and volume keys work. |
+| Wireless | Wi-Fi works on 2.4 and 5 GHz (station mode, WPA2) through a new mt76 variant for the MT6897 connectivity subsystem. Bluetooth works with AirPods and a BLE keyboard. |
+| Audio | The four speakers and the built-in microphone work through PipeWire. |
+| Power | USB-C charging, including PPS direct charging at about 40 W, and the battery gauge. The tablet keeps charging while asleep. Other power features that work: suspend-to-idle with power-key wake, a 10-second forced power-off, CPU idle states and thermal throttling. |
+| Desktop | The buntOS compositor, shell, settings and on-screen keyboard run, with Korean input. So do the usual apps (Firefox, Files, Terminal and others). |
 
-라이선스 원문은 [LICENSES/](LICENSES/)에 있습니다. 이 구성을 택한 이유는 결정 자료의 ADR-006에 있습니다.
+## Not done yet
 
-## 기여
+- **Input and ports:**
+  - The stylus driver is written but not tested on the device.
+  - USB-C headphones, USB host mode and DisplayPort Alt Mode.
+- **Sensors and media:**
+  - Cameras and the fingerprint reader.
+  - Auto-rotation and the ambient light sensor, which sit behind the SCP sensor hub.
+  - Hardware video decoding.
+- **Power:**
+  - Turning the display off when idle.
+  - Deeper sleep. Suspend-to-idle uses about 1.2 % of the battery per hour.
+  - Waking from the RTC.
+- **Distribution:** an installer and recovery tooling.
 
-[CONTRIBUTING.md](CONTRIBUTING.md)를 참고하세요. 기여는 DCO(Developer Certificate of Origin) 서명으로 받습니다.
+## Hardware
+
+| Part | Details |
+|---|---|
+| SoC | MediaTek MT6897 (Dimensity 8300): 4× Cortex-A715 + 4× Cortex-A510, Mali-G615 MC6 |
+| Memory and storage | 8 or 12 GB RAM, UFS |
+| Display | Novatek NT36532 panel, 2944×1840, dual-DSI with DSC, 144/120/60/30 Hz |
+| Power | MT6363, MT6368, MT6319 and MT6685 PMICs. The MT6375 is the charger and USB-C port controller. UPM6720 or NU2115 charge pumps and an MM8013 gauge complete it. |
+| Wireless | connsys soc7_0 (MT7921 family) with MT6637 RF |
+| Other | Four speaker amplifiers, two hall sensors and a UART pogo-pin keyboard |
+
+The global model, the Lenovo Idea Tab Pro (TB373FU), uses the same hardware. Its device tree is here, but it has not been tested on that model.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `kernel/tb375fc/` | The kernel on Linux 7.2.12: a queue of 182 patches, device trees, a config fragment and the build script |
+| `bsp/lenovo-tb375fc/` | Boot images (boot, vendor_boot, init_boot, dtbo), the initramfs, the mkosi board profile, Mesa and UPower packages, and firmware extraction |
+| `docs/tb375fc/` | Design, bring-up checklist and Wi-Fi notes (in Korean) |
+| `comp/`, `shell/`, `settings/`, … | The buntOS desktop. It is shared with the desktop line and merged into this repository. |
+
+## Building
+
+Builds run on Debian 13 arm64. The project uses a Lima VM on a Mac; see [docs/dev/environment.md](docs/dev/environment.md). Run these commands from the repository root inside that machine:
+
+1. Kernel package: `kernel/tb375fc/build.sh image`
+2. Mesa 26.3 package: `bsp/lenovo-tb375fc/mesa/build.sh`
+3. UPower package: `bsp/lenovo-tb375fc/upower/build.sh`
+4. Root file system: `tools/image/build.sh lenovo-tb375fc`. This needs about 30 GB of free disk on the host and produces `buntos.root-arm64.raw`.
+5. Boot images and initramfs: `bsp/lenovo-tb375fc/initramfs/mkinitramfs.sh` and `bsp/lenovo-tb375fc/boot/mkimages.sh`
+
+Details are in [kernel/tb375fc/README.md](kernel/tb375fc/README.md) and [bsp/lenovo-tb375fc/README.md](bsp/lenovo-tb375fc/README.md), in Korean.
+
+## Installing
+
+There is no installer yet. The steps the project followed, in order, are in [docs/tb375fc/bringup-checklist.md](docs/tb375fc/bringup-checklist.md), in Korean:
+
+1. Back up every partition and keep a way back. Use SP Flash Tool with the authorized DA from the stock firmware package.
+2. Unlock the bootloader. The known route uses a development LK image of unknown origin that was reported on XDA. This project does not distribute it and cannot vouch for it.
+3. Make a root partition (`buntos`) out of `userdata` and write the root file system to it.
+4. Flash the boot images to the spare slot `_b`. Android stays on slot `_a` as the way back.
+5. Extract the firmware from your own device with `bsp/lenovo-tb375fc/firmware/extract.sh`.
+
+> [!CAUTION]
+> Images built from this repository are development images.
+> - If the root file system cannot be mounted, the initramfs opens a root shell without a password on the screen and over USB.
+> - The kernel options `buntos.usbdebug=1` and `buntos.telnet=1` open more of them.
+>
+> Do not use these images on a device that holds data you need to protect.
+
+## Upstream
+
+The patches are written so that they can go upstream. One fix from the queue (the MT6363 VSRAM LDO registers) has been applied to the regulator tree for Linux 7.4. More will be sent after device testing.
+
+## Contributing
+
+Contributions are accepted under the Developer Certificate of Origin; see [CONTRIBUTING.md](CONTRIBUTING.md), in Korean.
+
+## License
+
+The repository follows [REUSE](https://reuse.software/). Each file carries SPDX headers or is covered by [REUSE.toml](REUSE.toml), and the license texts are in [LICENSES/](LICENSES/).
+
+| Part | License |
+|---|---|
+| buntOS desktop components | GPL-3.0-or-later |
+| Kernel patches | The license of the kernel files they change, mostly GPL-2.0-only (see REUSE.toml) |
+| Device trees | GPL-2.0-only OR BSD-2-Clause |
+| Documentation and screenshots | CC-BY-SA-4.0 |
+
+## Acknowledgements
+
+This work builds on others:
+- the Linux kernel and MediaTek upstream developers
+- Mesa (Panfrost) and panthor
+- Smithay, Debian and mt76
+- OnePlus, OPPO and Motorola, who published their MT6897 kernel sources under the GPL
+- the XDA community for its unlock reports
+- [u0n0u/tb375fc-linux](https://github.com/u0n0u/tb375fc-linux), another mainline port of this tablet
+
+## Disclaimer
+
+This is an unofficial project. It is not affiliated with or endorsed by Lenovo, MediaTek, Apple, or the makers of the apps shown in the screenshots. Product names, app names and icons belong to their owners. The UI follows macOS conventions but uses its own artwork.
