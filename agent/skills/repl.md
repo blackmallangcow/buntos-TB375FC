@@ -97,6 +97,10 @@ line names the app and window that received it and the way (`accessibility` or
 Key names: Playwright's (`Enter`, `ArrowLeft`, `Control+A`, `Meta`) or xkb's (`Return`, `Left`,
 `ctrl+a`, `super`); several keys separated by spaces or in an array.
 
+When a whole document is replaced (a link to another page), a very long diff is summed up as
+`# the document was replaced: 1529 lines → 49 lines; take a snapshot to read it`. Take a snapshot
+then, or raise the limit with `snapshot({ diff: true, maxLines: 5000 })` (400 lines by default).
+
 ## Wait
 
 Do not sleep. Wait for what you expect, with a time limit (10 s by default, `timeout` in ms):
@@ -106,10 +110,15 @@ await calc.wait({ text: '42' })                     // a name, text or value wit
 await editor.wait({ role: 'dialog', gone: true })   // until it goes away
 await editor.waitForWindow('Save')                  // a window whose title has it is open
 await editor.waitForWindow()                        // any new window of the app
+await page.waitForLoadState()                       // the visible document has finished loading
 await calc.locator('e159').wait({ value: '42' })    // the element's value becomes this
 await calc.locator('e159').wait({ changed: true })  // the element's value changes
 await dialog.getByRole('button', { name: 'OK' }).waitFor({ state: 'hidden' })
 ```
+
+Waiting for a window also waits until its document has finished loading, so a snapshot right
+after it has the page body. A wait stops with `TargetGoneError` when the app it watches quits or
+is restarted (a new process); take a new snapshot then, because refs from the old one are gone.
 
 Something is gone only when the whole scope was read and it was not there, or when its app quit.
 While no window has the keyboard focus or a tree is cut at 2000 lines, the wait goes on; wait

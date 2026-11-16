@@ -74,7 +74,11 @@ terminals (foot) never do.
 - Elements scrolled out of view in a web page are marked `[offscreen]`; acting on them scrolls
   them into view first. GTK lists only build the rows on screen: scroll the list and read again.
 - Use `wait` for things that take time (a page loading, a dialog opening, a result appearing)
-  instead of sleeping.
+  instead of sleeping. `waitForLoadState()` (CLI `wait --loaded`) waits until the visible page has
+  finished loading; waiting for a window does this too. A wait ends with `TargetGoneError` when
+  the app quits or restarts.
+- A diff of a replaced document is summed up when it is longer than 400 lines (`maxLines`, CLI
+  `--max-lines`); take a snapshot to read the new page.
 
 ## Apps
 

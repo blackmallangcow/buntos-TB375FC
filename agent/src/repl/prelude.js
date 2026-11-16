@@ -513,13 +513,15 @@
       return new Mouse(this.scope);
     }
 
-    /** 압축 접근성 트리. interactive: 누르거나 쓸 수 있는 요소만, hidden: 숨은 요소도, diff: 지난번과 달라진 줄만 보인다 */
+    /** 압축 접근성 트리. interactive: 누르거나 쓸 수 있는 요소만, hidden: 숨은 요소도, diff: 지난번과 달라진 줄만 보인다.
+     *  maxLines: 문서가 통째로 바뀌어 diff가 이보다 길면 요약한다 (기본 400) */
     async snapshot(opts) {
-      const o = options(opts, ['interactive', 'hidden', 'diff'], 'snapshot');
+      const o = options(opts, ['interactive', 'hidden', 'diff', 'maxLines'], 'snapshot');
       const reply = call('snapshot', {
         app: appOf(this.scope),
         interactive: !!o.interactive,
         hidden: !!o.hidden,
+        max_lines: integer(o.maxLines, 'maxLines'),
       });
       return new Snapshot(reply, !!o.diff);
     }
@@ -541,9 +543,10 @@
       return new Screenshot(call('screenshot', { app: appOf(this.scope) }));
     }
 
-    /** 무엇이 나타나거나(gone이면 사라지거나) 창이 뜰 때까지 기다린다: { text } | { role, name } | { window } */
+    /** 무엇이 나타나거나(gone이면 사라지거나) 창이 뜰 때까지 기다린다: { text } | { role, name } | { window } | { loaded }.
+     *  loaded: 보이는 문서를 다 불러올 때까지(불러오는 중이 아닐 때까지). 창 기다리기도 문서를 다 불러오기를 기다린다 */
     async wait(opts) {
-      const o = options(opts, ['text', 'role', 'name', 'exact', 'nth', 'window', 'gone', 'timeout'], 'wait');
+      const o = options(opts, ['text', 'role', 'name', 'exact', 'nth', 'window', 'gone', 'loaded', 'timeout'], 'wait');
       return new Waited(
         call('wait', {
           app: appOf(this.scope),
@@ -554,9 +557,19 @@
           exact: !!o.exact,
           nth: integer(o.nth, 'wait nth'),
           gone: !!o.gone,
+          loaded: !!o.loaded,
           timeout_ms: millis(o.timeout, 'timeout'),
         }),
       );
+    }
+
+    /** 보이는 문서를 다 불러올 때까지 기다린다 (Playwright의 waitForLoadState. 상태 이름은 받기만 하고 모두 "다
+     *  불러옴"으로 본다) */
+    async waitForLoadState(state, opts) {
+      if (state !== null && typeof state === 'object') [state, opts] = [undefined, state];
+      if (state !== undefined) text(state, 'waitForLoadState');
+      const o = options(opts, ['timeout'], 'waitForLoadState');
+      return this.wait({ loaded: true, timeout: o.timeout });
     }
 
     /** 창이 뜰 때까지 기다린다. 제목이 없으면 새로 뜬 창이다 */
@@ -857,9 +870,14 @@
 
     /** 이 요소 아래만 읽은 트리 */
     async snapshot(opts) {
-      const o = options(opts, ['interactive', 'hidden', 'diff', 'timeout'], 'snapshot');
+      const o = options(opts, ['interactive', 'hidden', 'diff', 'maxLines', 'timeout'], 'snapshot');
       const ref = this.resolve(millis(o.timeout, 'timeout'));
-      const reply = call('snapshot', { ref, interactive: !!o.interactive, hidden: !!o.hidden });
+      const reply = call('snapshot', {
+        ref,
+        interactive: !!o.interactive,
+        hidden: !!o.hidden,
+        max_lines: integer(o.maxLines, 'maxLines'),
+      });
       return new Snapshot(reply, !!o.diff);
     }
 
