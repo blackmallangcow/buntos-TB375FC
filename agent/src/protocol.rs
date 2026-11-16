@@ -59,6 +59,8 @@ pub const BLOCKED_APP: i64 = -32002;
 pub const SCREEN_LOCKED: i64 = -32003;
 /// 기다리던 것이 시간 상한 안에 일어나지 않았다 (`wait`)
 pub const TIMEOUT: i64 = -32004;
+/// 대상 앱이 끝났거나 다시 떴다: 받은 ref와 기다리던 것은 그 앱의 것이었다. 새 스냅샷을 읽어야 한다
+pub const TARGET_GONE: i64 = -32007;
 
 /// 데몬 알림(AGENT_ERROR)의 앞머리: `app`에 맞는 앱이 없다. 기다리기는 이것을 그 앱이 없는 것으로 읽는다
 pub const NO_APP_MATCHES: &str = "no app matches";

@@ -9,6 +9,9 @@
 //! 다시 읽을 때마다 데몬에 따로 요청한다([`Desk`]): 기다리는 동안 데몬을 붙잡지 않고, 요청마다 정책을 다시
 //! 보므로 그 사이에 화면이 잠기거나 사용자가 AI를 끄면 바로 거절된다. 다시 읽는 스냅샷은 `peek`이라 다음
 //! 스냅샷의 diff를 흐리지 않는다.
+//!
+//! 앱(`app`)이나 ref 범위의 기다리기는 처음 본 그 앱의 pid에 묶인다: 앱이 다시 뜨거나 끝나면 새 프로세스에 조용히
+//! 붙지 않고 TARGET_GONE으로 끝난다(이슈 #1 P2-2).
 
 use std::time::{Duration, Instant};
 
@@ -51,10 +54,20 @@ enum Condition {
 
 /// 범위를 한 번 읽은 것
 enum Seen {
-    /// 트리의 요소 줄. `cut`이면 트리가 길어 끝을 잘라 안 보이는 요소가 더 있을 수 있다
-    Lines { lines: Vec<Line>, cut: bool },
-    /// 창 제목. `complete`가 아니면 빠진 창이 있을 수 있다 (잘린 트리에서 읽었다)
-    Windows { titles: Vec<String>, complete: bool },
+    /// 트리의 요소 줄. `cut`이면 트리가 길어 끝을 잘라 안 보이는 요소가 더 있을 수 있다. `pid`는 그 앱의 pid
+    /// (스냅샷 머리줄)
+    Lines {
+        lines: Vec<Line>,
+        cut: bool,
+        pid: Option<u32>,
+    },
+    /// 창 제목. `complete`가 아니면 빠진 창이 있을 수 있다 (잘린 트리에서 읽었다). `pid`는 앱 범위일 때 그 앱의
+    /// pid (모든 앱의 창이면 None)
+    Windows {
+        titles: Vec<String>,
+        complete: bool,
+        pid: Option<u32>,
+    },
     /// 앱이 없다 (아직 뜨지 않았거나 끝났다): 그 앱의 요소와 창도 없다
     Absent(String),
     /// 보지 못했다 (키보드 포커스를 가진 창이 없다, 트리가 없는 창, 접근성 버스의 오류): 있는지 없는지 모른다.
@@ -149,8 +162,13 @@ pub fn run(desk: &dyn Desk, params: &WaitParams) -> Result<Waited, Failure> {
     let limit = limit(params);
     let started = Instant::now();
     let mut baseline: Option<Baseline> = None;
+    let mut bound: Option<u32> = None;
     loop {
         let seen = observe(desk, params, &condition)?;
+        if let Some(failure) = bind(&mut bound, &seen, &condition, params) {
+            crate::atspi::dump_calls(None, &failure.1);
+            return Err(failure);
+        }
         if let Some(outcome) = check(&condition, params, &seen, &mut baseline) {
             return Ok(answer(
                 &condition,
@@ -179,7 +197,60 @@ fn observe(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Resul
     };
     match seen {
         Err((protocol::AGENT_ERROR, message)) => unseen(message),
+        // 데몬이 ref의 앱이 끝났거나 다시 떴다고 알렸다: 사라지기를 기다렸으면 사라진 것이고, 아니면 그대로 끝낸다
+        Err((protocol::TARGET_GONE, message)) if params.gone => Ok(Seen::Absent(message)),
         seen => seen,
+    }
+}
+
+/// 기다리기를 처음 본 대상 앱의 pid에 묶는다 (이슈 #1 P2-2: Firefox가 끝나고 다시 뜨자 `wait --window … --app
+/// firefox-esr`이 새 프로세스를 지켜보다 시간이 다 되었다). 앱(`app`)이나 ref 범위만 묶는다: 활성 창 범위는 다른
+/// 앱으로 옮겨 갈 수 있다. pid가 바뀌면 앱이 다시 뜬 것이고, 묶은 뒤에 앱이 없으면 끝난 것이다(ref의 앱은 처음부터
+/// 없어도). 사라지기(gone)를 기다리면 앱이 끝난 것은 기다리던 것이 사라진 것이라 실패가 아니다
+fn bind(
+    bound: &mut Option<u32>,
+    seen: &Seen,
+    condition: &Condition,
+    params: &WaitParams,
+) -> Option<Failure> {
+    if params.app.is_none() && params.scope.is_none() {
+        return None;
+    }
+    let what = || describe(condition, params);
+    match seen {
+        Seen::Lines { pid, .. } | Seen::Windows { pid, .. } => {
+            let now = (*pid)?;
+            match *bound.get_or_insert(now) {
+                first if first != now => Some((
+                    protocol::TARGET_GONE,
+                    format!(
+                        "stopped waiting for {}: the app restarted (pid {first} → {now}); take a \
+                         new snapshot",
+                        what()
+                    ),
+                )),
+                _ => None,
+            }
+        }
+        Seen::Absent(_) if params.gone => None,
+        Seen::Absent(message) => match (*bound, &params.scope) {
+            (Some(first), _) => Some((
+                protocol::TARGET_GONE,
+                format!(
+                    "stopped waiting for {}: {} (pid {first}); take a new snapshot",
+                    what(),
+                    protocol::APP_QUIT
+                ),
+            )),
+            // ref의 앱은 다시 나타나지 않는다
+            (None, Some(_)) => Some((
+                protocol::TARGET_GONE,
+                format!("stopped waiting for {}: {message}", what()),
+            )),
+            // 아직 뜨지 않은 앱: 뜨기를 기다린다
+            (None, None) => None,
+        },
+        Seen::Unknown(_) => None,
     }
 }
 
@@ -222,6 +293,7 @@ fn lines(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<
     let tree = reply["tree"].as_str().unwrap_or_default();
     let lines = outline::parse(tree);
     let cut = outline::truncated(tree);
+    let pid = outline::app_pid(tree);
     if let Condition::Element(matcher) = condition
         && cut
         && !params.gone
@@ -234,10 +306,11 @@ fn lines(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<
             return Ok(Seen::Lines {
                 lines: found,
                 cut: outline::truncated(short),
+                pid,
             });
         }
     }
-    Ok(Seen::Lines { lines, cut })
+    Ok(Seen::Lines { lines, cut, pid })
 }
 
 /// 창 제목. 앱을 주었으면 그 앱의 보이는 창: 스냅샷의 맨 위 줄이다. 트리가 2000줄에서 잘렸으면 뒤의 창이 빠질 수
@@ -250,6 +323,7 @@ fn windows(desk: &dyn Desk, params: &WaitParams) -> Result<Seen, Failure> {
         return Ok(Seen::Windows {
             titles: all_windows(&reply, None),
             complete: true,
+            pid: None,
         });
     }
     let reply = desk.call("snapshot", snapshot(params, false))?;
@@ -260,7 +334,8 @@ fn windows(desk: &dyn Desk, params: &WaitParams) -> Result<Seen, Failure> {
         .map(|line| line.name)
         .collect();
     let mut complete = !outline::truncated(tree);
-    if !complete && let Some(pid) = outline::app_pid(tree) {
+    let pid = outline::app_pid(tree);
+    if !complete && let Some(pid) = pid {
         let listed = all_windows(&desk.call("apps", Value::Null)?, Some(pid));
         // 보이는 창이 있는 앱인데 목록에 창이 없으면 목록을 읽지 못한 것이다(바쁜 앱): 다 보았다고 하지 않는다
         complete = !listed.is_empty();
@@ -270,7 +345,11 @@ fn windows(desk: &dyn Desk, params: &WaitParams) -> Result<Seen, Failure> {
             }
         }
     }
-    Ok(Seen::Windows { titles, complete })
+    Ok(Seen::Windows {
+        titles,
+        complete,
+        pid,
+    })
 }
 
 /// `apps`의 답에서 창 제목 (트리가 있는 앱의 창과 트리가 없는 창). pid를 주면 그 프로세스의 창만
@@ -313,6 +392,7 @@ fn check(
             Seen::Windows {
                 titles: windows,
                 complete,
+                ..
             },
         ) => {
             if title.is_empty() {
@@ -348,7 +428,7 @@ fn check(
         (_, Seen::Unknown(_)) => None,
         // observe는 창을 기다릴 때만 창 목록을, 아닐 때만 줄을 읽는다
         (_, Seen::Windows { .. }) | (Condition::Window(_), Seen::Lines { .. }) => None,
-        (Condition::Element(matcher), Seen::Lines { lines, cut }) => {
+        (Condition::Element(matcher), Seen::Lines { lines, cut, .. }) => {
             // ref 아래에서 찾을 때 맨 위 줄은 그 ref 자신이다 (Playwright처럼 자손만 찾는다)
             let start = usize::from(params.scope.is_some()).min(lines.len());
             let hits: Vec<usize> = (start..lines.len())
@@ -495,10 +575,10 @@ fn answer(condition: &Condition, params: &WaitParams, outcome: Outcome, ms: u64)
     }
 }
 
-/// 시간이 다 됐을 때의 알림: 무엇을 기다렸고 마지막으로 본 것이 어땠는지
-fn timed_out(condition: &Condition, params: &WaitParams, seen: &Seen, limit: Duration) -> String {
+/// 기다린 것 (알림에 쓴다): `button "OK" in Calculator`, `a window titled "저장"`
+fn describe(condition: &Condition, params: &WaitParams) -> String {
     let target = params.scope.as_deref().unwrap_or("it");
-    let what = match condition {
+    match condition {
         Condition::Element(matcher) if params.gone => {
             format!("{}{} to go away", matcher.describe(), scope(params))
         }
@@ -515,13 +595,24 @@ fn timed_out(condition: &Condition, params: &WaitParams, seen: &Seen, limit: Dur
         Condition::Window(title) => format!("a window titled {title:?}"),
         Condition::Value(value) => format!("{target}'s value to be {value:?}"),
         Condition::Changed => format!("{target}'s value to change"),
-    };
+    }
+}
+
+/// 시간이 다 됐을 때의 알림: 무엇을 기다렸고 마지막으로 본 것이 어땠는지
+fn timed_out(condition: &Condition, params: &WaitParams, seen: &Seen, limit: Duration) -> String {
+    let target = params.scope.as_deref().unwrap_or("it");
+    let what = describe(condition, params);
     // 잘린 트리에서는 다 보지 못한다: 범위를 좁히라고 알린다
     let narrower = "the tree is longer than the 2000 lines a snapshot shows; wait below a ref \
                     (locator(ref).getByText(…), --ref) to see the rest";
     let now = match (condition, seen) {
         (_, Seen::Absent(message) | Seen::Unknown(message)) => format!("; last error: {message}"),
-        (Condition::Window(_), Seen::Windows { titles, complete }) => {
+        (
+            Condition::Window(_),
+            Seen::Windows {
+                titles, complete, ..
+            },
+        ) => {
             let open: Vec<String> = titles
                 .iter()
                 .take(WINDOWS_SHOWN)
@@ -536,7 +627,7 @@ fn timed_out(condition: &Condition, params: &WaitParams, seen: &Seen, limit: Dur
                 false => format!("{open}; {narrower}"),
             }
         }
-        (Condition::Element(matcher), Seen::Lines { lines, cut }) => {
+        (Condition::Element(matcher), Seen::Lines { lines, cut, .. }) => {
             match (lines.iter().find(|line| matcher.matches(line)), cut) {
                 (Some(line), _) if params.gone => format!("; still there: {}", line.text),
                 (Some(_), _) => String::new(),
@@ -1231,5 +1322,159 @@ mod tests {
         assert_eq!(limit_of(None), Duration::from_secs(10));
         assert_eq!(limit_of(Some(0)), Duration::ZERO);
         assert_eq!(limit_of(Some(u64::MAX)), Duration::from_secs(120));
+    }
+
+    /// pid가 `pid`인 앱의 스냅샷
+    fn tree_of(pid: u32, lines: &str) -> Result<Value, Failure> {
+        Ok(json!({
+            "tree": format!("- app: \"Mozilla Firefox\" [pid={pid}]\n{lines}"),
+            "diff": "",
+            "first": false,
+        }))
+    }
+
+    fn no_firefox() -> Result<Value, Failure> {
+        Err((
+            protocol::AGENT_ERROR,
+            "no app matches \"firefox-esr\"; see `bunt agent apps`".into(),
+        ))
+    }
+
+    #[test]
+    fn a_wait_does_not_follow_a_restarted_app() {
+        // 이슈 #1 P2-2: Firefox가 끝나고 다시 떴다. 새 프로세스의 창을 지켜보다 시간이 다 되지 않고 바로 알린다
+        let firefox = |pid| tree_of(pid, "- window \"Mozilla Firefox\" [ref=e1]\n");
+        let desk = Script::new(vec![firefox(552335), firefox(575616)]);
+        let failure = run(
+            &desk,
+            &params(|p| {
+                p.app = Some("firefox-esr".into());
+                p.window = Some("mt6368".into());
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, protocol::TARGET_GONE);
+        assert_eq!(
+            failure.1,
+            "stopped waiting for a window titled \"mt6368\": the app restarted (pid 552335 → \
+             575616); take a new snapshot"
+        );
+        assert_eq!(desk.calls.borrow().len(), 2);
+        // 끝나기만 해도 알린다
+        let failure = run(
+            &Script::new(vec![firefox(552335), no_firefox()]),
+            &params(|p| {
+                p.app = Some("firefox-esr".into());
+                p.text = Some("lore.kernel.org".into());
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, protocol::TARGET_GONE);
+        assert_eq!(
+            failure.1,
+            "stopped waiting for text \"lore.kernel.org\" in firefox-esr: its app quit (pid \
+             552335); take a new snapshot"
+        );
+        // 아직 뜨지 않은 앱은 뜨기를 기다린다 (그 뒤에 묶는다)
+        let desk = Script::new(vec![no_firefox(), firefox(575616)]);
+        let waited = run(
+            &desk,
+            &params(|p| {
+                p.app = Some("firefox-esr".into());
+                p.window = Some("Firefox".into());
+            }),
+        )
+        .unwrap();
+        assert_eq!(waited.window.as_deref(), Some("Mozilla Firefox"));
+    }
+
+    #[test]
+    fn a_target_that_quits_is_gone_when_waiting_for_it_to_go() {
+        // 사라지기를 기다리면 앱이 끝난 것은 사라진 것이다 (다시 뜬 것은 알린다)
+        let page = |pid| tree_of(pid, "- dialog \"저장할까요?\" [ref=e7]\n");
+        let gone = run(
+            &Script::new(vec![page(7), no_firefox()]),
+            &params(|p| {
+                p.app = Some("firefox-esr".into());
+                p.role = Some("dialog".into());
+                p.gone = true;
+            }),
+        )
+        .unwrap();
+        assert_eq!(gone.done, "dialog in firefox-esr is gone");
+        let restarted = run(
+            &Script::new(vec![page(7), page(8)]),
+            &params(|p| {
+                p.app = Some("firefox-esr".into());
+                p.role = Some("dialog".into());
+                p.gone = true;
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(restarted.0, protocol::TARGET_GONE);
+    }
+
+    #[test]
+    fn a_ref_of_an_app_that_quit_ends_the_wait_at_once() {
+        let quit = || -> Result<Value, Failure> {
+            Err((
+                protocol::AGENT_ERROR,
+                format!("e9 is gone: {}; take a new snapshot", protocol::APP_QUIT),
+            ))
+        };
+        let desk = Script::new(vec![quit()]);
+        let failure = run(
+            &desk,
+            &params(|p| {
+                p.scope = Some("e9".into());
+                p.value = Some("42".into());
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, protocol::TARGET_GONE);
+        assert_eq!(
+            failure.1,
+            "stopped waiting for e9's value to be \"42\": e9 is gone: its app quit; take a new \
+             snapshot"
+        );
+        assert_eq!(desk.calls.borrow().len(), 1);
+        // 데몬이 TARGET_GONE으로 알려도 같다: 사라지기면 사라진 것, 아니면 그대로 끝낸다
+        let target_gone = || -> Result<Value, Failure> {
+            Err((
+                protocol::TARGET_GONE,
+                "e9 belongs to an app that restarted (pid 7 → 8); take a new snapshot".into(),
+            ))
+        };
+        let gone = run(
+            &Script::new(vec![target_gone()]),
+            &params(|p| {
+                p.scope = Some("e9".into());
+                p.gone = true;
+            }),
+        )
+        .unwrap();
+        assert_eq!(gone.done, "e9 is gone");
+        let desk = Script::new(vec![target_gone()]);
+        let failure = run(&desk, &params(|p| p.scope = Some("e9".into()))).unwrap_err();
+        assert_eq!(failure.0, protocol::TARGET_GONE);
+        assert!(failure.1.starts_with("e9 belongs to an app that restarted"));
+        assert_eq!(desk.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn the_active_window_may_move_to_another_app() {
+        // 활성 창 범위는 묶지 않는다: 포커스가 다른 앱으로 가도 기다리던 것을 찾는다
+        let waited = run(
+            &Script::new(vec![
+                tree_of(7, "- window \"편집기\" [ref=e1]\n"),
+                tree_of(
+                    8,
+                    "- window \"계산기\" [ref=e2]:\n  - button \"42\" [ref=e3]\n",
+                ),
+            ]),
+            &params(|p| p.text = Some("42".into())),
+        )
+        .unwrap();
+        assert_eq!(waited.found.unwrap().reference.as_deref(), Some("e3"));
     }
 }
