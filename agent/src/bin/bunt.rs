@@ -73,10 +73,16 @@ Commands:
                              --text <text>                 a name, text or field value with it
                              --role <role> [--name <name>] an element (button, textbox, ...)
                              --window <title>, --new-window
-                                                           a window of the app (or of any app)
+                                                           a window of the app (or of any app),
+                                                           then its page to finish loading
+                             --loaded                      the visible page to finish loading
+                                                           (with --window: fail if it is still
+                                                           loading when the time is up)
                              --value <value>, --changed    the value of the --ref element
                              --ref <ref> alone             that element
-                           --exact matches whole names; --nth <n> picks one of several matches
+                           --exact matches whole names; --nth <n> picks one of several matches.
+                           A wait on an app or a ref stops with an error when that app quits
+                           or restarts: take a new snapshot then
 
 After an action the reply is what changed in that window once it stopped changing.
 Elements of a web page that are scrolled out of view are marked [offscreen]; an action on
@@ -575,6 +581,7 @@ fn wait_params(args: &[&str]) -> Result<(WaitParams, bool), String> {
             "--session" => params.session = Some(value("--session")?),
             "--changed" => params.changed = true,
             "--gone" => params.gone = true,
+            "--loaded" => params.loaded = true,
             "--exact" => params.exact = true,
             "--json" => json = true,
             other => return Err(format!("unknown option: {other}")),
@@ -944,6 +951,8 @@ mod tests {
         assert_eq!((params.nth, params.timeout_ms), (Some(-1), Some(0)));
         let (window, _) = wait_params(&["--new-window"]).unwrap();
         assert_eq!(window.window.as_deref(), Some(""));
+        let (loaded, _) = wait_params(&["--loaded", "--app", "firefox"]).unwrap();
+        assert!(loaded.loaded);
         let (value, _) = wait_params(&["--ref", "e9", "--value", "42"]).unwrap();
         assert_eq!(
             (value.scope.as_deref(), value.value.as_deref()),

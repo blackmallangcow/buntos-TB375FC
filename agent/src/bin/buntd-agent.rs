@@ -860,6 +860,7 @@ impl Agent {
             tree: rendered.text,
             diff,
             first: previous.is_none() && !params.peek,
+            busy: rendered.busy,
         })
     }
 

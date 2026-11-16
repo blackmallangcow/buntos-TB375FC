@@ -97,6 +97,9 @@ pub struct Snapshot {
     pub diff: String,
     /// 이 범위를 이 세션에서 처음 읽었다 (diff가 비어 있다)
     pub first: bool,
+    /// 범위 안의 보이는 문서가 불러오는 중이다 (BUSY). 기다리기(`wait --loaded`, 창 기다리기)가 본다
+    #[serde(default)]
+    pub busy: bool,
 }
 
 /// `act`의 인자: ref가 가리키는 요소에 동작 하나
@@ -266,6 +269,9 @@ pub struct WaitParams {
     pub changed: bool,
     /// 나타나기 대신 사라지기(창은 닫히기)를 기다린다
     pub gone: bool,
+    /// 범위의 보이는 문서가 다 불러올 때까지(BUSY가 풀릴 때까지). window와 함께 주면 창이 뜬 뒤 다 불러오지
+    /// 못하고 시간이 다 되었을 때 성공 대신 TIMEOUT이다
+    pub loaded: bool,
     /// 기다리는 시간의 상한(ms). 0이면 한 번만 본다. 없으면 10초
     pub timeout_ms: Option<u64>,
 }

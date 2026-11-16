@@ -12,6 +12,9 @@
 //!
 //! 앱(`app`)이나 ref 범위의 기다리기는 처음 본 그 앱의 pid에 묶인다: 앱이 다시 뜨거나 끝나면 새 프로세스에 조용히
 //! 붙지 않고 TARGET_GONE으로 끝난다(이슈 #1 P2-2).
+//!
+//! 창을 기다리면 창이 뜬 뒤 그 문서가 다 불러오기(BUSY가 풀리기)까지 시간 상한 안에서 더 기다린다. `loaded`는 범위의
+//! 보이는 문서가 다 불러오기를 기다린다(이슈 #1 P2-3: `wait --window`가 본문을 받기 전에 끝났다).
 
 use std::time::{Duration, Instant};
 
@@ -50,6 +53,8 @@ enum Condition {
     Value(String),
     /// ref 요소의 값이 처음 본 것과 달라진다
     Changed,
+    /// 범위의 보이는 문서가 다 불러왔다 (BUSY가 풀렸다)
+    Loaded,
 }
 
 /// 범위를 한 번 읽은 것
@@ -60,6 +65,8 @@ enum Seen {
         lines: Vec<Line>,
         cut: bool,
         pid: Option<u32>,
+        /// 범위의 보이는 문서가 불러오는 중이다 (스냅샷 답의 busy)
+        busy: bool,
     },
     /// 창 제목. `complete`가 아니면 빠진 창이 있을 수 있다 (잘린 트리에서 읽었다). `pid`는 앱 범위일 때 그 앱의
     /// pid (모든 앱의 창이면 None)
@@ -67,6 +74,8 @@ enum Seen {
         titles: Vec<String>,
         complete: bool,
         pid: Option<u32>,
+        /// 그 앱의 보이는 문서가 불러오는 중이다. 모든 앱의 창이면 모른다(None)
+        busy: Option<bool>,
     },
     /// 앱이 없다 (아직 뜨지 않았거나 끝났다): 그 앱의 요소와 창도 없다
     Absent(String),
@@ -75,10 +84,12 @@ enum Seen {
     Unknown(String),
 }
 
-/// 처음 본 것: 새로 뜬 창은 처음 본 창 목록과, 바뀐 값은 처음 본 값과 견준다
+/// 처음 본 것: 새로 뜬 창은 처음 본 창 목록과, 바뀐 값은 처음 본 값과 견준다. 불러오기는 불러오는 중이던 적이
+/// 있는지 적는다
 enum Baseline {
     Windows(Vec<String>),
     Value(Option<String>),
+    Busy(bool),
 }
 
 /// 한 번 본 결과: 기다리던 것이 일어났으면 그 답
@@ -90,6 +101,8 @@ enum Outcome {
     },
     Gone,
     Window(String),
+    /// 다 불러왔다. 참이면 기다리는 동안 불러오는 중이었다
+    Loaded(bool),
 }
 
 fn invalid(message: impl Into<String>) -> Failure {
@@ -113,7 +126,18 @@ fn condition(params: &WaitParams) -> Result<Condition, Failure> {
         if window.is_empty() && params.gone {
             return Err(invalid("gone needs the title of the window to close"));
         }
+        if params.loaded && params.gone {
+            return Err(invalid("loaded does not go with gone"));
+        }
         return Ok(Condition::Window(window.clone()));
+    }
+    if params.loaded {
+        if !matcher.is_empty() || valued || params.gone || params.nth.is_some() {
+            return Err(invalid(
+                "loaded goes alone (with app or ref) or with window: it waits for the page to load",
+            ));
+        }
+        return Ok(Condition::Loaded);
     }
     if valued {
         if params.scope.is_none() {
@@ -141,8 +165,8 @@ fn condition(params: &WaitParams) -> Result<Condition, Failure> {
         return Ok(Condition::Itself);
     }
     Err(invalid(
-        "wait needs something to wait for: text, role and name, window, a ref, or value or changed \
-         with a ref",
+        "wait needs something to wait for: text, role and name, window, loaded, a ref, or value or \
+         changed with a ref",
     ))
 }
 
@@ -163,29 +187,91 @@ pub fn run(desk: &dyn Desk, params: &WaitParams) -> Result<Waited, Failure> {
     let started = Instant::now();
     let mut baseline: Option<Baseline> = None;
     let mut bound: Option<u32> = None;
+    // 모든 앱의 창에서 찾은 창은 그 창의 앱을 범위로 삼아 다 불러오기를 기다린다
+    let mut params = params.clone();
+    // 떴지만 그 문서를 아직 다 불러오지 못한 창: (제목, 마지막으로 불러오는 중이었는지). 앱을 읽지 못해 모를 수도 있다
+    let mut opened: Option<(String, bool)> = None;
+    let ms = || started.elapsed().as_millis() as u64;
     loop {
-        let seen = observe(desk, params, &condition)?;
-        if let Some(failure) = bind(&mut bound, &seen, &condition, params) {
+        let seen = observe(desk, &params, &condition)?;
+        if let Some(failure) = bind(&mut bound, &seen, &condition, &params) {
             crate::atspi::dump_calls(None, &failure.1);
             return Err(failure);
         }
-        if let Some(outcome) = check(&condition, params, &seen, &mut baseline) {
-            return Ok(answer(
-                &condition,
-                params,
-                outcome,
-                started.elapsed().as_millis() as u64,
-            ));
+        match check(&condition, &params, &seen, &mut baseline) {
+            // 창이 떴다: 그 문서가 다 불러오기를 시간 상한까지 기다린다 (이슈 #1 P2-3)
+            Some(Outcome::Window(title)) if !params.gone => match seen {
+                Seen::Windows {
+                    busy: Some(true), ..
+                } => opened = Some((title, true)),
+                Seen::Windows { busy: None, .. } => match owner(desk, &title)? {
+                    Some(bus) => {
+                        params.app = Some(bus);
+                        opened = Some((title, false));
+                        continue;
+                    }
+                    // 트리가 없는 창: 불러오는지 모른다
+                    None => return Ok(answer(&condition, &params, Outcome::Window(title), ms())),
+                },
+                _ => return Ok(answer(&condition, &params, Outcome::Window(title), ms())),
+            },
+            Some(outcome) => return Ok(answer(&condition, &params, outcome, ms())),
+            // 창 목록에 다시 없다: 닫혔다
+            None if matches!(seen, Seen::Windows { .. }) => opened = None,
+            None => {}
         }
         let elapsed = started.elapsed();
         if elapsed >= limit {
-            return Err((
-                protocol::TIMEOUT,
-                timed_out(&condition, params, &seen, limit),
-            ));
+            return match opened {
+                // 창은 떴다: --loaded가 아니면 기다린 것은 일어났다
+                Some((title, busy)) if !params.loaded => {
+                    let mut waited = answer(&condition, &params, Outcome::Window(title), ms());
+                    waited.done.push_str(if busy {
+                        "; it is still loading"
+                    } else {
+                        "; could not tell whether its page finished loading"
+                    });
+                    Ok(waited)
+                }
+                Some((title, _)) => Err((
+                    protocol::TIMEOUT,
+                    format!(
+                        "timed out after {} ms waiting for the window {title:?} to finish loading; \
+                         it is still loading",
+                        limit.as_millis()
+                    ),
+                )),
+                None => Err((
+                    protocol::TIMEOUT,
+                    timed_out(&condition, &params, &seen, limit),
+                )),
+            };
         }
         std::thread::sleep(POLL.min(limit - elapsed));
     }
+}
+
+/// 모든 앱의 창 목록(`apps`)에서 이 제목의 창을 가진 앱의 접근성 버스 이름. 트리가 없는 창이거나 목록을 읽지
+/// 못했으면 None
+fn owner(desk: &dyn Desk, title: &str) -> Result<Option<String>, Failure> {
+    let reply = match desk.call("apps", Value::Null) {
+        Ok(reply) => reply,
+        Err((protocol::AGENT_ERROR, _)) => return Ok(None),
+        Err(failure) => return Err(failure),
+    };
+    Ok(reply["apps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|app| {
+            app["windows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|window| window["title"].as_str() == Some(title))
+        })
+        .and_then(|app| app["bus"].as_str())
+        .map(str::to_string))
 }
 
 /// 범위를 한 번 읽는다. 정책의 거절(허용하지 않은 AI, 막은 앱, 화면 잠김)과 잘못된 인자는 바로 돌려준다. 읽지 못한
@@ -294,6 +380,7 @@ fn lines(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<
     let lines = outline::parse(tree);
     let cut = outline::truncated(tree);
     let pid = outline::app_pid(tree);
+    let busy = reply["busy"].as_bool().unwrap_or(false);
     if let Condition::Element(matcher) = condition
         && cut
         && !params.gone
@@ -307,10 +394,16 @@ fn lines(desk: &dyn Desk, params: &WaitParams, condition: &Condition) -> Result<
                 lines: found,
                 cut: outline::truncated(short),
                 pid,
+                busy,
             });
         }
     }
-    Ok(Seen::Lines { lines, cut, pid })
+    Ok(Seen::Lines {
+        lines,
+        cut,
+        pid,
+        busy,
+    })
 }
 
 /// 창 제목. 앱을 주었으면 그 앱의 보이는 창: 스냅샷의 맨 위 줄이다. 트리가 2000줄에서 잘렸으면 뒤의 창이 빠질 수
@@ -324,6 +417,7 @@ fn windows(desk: &dyn Desk, params: &WaitParams) -> Result<Seen, Failure> {
             titles: all_windows(&reply, None),
             complete: true,
             pid: None,
+            busy: None,
         });
     }
     let reply = desk.call("snapshot", snapshot(params, false))?;
@@ -335,6 +429,7 @@ fn windows(desk: &dyn Desk, params: &WaitParams) -> Result<Seen, Failure> {
         .collect();
     let mut complete = !outline::truncated(tree);
     let pid = outline::app_pid(tree);
+    let busy = Some(reply["busy"].as_bool().unwrap_or(false));
     if !complete && let Some(pid) = pid {
         let listed = all_windows(&desk.call("apps", Value::Null)?, Some(pid));
         // 보이는 창이 있는 앱인데 목록에 창이 없으면 목록을 읽지 못한 것이다(바쁜 앱): 다 보았다고 하지 않는다
@@ -349,6 +444,7 @@ fn windows(desk: &dyn Desk, params: &WaitParams) -> Result<Seen, Failure> {
         titles,
         complete,
         pid,
+        busy,
     })
 }
 
@@ -465,6 +561,13 @@ fn check(
             let root = lines.first()?;
             outline::fits(value, root.value(), root.value_hidden(), true).then(|| single(lines))
         }
+        (Condition::Loaded, Seen::Lines { busy, .. }) => {
+            let Baseline::Busy(was_busy) = baseline.get_or_insert(Baseline::Busy(false)) else {
+                return None;
+            };
+            *was_busy |= *busy;
+            (!busy).then_some(Outcome::Loaded(*was_busy))
+        }
         (Condition::Changed, Seen::Lines { lines, .. }) => {
             // 처음에 없던 요소가 나타나도 바뀐 것이다
             let now = lines.first().map(|root| root.value().to_string());
@@ -535,6 +638,15 @@ fn answer(condition: &Condition, params: &WaitParams, outcome: Outcome, ms: u64)
                 ..Waited::default()
             }
         }
+        Outcome::Loaded(was_busy) => Waited {
+            done: if was_busy {
+                format!("the page finished loading{}", scope(params))
+            } else {
+                format!("nothing is loading{}", scope(params))
+            },
+            waited_ms: ms,
+            ..Waited::default()
+        },
         Outcome::Window(title) => Waited {
             done: if params.window.as_deref() == Some("") {
                 format!("a new window {title:?} appeared")
@@ -595,6 +707,7 @@ fn describe(condition: &Condition, params: &WaitParams) -> String {
         Condition::Window(title) => format!("a window titled {title:?}"),
         Condition::Value(value) => format!("{target}'s value to be {value:?}"),
         Condition::Changed => format!("{target}'s value to change"),
+        Condition::Loaded => format!("the page to finish loading{}", scope(params)),
     }
 }
 
@@ -645,6 +758,7 @@ fn timed_out(condition: &Condition, params: &WaitParams, seen: &Seen, limit: Dur
             Some(root) => format!("; still there: {}", root.text),
             None => format!("; {target} is not on screen"),
         },
+        (Condition::Loaded, Seen::Lines { .. }) => "; it is still loading".into(),
         _ => String::new(),
     };
     format!(
@@ -1459,6 +1573,202 @@ mod tests {
         assert_eq!(failure.0, protocol::TARGET_GONE);
         assert!(failure.1.starts_with("e9 belongs to an app that restarted"));
         assert_eq!(desk.calls.borrow().len(), 1);
+    }
+
+    /// 불러오는 중인지(busy)를 함께 주는 스냅샷
+    fn page(lines: &str, busy: bool) -> Result<Value, Failure> {
+        Ok(json!({
+            "tree": format!("- app: \"Mozilla Firefox\" [pid=7]\n{lines}"),
+            "diff": "",
+            "first": false,
+            "busy": busy,
+        }))
+    }
+
+    const WIKIPEDIA: &str =
+        "- window \"Linux - Wikipedia\" [ref=e1]:\n  - document \"Linux\" [ref=e2]\n";
+
+    #[test]
+    fn loaded_waits_until_the_page_stops_loading() {
+        let desk = Script::new(vec![
+            page(WIKIPEDIA, true),
+            page(WIKIPEDIA, true),
+            page(WIKIPEDIA, false),
+        ]);
+        let waited = run(
+            &desk,
+            &params(|p| {
+                p.app = Some("firefox".into());
+                p.loaded = true;
+            }),
+        )
+        .unwrap();
+        assert_eq!(waited.done, "the page finished loading in firefox");
+        assert_eq!(desk.calls.borrow().len(), 3);
+        let idle = run(
+            &Script::new(vec![page(WIKIPEDIA, false)]),
+            &params(|p| p.loaded = true),
+        )
+        .unwrap();
+        assert_eq!(idle.done, "nothing is loading in the active window");
+        let failure = run(
+            &Script::new(vec![page(WIKIPEDIA, true)]),
+            &params(|p| {
+                p.loaded = true;
+                p.timeout_ms = Some(150);
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, protocol::TIMEOUT);
+        assert_eq!(
+            failure.1,
+            "timed out after 150 ms waiting for the page to finish loading in the active window; \
+             it is still loading"
+        );
+    }
+
+    #[test]
+    fn a_window_wait_also_waits_for_its_page() {
+        // 이슈 #1 P2-3: 창 제목이 바뀌자마자 끝나지 않고, 그 문서가 다 불러오기를 기다린다
+        let desk = Script::new(vec![
+            page("- window \"Mozilla Firefox\" [ref=e1]\n", true),
+            page(WIKIPEDIA, true),
+            page(WIKIPEDIA, false),
+        ]);
+        let waited = run(
+            &desk,
+            &params(|p| {
+                p.app = Some("firefox".into());
+                p.window = Some("Linux".into());
+            }),
+        )
+        .unwrap();
+        assert_eq!(waited.window.as_deref(), Some("Linux - Wikipedia"));
+        assert_eq!(waited.done, "the window \"Linux - Wikipedia\" is open");
+        assert_eq!(desk.calls.borrow().len(), 3);
+        // 시간이 다 되도록 불러오면 창은 떴다고 알리고 아직 불러온다고 붙인다
+        let still = run(
+            &Script::new(vec![page(WIKIPEDIA, true)]),
+            &params(|p| {
+                p.app = Some("firefox".into());
+                p.window = Some("Linux".into());
+                p.timeout_ms = Some(150);
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            still.done,
+            "the window \"Linux - Wikipedia\" is open; it is still loading"
+        );
+        // --loaded와 함께면 실패다
+        let failure = run(
+            &Script::new(vec![page(WIKIPEDIA, true)]),
+            &params(|p| {
+                p.app = Some("firefox".into());
+                p.window = Some("Linux".into());
+                p.loaded = true;
+                p.timeout_ms = Some(150);
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, protocol::TIMEOUT);
+        assert!(
+            failure
+                .1
+                .ends_with("to finish loading; it is still loading")
+        );
+    }
+
+    #[test]
+    fn a_window_of_any_app_waits_for_the_page_of_its_app() {
+        let apps = |titles: &[&str]| -> Result<Value, Failure> {
+            Ok(json!({
+                "apps": [{
+                    "name": "Firefox",
+                    "bus": ":1.57",
+                    "pid": 7,
+                    "windows": titles.iter().map(|title| json!({ "title": title })).collect::<Vec<_>>(),
+                }],
+                "untracked": [{ "title": "터미널" }],
+            }))
+        };
+        let desk = Script::new(vec![
+            apps(&["Mozilla Firefox"]),
+            apps(&["Linux - Wikipedia"]),
+            // 그 창을 가진 앱
+            apps(&["Linux - Wikipedia"]),
+            page(WIKIPEDIA, true),
+            page(WIKIPEDIA, false),
+        ]);
+        let waited = run(&desk, &params(|p| p.window = Some("Linux".into()))).unwrap();
+        assert_eq!(waited.window.as_deref(), Some("Linux - Wikipedia"));
+        let calls = desk.calls.borrow();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[3].0, "snapshot");
+        assert_eq!(calls[3].1["app"], ":1.57");
+        // 그 앱을 읽지 못하면 다 불러왔는지 모르지만 창은 떴다
+        let busy_app = || -> Result<Value, Failure> {
+            Err((
+                protocol::AGENT_ERROR,
+                "cannot read :1.57: org.freedesktop.DBus.Error.Timeout".into(),
+            ))
+        };
+        let waited = run(
+            &Script::new(vec![
+                apps(&["Linux - Wikipedia"]),
+                apps(&["Linux - Wikipedia"]),
+                busy_app(),
+            ]),
+            &params(|p| {
+                p.window = Some("Linux".into());
+                p.timeout_ms = Some(150);
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            waited.done,
+            "the window \"Linux - Wikipedia\" is open; could not tell whether its page finished \
+             loading"
+        );
+        // 트리가 없는 창은 불러오는지 모른다: 기다리지 않는다
+        let desk = Script::new(vec![apps(&[]), apps(&[])]);
+        let waited = run(&desk, &params(|p| p.window = Some("터미널".into()))).unwrap();
+        assert_eq!(waited.window.as_deref(), Some("터미널"));
+        assert_eq!(desk.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn loaded_goes_alone_or_with_a_window() {
+        for bad in [
+            params(|p| {
+                p.loaded = true;
+                p.text = Some("x".into());
+            }),
+            params(|p| {
+                p.loaded = true;
+                p.gone = true;
+            }),
+            params(|p| {
+                p.loaded = true;
+                p.window = Some("w".into());
+                p.gone = true;
+            }),
+            params(|p| {
+                p.loaded = true;
+                p.scope = Some("e1".into());
+                p.changed = true;
+            }),
+        ] {
+            assert_eq!(
+                condition(&bad).unwrap_err().0,
+                protocol::INVALID_PARAMS,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            condition(&params(|p| p.loaded = true)).unwrap(),
+            Condition::Loaded
+        );
     }
 
     #[test]
