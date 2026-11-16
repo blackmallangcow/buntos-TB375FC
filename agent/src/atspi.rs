@@ -773,19 +773,28 @@ impl A11y {
             .unwrap_or_default()
     }
 
+    /// 막대·숫자 칸의 값. 속성마다 Properties.Get으로 읽고 Properties.GetAll은 보내지 않는다(이슈 #1 P0):
+    /// at-spi2-core 2.62는 GetAll의 a{sv}를 만들다 속성 하나(MinimumValue)를 못 읽으면 값 없는 항목을 써서,
+    /// 앱이 libdbus의 타입 검사에 걸려 abort한다. Firefox는 값을 모르는 막대에 NaN을 주어 이렇게 끝났다. Get은
+    /// 그때 오류로 답할 뿐이다. 세 호출은 함께 보낸다
     async fn value(&self, bus: &str, path: &str) -> Option<Range> {
-        let all: HashMap<String, OwnedValue> = self
-            .call(bus, path, PROPERTIES, "GetAll", &("org.a11y.atspi.Value",))
-            .await
-            .ok()?;
-        let number = |key: &str| {
-            all.get(key)
+        const VALUE: &str = "org.a11y.atspi.Value";
+        let number = |property: &'static str| async move {
+            self.call::<_, OwnedValue>(bus, path, PROPERTIES, "Get", &(VALUE, property))
+                .await
+                .ok()
                 .and_then(|value| value.downcast_ref::<f64>().ok())
         };
+        let (current, min, max) = join3(
+            number("CurrentValue"),
+            number("MinimumValue"),
+            number("MaximumValue"),
+        )
+        .await;
         Some(Range {
-            current: number("CurrentValue")?,
-            min: number("MinimumValue").unwrap_or(0.0),
-            max: number("MaximumValue").unwrap_or(0.0),
+            current: current?,
+            min: min.unwrap_or(0.0),
+            max: max.unwrap_or(0.0),
         })
     }
 
