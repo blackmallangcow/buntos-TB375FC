@@ -904,7 +904,8 @@ impl A11y {
     /// 막대·숫자 칸의 값. 속성마다 Properties.Get으로 읽고 Properties.GetAll은 보내지 않는다(이슈 #1 P0):
     /// at-spi2-core 2.62는 GetAll의 a{sv}를 만들다 속성 하나(MinimumValue)를 못 읽으면 값 없는 항목을 써서,
     /// 앱이 libdbus의 타입 검사에 걸려 abort한다. Firefox는 값을 모르는 막대에 NaN을 주어 이렇게 끝났다. Get은
-    /// 그때 오류로 답할 뿐이다. 세 호출은 함께 보낸다
+    /// 그때 오류로 답할 뿐이다. 세 호출은 함께 보낸다. 읽지 못했거나 수가 아닌(NaN) 끝은 None이고, 값을 읽지
+    /// 못하면 None이다
     async fn value(&self, bus: &str, path: &str) -> Option<Range> {
         const VALUE: &str = "org.a11y.atspi.Value";
         let number = |property: &'static str| async move {
@@ -912,6 +913,7 @@ impl A11y {
                 .await
                 .ok()
                 .and_then(|value| value.downcast_ref::<f64>().ok())
+                .filter(|value| value.is_finite())
         };
         let (current, min, max) = join3(
             number("CurrentValue"),
@@ -921,8 +923,8 @@ impl A11y {
         .await;
         Some(Range {
             current: current?,
-            min: min.unwrap_or(0.0),
-            max: max.unwrap_or(0.0),
+            min,
+            max,
         })
     }
 

@@ -169,11 +169,13 @@ pub struct Item {
     pub level: Option<String>,
 }
 
+/// Value 인터페이스의 값과 두 끝. 읽지 못한 끝은 None이다: Firefox는 min 없는 숫자 칸의 MinimumValue에
+/// `Get failed`로 답하고 MaximumValue에 0을 준다
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Range {
     pub current: f64,
-    pub min: f64,
-    pub max: f64,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
 }
 
 impl Item {
@@ -836,12 +838,19 @@ fn attributes(item: &Item, role: &str, name: &str, is_interactive: bool) -> Vec<
         out.push("invalid".into());
     }
     if let Some(range) = &item.value {
-        out.push(format!("value={}", number(range.current)));
-        out.push(format!(
-            "range={}..{}",
-            number(range.min),
-            number(range.max)
-        ));
+        // 값이 정해지지 않은 막대(값 없는 <progress>, aria-valuenow 없는 progressbar)의 값은 0이나 가운데 값이라
+        // 값이 아니다 (이슈 #1 리뷰: `value=0`)
+        if item.has(state::INDETERMINATE) && !checkable {
+            out.push("indeterminate".into());
+        } else {
+            out.push(format!("value={}", number(range.current)));
+        }
+        // 두 끝을 다 읽었고 폭이 있을 때만 (이슈 #1 리뷰: 최솟값을 못 읽은 칸이 `range=0..0`이었다)
+        if let (Some(min), Some(max)) = (range.min, range.max)
+            && min < max
+        {
+            out.push(format!("range={}..{}", number(min), number(max)));
+        }
     }
     if item.is_editable() && item.role != role::PASSWORD_TEXT {
         if let Some(text) = item
@@ -924,8 +933,8 @@ mod tests {
         let mut slider = item("/s", "/box", 1, role::SLIDER, "");
         slider.value = Some(Range {
             current: 0.4,
-            min: 0.0,
-            max: 1.0,
+            min: Some(0.0),
+            max: Some(1.0),
         });
         let mut hidden = item("/h", "/w", 2, role::BUTTON, "숨김");
         hidden.states = state::SENSITIVE;
@@ -1097,6 +1106,50 @@ mod tests {
                 "  - text: \"음량\"",
                 "  - slider [ref=e2] [value=0.4] [range=0..1]",
                 "  - button \"저장\" [ref=e3]",
+            ]
+        );
+    }
+
+    #[test]
+    fn values_show_only_what_was_read() {
+        // 이슈 #1 리뷰의 시험 페이지에서 Firefox가 준 값
+        let with = |path: &str, index, role, current, min, max| {
+            let mut element = item(path, "/w", index, role, path.trim_start_matches('/'));
+            element.value = Some(Range { current, min, max });
+            element
+        };
+        let mut progress = with(
+            "/progress",
+            0,
+            role::PROGRESS_BAR,
+            0.0,
+            Some(0.0),
+            Some(1.0),
+        );
+        progress.states |= state::INDETERMINATE;
+        let items = vec![
+            item("/w", "", 0, role::FRAME, "값"),
+            progress,
+            with("/meter", 1, role::PROGRESS_BAR, 3.0, Some(0.0), Some(10.0)),
+            with("/spin", 2, role::SPIN_BUTTON, 0.0, None, Some(0.0)),
+            with("/number", 3, role::SPIN_BUTTON, 5.0, None, Some(0.0)),
+            with("/flat", 4, role::SLIDER, 2.0, Some(2.0), Some(2.0)),
+        ];
+        let tree = Tree::new(&items);
+        let options = Options {
+            interactive: false,
+            hidden: false,
+        };
+        let lines = render(&tree, &["/w"], &options, &mut refs());
+        assert_eq!(
+            lines,
+            [
+                "- window \"값\" [ref=e1]:",
+                "  - progressbar \"progress\" [indeterminate] [range=0..1]",
+                "  - progressbar \"meter\" [value=3] [range=0..10]",
+                "  - spinbutton \"spin\" [ref=e2] [value=0]",
+                "  - spinbutton \"number\" [ref=e3] [value=5]",
+                "  - slider \"flat\" [ref=e4] [value=2]",
             ]
         );
     }
