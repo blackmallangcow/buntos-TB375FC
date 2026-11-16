@@ -76,6 +76,9 @@ const ENTER_PAUSE: Duration = Duration::from_millis(100);
 
 impl BuntState {
     pub fn agent_request(&mut self, request: AgentRequest) {
+        // 사람이 Esc로 닫은 메뉴의 잡기가 남아 있으면 먼저 푼다. 남은 잡기를 사람의 잡기로 보거나 닫힌 메뉴를 키보드
+        // 포커스로 보지 않게 한다 (touch.rs)
+        self.end_finished_menu_grab();
         // 화면이 잠긴 동안에는 에이전트가 아무것도 읽거나 하지 못한다(창 목록, 창 그림 포함). 잠금을 푸는 것은
         // 사람이 잠금 화면에 친 암호뿐이다 (session_lock.rs)
         let locked = self.session_lock.is_locked().then_some(Refused::Locked);

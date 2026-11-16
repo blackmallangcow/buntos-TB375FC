@@ -987,6 +987,43 @@ impl BuntState {
         }
     }
 
+    /// 다 닫힌 메뉴의 잡기를 지금 푼다. 사람이 Esc로 메뉴를 닫으면 smithay의 팝업 잡기는 다음 입력 때에야 풀려, 그동안
+    /// 포인터는 잡힌 것으로 보이고(사람의 잡기로 보아 에이전트의 누르기를 거절했다) 키보드는 닫힌 메뉴에 남았다(대상
+    /// 확인이 FocusMoved). 다음 입력 때 smithay가 할 일(PopupPointerGrab::unset)을 먼저 해 키보드를 메뉴를 연 표면에
+    /// 돌려준다. 에이전트 요청을 받을 때 부른다 (agent.rs, VM 시험)
+    pub(crate) fn end_finished_menu_grab(&mut self) {
+        // 이벤트 루프 끝(udev.rs)을 기다리지 않고 지워진 팝업을 지금 거둔다. 앱이 메뉴를 지운 요청과 에이전트의 다음 요청이
+        // 한 차례에 오면 그때까지 잡기가 끝나지 않은 것으로 보였다
+        self.popups.cleanup();
+        let Some(grab) = self.touch.popup_grab.take_if(|grab| grab.has_ended()) else {
+            return;
+        };
+        let serial = grab.serial();
+        if let Some(pointer) = self.seat.get_pointer()
+            && pointer.has_grab(serial)
+        {
+            let time = self.start_time.elapsed().as_millis() as u32;
+            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+        }
+        if let Some(keyboard) = self.seat.get_keyboard()
+            && keyboard.has_grab(serial)
+        {
+            keyboard.unset_grab(self);
+            // 다 닫힌 잡기의 current_grab은 메뉴를 연 표면이다
+            let next = grab.current_grab();
+            self.commit_preedit_before_focus(next.as_ref());
+            keyboard.set_focus(self, next, SERIAL_COUNTER.next_serial());
+        }
+        // 잡기는 풀렸는데 키보드 포커스가 메뉴였던 표면에 남았으면 메뉴를 연 표면으로 돌려준다. GTK4는 팝오버를 닫을 때
+        // 팝업 역할만 지우고 표면은 남겨, 잡기가 먼저 풀리면 포커스가 역할 없는 표면에 머물렀다 (VM 시험)
+        if self
+            .keyboard_focus()
+            .is_some_and(|focus| self.focus_is_stale(&focus))
+        {
+            self.refresh_layer_focus();
+        }
+    }
+
     /// 그 표면(이나 그 팝업)이 속한 셸 막대
     fn bar_of_surface(&self, surface: &WlSurface) -> Option<Bar> {
         let root = self.root_surface(surface);

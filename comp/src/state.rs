@@ -1981,6 +1981,14 @@ impl BuntState {
             .unwrap_or(root)
     }
 
+    /// 키보드 포커스가 더는 키보드를 받을 수 없는 표면에 남았는지: 닫힌 메뉴, 사라진 표면. 팝업 메뉴는 그랩하는 동안
+    /// 키보드를 가진다. 메뉴바처럼 키보드를 받지 않는 레이어의 팝업도 그렇다 (그래야 Esc와 화살표가 메뉴로 간다).
+    /// refresh_layer_focus와 에이전트 요청 앞의 메뉴 정리(touch.rs)가 함께 쓴다
+    pub(crate) fn focus_is_stale(&self, focus: &WlSurface) -> bool {
+        !(focus.is_alive() && self.popups.find_popup(focus).is_some())
+            && self.cannot_hold_focus(&self.root_surface(focus))
+    }
+
     /// 키보드 포커스를 둘 수 없는 최상위 표면인지: 사라졌거나, 창도 아니고 키보드를 받는 보이는
     /// 레이어 표면도 아니다 (레이어 역할을 잃은 표면 포함)
     fn cannot_hold_focus(&self, root: &WlSurface) -> bool {
@@ -2023,12 +2031,9 @@ impl BuntState {
             }
             return;
         }
-        // 팝업 메뉴는 그랩하는 동안 키보드를 가진다. 메뉴바처럼 키보드를 받지 않는 레이어의 팝업도
-        // 그렇다 (그래야 Esc와 화살표가 메뉴로 간다)
-        let stale = focus.as_ref().is_some_and(|focus| {
-            !(focus.is_alive() && self.popups.find_popup(focus).is_some())
-                && self.cannot_hold_focus(&self.root_surface(focus))
-        });
+        let stale = focus
+            .as_ref()
+            .is_some_and(|focus| self.focus_is_stale(focus));
         if stale {
             // 닫힌 메뉴를 연 표면이 키보드를 받으면(데스크탑 항목 창 같은 on-demand 레이어, 창) 그리로
             // 돌려준다. smithay의 팝업 그랩도 다음 입력 때 그렇게 하지만, 앱이 팝업을 지운 뒤 표면을 지우기
