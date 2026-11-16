@@ -902,7 +902,7 @@ v0 구현 (2026-10-29, 접근 정책):
 
 ### 9.4 CI 구성 (ADR-010)
 
-- 저장소: GitHub 공개 저장소 [`blackmallangcow/buntOS`](https://github.com/blackmallangcow/buntOS). 실기기(TB375FC) 시험을 마친 뒤 공개하기로 했으며(2026-10-30 결정. 제품 라인을 나눈 뒤 다시 정한다, 11장 다음 작업 11번), 그 전까지는 비공개로 두고 aarch64 빌드·e2e는 로컬 개발 VM(`tools/devvm/`)에서 돌린다(arm64 호스티드 러너 무료 제공은 공개 저장소 한정)
+- 저장소: GitHub `blackmallangcow/buntOS`(데스크톱 라인, 아직 비공개). 태블릿 라인의 첫 포크 [`blackmallangcow/buntos-TB375FC`](https://github.com/blackmallangcow/buntos-TB375FC)는 2026-11-16에 먼저 공개했다. buntOS는 실기기(TB375FC) 시험을 마친 뒤 공개하기로 했으며(2026-10-30 결정. 제품 라인을 나눈 뒤 다시 정한다, 11장 다음 작업 11번), 그 전까지는 비공개로 두고 aarch64 빌드·e2e는 로컬 개발 VM(`tools/devvm/`)에서 돌린다(arm64 호스티드 러너 무료 제공은 공개 저장소 한정)
 - x86-64 e2e: GitHub 호스티드 Linux 러너(`ubuntu-26.04`, 비공개 저장소는 2코어)에서 KVM 가속으로 전체 시나리오(e2e 1·8·5·6·4·7·9번. 8번과 9번은 2026-10-31, 2026-11-03에 더해 x86-64에서는 아직 돌리지 않았다)를 돌린다(`.github/workflows/x86-64.yml`, 2026-10-31). 자체 컴포넌트는 이미지와 같은 Debian 스냅숏의 컨테이너에서, 이미지는 빌드 VM과 같은 Debian 13의 도구 트리로 만들어 로컬과 같은 판의 도구를 쓴다. 작업 하나가 15~19분이라 비공개 저장소의 Actions 시간 때문에 main에서는 손으로 돌린다(하루 한 번 돌릴지는 정하지 않았다)
 - aarch64 e2e: Phase 0 첫 주에 호스티드 arm64 러너(`ubuntu-24.04-arm`)의 `/dev/kvm` 유무를 확인해 둘 중 하나로 확정한다
   - KVM 있음: 호스티드 arm64 러너에서 전체 시나리오
