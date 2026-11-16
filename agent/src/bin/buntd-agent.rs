@@ -2085,8 +2085,8 @@ impl Agent {
                     .await
             }
         };
-        let (screen_x, screen_y) = clicked
-            .map_err(|err| agent_error(format!("the pointer click failed: {}", reason(&err))))?;
+        // 사람이 포인터를 쓰는 중이거나 멈췄으면 컴포지터가 거절한다: 그 번호로 알리고 다시 누르지 않는다
+        let (screen_x, screen_y) = clicked.map_err(|err| refused(&err, "the pointer click"))?;
         let done = format!(
             "clicked with the pointer at ({x:.0}, {y:.0}) in {:?} (screen {screen_x:.0}, {screen_y:.0})",
             window.title
