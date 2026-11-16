@@ -192,6 +192,54 @@ fn desktop_errors_are_typed_and_carry_their_code() {
     );
 }
 
+/// 사람과 함께 쓰는 컴퓨터의 거절: 데몬의 오류 번호마다 이름이 있고, 사람이 쓰는 중이면 다시 해 볼 시간이 있다
+#[test]
+fn refusals_for_the_person_have_names() {
+    let repls = repls();
+    let desk = Fake::new(|_, params| {
+        Err(match params["value"].as_str() {
+            Some("moved") => (
+                protocol::FOCUS_MOVED,
+                "the keyboard focus is on System Settings \"Settings\"".into(),
+            ),
+            Some("busy") => (
+                protocol::USER_ACTIVE,
+                "typing: the person is using the computer, so nothing was sent; try again in 1200 \
+                 ms"
+                .into(),
+            ),
+            Some("gone") => (protocol::TARGET_GONE, "e5 is gone: its app quit".into()),
+            _ => (protocol::PAUSED, "the person paused AI control".into()),
+        })
+    });
+    let caught = run(
+        &repls,
+        &desk,
+        "const seen = [];\n\
+         for (const value of ['moved', 'busy', 'gone', 'paused']) {\n\
+           try { await desktop.keyboard.type(value) } catch (e) {\n\
+             seen.push([e.name, e.code, e instanceof desktop.errors.DesktopError, e.retryAfterMs ?? null]);\n\
+           }\n\
+         }\n\
+         seen",
+    );
+    assert_eq!(
+        caught.value,
+        Some(json!([
+            ["FocusMovedError", -32005, true, null],
+            ["UserActiveError", -32006, true, 1200],
+            ["TargetGoneError", -32007, true, null],
+            ["PausedError", -32008, true, null]
+        ]))
+    );
+    let names = run(
+        &repls,
+        &desk,
+        "['FocusMovedError', 'UserActiveError', 'TargetGoneError', 'PausedError'].every((name) => typeof desktop.errors[name] === 'function')",
+    );
+    assert_eq!(names.value, Some(json!(true)));
+}
+
 #[test]
 fn the_time_limit_stops_runaway_code_and_keeps_the_repl() {
     let repls = repls();
