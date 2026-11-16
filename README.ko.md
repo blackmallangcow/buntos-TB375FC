@@ -2,7 +2,7 @@
 
 # Lenovo Xiaoxin Pad Pro 12.7 (TB375FC)용 buntOS
 
-buntOS는 Debian과 mainline 리눅스, 그리고 Rust와 Smithay로 만든 자체 Wayland 컴포지터 위에 세운 열린 데스크톱 OS입니다. 이 저장소는 buntOS 태블릿 라인의 첫 기기입니다. MediaTek Dimensity 8300(MT6897) 태블릿인 **Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)**에 mainline 리눅스 7.2를 포팅하고, 그 위에서 buntOS 데스크톱을 돌립니다.
+buntOS는 Debian과 mainline 리눅스, 그리고 Rust와 Smithay로 만든 자체 Wayland 컴포지터 위에 세운 열린 데스크톱 OS입니다. 핵심 기능은 AI 에이전트가 사람처럼 앱을 쓰게 하는 제어 계층입니다. 이 저장소는 buntOS 태블릿 라인의 첫 기기입니다. MediaTek Dimensity 8300(MT6897) 태블릿인 **Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)**에 mainline 리눅스 7.2를 포팅하고, 그 위에서 buntOS 데스크톱을 돌립니다.
 
 메인 CPU에서 도는 것은 모두 오픈소스입니다. 펌웨어만 예외이며, 이 저장소에 넣지 않고 각자의 기기에서 뽑아 씁니다.
 
@@ -17,6 +17,29 @@ buntOS는 Debian과 mainline 리눅스, 그리고 Rust와 Smithay로 만든 자�
 
 ![TB375FC에서 도는 Orca](docs/images/tb375fc/orca.png)
 *AI 코딩 에이전트를 여럿 함께 돌리는 IDE인 Orca가 태블릿에서 네이티브로(arm64, Wayland) 돕니다. 안의 Claude 채팅은 이 태블릿의 개발 환경을 정리하고 있습니다.*
+
+## AI 에이전트 제어
+
+buntOS의 핵심은 AI 에이전트가 사람처럼 데스크톱과 앱을 쓸 수 있다는 것입니다. 에이전트는 화면의 픽셀을 짐작하지 않고, 앱마다의 접근성 트리를 읽고 그것으로 동작합니다. 그래서 동작이 의도한 단추와 칸에 정확히 닿고, 어느 언어로든 글을 칠 수 있습니다. 좌표로 누르기는 캔버스처럼 접근성 정보가 없는 곳에만 씁니다.
+
+- **`bunt agent`**: 앱 목록을 보고 앱을 엽니다. 지금 창을 ref가 붙은 짧은 트리로 보여 주고, 그 ref로 누르기, 채우기, 입력, 키 누르기, 고르기, 스크롤, 바뀌기를 기다리기를 합니다. ref가 없는 것은 창 스크린샷으로 봅니다.
+- **`bunt agent repl`**: Playwright와 비슷한 로케이터로 자바스크립트를 실행합니다. 긴 작업도 짧은 스크립트가 됩니다.
+- **`bunt mcp`**: 셸이 없는 AI 앱에 같은 기능을 MCP로 줍니다.
+
+```bash
+bunt agent launch org.gnome.Calculator  # 앱(이름이나 데스크톱 ID)을 열고 그 창을 보여 준다
+bunt agent snapshot                     # 지금 창을 ref가 붙은 트리로
+bunt agent click <ref>                  # 단추를 접근성 동작으로 누른다
+bunt agent type "안녕하세요" --ref <ref>  # 글 칸에 입력한다(어느 언어든)
+bunt agent repl "desktop.app('계산기').getByRole('button', { name: '7' }).click()"
+```
+
+사람이 주도권을 가집니다.
+- AI는 사람이 시스템 설정 › AI 에이전트에서 허용한 뒤에만 앱을 다룰 수 있습니다. 아직 허용하지 않은 AI가 시도하면 사람에게 요청 창이 뜹니다. 사람은 거부하거나, 시스템 설정을 열어 허용할 수 있습니다.
+- 관리자 인증과 암호 창은 사람만 답합니다.
+- 화면이 잠긴 동안에는 아무것도 다룰 수 없습니다.
+
+에이전트 계층은 buntOS 공용 데스크톱에서 오며, 이 태블릿의 데스크톱에도 들어 있습니다. QEMU에서 실제 앱(계산기, 텍스트 편집기, Firefox, 시스템 모니터)을 다루는 e2e 시험으로 확인합니다.
 
 ## 되는 것
 

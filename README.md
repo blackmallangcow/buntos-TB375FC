@@ -2,7 +2,7 @@
 
 # buntOS on the Lenovo Xiaoxin Pad Pro 12.7 (TB375FC)
 
-buntOS is an open desktop OS built on Debian, mainline Linux and its own Rust/Smithay Wayland compositor. This repository is the first device of its tablet line. It ports mainline Linux 7.2 to the **Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)**, a MediaTek Dimensity 8300 (MT6897) tablet, and runs the buntOS desktop on top.
+buntOS is an open desktop OS built on Debian, mainline Linux and its own Rust/Smithay Wayland compositor. Its core feature is a control layer that lets AI agents use apps the way a person does. This repository is the first device of its tablet line. It ports mainline Linux 7.2 to the **Lenovo Xiaoxin Pad Pro 12.7 (2025, TB375FC)**, a MediaTek Dimensity 8300 (MT6897) tablet, and runs the buntOS desktop on top.
 
 Everything that runs on the main CPU is open source. Firmware is the only exception. It is not distributed here; you extract it from your own device.
 
@@ -17,6 +17,29 @@ Everything that runs on the main CPU is open source. Firmware is the only except
 
 ![Orca running on the TB375FC](docs/images/tb375fc/orca.png)
 *Orca, an IDE for running AI coding agents in parallel, runs natively on the tablet (arm64, Wayland). The Claude chat in it is summing up the tablet's own development environment.*
+
+## AI agent control
+
+The core of buntOS is that AI agents can use the desktop and its apps the way a person does. Agents read and act through each app's accessibility tree instead of guessing at pixels. Their actions land on the intended button or field, and they can type in any language. Clicks by position are only for things without accessibility information, such as a canvas.
+
+- **`bunt agent`** lists and opens apps. It prints the active window as a compact tree with refs, and it acts on those refs: click, fill, type, press keys, select, scroll and wait for changes. For things without refs, it takes a screenshot of the window.
+- **`bunt agent repl`** runs JavaScript with Playwright-like locators, so a long task becomes a short script.
+- **`bunt mcp`** offers the same to AI apps that have no shell, over MCP.
+
+```bash
+bunt agent launch org.gnome.Calculator  # open an app (name or desktop ID) and print its window
+bunt agent snapshot                     # the active window as a tree with refs
+bunt agent click <ref>                  # press a button through its accessible action
+bunt agent type "안녕하세요" --ref <ref>  # type into a text field, in any language
+bunt agent repl "desktop.app('Calculator').getByRole('button', { name: '7' }).click()"
+```
+
+The person stays in charge:
+- An AI can control apps only after the person allows it in System Settings › AI Agents. When an AI that is not allowed yet tries, the person sees a request and can deny it or open System Settings to allow it.
+- Only the person answers administrator authentication and password windows.
+- Nothing can be controlled while the screen is locked.
+
+The agent layer comes from the shared buntOS desktop and is part of the desktop on this tablet. It is checked by end-to-end tests that drive real apps (Calculator, Text Editor, Firefox, System Monitor) in QEMU.
 
 ## What works
 
