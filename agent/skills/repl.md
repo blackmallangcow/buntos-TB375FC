@@ -98,8 +98,11 @@ Key names: Playwright's (`Enter`, `ArrowLeft`, `Control+A`, `Meta`) or xkb's (`R
 `ctrl+a`, `super`); several keys separated by spaces or in an array.
 
 When a whole document is replaced (a link to another page), a very long diff is summed up as
-`# the document was replaced: 1529 lines → 49 lines; take a snapshot to read it`. Take a snapshot
-then, or raise the limit with `snapshot({ diff: true, maxLines: 5000 })` (400 lines by default).
+`# the document was replaced: 1529 lines → 2049 lines; take a snapshot to read it`. A dialog that
+opens over a page is told apart: `# dialog "Quit" opened; the rest of the window (1529 lines) left
+the tree while it is up`. When the new tree fits in the limit, it follows the line after
+`; it now reads:`. Otherwise take a snapshot, or raise the limit with
+`snapshot({ diff: true, maxLines: 5000 })` (400 lines by default).
 
 ## Wait
 

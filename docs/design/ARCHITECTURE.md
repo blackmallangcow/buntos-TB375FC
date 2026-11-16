@@ -1,8 +1,9 @@
-# buntOS 설계안 v0.8.12
+# buntOS 설계안 v0.8.13
 
 - 상태: 초안 (Draft)
 - 작성일: 2026-10-27
 - 개정 이력
+  - v0.8.13 (2026-11-17): 6장에 태블릿 이슈 #1 실사용 리뷰의 고침을 적었다: 읽지 못한 값과 정해지지 않은 막대(`indeterminate`), 대화 상자가 뜬 diff 요약과 상한 안의 새 트리, 예전 규칙으로 저장된 AI 이름, `bunt agent version`.
   - v0.8.12 (2026-11-17): 6장에 사람과 AI가 한 컴퓨터를 함께 쓰는 길을 적었다. 6.3절에 대상 확인 입력과 사람 우선 규칙, AI 멈춤·활동·대상 강조, 네 층의 입력 길과 AI seat 설계를, 6.4절에 ref 없는 키의 규칙, 답의 첫 줄, 포커스 없는 글 넣기, 새 오류 번호, `wait --loaded`, diff 요약, `bunt --version`을, 6.5절에 AI 제어 창을, 6.6절과 9.2절에 진행과 e2e 5번의 함께 쓰기 블록을 적었다. 태블릿 이슈 #1(Value의 GetAll로 Firefox가 끝남 등)의 고침도 6.3절에 있다
   - v0.8.11 (2026-11-06): 5.1·5.2절에 화면 키보드의 단축 줄과 클립보드 프로토콜·기록을, 5.4절에 잠금 화면의 붙여넣기 막기를, 5.6절(클립보드)을, 6.5절에 사람만 답하는 클립보드 기록 창과 한계를, 9.2절에 e2e 10·11번을, 11장에 진행 상황을 더했다
   - v0.8.10 (2026-11-06): 5.1절에 커서를 그리는 조건을 더했다
@@ -635,6 +636,12 @@ v0 구현 (2026-11-17, 사람과 AI가 함께 쓰기):
   - P2-2·P2-3: 기다리기의 pid 묶기와 문서 로딩 기다리기.
   - P3-1: fill이 실패하면 type으로 다시 넣는다.
   - P3-2: 큰 diff 요약.
+  - 실사용 리뷰(11-17, 태블릿 빌드 a23b2ce):
+    - 읽지 못한 Value 끝은 0으로 채우지 않는다. `range=`는 두 끝을 다 읽었고 폭이 있을 때만 낸다. Firefox는 min 없는 숫자 칸의 MinimumValue에 `Get failed`로 답하고 MaximumValue에 0을 주어 `range=0..0`이 나왔다.
+    - INDETERMINATE인 막대(값 없는 `<progress>`)는 `value=0` 대신 `indeterminate`다.
+    - Firefox의 종료 확인 창은 창 안의 모달이라 뒤의 페이지가 트리에서 빠진다. 이를 문서 교체로 알렸다(`2000 lines → 5 lines`). 이제 대화 상자가 떴다고 알린다.
+    - 예전 규칙으로 정책 파일과 요청 기록에 저장된 이름(`Claude Code URL Handler`)은 보일 때 지금 규칙으로 바꾼다(`bunt_access::shown_name`). 정책 파일은 root의 것이라 고쳐 쓰지 않는다.
+    - `bunt agent version`도 판을 낸다.
   - P3-3(로그인된 내용 읽기)은 정책이다. 기본 차단은 두지 않고, AI가 읽고 다루는 앱을 메뉴 막대 표시로 보인다.
 - **측정 (시험 VM, AI가 편집기에 300조각을 치는 동안 사람이 QMP로 설정 검색 칸을 누르고 치기):**
 
@@ -705,6 +712,8 @@ v0 구현 (2026-11-17, 사람과 AI가 함께 쓰기):
 - 한 번에 2000줄까지 내고, 넘으면 ref로 나눠 읽으라고 적는다.
 - 웹 페이지의 글: Firefox는 그릇(문단, div, 목록 항목, 칸)에 바로 든 글을 자식으로 내놓지 않고 그릇의 Text에 넣으며, 자식 요소가 든 자리에 U+FFFC를 둔다. 데몬은 그릇의 글을 읽어 그 자리에 자식을 끼워 화면의 차례대로 `text:`와 요소를 낸다. 자리 수와 자식 수가 다르면 글을 먼저 낸다. U+FFFC는 이름과 값에서 뺀다. Firefox는 창과 문서에도 EditableText를 붙이므로 EDITABLE 상태가 있어야 글자 칸으로 본다. 2차 후기에서는 검색 결과의 본문이 빠지고 창의 `value=`가 U+FFFC로 찼다.
 - 상태와 값: `hidden`, `offscreen`, `active`, `focused`, `checked`, `mixed`, `pressed`, `selected`, `expanded`/`collapsed`, `disabled`, `readonly`, `secret`(암호 칸), `required`, `invalid`, `value=`, `range=`, `placeholder=`, `level=`, `description=`.
+  - 값이 정해지지 않은 막대(INDETERMINATE: 값 없는 `<progress>`, aria-valuenow 없는 progressbar)는 `value=` 대신 `indeterminate`다.
+  - `range=`는 두 끝을 다 읽었고 폭이 있을 때만 낸다.
 - 글을 쓰는 콤보 상자(Firefox 주소 막대)도 글자 칸처럼 `value=`를 낸다.
 
 **동작 (v0, 구현).**
@@ -765,8 +774,11 @@ $ bunt agent click e185
 - 앱을 끝내는 동작: 동작 뒤 앱이 끝나면(계산기 닫기, 문서 버리기) 실패가 아니라 그 일을 알린다(`…; then the app quit (window "계산기" closed)`). 창만 닫히면 `then its window closed`다. 2차 후기에서는 D-Bus 오류(`ServiceUnknown`)가 그대로 보여, AI가 된 동작을 실패로 알고 되풀이할 수 있었다.
 - 오류 번호(JSON-RPC): -32000 접근성 버스·앱의 오류, -32001 허용하지 않은 클라이언트나 인증 창, -32002 사용자가 막은 앱(6.5절), -32003 화면이 잠김(5.4절. 사람이 암호로 풀 때까지 기다리라고 알린다), -32004 기다리기 시간 초과, -32005 FOCUS_MOVED(사람이 포커스를 옮겨 보내지 않았다), -32006 USER_ACTIVE(사람이 쓰는 중이라 보내지 않았다. 알림 끝의 "try again in N ms", REPL `retryAfterMs`), -32007 TARGET_GONE(ref·동작·기다리기의 대상 앱이 끝났거나 다시 떴다), -32008 PAUSED(사람이 AI 제어를 멈췄다. 읽기는 된다). REPL 이름은 FocusMovedError, UserActiveError, TargetGoneError, PausedError다.
 - 기다리기: `wait --loaded`(REPL `waitForLoadState()`)는 보이는 문서가 BUSY에서 벗어날 때까지 기다린다. 창 기다리기(`--window`, `--new-window`)도 창이 뜬 뒤 문서를 다 불러오기까지(상한 안에서) 기다린다. 앱·ref 범위의 기다리기는 처음 본 pid에 묶여, 앱이 끝나거나 다시 뜨면 TARGET_GONE으로 끝난다(태블릿 이슈 #1 P2-2·P2-3).
-- 큰 diff: 바뀐 줄이 400(`--max-lines`, REPL `maxLines`)을 넘으면 "# the document was replaced: 1885 lines → 51 lines; take a snapshot to read it"처럼 요약한다(P3-2).
-- 판: `bunt --version`, `buntd-agent --version`, 데몬 시작 기록이 크레이트 판과 빌드 커밋(이미지 빌드가 넣는 `BUNTOS_COMMIT`)을 낸다(P1-2).
+- 큰 diff: 바뀐 줄이 400(`--max-lines`, REPL `maxLines`)을 넘으면 한 줄로 요약한다(P3-2).
+  - 대화 상자가 뜨거나 닫혔으면 그렇게 알린다(`# dialog "Firefox 종료" opened; the rest of the window (2000 lines) left the tree while it is up`). 창 안의 모달은 뒤의 페이지를 트리에서 빼기 때문이다.
+  - 앞 트리가 거의 다 지워졌으면 문서가 바뀌었다고 알린다(`# the document was replaced: 1885 lines → 51 lines`).
+  - 새 트리가 상한 안이면 요약 뒤에 `; it now reads:`와 새 트리를 통째로 붙인다. 아니면 `; take a snapshot to read it`이다.
+- 판: `bunt --version`(`bunt version`, `bunt agent version`도 같다), `buntd-agent --version`, 데몬 시작 기록이 크레이트 판과 빌드 커밋(이미지 빌드가 넣는 `BUNTOS_COMMIT`)을 낸다(P1-2).
 
 **JS REPL (v0, 구현).** `bunt agent repl`과 MCP의 repl 도구. API는 Playwright와 같은 꼴이다(`agent/skills/repl.md`).
 
