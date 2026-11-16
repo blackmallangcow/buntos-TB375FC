@@ -172,6 +172,29 @@ agent-access-message = 허용하면 이 AI가 앱의 화면 내용을 읽고, �
 agent-access-deny = 거부
 agent-access-open = 시스템 설정 열기
 
+## 메뉴 막대의 AI 표시와 AI 제어 창 (agent_control.rs). AI가 제어하는 동안과 사람이 멈춘 동안만 표시가 보이고, 누르면
+## 사람만 누르는 창이 열린다. macOS 메뉴 막대의 사용 중 표시를 따른다
+# 표시의 도움말과 접근성 이름
+agent-indicator-active = AI 제어 중
+agent-indicator-paused = AI 제어 멈춤
+agent-control-title = AI 제어
+# 제목 줄 오른쪽의 지금 상태
+agent-control-state-active = 제어 중
+agent-control-state-paused = 멈춤
+agent-control-state-idle = 대기 중
+# $client: AI 클라이언트의 이름
+agent-control-active = “{ $client }”이(가) 이 컴퓨터를 제어하고 있습니다.
+agent-control-active-unknown = AI가 이 컴퓨터를 제어하고 있습니다.
+agent-control-paused = AI 제어를 멈췄습니다. 다시 허용할 때까지 AI는 버튼을 누르거나 글을 입력할 수 없습니다.
+agent-control-idle = 지금 이 컴퓨터를 제어하는 AI가 없습니다.
+# 다룬 앱 묶음의 머리글: 제어 중일 때, 멈췄거나 대기 중일 때
+agent-control-target = 다루는 앱
+agent-control-last-target = 마지막으로 다룬 앱
+agent-control-unknown-app = 알 수 없는 앱
+agent-control-pause = AI 제어 멈추기
+agent-control-resume = 다시 허용
+agent-control-settings = AI 에이전트 설정…
+
 # ⇧⌘5 스크린샷 도구 막대와 찍은 뒤의 미리 보기 (macOS 스크린샷)
 screenshot-close = 닫기
 screenshot-mode-screen = 전체 화면 캡처

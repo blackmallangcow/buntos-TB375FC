@@ -218,8 +218,9 @@ impl Frame {
 const KEEP_WORD_CHARS: usize = 16;
 
 /// 띄어 쓴 낱말마다 줄 바꿈을 막은 Pango 마크업 (CSS의 word-break: keep-all, AI 접근 요청 창과 같다).
-/// Pango는 한글 음절 사이마다 줄을 바꿀 수 있다고 보아 "필요합|니다"처럼 낱말 가운데에서 바꾸기 때문이다
-fn keep_words(text: &str) -> String {
+/// Pango는 한글 음절 사이마다 줄을 바꿀 수 있다고 보아 "필요합|니다"처럼 낱말 가운데에서 바꾸기 때문이다.
+/// AI 제어 창(agent_control.rs)도 쓴다: AI 이름처럼 긴 낱말이 들어가도 판이 넓어지지 않는다
+pub(crate) fn keep_words(text: &str) -> String {
     text.split(' ')
         .map(|word| {
             let escaped = glib::markup_escape_text(word);

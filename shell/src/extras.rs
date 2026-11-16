@@ -242,8 +242,8 @@ impl Menu {
 /// 포인터가 메뉴 안에서 실제로 움직인 뒤에만 가리킨 줄을 칠하게 한다 (pointer-moved 클래스).
 /// 메뉴가 뜰 때 GTK가 포인터가 메뉴 위에 있다고 보고 아래쪽 줄에 hover를 줄 때가 있다.
 /// 그 처음 위치에서 벗어나는 움직임이 와야 실제 포인터로 본다. macOS도 포인터가 메뉴에
-/// 들어오기 전에는 항목을 칠하지 않는다
-fn follow_pointer(content: &gtk::Box) {
+/// 들어오기 전에는 항목을 칠하지 않는다. AI 제어 창(agent_control.rs)의 판도 쓴다
+pub(crate) fn follow_pointer(content: &gtk::Box) {
     let motion = gtk::EventControllerMotion::new();
     let start: Rc<Cell<Option<(f64, f64)>>> = Rc::default();
     let entered = start.clone();
