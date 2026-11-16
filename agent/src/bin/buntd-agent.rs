@@ -848,7 +848,13 @@ impl Agent {
         };
         let diff = previous
             .as_deref()
-            .map(|old| diff::unified(old, &rendered.text))
+            .map(|old| {
+                diff::limited(
+                    old,
+                    &rendered.text,
+                    params.max_lines.unwrap_or(diff::MAX_LINES),
+                )
+            })
             .unwrap_or_default();
         tracing::info!(
             items = rendered.items,
@@ -1324,7 +1330,15 @@ impl Agent {
         if app_gone(&a11y, &bus).await {
             return Ok(quit_after(&bus, &done, &window_title, settled.ms));
         }
-        let acted = self.finish(&session, &bus, &window, &before, settled, done.clone());
+        let acted = self.finish(
+            &session,
+            &bus,
+            &window,
+            &before,
+            settled,
+            done.clone(),
+            params.max_lines,
+        );
         tracing::info!(
             action = %params.action,
             settled_ms = acted.settled_ms,
@@ -1378,7 +1392,9 @@ impl Agent {
         }
     }
 
-    /// 동작의 답: 동작 전과 멈춘 뒤의 diff, 새로 뜬 창. 다음 스냅샷의 diff는 이 뒤부터다
+    /// 동작의 답: 동작 전과 멈춘 뒤의 diff(`max_lines`보다 많이 바뀌었으면 요약), 새로 뜬 창. 다음 스냅샷의 diff는
+    /// 이 뒤부터다
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         &mut self,
         session: &str,
@@ -1387,6 +1403,7 @@ impl Agent {
         before: &Rendered,
         settled: Settled,
         done: String,
+        max_lines: Option<usize>,
     ) -> Acted {
         let after = settled.after;
         let new_windows = after
@@ -1411,7 +1428,11 @@ impl Agent {
                 new_windows,
             };
         }
-        let diff = diff::unified(&before.text, &after.text);
+        let diff = diff::limited(
+            &before.text,
+            &after.text,
+            max_lines.unwrap_or(diff::MAX_LINES),
+        );
         let scope = format!("window {bus} {window}");
         self.sessions
             .get(session)
@@ -1628,7 +1649,15 @@ impl Agent {
         if app_gone(a11y, &bus).await {
             return Ok(quit_after(&bus, &done, &window.title, settled.ms));
         }
-        let acted = self.finish(&session, &bus, &path, &before, settled, done);
+        let acted = self.finish(
+            &session,
+            &bus,
+            &path,
+            &before,
+            settled,
+            done,
+            params.max_lines,
+        );
         tracing::info!(
             settled_ms = acted.settled_ms,
             diff = acted.diff.lines().count(),

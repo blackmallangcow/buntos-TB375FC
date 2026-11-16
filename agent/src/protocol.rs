@@ -87,6 +87,8 @@ pub struct SnapshotParams {
     /// 읽기만 하고 다음 diff가 견줄 지난 트리는 그대로 둔다. 기다리기(`wait`)가 다시 읽을 때 쓴다: 다음
     /// 스냅샷의 diff는 기다리는 동안 읽은 것이 아니라 AI가 지난번에 본 트리와 견준 것이어야 한다
     pub peek: bool,
+    /// diff가 이보다 많은 줄(지운 줄과 더한 줄)이면 줄 대신 요약 한 줄을 준다. 없으면 400 (diff::MAX_LINES)
+    pub max_lines: Option<usize>,
 }
 
 /// `snapshot`의 답
@@ -131,6 +133,8 @@ pub struct ActParams {
     pub keys: bool,
     /// 동작 뒤 화면이 멈추기를 기다리는 시간의 상한(ms). 없으면 3000
     pub settle_ms: Option<u64>,
+    /// diff가 이보다 많은 줄(지운 줄과 더한 줄)이면 줄 대신 요약 한 줄을 준다. 없으면 400 (diff::MAX_LINES)
+    pub max_lines: Option<usize>,
 }
 
 /// `act`의 답

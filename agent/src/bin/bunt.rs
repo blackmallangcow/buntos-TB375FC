@@ -94,6 +94,8 @@ Options for snapshot:
   -i, --interactive        Only elements that can be clicked or typed into
   --hidden                 Include hidden elements
   --diff                   Print only what changed since the last snapshot of the same scope
+  --max-lines <n>          With --diff: if more than n lines changed (default 400), print a
+                           one-line summary instead; read the whole tree to see the rest
 
 Options for actions:
   --app <name>             Without a ref (click --at, press, type, scroll): act on this app's
@@ -103,6 +105,8 @@ Options for actions:
   --settle <ms>            Wait at most this long for the window to stop changing after an
                            action (default 3000; 0 reads it once right away). A page that is
                            still loading counts as changing
+  --max-lines <n>          If more than n lines of the window changed (default 400), print a
+                           one-line summary instead of the diff (take a snapshot to read it)
 
 Options for all:
   --session <name>         Session for refs and diffs (default: default)
@@ -632,6 +636,12 @@ fn absolute(path: &str) -> Result<String, String> {
     Ok(here.join(path).display().to_string())
 }
 
+/// `--max-lines`의 값: 줄 수
+fn max_lines(text: &str) -> Result<usize, String> {
+    text.parse()
+        .map_err(|_| format!("--max-lines needs a number of lines, not {text:?}"))
+}
+
 /// "120,340" → [120, 340]
 fn point(text: &str) -> Result<[f64; 2], String> {
     let bad = || format!("--at needs x,y in pixels (e.g. 120,340), not {text:?}");
@@ -662,6 +672,7 @@ fn snapshot(args: &[&str]) -> Result<(), String> {
             "--session" => params.session = Some(value("--session")?),
             "-i" | "--interactive" => params.interactive = true,
             "--hidden" => params.hidden = true,
+            "--max-lines" => params.max_lines = Some(max_lines(&value("--max-lines")?)?),
             "--diff" => diff = true,
             "--json" => json = true,
             other => return Err(format!("unknown option: {other}")),
@@ -763,6 +774,7 @@ fn act_options(params: &mut ActParams, args: &[&str]) -> Result<bool, String> {
                         .map_err(|_| format!("--settle needs milliseconds, not {ms:?}"))?,
                 );
             }
+            "--max-lines" => params.max_lines = Some(max_lines(&value("--max-lines")?)?),
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -887,6 +899,10 @@ mod tests {
         assert!(params("press", "", &["--keep-focus"]).is_err());
         assert!(params("press", "e4", &["--keys"]).is_err());
         assert!(params("fill", "e4", &["--settle", "soon"]).is_err());
+        let limited = params("click", "e3", &["--max-lines", "50"]).unwrap();
+        assert_eq!(limited.max_lines, Some(50));
+        assert!(params("click", "e3", &["--max-lines", "-1"]).is_err());
+        assert!(params("click", "e3", &["--max-lines"]).is_err());
         // --app은 ref가 없으면 그 앱의 창에 하고, 있으면 ref가 그 앱의 것인지 본다
         assert!(params("click", "e3", &["--app", "계산기"]).is_ok());
         assert!(params("press", "", &["--app", "firefox"]).is_ok());
