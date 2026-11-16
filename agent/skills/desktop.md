@@ -77,8 +77,11 @@ terminals (foot) never do.
   instead of sleeping. `waitForLoadState()` (CLI `wait --loaded`) waits until the visible page has
   finished loading; waiting for a window does this too. A wait ends with `TargetGoneError` when
   the app quits or restarts.
-- A diff of a replaced document is summed up when it is longer than 400 lines (`maxLines`, CLI
-  `--max-lines`); take a snapshot to read the new page.
+- A diff longer than 400 lines (`maxLines`, CLI `--max-lines`) is summed up in one line: a
+  dialog that opened or closed, or a replaced document. When the new tree fits in that limit it
+  follows the line (`; it now reads:`); otherwise take a snapshot to read it.
+- `[indeterminate]` marks a progress bar with no value yet. `range=` appears only when the app
+  gives both ends.
 
 ## Apps
 

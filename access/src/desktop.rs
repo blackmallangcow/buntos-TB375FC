@@ -32,6 +32,57 @@ pub fn desktop_app(exe: &Path, script: Option<&Path>) -> Option<DesktopApp> {
     find_app(desktop_files(), &languages(), exe, script)
 }
 
+/// 저장된 AI 이름 대신 화면에 보일 이름. bdaf997 전에는 앱 메뉴에 보이지 않는 항목의 이름이 AI 이름이 되어, 그때
+/// 허용하거나 요청을 남긴 AI는 그 이름이 정책 파일과 요청 기록에 남았다(이슈 #1 리뷰: `name = "Claude Code URL
+/// Handler"`). 정책 파일은 root의 것이라 고쳐 쓰지 않고 보일 때 바꾼다. 저장된 이름이 이 프로그램을 실행하는 숨은
+/// 항목의 이름이면 지금의 identify처럼 정한다: 앱 메뉴에 보이는 항목의 이름, 없으면 그 숨은 항목이 부르는 프로그램의
+/// 이름(claude). 그 밖에는 저장된 이름 그대로다
+pub fn shown_name(name: &str, exe: &Path, script: Option<&Path>) -> String {
+    shown_name_in(desktop_files(), &languages(), name, exe, script)
+}
+
+fn shown_name_in(
+    files: Vec<(String, PathBuf)>,
+    languages: &[String],
+    name: &str,
+    exe: &Path,
+    script: Option<&Path>,
+) -> String {
+    let entries: Vec<Entry> = files
+        .into_iter()
+        .filter_map(|(_, path)| Entry::parse(&fs::read_to_string(path).ok()?, languages))
+        .filter(|entry| {
+            (entry.is_application || entry.is_hidden_application) && runs(&entry.exec, exe, script)
+        })
+        .collect();
+    let Some(stale) = entries
+        .iter()
+        .find(|entry| entry.is_hidden_application && entry.names.iter().any(|known| known == name))
+    else {
+        return name.to_owned();
+    };
+    entries
+        .iter()
+        .find(|entry| entry.is_application)
+        .map(|entry| entry.name.clone())
+        .or_else(|| exec_name(&stale.exec))
+        .unwrap_or_else(|| name.to_owned())
+}
+
+/// Exec가 부르는 프로그램의 이름(`"/usr/bin/claude" --handle-uri %u`면 claude). 인터프리터면 스크립트의 이름이다
+fn exec_name(exec: &[String]) -> Option<String> {
+    let (program, rest) = exec_program(exec)?;
+    let path = if is_interpreter(Path::new(program)) {
+        Path::new(*rest.iter().find(|argument| !argument.starts_with('-'))?)
+    } else {
+        Path::new(program)
+    };
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
 /// `files`(데스크톱 ID, 경로) 가운데 이 실행 파일을 실행하는 첫 앱 항목
 fn find_app(
     files: Vec<(String, PathBuf)>,
@@ -136,7 +187,12 @@ fn languages() -> Vec<String> {
 struct Entry {
     /// 앱 메뉴에 보이는 앱: Type=Application이고 Hidden·NoDisplay가 아니다 (agent/src/desktop.rs와 같은 판단)
     is_application: bool,
+    /// 앱 메뉴에 보이지 않는 앱: Type=Application이고 Hidden이나 NoDisplay다
+    is_hidden_application: bool,
+    /// 지금 언어의 이름
     name: String,
+    /// 모든 언어의 이름 (Name과 Name[…])
+    names: Vec<String>,
     exec: Vec<String>,
 }
 
@@ -148,6 +204,7 @@ impl Entry {
         let mut no_display = false;
         let mut exec = None;
         let mut name = None;
+        let mut names = Vec::new();
         // (languages 안의 순위, 이름)
         let mut localized: Option<(usize, String)> = None;
         for line in text.lines() {
@@ -168,7 +225,10 @@ impl Entry {
                 "Hidden" => hidden = value == "true",
                 "NoDisplay" => no_display = value == "true",
                 "Exec" => exec = Some(exec_arguments(value)),
-                "Name" => name = Some(unescape_string(value)),
+                "Name" => {
+                    name = Some(unescape_string(value));
+                    names.push(unescape_string(value));
+                }
                 _ => {
                     let Some(language) = key
                         .strip_prefix("Name[")
@@ -176,6 +236,7 @@ impl Entry {
                     else {
                         continue;
                     };
+                    names.push(unescape_string(value));
                     let language = language.split('@').next().unwrap_or_default();
                     if let Some(rank) = languages.iter().position(|l| l == language)
                         && localized.as_ref().is_none_or(|(best, _)| rank < *best)
@@ -186,23 +247,33 @@ impl Entry {
             }
         }
         let name = localized.map(|(_, name)| name).or(name)?;
+        let application = kind.as_deref() == Some("Application");
         Some(Entry {
-            is_application: kind.as_deref() == Some("Application") && !hidden && !no_display,
+            is_application: application && !hidden && !no_display,
+            is_hidden_application: application && (hidden || no_display),
             name,
+            names,
             exec: exec?,
         })
     }
 }
 
-/// Exec가 이 프로그램을 실행하는지
-fn runs(exec: &[String], exe: &Path, script: Option<&Path>) -> bool {
-    // `env 변수=값 프로그램 …`은 env를 건너뛴다
+/// Exec의 프로그램과 나머지 인자. `env 변수=값 프로그램 …`은 env를 건너뛴다
+fn exec_program(exec: &[String]) -> Option<(&str, Vec<&str>)> {
     let mut arguments = exec.iter().map(String::as_str);
     let mut program = arguments.next();
     if program.is_some_and(|program| program == "env" || program.ends_with("/env")) {
         program = arguments.find(|argument| !argument.contains('=') && !argument.starts_with('-'));
     }
-    let Some(program) = program.and_then(find_program) else {
+    Some((program?, arguments.collect()))
+}
+
+/// Exec가 이 프로그램을 실행하는지
+fn runs(exec: &[String], exe: &Path, script: Option<&Path>) -> bool {
+    let Some((program, rest)) = exec_program(exec) else {
+        return false;
+    };
+    let Some(program) = find_program(program) else {
         return false;
     };
     if script.is_some_and(|script| program == script) {
@@ -211,7 +282,6 @@ fn runs(exec: &[String], exe: &Path, script: Option<&Path>) -> bool {
     if program != exe {
         return false;
     }
-    let rest: Vec<&str> = arguments.collect();
     let exec_script = if is_interpreter(&program) {
         script_argument(&program, &rest, None).map(|(_, canonical)| canonical)
     } else {
@@ -409,6 +479,73 @@ mod tests {
                 name: "Claude Code".into()
             })
         );
+    }
+
+    /// 이슈 #1 리뷰: bdaf997 전에 저장된 이름("Claude Code URL Handler")은 지금 규칙의 이름으로 보인다
+    #[test]
+    fn a_name_stored_from_a_hidden_entry_is_shown_by_the_current_rule() {
+        let data = env::temp_dir().join(format!("bunt-access-shown-{}", std::process::id()));
+        let applications = data.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        fs::create_dir_all(data.join("bin")).unwrap();
+        let program = data.join("bin/claude");
+        fs::write(&program, "").unwrap();
+        let program = fs::canonicalize(&program).unwrap();
+        let files = || {
+            let mut files = Vec::new();
+            collect(&applications, "", 0, &mut HashSet::new(), &mut files);
+            files
+        };
+        fs::write(
+            applications.join("claude-code-url-handler.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Claude Code URL Handler\nName[de]=Claude Code URL-Handler\nExec=\"{}\" --handle-uri %u\nType=Application\nNoDisplay=true\n",
+                program.display()
+            ),
+        )
+        .unwrap();
+        let shown = |name: &str| shown_name_in(files(), &[], name, &program, None);
+        // 숨은 항목의 이름(어느 언어든)이면 그 항목이 부르는 프로그램의 이름이다
+        assert_eq!(shown("Claude Code URL Handler"), "claude");
+        assert_eq!(shown("Claude Code URL-Handler"), "claude");
+        // 다른 이름은 그대로다
+        assert_eq!(shown("claude"), "claude");
+        assert_eq!(shown("내 AI"), "내 AI");
+        // 다른 프로그램을 부르는 숨은 항목의 이름은 바꾸지 않는다
+        let other = data.join("bin/other");
+        fs::write(&other, "").unwrap();
+        let other = fs::canonicalize(&other).unwrap();
+        assert_eq!(
+            shown_name_in(files(), &[], "Claude Code URL Handler", &other, None),
+            "Claude Code URL Handler"
+        );
+        // 앱 메뉴에 보이는 항목이 있으면 그 이름이다 (identify와 같다)
+        fs::write(
+            applications.join("claude.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Claude Code\nExec={}\nType=Application\n",
+                program.display()
+            ),
+        )
+        .unwrap();
+        let visible = shown("Claude Code URL Handler");
+        let _ = fs::remove_dir_all(&data);
+        assert_eq!(visible, "Claude Code");
+    }
+
+    #[test]
+    fn exec_names_its_program_or_script() {
+        let exec = |line: &str| exec_name(&exec_arguments(line));
+        assert_eq!(
+            exec("\"/usr/bin/claude\" --handle-uri %u").as_deref(),
+            Some("claude")
+        );
+        assert_eq!(exec("env A=1 claude %u").as_deref(), Some("claude"));
+        assert_eq!(
+            exec("node --no-warnings /opt/ai/cli.js %u").as_deref(),
+            Some("cli.js")
+        );
+        assert_eq!(exec("").as_deref(), None);
     }
 
     #[test]

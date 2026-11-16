@@ -210,17 +210,17 @@ fn values_are_read_one_property_at_a_time() {
         items[0].value,
         Some(Range {
             current: 0.4,
-            min: 0.0,
-            max: 1.0
+            min: Some(0.0),
+            max: Some(1.0)
         })
     );
-    // MinimumValue를 읽지 못해도 앱은 남고 나머지 값은 읽힌다
+    // MinimumValue를 읽지 못해도 앱은 남고 나머지 값은 읽힌다. 읽지 못한 끝은 0이 아니라 없음이다
     assert_eq!(
         items[1].value,
         Some(Range {
             current: 0.0,
-            min: 0.0,
-            max: 100.0
+            min: None,
+            max: Some(100.0)
         })
     );
     let gets = |path: &str| {
