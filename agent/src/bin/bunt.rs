@@ -153,7 +153,7 @@ fn main() -> ExitCode {
         ["agent", "skills", rest @ ..] => skills(rest),
         ["agent", "launch", app, rest @ ..] => launch(app, rest),
         ["mcp", rest @ ..] => serve_mcp(rest),
-        ["--version" | "-V" | "version"] | ["agent", "--version" | "-V"] => {
+        ["--version" | "-V" | "version"] | ["agent", "--version" | "-V" | "version"] => {
             println!("{}", version());
             return ExitCode::SUCCESS;
         }
