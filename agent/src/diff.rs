@@ -6,7 +6,7 @@
 //! Myers 알고리즘으로 견준다. 거의 다 바뀌었으면 통째로 바꾼 한 덩어리로 낸다.
 //!
 //! 바뀐 줄이 너무 많으면([`limited`]) 줄 대신 요약 한 줄을 낸다: 문서가 통째로 바뀌면 diff는 앞 문서를 모두 지운
-//! 줄이 되어, 읽을 것 없이 모델의 맥락만 채운다.
+//! 줄이 되어, 읽을 것 없이 모델의 맥락만 채운다. 새 트리가 상한 안이면 요약 뒤에 새 트리를 붙인다.
 
 /// 이보다 많이 다르면 견주기를 그만두고 통째로 바꾼 것으로 본다 (기억은 대략 이 값의 제곱)
 const MAX_EDITS: usize = 1000;
@@ -26,8 +26,9 @@ pub fn unified(old: &str, new: &str) -> String {
 }
 
 /// [`unified`]와 같되, 바뀐 줄(지운 줄과 더한 줄)이 `max_lines`보다 많으면 줄 대신 `#`로 시작하는 요약 한 줄을
-/// 낸다 (이슈 #1 P3-2: 새 탭을 열자 diff가 `@@ -2,1885 +2,51 @@`처럼 앞 문서 1885줄을 지운 줄로 냈다). 앞 트리가
-/// 거의 다 지워졌으면 문서가 바뀌었다고 알린다. 어느 쪽이든 새 스냅샷이 지금 모습을 준다
+/// 낸다 (이슈 #1 P3-2: 새 탭을 열자 diff가 `@@ -2,1885 +2,51 @@`처럼 앞 문서 1885줄을 지운 줄로 냈다). 대화 상자가
+/// 뜨거나 닫혔으면 그렇게, 앞 트리가 거의 다 지워졌으면 문서가 바뀌었다고 알린다. 새 트리가 `max_lines` 줄 안이면
+/// 요약 뒤에 새 트리를 통째로 붙이고, 아니면 새 스냅샷을 읽으라고 한다
 pub fn limited(old: &str, new: &str, max_lines: usize) -> String {
     let old: Vec<&str> = old.lines().collect();
     let new: Vec<&str> = new.lines().collect();
@@ -50,26 +51,77 @@ pub fn limited(old: &str, new: &str, max_lines: usize) -> String {
     let deleted = ops.iter().filter(|op| **op == Op::Delete).count();
     let inserted = ops.iter().filter(|op| **op == Op::Insert).count();
     if deleted + inserted > max_lines {
-        return summary(old.len(), deleted, inserted, max_lines);
+        return summary(&old, &new, a, b, &ops, max_lines);
     }
     hunks(a, b, &ops, prefix)
 }
 
-/// 줄 대신 내는 요약. `old_lines`는 앞 트리의 줄 수다
-fn summary(old_lines: usize, deleted: usize, inserted: usize, max_lines: usize) -> String {
-    // 앞 트리가 거의 다(90% 넘게) 지워졌다: 머리줄(앱 이름) 말고는 다 바뀌었다
-    if deleted * 10 > old_lines * 9 {
+/// 줄 대신 내는 요약. `a`, `b`는 앞뒤의 같은 줄을 뗀 나머지이고 `ops`는 그 편집이다
+fn summary(
+    old: &[&str],
+    new: &[&str],
+    a: &[&str],
+    b: &[&str],
+    ops: &[Op],
+    max_lines: usize,
+) -> String {
+    let (mut removed, mut added) = (Vec::new(), Vec::new());
+    let (mut i, mut j) = (0, 0);
+    for op in ops {
+        match op {
+            Op::Same => (i, j) = (i + 1, j + 1),
+            Op::Delete => {
+                removed.push(a[i]);
+                i += 1;
+            }
+            Op::Insert => {
+                added.push(b[j]);
+                j += 1;
+            }
+        }
+    }
+    let (deleted, inserted) = (removed.len(), added.len());
+    let head = if let Some(dialog) = added.iter().find_map(|line| dialog(line)) {
+        // 창 안의 모달(Firefox의 종료 확인)은 뒤의 페이지를 접근성 트리에서 뺀다: 문서가 바뀐 것이 아니다 (이슈 #1
+        // 리뷰: "the document was replaced: 2000 lines → 5 lines")
         format!(
-            "# the document was replaced: {deleted} lines → {inserted} lines; take a snapshot to \
-             read it\n"
+            "# {dialog} opened; the rest of the window ({deleted} lines) left the tree while it is up"
         )
+    } else if let Some(dialog) = removed.iter().find_map(|line| dialog(line)) {
+        format!("# {dialog} closed and {inserted} lines came back")
+    } else if deleted * 10 > old.len() * 9 {
+        // 앞 트리가 거의 다(90% 넘게) 지워졌다: 머리줄(앱 이름) 말고는 다 바뀌었다
+        format!("# the document was replaced: {deleted} lines → {inserted} lines")
     } else {
         format!(
             "# {} lines changed ({deleted} removed, {inserted} added), more than the {max_lines} a \
-             diff shows; take a snapshot to read it\n",
+             diff shows",
             deleted + inserted
         )
+    };
+    // 새 트리가 diff의 상한 안이면 그대로 보인다: 스냅샷을 다시 찍어 읽을 것이 이것이다
+    if new.len() <= max_lines {
+        format!("{head}; it now reads:\n{}\n", new.join("\n"))
+    } else {
+        format!("{head}; take a snapshot to read it\n")
     }
+}
+
+/// 트리 줄이 대화 상자면 그 역할과 이름(`dialog "Firefox 종료"`). 줄의 꼴은 tree.rs가 정한다:
+/// `  - dialog "이름" [ref=e5] [modal]:`
+fn dialog(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("- ")?;
+    let role = rest.split([' ', ':']).next()?;
+    if role != "dialog" && role != "alertdialog" {
+        return None;
+    }
+    Some(
+        rest.split(" [")
+            .next()
+            .unwrap_or(rest)
+            .trim_end_matches(':')
+            .trim_end(),
+    )
 }
 
 /// 앞에서부터의 편집 순서 (같음, 지움, 더함). 편집이 MAX_EDITS를 넘으면 None
@@ -282,8 +334,16 @@ mod tests {
                 .map(|n| format!("  - link \"바로 가기 {n}\""))
                 .collect(),
         );
+        // 새 탭(52줄)은 상한 안이므로 요약 뒤에 통째로 붙는다
         assert_eq!(
             limited(&article, &new_tab, MAX_LINES),
+            format!(
+                "# the document was replaced: 1885 lines → 51 lines; it now reads:\n{new_tab}\n"
+            )
+        );
+        // 새 트리도 상한을 넘으면 스냅샷을 읽으라고만 한다
+        assert_eq!(
+            limited(&article, &new_tab, 50),
             "# the document was replaced: 1885 lines → 51 lines; take a snapshot to read it\n"
         );
         // 상한을 올리면 줄로 낸다
@@ -312,6 +372,54 @@ mod tests {
             "@@ -2 +2 @@\n-b\n+B\n"
         );
         assert_eq!(limited("a", "a", 0), "");
+    }
+
+    #[test]
+    fn a_modal_dialog_is_not_a_replaced_document() {
+        // 이슈 #1 리뷰: Firefox에서 Ctrl+Q를 누르자 종료 확인 창이 창 안에 뜨고 페이지는 트리에서 빠졌다
+        let page: Vec<String> = std::iter::once("- app: \"Firefox\" [pid=7]".to_string())
+            .chain(std::iter::once(
+                "  - window \"위키백과 — Mozilla Firefox\" [ref=e1] [active]:".to_string(),
+            ))
+            .chain((0..2000).map(|n| format!("    - text: \"문단 {n}\"")))
+            .collect();
+        let modal = [
+            "- app: \"Firefox\" [pid=7]",
+            "  - window \"위키백과 — Mozilla Firefox\" [ref=e1] [active]:",
+            "    - dialog \"Firefox 종료\" [ref=e2001] [modal]:",
+            "      - text: \"Firefox를 종료하시겠습니까?\"",
+            "      - button \"Firefox 종료\" [ref=e2002]",
+            "      - button \"취소\" [ref=e2003]",
+        ]
+        .join("\n");
+        let page = page.join("\n");
+        assert_eq!(
+            limited(&page, &modal, MAX_LINES),
+            format!(
+                "# dialog \"Firefox 종료\" opened; the rest of the window (2000 lines) left the tree \
+                 while it is up; it now reads:\n{modal}\n"
+            )
+        );
+        // 닫히면 페이지가 돌아온다 (새 트리는 상한을 넘는다)
+        assert_eq!(
+            limited(&modal, &page, MAX_LINES),
+            "# dialog \"Firefox 종료\" closed and 2000 lines came back; take a snapshot to read it\n"
+        );
+    }
+
+    #[test]
+    fn dialog_lines_give_their_role_and_name() {
+        assert_eq!(
+            dialog("    - dialog \"Firefox 종료\" [ref=e5] [modal]:"),
+            Some("dialog \"Firefox 종료\"")
+        );
+        assert_eq!(
+            dialog("  - alertdialog \"오류\" [ref=e9]"),
+            Some("alertdialog \"오류\"")
+        );
+        assert_eq!(dialog("  - dialog [ref=e9]:"), Some("dialog"));
+        assert_eq!(dialog("  - text: \"dialog\""), None);
+        assert_eq!(dialog("  - button \"dialog\" [ref=e3]"), None);
     }
 
     #[test]
