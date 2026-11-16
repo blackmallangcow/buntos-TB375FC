@@ -12,7 +12,7 @@ auth_admin_keep으로 두면 인증한 뒤 몇 분 동안 같은 세션의 다�
 -->
 <policyconfig>
   <vendor>buntOS</vendor>
-  <vendor_url>https://github.com/blackmallangcow/buntOS</vendor_url>
+  <vendor_url>https://github.com/blackmallangcow/buntos-TB375FC</vendor_url>
   <icon_name>org.buntos.Agent-symbolic</icon_name>
 
   <action id="org.buntos.agent.access.change">

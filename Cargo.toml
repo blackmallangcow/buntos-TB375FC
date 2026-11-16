@@ -9,7 +9,7 @@ members = ["access", "agent", "comp", "greeter", "i18n", "keyboard", "packages",
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/blackmallangcow/buntOS"
+repository = "https://github.com/blackmallangcow/buntos-TB375FC"
 publish = false
 
 [profile.release]
