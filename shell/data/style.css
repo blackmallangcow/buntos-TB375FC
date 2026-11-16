@@ -23,7 +23,9 @@ window.bunt-launcher.background,
 window.bunt-clipboard,
 window.bunt-clipboard.background,
 window.bunt-wallpaper,
-window.bunt-wallpaper.background {
+window.bunt-wallpaper.background,
+window.bunt-agent-control,
+window.bunt-agent-control.background {
   background: none;
   background-color: transparent;
   box-shadow: none;
@@ -111,6 +113,87 @@ window.bunt-wallpaper.background {
 }
 
 .bar.solid button.recording-stop image {
+  -gtk-icon-shadow: none;
+}
+
+/* 메뉴 막대의 AI 표시(agent_control.rs): AI가 제어하는 동안과 사람이 멈춘 동안만 보인다. 메뉴가 없는 단추라 메뉴
+ * 막대 단추 모양을 따로 준다(기록 중단 단추와 같다). 캡슐이 아이콘보다 넓어 좌우 여백은 좁다 */
+.bar button.agent-indicator {
+  min-height: 0;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  box-shadow: none;
+  color: inherit;
+}
+
+.bar button.agent-indicator:hover {
+  background: var(--on-wallpaper-hover);
+}
+
+.bar.background button.agent-indicator:hover {
+  background: var(--hover);
+}
+
+/* 나타날 때 흐리게 시작한다. 같은 애니메이션을 다시 시작하려고 이름만 다른 두 개를 번갈아 붙인다 */
+@keyframes agent-indicator-in-a {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes agent-indicator-in-b {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.bar button.agent-indicator.appear-a {
+  animation: agent-indicator-in-a 200ms ease-out;
+}
+
+.bar button.agent-indicator.appear-b {
+  animation: agent-indicator-in-b 200ms ease-out;
+}
+
+/* 제어 중: AI 색 캡슐에 흰 AI 기호. 배경화면 위에서는 메뉴 막대 아이콘과 같은 그림자로 띄운다 */
+.agent-badge {
+  min-width: 24px;
+  min-height: 16px;
+  border-radius: var(--radius-capsule);
+  background: var(--agent);
+  box-shadow: var(--on-wallpaper-shadow);
+  color: var(--agent-fg);
+}
+
+.agent-badge image {
+  -gtk-icon-size: 12px;
+  -gtk-icon-shadow: none;
+}
+
+/* 멈춤: 메뉴 막대 글씨색의 빈 캡슐과 멈춤 기호. 채운 캡슐과 크기가 같다(색만으로 구별하지 않는다) */
+.agent-badge.paused {
+  background: none;
+  box-shadow: inset 0 0 0 1.5px currentColor, var(--on-wallpaper-shadow);
+  color: inherit;
+}
+
+.agent-badge.paused image {
+  -gtk-icon-shadow: var(--on-wallpaper-shadow);
+}
+
+/* 검은 막대와 유리 막대 위에서는 그림자가 없다 */
+.bar.solid .agent-badge,
+.bar.background .agent-badge {
+  box-shadow: none;
+}
+
+.bar.solid .agent-badge.paused,
+.bar.background .agent-badge.paused {
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+
+.bar.solid .agent-badge.paused image,
+.bar.background .agent-badge.paused image {
   -gtk-icon-shadow: none;
 }
 
@@ -1005,6 +1088,46 @@ window.bunt-polkit-agent.background {
   background-image: linear-gradient(to bottom, color-mix(in srgb, var(--pink) 75%, white), var(--pink));
 }
 
+/* AI 제어 창(agent_control.rs): 메뉴 막대 항목의 메뉴와 같은 유리 판을 표시 바로 아래에 둔다(5.1절). 메뉴 막대
+ * 표면의 팝오버가 아니라 화면을 덮는 투명한 overlay 창(bunt-agent-control) 안에 있어 에이전트가 누르지 못한다.
+ * 줄은 메뉴 막대 항목의 메뉴 클래스(extra-*)를 같이 쓴다 */
+.agent-control-panel {
+  padding: 5px;
+  border-radius: var(--radius-lg);
+  background: var(--glass-strong);
+  box-shadow: var(--shadow-menu), 0 0 0 1px var(--glass-outline), inset 0 1px var(--glass-highlight);
+  color: var(--label);
+  font-size: var(--text-body);
+}
+
+/* 제목 줄의 AI 기호: 메뉴 줄의 동그라미 아이콘과 같은 꼴. 제어 중이면 AI 색이다 */
+.agent-control-icon {
+  min-width: 26px;
+  min-height: 26px;
+  border-radius: 13px;
+  background: var(--control-bg);
+  -gtk-icon-size: 14px;
+}
+
+.agent-control-icon.active {
+  background: var(--agent);
+  color: var(--agent-fg);
+}
+
+/* 다룬 앱 줄은 누를 수 없다. 메뉴 줄의 여백만 쓴다 */
+.agent-control-app {
+  padding: 4px 10px;
+}
+
+/* 멈추기·다시 허용 줄: 메뉴 항목처럼 앞에 기호, 오른쪽에 단축키(메뉴의 단축키와 같은 흐린 글) */
+.agent-control-glyph {
+  -gtk-icon-size: 14px;
+}
+
+.agent-control-shortcut {
+  color: var(--label-secondary);
+}
+
 .auth-lock-badge {
   margin: 0 -4px -4px 0;
   border-radius: var(--radius-capsule);
@@ -1315,7 +1438,8 @@ window.touch .bar {
 
 window.touch .bar menubutton > button,
 window.touch .bar menubar > item,
-window.touch .bar button.recording-stop {
+window.touch .bar button.recording-stop,
+window.touch .bar button.agent-indicator {
   min-width: 18px;
   min-height: 36px;
   padding-top: 0;

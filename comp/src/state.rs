@@ -144,6 +144,9 @@ struct RestoreGeometry(RefCell<Option<Rectangle<i32, Logical>>>);
 /// 아직 자리를 정하지 않은 새 창. 첫 버퍼가 와서 크기를 알면 자리를 정한다.
 struct PendingPlacement(Cell<bool>);
 
+/// 사람이 다른 앱에 글을 치는 동안 떠서 사람의 창 뒤에 놓인 새 창 (R3, agent_guard.rs). 포커스를 받으면 지운다
+struct OpenedBehind(Cell<bool>);
+
 pub struct BuntState {
     pub config: Config,
     pub start_time: Instant,
@@ -228,6 +231,10 @@ pub struct BuntState {
     pub input_devices: crate::input_mode::InputDevices,
     /// 셸 전용 화면 키보드 프로토콜(bunt_osk_v1)과 셸에 알린 글 입력 상태 (osk.rs)
     pub osk: crate::osk::OskState,
+    /// 사람의 실제 입력 기록, 사람 우선 규칙, AI 멈춤과 활동 (agent_guard.rs)
+    pub agent_guard: crate::agent_guard::AgentGuard,
+    /// AI 대상 강조 테두리 (agent_target.rs)
+    pub agent_target: crate::agent_target::AgentTarget,
 }
 
 impl BuntState {
@@ -351,6 +358,7 @@ impl BuntState {
         let input_devices = crate::input_mode::InputDevices::start(config.input.mode, &dbus);
         // 셸의 화면 키보드(bunt_osk_v1): 컴포지터가 셸로 띄운 클라이언트만 본다 (osk.rs)
         let osk = crate::osk::OskState::new(&dh);
+        let agent_guard = crate::agent_guard::AgentGuard::new(config.agent.yield_ms);
 
         Ok(Self {
             config,
@@ -404,6 +412,8 @@ impl BuntState {
             touch: crate::touch::Touch::default(),
             input_devices,
             osk,
+            agent_guard,
+            agent_target: crate::agent_target::AgentTarget::default(),
         })
     }
 
@@ -575,6 +585,11 @@ impl BuntState {
         }
         self.restore_hidden(window);
         let target = self.raise_with_dialogs(window);
+        for focused in [window, &target] {
+            if let Some(behind) = focused.user_data().get::<OpenedBehind>() {
+                behind.0.set(false);
+            }
+        }
         self.note_focus(&target);
         for other in self.space.elements() {
             other.set_activated(*other == target);
@@ -639,6 +654,53 @@ impl BuntState {
             }
         }
         false
+    }
+
+    /// R3: 사람이 다른 앱에 글을 치는 중이면(agent_guard.rs) 새 창은 키보드 포커스를 가져가지 않고 사람의 창 뒤에 뜬다
+    /// (macOS의 협조적 활성화). 에이전트가 띄운 앱이 사람이 치던 글을 가져가지 않게 한다. 사람이 치고 있는 앱이 연
+    /// 창(⌘N, 대화 상자, 설정 창)은 그 앱의 일이므로 그대로 포커스를 받는다
+    fn opens_behind(&self, window: &Window) -> bool {
+        let same_app =
+            self.keyboard_focus()
+                .zip(window.toplevel())
+                .is_some_and(|(focus, toplevel)| {
+                    focus.id().same_client_as(&toplevel.wl_surface().id())
+                });
+        self.agent_guard.new_window_waits(same_app, Instant::now())
+    }
+
+    /// 사람의 창 뒤에 뜬 새 창인지 (R3)
+    fn opened_behind(window: &Window) -> bool {
+        window
+            .user_data()
+            .get::<OpenedBehind>()
+            .is_some_and(|behind| behind.0.get())
+    }
+
+    /// 키보드 포커스를 가진 창과 그 대화 상자를 다시 맨 위로 올린다. 사람의 창 뒤에 뜬 새 창(R3)이 자리를 정하거나
+    /// 크기를 바꾸며 위로 올라와도 사람의 창을 덮지 않게 한다. 활성 상태는 바꾸지 않는다
+    fn keep_focused_in_front(&mut self) {
+        let Some(mut top) = self
+            .keyboard_focus()
+            .map(|surface| self.root_surface(&surface))
+            .and_then(|root| self.window_for_surface(&root))
+        else {
+            return;
+        };
+        // 대화 상자에 포커스가 있으면 그 부모부터 올린다. 부모 고리가 잘못 이어져 있어도 끝나도록 창 수만큼만 따라간다
+        for _ in 0..self.space.elements().count() {
+            match top
+                .toplevel()
+                .and_then(ToplevelSurface::parent)
+                .and_then(|parent| self.window_for_surface(&parent))
+            {
+                Some(parent) => top = parent,
+                None => break,
+            }
+        }
+        if self.space.element_geometry(&top).is_some() {
+            self.raise_with_dialogs(&top);
+        }
     }
 
     /// 모달 대화 상자인지 (xdg-dialog-v1. 부모가 없는 창의 모달 표시는 뜻이 없다)
@@ -726,6 +788,10 @@ impl BuntState {
             fit(center.y + offset, size.h, area.loc.y, area.size.h),
         ));
         self.space.map_element(window.clone(), location, false);
+        // 사람의 창 뒤에 뜬 새 창은 자리를 정한 뒤에도 그 뒤에 둔다 (map_element는 맨 위로 올린다)
+        if Self::opened_behind(window) {
+            self.keep_focused_in_front();
+        }
     }
 
     fn ensure_initial_configure(&mut self, surface: &WlSurface) {
@@ -1212,10 +1278,12 @@ impl BuntState {
             }
         });
 
+        // 사람의 창 뒤에 뜬 새 창(R3)이 처음부터 최대화를 청해도 활성화하거나 사람의 창 위로 올리지 않는다
+        let behind = Self::opened_behind(&window);
         match self.filled_area(surface) {
             Some(area) => {
                 surface.with_pending_state(|pending| pending.size = Some(area.size));
-                self.space.map_element(window.clone(), area.loc, true);
+                self.space.map_element(window.clone(), area.loc, !behind);
             }
             None => {
                 let previous = restore.0.borrow_mut().take();
@@ -1224,9 +1292,12 @@ impl BuntState {
                     pending.size = previous.map(|geo| geo.size).filter(|size| !size.is_empty());
                 });
                 if let Some(geo) = previous {
-                    self.space.map_element(window.clone(), geo.loc, true);
+                    self.space.map_element(window.clone(), geo.loc, !behind);
                 }
             }
+        }
+        if behind {
+            self.keep_focused_in_front();
         }
         // 첫 configure 전이면 첫 configure에 함께 실린다
         if surface.is_initial_configure_sent() {
@@ -1431,6 +1502,16 @@ impl XdgShellHandler for BuntState {
             .get_or_insert(|| PendingPlacement(Cell::new(true)));
         // 크기를 알기 전에는 아무 데나 두고, 첫 버퍼가 오면 place_new_window가 옮긴다
         let origin = area.map(|area| area.loc).unwrap_or_default();
+        // 사람이 다른 앱에 글을 치는 중이면 키보드를 주지 않고 사람의 창 뒤에 둔다 (R3)
+        if self.opens_behind(&window) {
+            window
+                .user_data()
+                .get_or_insert(|| OpenedBehind(Cell::new(true)));
+            self.space.map_element(window.clone(), origin, false);
+            self.keep_focused_in_front();
+            tracing::info!("a new window opened behind while the person was typing");
+            return;
+        }
         self.space.map_element(window.clone(), origin, true);
         self.focus_window(&window, smithay::utils::SERIAL_COUNTER.next_serial());
     }
@@ -1900,6 +1981,14 @@ impl BuntState {
             .unwrap_or(root)
     }
 
+    /// 키보드 포커스가 더는 키보드를 받을 수 없는 표면에 남았는지: 닫힌 메뉴, 사라진 표면. 팝업 메뉴는 그랩하는 동안
+    /// 키보드를 가진다. 메뉴바처럼 키보드를 받지 않는 레이어의 팝업도 그렇다 (그래야 Esc와 화살표가 메뉴로 간다).
+    /// refresh_layer_focus와 에이전트 요청 앞의 메뉴 정리(touch.rs)가 함께 쓴다
+    pub(crate) fn focus_is_stale(&self, focus: &WlSurface) -> bool {
+        !(focus.is_alive() && self.popups.find_popup(focus).is_some())
+            && self.cannot_hold_focus(&self.root_surface(focus))
+    }
+
     /// 키보드 포커스를 둘 수 없는 최상위 표면인지: 사라졌거나, 창도 아니고 키보드를 받는 보이는
     /// 레이어 표면도 아니다 (레이어 역할을 잃은 표면 포함)
     fn cannot_hold_focus(&self, root: &WlSurface) -> bool {
@@ -1942,12 +2031,9 @@ impl BuntState {
             }
             return;
         }
-        // 팝업 메뉴는 그랩하는 동안 키보드를 가진다. 메뉴바처럼 키보드를 받지 않는 레이어의 팝업도
-        // 그렇다 (그래야 Esc와 화살표가 메뉴로 간다)
-        let stale = focus.as_ref().is_some_and(|focus| {
-            !(focus.is_alive() && self.popups.find_popup(focus).is_some())
-                && self.cannot_hold_focus(&self.root_surface(focus))
-        });
+        let stale = focus
+            .as_ref()
+            .is_some_and(|focus| self.focus_is_stale(focus));
         if stale {
             // 닫힌 메뉴를 연 표면이 키보드를 받으면(데스크탑 항목 창 같은 on-demand 레이어, 창) 그리로
             // 돌려준다. smithay의 팝업 그랩도 다음 입력 때 그렇게 하지만, 앱이 팝업을 지운 뒤 표면을 지우기
@@ -2196,6 +2282,8 @@ impl BuntState {
             Request::Agent(request) => self.agent_request(request),
             // 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
             Request::Session(request) => self.session_request(request),
+            // 셸의 AI 표시에서 사람이 멈추거나 다시 했다 (agent.rs)
+            Request::AgentPaused(paused) => self.set_agent_paused(paused),
         }
     }
 

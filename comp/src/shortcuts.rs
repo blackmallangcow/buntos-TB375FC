@@ -213,6 +213,8 @@ pub enum Builtin {
     ForceQuit,
     /// 음량 키 (표에 없는 고정 키). 셸이 음량을 바꾸고 표시를 띄운다
     Volume(VolumeKey),
+    /// AI 제어를 멈추거나 다시 한다 (agent_guard.rs). 에이전트의 키는 단축키를 거치지 않으므로 사람만 누른다
+    ToggleAgentPause,
 }
 
 /// 기기와 키보드의 음량 키
@@ -318,10 +320,12 @@ pub enum Category {
     App,
     /// 화면 잠금과 로그아웃
     Session,
+    /// AI 제어 (멈추기·다시 하기)
+    Agent,
 }
 
 impl Category {
-    pub const ALL: [Category; 7] = [
+    pub const ALL: [Category; 8] = [
         Category::Launcher,
         Category::Windows,
         Category::Input,
@@ -329,6 +333,7 @@ impl Category {
         Category::Text,
         Category::App,
         Category::Session,
+        Category::Agent,
     ];
 
     pub fn id(self) -> &'static str {
@@ -340,6 +345,7 @@ impl Category {
             Category::Text => "text",
             Category::App => "app",
             Category::Session => "session",
+            Category::Agent => "agent",
         }
     }
 }
@@ -806,6 +812,14 @@ pub const DEFS: &[Def] = &[
         Category::Session,
         "<Alt><Shift><Super>q",
         Builtin::LogOut { confirm: false },
+    ),
+    // AI 제어 멈추기·다시 하기. 메뉴 막대의 AI 표시와 같은 일을 사람이 키로 한다. macOS에는 없는 키라 앱 단축키와
+    // 겹치지 않게 ⌃⌥⌘를 모두 쓴다
+    run(
+        "agent.pause",
+        Category::Agent,
+        "<Control><Alt><Super>period",
+        Builtin::ToggleAgentPause,
     ),
 ];
 
@@ -1336,6 +1350,47 @@ mod tests {
             Category::ALL
                 .iter()
                 .any(|category| category.id() == "session")
+        );
+    }
+
+    /// ⌃⌥⌘.로 AI 제어를 멈추고 다시 한다. 글을 치는 중에도, 터미널에서도 컴포지터가 받는다
+    #[test]
+    fn control_option_command_period_pauses_ai_control() {
+        let shortcuts = Shortcuts::new(&BTreeMap::new());
+        for place in [APP, TYPING, TERMINAL] {
+            assert_eq!(
+                shortcuts.lookup(accel("<Control><Alt><Super>period"), place),
+                Some(Hit::Run(Builtin::ToggleAgentPause))
+            );
+        }
+        let info = shortcuts.info();
+        let pause = info.iter().find(|info| info.id == "agent.pause").unwrap();
+        assert_eq!(
+            (pause.category.as_str(), pause.kind.as_str()),
+            ("agent", "key")
+        );
+        assert_eq!(pause.accelerator, "<Control><Alt><Super>period");
+        assert!(
+            Category::ALL
+                .iter()
+                .any(|category| category.id() == "agent")
+        );
+        // 사람이 바꾼 키를 따른다
+        let mut prefs = BTreeMap::new();
+        remember(
+            &mut prefs,
+            "agent.pause",
+            "<Control><Super>F12".into(),
+            true,
+        );
+        let changed = Shortcuts::new(&prefs);
+        assert_eq!(
+            changed.lookup(accel("<Control><Super>F12"), APP),
+            Some(Hit::Run(Builtin::ToggleAgentPause))
+        );
+        assert_eq!(
+            changed.lookup(accel("<Control><Alt><Super>period"), APP),
+            None
         );
     }
 

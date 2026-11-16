@@ -8,7 +8,7 @@
 # type은 글 입력으로 확정해 조합을 거치지 않는다. 확인은 에이전트(앱의 글)와 입력기 상태(fcitx5)로 한다.
 # 직렬 콘솔의 root로 실행하며 마지막 줄이 답이다(답이 없으면 호스트가 기다리므로 늘 한 줄을 낸다).
 # 사용법: hangul.sh prepare | state | focus-list | clear hangul|english | value | focus-other |
-#         other-value | foot-prepare | foot | firefox-prepare | firefox-wait first|second |
+#         other-value | foot-behind | foot-prepare | foot | firefox-prepare | firefox-wait first|second |
 #         firefox-values | firefox-focus first|second | cleanup
 set -u
 
@@ -17,7 +17,24 @@ foot_file=/tmp/e2e-hangul-foot
 page=/tmp/e2e-hangul.html
 profile=/tmp/e2e-hangul-firefox
 session=(XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus)
-A() { sudo -u "$user" "${session[@]}" bunt agent "$@"; }
+# 사람이 방금 입력했으면(QMP 키·누르기) 컴포지터가 에이전트의 입력을 미루고 "try again in N ms"로 알린다(사람 우선,
+# ARCHITECTURE 6.3절). AI가 하듯 그만큼 기다렸다 다시 한다(다섯 번까지). 표준 출력과 오류는 그대로 낸다
+agent_retry() {
+	local err rc ms try
+	err=$(mktemp)
+	for try in 1 2 3 4 5 6; do
+		"$@" 2>"$err"
+		rc=$?
+		ms=$(grep -a -o 'try again in [0-9]* ms' "$err" | grep -o '[0-9]*' | head -1)
+		if [[ $rc -eq 0 || -z "$ms" || $try -eq 6 ]]; then
+			cat "$err" >&2
+			rm -f "$err"
+			return "$rc"
+		fi
+		sleep "$(awk -v ms="$ms" 'BEGIN { printf "%.2f", (ms + 100) / 1000 }')"
+	done
+}
+A() { agent_retry sudo -u "$user" "${session[@]}" bunt agent "$@"; }
 im() { sudo -u "$user" "${session[@]}" fcitx5-remote "$@"; }
 compositor() {
 	sudo -u "$user" "${session[@]}" \
@@ -136,9 +153,32 @@ other-value)
 	echo "[$(grep -m1 textbox <<<"$tree" | value)]"
 	A fill "$(ref textbox <<<"$tree")" "" >/dev/null 2>&1
 	;;
+foot-behind)
+	# 사람이 편집기에 조합하는 중에(방금 앱에 쳤다) 다른 프로그램이 띄운 새 창(터미널)은 키보드를 가져가지 않고 사람의
+	# 창 뒤에 뜬다(R3, 사람 우선). 창이 목록에 보일 때까지 기다려, 보이기까지 걸린 ms, 키보드 포커스를 가진 앱(창이 뜨지
+	# 않았으면 no-window), 편집기의 글(조합하던 글자는 아직 문서에 없다)을 낸다. 띄운 터미널은 닫는다
+	rm -f "$foot_file"
+	start=$(date +%s%N)
+	spawn foot --working-directory=/tmp sh -c "cat >$foot_file"
+	focused=no-window
+	for _ in $(seq 50); do
+		A apps 2>/dev/null | grep -a -q ' app=foot ' && focused= && break
+		sleep 0.1
+	done
+	took=$((($(date +%s%N) - start) / 1000000))
+	sleep 0.3
+	focused=${focused:-$(focus_app)}
+	text=$(editor_value)
+	pkill -n -x foot
+	for _ in $(seq 25); do
+		pgrep -x foot >/dev/null || break
+		sleep 0.2
+	done
+	echo "$took $focused [$text]"
+	;;
 foot-prepare)
-	# 터미널(foot)을 띄워 cat이 받은 바이트를 파일에 쓰게 한다. 새 창이 키보드 포커스를 가져가므로, 조합하던
-	# 글자가 있으면 편집기에 확정되어야 한다. 편집기의 글과 준비 결과를 낸다
+	# 터미널(foot)을 띄워 cat이 받은 바이트를 파일에 쓰게 한다. 사람이 손을 멈춘 뒤(yield-ms가 지났다) 뜬 새 창은 키보드
+	# 포커스를 가져가므로, 조합하던 글자가 있으면 편집기에 확정되어야 한다. 편집기의 글과 준비 결과를 낸다
 	rm -f "$foot_file"
 	spawn foot --working-directory=/tmp sh -c "cat >$foot_file"
 	for _ in $(seq 50); do

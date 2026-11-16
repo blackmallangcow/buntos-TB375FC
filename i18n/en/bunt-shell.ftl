@@ -172,6 +172,30 @@ agent-access-message = If you allow it, this AI can read what apps show, press b
 agent-access-deny = Deny
 agent-access-open = Open System Settings
 
+## AI indicator in the menu bar and the AI control window (agent_control.rs). The indicator shows only while an AI is in
+## control or while the person paused it; clicking it opens a window only the person can use. Like the in-use indicators
+## in the macOS menu bar
+# Tooltip and accessible name of the indicator
+agent-indicator-active = AI Control Active
+agent-indicator-paused = AI Control Paused
+agent-control-title = AI Control
+# The current state at the right of the title row
+agent-control-state-active = Active
+agent-control-state-paused = Paused
+agent-control-state-idle = Idle
+# $client: the AI client's name
+agent-control-active = “{ $client }” is controlling this computer.
+agent-control-active-unknown = An AI is controlling this computer.
+agent-control-paused = AI control is paused. AI can’t press buttons or type until you resume it.
+agent-control-idle = No AI is controlling this computer right now.
+# Header of the app section: while in control, and when paused or idle
+agent-control-target = Current App
+agent-control-last-target = Last App
+agent-control-unknown-app = Unknown App
+agent-control-pause = Pause AI Control
+agent-control-resume = Resume AI Control
+agent-control-settings = AI Agents Settings…
+
 # Screenshot toolbar (⇧⌘5) and the preview after taking one (macOS Screenshot)
 screenshot-close = Close
 screenshot-mode-screen = Capture Entire Screen

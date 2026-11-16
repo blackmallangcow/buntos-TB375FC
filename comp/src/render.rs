@@ -37,6 +37,8 @@ smithay::backend::renderer::element::render_elements! {
     Solid = SolidColorRenderElement,
     // 창 최소화 효과 (minimize.rs)
     Minimize = crate::minimize::EffectElement,
+    // AI 대상 강조 테두리 (agent_guard.rs)
+    Highlight = smithay::backend::renderer::gles::element::PixelShaderElement,
 }
 
 impl std::fmt::Debug for OutputRenderElements {
@@ -49,6 +51,7 @@ impl std::fmt::Debug for OutputRenderElements {
             Self::Uncovered(element) => f.debug_tuple("Uncovered").field(element).finish(),
             Self::Solid(element) => f.debug_tuple("Solid").field(element).finish(),
             Self::Minimize(element) => f.debug_tuple("Minimize").field(element).finish(),
+            Self::Highlight(element) => f.debug_tuple("Highlight").field(element).finish(),
             Self::_GenericCatcher(_) => f.write_str("GenericCatcher"),
         }
     }

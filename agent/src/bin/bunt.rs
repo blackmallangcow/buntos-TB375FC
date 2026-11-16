@@ -25,6 +25,7 @@ use serde_json::Value;
 const USAGE: &str = "\
 Usage: bunt agent <command> [options]
        bunt mcp [--session <name>]
+       bunt --version
 
 Read and control the desktop through accessibility trees (buntd-agent). `bunt mcp` speaks MCP
 on standard input and output for AI apps without a shell: its tools are repl and skills.
@@ -72,10 +73,16 @@ Commands:
                              --text <text>                 a name, text or field value with it
                              --role <role> [--name <name>] an element (button, textbox, ...)
                              --window <title>, --new-window
-                                                           a window of the app (or of any app)
+                                                           a window of the app (or of any app),
+                                                           then its page to finish loading
+                             --loaded                      the visible page to finish loading
+                                                           (with --window: fail if it is still
+                                                           loading when the time is up)
                              --value <value>, --changed    the value of the --ref element
                              --ref <ref> alone             that element
-                           --exact matches whole names; --nth <n> picks one of several matches
+                           --exact matches whole names; --nth <n> picks one of several matches.
+                           A wait on an app or a ref stops with an error when that app quits
+                           or restarts: take a new snapshot then
 
 After an action the reply is what changed in that window once it stopped changing.
 Elements of a web page that are scrolled out of view are marked [offscreen]; an action on
@@ -87,6 +94,8 @@ Options for snapshot:
   -i, --interactive        Only elements that can be clicked or typed into
   --hidden                 Include hidden elements
   --diff                   Print only what changed since the last snapshot of the same scope
+  --max-lines <n>          With --diff: if more than n lines changed (default 400), print a
+                           one-line summary instead; read the whole tree to see the rest
 
 Options for actions:
   --app <name>             Without a ref (click --at, press, type, scroll): act on this app's
@@ -96,6 +105,8 @@ Options for actions:
   --settle <ms>            Wait at most this long for the window to stop changing after an
                            action (default 3000; 0 reads it once right away). A page that is
                            still loading counts as changing
+  --max-lines <n>          If more than n lines of the window changed (default 400), print a
+                           one-line summary instead of the diff (take a snapshot to read it)
 
 Options for all:
   --session <name>         Session for refs and diffs (default: default)
@@ -104,6 +115,14 @@ Options for all:
 
 /// scroll의 기본 눈금 수
 const SCROLL_NOTCHES: f64 = 5.0;
+
+/// 이 빌드의 크레이트 판과 커밋 (이슈 #1 P1-2: 기기의 바이너리가 어느 소스인지 알 길이 없었다). 커밋은 빌드할
+/// 때의 환경 변수 BUNTOS_COMMIT에서 받는다(이미지 빌드가 넣는다). 없으면 unknown
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const COMMIT: &str = match option_env!("BUNTOS_COMMIT") {
+    Some(commit) if !commit.is_empty() => commit,
+    _ => "unknown",
+};
 
 fn main() -> ExitCode {
     // `| head`처럼 읽는 쪽이 먼저 닫으면 다른 명령줄 도구처럼 조용히 끝난다 (Rust는 SIGPIPE를 무시해
@@ -134,6 +153,10 @@ fn main() -> ExitCode {
         ["agent", "skills", rest @ ..] => skills(rest),
         ["agent", "launch", app, rest @ ..] => launch(app, rest),
         ["mcp", rest @ ..] => serve_mcp(rest),
+        ["--version" | "-V" | "version"] | ["agent", "--version" | "-V"] => {
+            println!("{}", version());
+            return ExitCode::SUCCESS;
+        }
         []
         | ["help" | "-h" | "--help", ..]
         | ["agent"]
@@ -150,6 +173,11 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `bunt --version`의 글: `bunt 0.1.0 (commit 9802da5)`
+fn version() -> String {
+    format!("bunt {VERSION} (commit {COMMIT})")
 }
 
 fn apps(args: &[&str]) -> Result<(), String> {
@@ -557,6 +585,7 @@ fn wait_params(args: &[&str]) -> Result<(WaitParams, bool), String> {
             "--session" => params.session = Some(value("--session")?),
             "--changed" => params.changed = true,
             "--gone" => params.gone = true,
+            "--loaded" => params.loaded = true,
             "--exact" => params.exact = true,
             "--json" => json = true,
             other => return Err(format!("unknown option: {other}")),
@@ -607,6 +636,12 @@ fn absolute(path: &str) -> Result<String, String> {
     Ok(here.join(path).display().to_string())
 }
 
+/// `--max-lines`의 값: 줄 수
+fn max_lines(text: &str) -> Result<usize, String> {
+    text.parse()
+        .map_err(|_| format!("--max-lines needs a number of lines, not {text:?}"))
+}
+
 /// "120,340" → [120, 340]
 fn point(text: &str) -> Result<[f64; 2], String> {
     let bad = || format!("--at needs x,y in pixels (e.g. 120,340), not {text:?}");
@@ -637,6 +672,7 @@ fn snapshot(args: &[&str]) -> Result<(), String> {
             "--session" => params.session = Some(value("--session")?),
             "-i" | "--interactive" => params.interactive = true,
             "--hidden" => params.hidden = true,
+            "--max-lines" => params.max_lines = Some(max_lines(&value("--max-lines")?)?),
             "--diff" => diff = true,
             "--json" => json = true,
             other => return Err(format!("unknown option: {other}")),
@@ -738,6 +774,7 @@ fn act_options(params: &mut ActParams, args: &[&str]) -> Result<bool, String> {
                         .map_err(|_| format!("--settle needs milliseconds, not {ms:?}"))?,
                 );
             }
+            "--max-lines" => params.max_lines = Some(max_lines(&value("--max-lines")?)?),
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -862,6 +899,10 @@ mod tests {
         assert!(params("press", "", &["--keep-focus"]).is_err());
         assert!(params("press", "e4", &["--keys"]).is_err());
         assert!(params("fill", "e4", &["--settle", "soon"]).is_err());
+        let limited = params("click", "e3", &["--max-lines", "50"]).unwrap();
+        assert_eq!(limited.max_lines, Some(50));
+        assert!(params("click", "e3", &["--max-lines", "-1"]).is_err());
+        assert!(params("click", "e3", &["--max-lines"]).is_err());
         // --app은 ref가 없으면 그 앱의 창에 하고, 있으면 ref가 그 앱의 것인지 본다
         assert!(params("click", "e3", &["--app", "계산기"]).is_ok());
         assert!(params("press", "", &["--app", "firefox"]).is_ok());
@@ -926,6 +967,8 @@ mod tests {
         assert_eq!((params.nth, params.timeout_ms), (Some(-1), Some(0)));
         let (window, _) = wait_params(&["--new-window"]).unwrap();
         assert_eq!(window.window.as_deref(), Some(""));
+        let (loaded, _) = wait_params(&["--loaded", "--app", "firefox"]).unwrap();
+        assert!(loaded.loaded);
         let (value, _) = wait_params(&["--ref", "e9", "--value", "42"]).unwrap();
         assert_eq!(
             (value.scope.as_deref(), value.value.as_deref()),

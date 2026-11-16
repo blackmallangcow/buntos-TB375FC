@@ -59,6 +59,17 @@ pub const BLOCKED_APP: i64 = -32002;
 pub const SCREEN_LOCKED: i64 = -32003;
 /// 기다리던 것이 시간 상한 안에 일어나지 않았다 (`wait`)
 pub const TIMEOUT: i64 = -32004;
+/// 사람이 키보드 포커스를 다른 창으로 옮겨, 그 창에 보내려던 키·글·휠을 보내지 않았다. 되빼앗지 않는다: ref나
+/// `--app`으로 대상을 다시 고른다
+pub const FOCUS_MOVED: i64 = -32005;
+/// 사람이 지금 컴퓨터를 쓰고 있어(키를 치거나 포인터를 움직이는 중) 아무것도 보내지 않았다. 알림 글의
+/// "try again in N ms"가 다시 해 볼 때까지의 시간이다
+pub const USER_ACTIVE: i64 = -32006;
+/// ref, 동작, 기다리기의 대상 앱(창)이 끝났거나 다시 떴다(pid가 바뀌었다). 받은 ref와 기다리던 것은 그 앱의
+/// 것이었으므로 새로 스냅샷을 읽는다
+pub const TARGET_GONE: i64 = -32007;
+/// 사람이 AI 제어를 멈췄다. 읽기는 되고, 다시 하기는 사람만 누른다
+pub const PAUSED: i64 = -32008;
 
 /// 데몬 알림(AGENT_ERROR)의 앞머리: `app`에 맞는 앱이 없다. 기다리기는 이것을 그 앱이 없는 것으로 읽는다
 pub const NO_APP_MATCHES: &str = "no app matches";
@@ -85,6 +96,8 @@ pub struct SnapshotParams {
     /// 읽기만 하고 다음 diff가 견줄 지난 트리는 그대로 둔다. 기다리기(`wait`)가 다시 읽을 때 쓴다: 다음
     /// 스냅샷의 diff는 기다리는 동안 읽은 것이 아니라 AI가 지난번에 본 트리와 견준 것이어야 한다
     pub peek: bool,
+    /// diff가 이보다 많은 줄(지운 줄과 더한 줄)이면 줄 대신 요약 한 줄을 준다. 없으면 400 (diff::MAX_LINES)
+    pub max_lines: Option<usize>,
 }
 
 /// `snapshot`의 답
@@ -95,6 +108,9 @@ pub struct Snapshot {
     pub diff: String,
     /// 이 범위를 이 세션에서 처음 읽었다 (diff가 비어 있다)
     pub first: bool,
+    /// 범위 안의 보이는 문서가 불러오는 중이다 (BUSY). 기다리기(`wait --loaded`, 창 기다리기)가 본다
+    #[serde(default)]
+    pub busy: bool,
 }
 
 /// `act`의 인자: ref가 가리키는 요소에 동작 하나
@@ -126,6 +142,8 @@ pub struct ActParams {
     pub keys: bool,
     /// 동작 뒤 화면이 멈추기를 기다리는 시간의 상한(ms). 없으면 3000
     pub settle_ms: Option<u64>,
+    /// diff가 이보다 많은 줄(지운 줄과 더한 줄)이면 줄 대신 요약 한 줄을 준다. 없으면 400 (diff::MAX_LINES)
+    pub max_lines: Option<usize>,
 }
 
 /// `act`의 답
@@ -264,6 +282,9 @@ pub struct WaitParams {
     pub changed: bool,
     /// 나타나기 대신 사라지기(창은 닫히기)를 기다린다
     pub gone: bool,
+    /// 범위의 보이는 문서가 다 불러올 때까지(BUSY가 풀릴 때까지). window와 함께 주면 창이 뜬 뒤 다 불러오지
+    /// 못하고 시간이 다 되었을 때 성공 대신 TIMEOUT이다
+    pub loaded: bool,
     /// 기다리는 시간의 상한(ms). 0이면 한 번만 본다. 없으면 10초
     pub timeout_ms: Option<u64>,
 }

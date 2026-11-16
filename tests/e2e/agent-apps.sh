@@ -10,11 +10,30 @@
 # 다른 페이지(시스템 모니터)를 빼는지, 앱을 끝내는 동작을 알리는지, 시스템 설정 사이드바도 본다. 끝으로
 # 셸의 메뉴 막대 단추를 포인터로 누르고, 메뉴를 Escape로 닫은 뒤 다른 메뉴 단추가 눌리는지 본다. JS REPL로
 # 계산기를 한 번에 다루고 그 변수가 다음 호출에 남는지도 본다.
-# 직렬 콘솔의 root로 실행한다(boot-to-shell.sh가 넣어 돌린다). 마지막 줄은 "E2E5_RESULT 통과 실패"다
+# 직렬 콘솔의 root로 실행한다(boot-to-shell.sh가 넣어 돌린다). 마지막 줄은 "E2E5_RESULT 통과 실패"다.
+# 인자로 together-* 단계 이름을 주면 그 단계만 돌리고 마지막 줄에 답한다: 사람과 AI가 함께 쓰는 시나리오다(boot-to-shell.sh가
+# 단계 사이에 QMP로 사람의 누르기와 키를 넣는다)
 set -u
 
 user=buntos
-A() { sudo -u "$user" XDG_RUNTIME_DIR=/run/user/1000 bunt agent "$@"; }
+# 사람이 방금 입력했으면(QMP 키·누르기) 컴포지터가 에이전트의 입력을 미루고 "try again in N ms"로 알린다(사람 우선,
+# ARCHITECTURE 6.3절). AI가 하듯 그만큼 기다렸다 다시 한다(다섯 번까지). 표준 출력과 오류는 그대로 낸다
+agent_retry() {
+	local err rc ms try
+	err=$(mktemp)
+	for try in 1 2 3 4 5 6; do
+		"$@" 2>"$err"
+		rc=$?
+		ms=$(grep -a -o 'try again in [0-9]* ms' "$err" | grep -o '[0-9]*' | head -1)
+		if [[ $rc -eq 0 || -z "$ms" || $try -eq 6 ]]; then
+			cat "$err" >&2
+			rm -f "$err"
+			return "$rc"
+		fi
+		sleep "$(awk -v ms="$ms" 'BEGIN { printf "%.2f", (ms + 100) / 1000 }')"
+	done
+}
+A() { agent_retry sudo -u "$user" XDG_RUNTIME_DIR=/run/user/1000 bunt agent "$@"; }
 im() { sudo -u "$user" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus fcitx5-remote "$@"; }
 passed=0
 failed=0
@@ -111,6 +130,133 @@ wait_firefox() {
 		sleep 2
 	done
 }
+
+# ---- 사람과 AI가 함께 쓴다 (설계 agent-focus-design 3장, 계약 A의 대상 확인 입력) ----
+# AI는 텍스트 편집기 문서에 조각을 잇달아 치고(접근성 type --ref), 그사이 사람은 QMP로 시스템 설정의 검색 칸을 누르고
+# 친다. 단계마다 상태는 /tmp/e2e-together.*에 둔다. 편집기 글은 트리의 값(200자에서 자른다)으로 읽으므로 조각은 그보다
+# 짧게 둔다. 편집기를 키로 읽으면(⌘A ⌘C) 편집기가 포커스를 가져가므로 쓰지 않는다
+together_chunks=36
+compositor() {
+	sudo -u "$user" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl --user call \
+		org.buntos.Compositor /org/buntos/Compositor org.buntos.Compositor1 "$@"
+}
+# 키보드 포커스를 가진 앱 ID나 레이어 이름
+focus_app() { compositor GetFocus | sed -E 's/^ussb [0-9]+ "([^"]*)".*/\1/'; }
+together() {
+	local state=/tmp/e2e-together.env search doc point editor settings
+	# shellcheck source=/dev/null
+	[[ -f $state ]] && . "$state"
+	case $1 in
+	together-watch)
+		# 접근성 버스에서 Value 인터페이스의 GetAll과 Get을 지켜본다. GetAll은 at-spi2-core 결함으로 앱(Firefox)을 죽였다
+		# (이슈 P0). dbus-monitor가 없으면 건너뛴다
+		command -v dbus-monitor >/dev/null || {
+			echo skip
+			return
+		}
+		local address
+		address=$(sudo -u "$user" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus busctl --user call \
+			org.a11y.Bus /org/a11y/bus org.a11y.Bus GetAddress | sed -E 's/^s "(.*)"$/\1/')
+		rm -f /tmp/e2e-together-monitor.log
+		setsid nohup sudo -u "$user" dbus-monitor --address "$address" \
+			"type='method_call',member='GetAll',arg0='org.a11y.atspi.Value'" \
+			"type='method_call',member='Get',arg0='org.a11y.atspi.Value'" \
+			</dev/null >/tmp/e2e-together-monitor.log 2>&1 &
+		sleep 1
+		echo watching
+		;;
+	together-prepare)
+		# 설정(사람의 창)의 검색 칸을 비우고, 사람이 누를 화면 자리를 AI가 그 칸을 포인터로 누른 답(화면 좌표)에서 읽는다.
+		# 끝으로 AI가 편집기를 열어 앞으로 가져온다: 사람이 누르기 전에는 AI의 창이 키보드 포커스를 가진다
+		settings=$(open_app org.buntos.Settings)
+		search=$(ref textbox <<<"$settings")
+		A press "ctrl+a BackSpace" --ref "$search" >/dev/null
+		point=$(A click "$search" --pointer | grep -o 'clicked with the pointer at ([0-9]*, [0-9]*)' |
+			grep -o '[0-9]*, [0-9]*' | tr -d ' ')
+		editor=$(open_app org.gnome.TextEditor)
+		doc=$(ref textbox <<<"$editor")
+		A fill "$doc" "-" >/dev/null
+		printf 'search=%s\ndoc=%s\n' "$search" "$doc" >"$state"
+		echo "$point"
+		;;
+	together-start)
+		# AI가 편집기 문서에 조각(a100 a101 …)을 잇달아 친다. 먼저 ref 없는 type이 아직 포커스를 가진 AI의 창에 가는지 본다
+		cat >/tmp/e2e-together.js <<JS
+const ed = desktop.app('org.gnome.TextEditor');
+const doc = ed.locator('$doc');
+const log = [];
+try { await desktop.keyboard.type('k', { settle: 0 }); log.push('before ok'); }
+catch (e) { log.push('before ' + e.name); }
+let ok = 0;
+for (let i = 100; i < 100 + $together_chunks; i++) {
+  try { await doc.type('a' + i + ' ', { settle: 0 }); ok++; }
+  catch (e) { log.push(i + ' ' + e.name + ': ' + String(e.message).slice(0, 100)); }
+}
+log.push('done ' + ok);
+log.join('\n')
+JS
+		chmod 644 /tmp/e2e-together.js
+		rm -f /tmp/e2e-together.out
+		setsid nohup bash -c "sudo -u $user XDG_RUNTIME_DIR=/run/user/1000 bunt agent repl --timeout 120000 - \
+			</tmp/e2e-together.js >/tmp/e2e-together.out 2>&1" </dev/null >/dev/null 2>&1 &
+		echo started
+		;;
+	together-result)
+		# AI가 다 칠 때까지 기다려 답한다: 편집기의 AI 조각 수, 차례대로인지(1/0), 편집기의 사람 글 수, 설정 칸의 AI 조각 수,
+		# 설정 칸의 글, 지금 포커스, 사람이 누르기 전의 ref 없는 type
+		for _ in $(seq 120); do
+			grep -q '^done [0-9]*$' /tmp/e2e-together.out 2>/dev/null && break
+			sleep 1
+		done
+		local text human
+		text=$(A snapshot --app org.gnome.TextEditor -i | grep -m1 "ref=$doc\]" | value)
+		human=$(A snapshot --app org.buntos.Settings -i | grep -m1 "ref=$search\]" | value)
+		local chunks order
+		chunks=$(grep -o 'a1[0-9][0-9]' <<<"$text" | wc -l)
+		order=$(grep -o 'a1[0-9][0-9]' <<<"$text" | tr -d a | awk -v n="$together_chunks" \
+			'{ if ($1 != 100 + NR - 1) bad = 1 } END { print (NR == n && !bad) ? 1 : 0 }')
+		echo "$chunks $order $(grep -o human <<<"$text" | wc -l) $(grep -c 'a1[0-9][0-9]' <<<"$human")" \
+			"${human:-none} $(focus_app) $(grep -m1 -o '^before [A-Za-z]*' /tmp/e2e-together.out | cut -d' ' -f2)"
+		;;
+	together-log)
+		# 실패를 알아보려고: AI REPL의 답과 편집기 글 (한 줄로)
+		echo "$(tr '\n' '|' </tmp/e2e-together.out | cut -c1-400) / 편집기: $(
+			A snapshot --app org.gnome.TextEditor -i | grep -m1 "ref=$doc\]" | value
+		)"
+		;;
+	together-refless)
+		# 사람이 설정을 누른 뒤: ref 없는 type은 사람의 칸에 치지 않고 FocusMovedError다
+		A repl "try { await desktop.keyboard.type('x'); 'typed' } catch (e) { e.name }" 2>&1 | tail -1
+		;;
+	together-fill)
+		# 사람이 쓰는 중에도 fill(접근성)은 키보드 포커스 없이 AI의 칸만 바꾼다
+		A fill "$doc" "AI fill" >/dev/null
+		echo "$(A snapshot --app org.gnome.TextEditor -i | grep -m1 "ref=$doc\]" | value)|$(focus_app)|$(
+			A snapshot --app org.buntos.Settings -i | grep -m1 "ref=$search\]" | value
+		)"
+		;;
+	together-getall)
+		# 지켜본 동안 Value의 GetAll 수와 Get 수 (Get이 0이면 Value를 가진 요소를 읽지 않아 GetAll 0이 뜻이 없다)
+		pkill -f "dbus-monitor --address" 2>/dev/null
+		sleep 0.5
+		echo "$(grep -c 'member=GetAll$' /tmp/e2e-together-monitor.log)" \
+			"$(grep -c 'member=Get$' /tmp/e2e-together-monitor.log)"
+		;;
+	together-cleanup)
+		# 설정 검색 칸을 접근성으로 비운다(포커스는 설정에 남아 e2e 6번의 앱 차례를 지킨다)
+		A press "ctrl+a BackSpace" --ref "$search" >/dev/null
+		rm -f /tmp/e2e-together.* /tmp/e2e-together-monitor.log
+		focus_app
+		;;
+	*)
+		echo "unknown step $1"
+		;;
+	esac
+}
+if (($# > 0)); then
+	together "$@"
+	exit
+fi
 
 # 다시 돌려도 같도록 이 시나리오가 쓰는 앱을 닫고 시작한다
 pkill -f /usr/bin/gnome-calculator
@@ -224,11 +370,16 @@ for _ in $(seq 45); do
 	firefox=$(A snapshot --app firefox-esr -i 2>/dev/null)
 done
 address=$(ref combobox <<<"$firefox")
+# fill이 다시 읽기에서 글을 지키지 못하면(이슈 P3-1) 데몬이 그 칸을 비우고 type의 길로 다시 넣고 둘 다 알린다
 if filled=$(A fill "$address" "$url" 2>&1); then
-	echo "E2E5 알림: Firefox 주소 막대가 fill의 글을 지켰다"
+	if grep -q 'cleared and typed instead' <<<"$filled"; then
+		echo "E2E5 알림: Firefox 주소 막대가 fill의 글을 버려 데몬이 비우고 다시 쳤다"
+	else
+		echo "E2E5 알림: Firefox 주소 막대가 fill의 글을 지켰다"
+	fi
 else
-	check "fill이 글을 지키지 못하면 type --ref를 권하는 오류다" \
-		"$(grep -c "did not keep the text.*type \"$url\" --ref $address" <<<"$filled")" 1
+	check "fill이 실패하면 다시 친 것까지 알리는 오류다" \
+		"$(grep -c "did not keep the text.*typing it instead" <<<"$filled")" 1
 	A press ctrl+a --ref "$address" >/dev/null
 	A type "$url" --ref "$address" >/dev/null
 fi

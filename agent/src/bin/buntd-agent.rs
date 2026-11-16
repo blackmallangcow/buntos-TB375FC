@@ -16,7 +16,7 @@
 //! 띄운 워커 프로세스(`buntd-agent --repl-worker`, seccomp로 가둔다)에서 돈다.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     fs,
     io::{self, BufRead, BufReader, Write},
@@ -32,7 +32,9 @@ use std::{
 
 use bunt_access::{Client, Policy};
 use bunt_agent::{
-    atspi::{self, A11y, AppRef, Focus, KEYBOARD_WINDOW, LOCK_WINDOW, Placed, ROOT, WindowRef},
+    atspi::{
+        self, A11y, AppRef, Declined, Focus, KEYBOARD_WINDOW, LOCK_WINDOW, Placed, ROOT, WindowRef,
+    },
     desk::Desk,
     desktop::{self, DesktopApp},
     diff,
@@ -41,7 +43,7 @@ use bunt_agent::{
         RpcError, Screenshot, ScreenshotParams, Snapshot, SnapshotParams, Untracked, WaitParams,
     },
     repl::{Repls, Worker, worker},
-    session::Sessions,
+    session::{Aim, Sessions},
     skills,
     tree::{self, Item, Options, Tree, iface, role, state},
     wait,
@@ -105,6 +107,8 @@ const PREPARE_WAIT: Duration = Duration::from_secs(30);
 /// 동작의 대상: 앱(접근성 버스 이름), 창, 요소와 그 부모. press는 요소 없이 창에만 보낼 수 있다
 struct Target {
     bus: String,
+    /// 앱 이름 (답의 첫 줄에 받은 앱으로 적는다)
+    app: String,
     window: String,
     window_title: String,
     item: Option<Item>,
@@ -121,8 +125,8 @@ struct Target {
 enum Chosen {
     /// 접근성 트리가 있는 창
     Tree(Box<Target>),
-    /// 트리가 없는 창 (pid, 제목). 키와 휠은 보내고 diff는 없다
-    Blind(u32, String),
+    /// 트리가 없는 창 (pid, 제목, 앱 이름). 키와 휠은 보내고 diff는 없다
+    Blind(u32, String, String),
 }
 
 /// 그린 범위: 머리줄을 포함한 트리 글과 그 앱의 보이는 창 (경로, 제목)
@@ -145,12 +149,24 @@ struct Agent {
     policy: Policy,
     /// 열었지만 아직 창이 뜨지 않은 앱 (데스크톱 ID, 연 시각)
     launching: HashMap<String, Instant>,
+    /// 지금 요청을 보낸 AI 클라이언트의 이름. 동작을 시작할 때 컴포지터에 알린다(메뉴 막대의 AI 표시)
+    client: String,
 }
 
 fn main() {
     // REPL 워커는 로그도 소켓도 쓰지 않는다. 무엇을 하기 전에 가른다
     if std::env::args().nth(1).as_deref() == Some("--repl-worker") {
         worker::main();
+    }
+    // 이 빌드의 크레이트 판과 커밋 (이슈 #1 P1-2). 커밋은 빌드할 때의 BUNTOS_COMMIT (이미지 빌드가 넣는다)
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    const COMMIT: &str = match option_env!("BUNTOS_COMMIT") {
+        Some(commit) if !commit.is_empty() => commit,
+        _ => "unknown",
+    };
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("buntd-agent {VERSION} (commit {COMMIT})");
+        return;
     }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -167,6 +183,8 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // 기기의 보고와 소스 커밋을 맞춰 보게 판을 남긴다
+    tracing::info!("buntd-agent {VERSION} (commit {COMMIT}) started");
     let agent = Arc::new(Mutex::new(Agent::default()));
     let repls = Arc::new(Repls::new(Box::new(Worker::spawn)));
     // 오래 쉰 REPL과 스스로 끝난 워커를 때때로 거둔다
@@ -391,6 +409,136 @@ fn blocked_app() -> Failure {
     )
 }
 
+/// 사람이 AI 제어를 멈췄다. 멈춤은 컴포지터가 갖고, 사람만 메뉴 막대나 단축키로 푼다
+fn paused() -> Failure {
+    (
+        protocol::PAUSED,
+        "the person paused AI control; only the person can resume it. Reading (snapshot, \
+         screenshot, wait) still works"
+            .into(),
+    )
+}
+
+/// 사람이 쓰는 중이라 컴포지터가 받지 않았다. 다시 해 볼 때까지의 시간을 "try again in N ms"로 싣는다 (REPL의
+/// UserActiveError가 이것을 읽는다)
+fn user_active(what: &str, retry_after_ms: u64) -> Failure {
+    (
+        protocol::USER_ACTIVE,
+        format!(
+            "{what}: the person is using the computer, so nothing was sent; try again in \
+             {retry_after_ms} ms"
+        ),
+    )
+}
+
+/// ref의 앱이 끝났거나 다시 떴다: ref를 준 때의 프로세스가 아니다
+fn target_gone(reference: &str, pid: u32) -> Failure {
+    (
+        protocol::TARGET_GONE,
+        format!(
+            "{reference} is gone: {} or restarted (it was pid {pid}); take a new snapshot",
+            protocol::APP_QUIT
+        ),
+    )
+}
+
+/// 컴포지터가 에이전트의 입력이나 활성화를 받지 않은 것을 AI에게 알릴 오류로 바꾼다. 사람을 먼저 둔 거절(사람이
+/// 포커스를 옮겼다, 쓰는 중이다, 멈췄다)은 그 번호로 알린다. 데몬은 다시 활성화하거나 다시 눌러 되찾지 않는다
+fn refused(err: &zbus::Error, what: &str) -> Failure {
+    refusal(atspi::declined(err), &reason(err), what)
+}
+
+/// refused의 가르기: 컴포지터의 거절 까닭(`declined`)과 오류 알림(`why`)으로
+fn refusal(declined: Option<Declined>, why: &str, what: &str) -> Failure {
+    match declined {
+        Some(Declined::FocusMoved) => (
+            protocol::FOCUS_MOVED,
+            format!(
+                "{what}: the keyboard focus is not on that window any more (the person moved \
+                 it), so nothing was sent. Do not take it back: read the window again and use a \
+                 ref (fill and accessible actions need no focus) or --app"
+            ),
+        ),
+        Some(Declined::UserActive { retry_after_ms }) => user_active(what, retry_after_ms),
+        Some(Declined::Paused) => paused(),
+        None => {
+            if why.contains("only the user can answer") {
+                auth_dialog()
+            } else if why.contains("screen is locked") {
+                screen_locked()
+            } else if why.starts_with("that window is gone") {
+                (protocol::TARGET_GONE, format!("{what} failed: {why}"))
+            } else {
+                agent_error(format!("{what} failed: {why}"))
+            }
+        }
+    }
+}
+
+/// ref도 `--app`도 없는 키·글·휠을 받을 창이 아직 없다: 이 세션에서 AI가 다룬 창이 없다
+fn no_aim(action: &str) -> Failure {
+    (
+        protocol::INVALID_PARAMS,
+        format!(
+            "{action} without a ref or --app goes only to the window you worked on last, and \
+             this session has not worked on one yet; pass --app <app> (see `bunt agent apps`) \
+             or a ref"
+        ),
+    )
+}
+
+/// 사람이 키보드 포커스를 옮겨 ref 없는 키·글·휠을 보내지 않을 때의 알림: 지금 포커스를 가진 곳과 다른 길
+fn focus_moved(aim: &Aim, now: &str, action: &str) -> Failure {
+    let (done, wanted) = match action {
+        "type" => ("typed", "type into"),
+        "press" => ("pressed", "press keys in"),
+        _ => ("scrolled", "scroll"),
+    };
+    let app = if aim.app_id.is_empty() {
+        aim.pid.to_string()
+    } else {
+        aim.app_id.clone()
+    };
+    (
+        protocol::FOCUS_MOVED,
+        format!(
+            "{now}, not on {} {:?}, the window you worked on last; the person may be using it, \
+             so nothing was {done}. Pass --app {app} or a ref to {wanted} your window (fill and \
+             accessible actions need no focus)",
+            aim.app, aim.title
+        ),
+    )
+}
+
+/// 지금 키보드 포커스를 가진 곳 (FOCUS_MOVED 알림의 앞머리)
+fn focus_now(focus: Option<&Focus>, apps: &[AppRef], installed: &[DesktopApp]) -> String {
+    match focus {
+        None => "no window has the keyboard focus".into(),
+        Some(focus) if focus.layer => {
+            format!("the keyboard focus is on the shell's {}", focus.app_id)
+        }
+        Some(focus) => format!(
+            "the keyboard focus is on {} {:?}",
+            app_label(focus.pid, &focus.app_id, apps, installed),
+            focus.title
+        ),
+    }
+}
+
+/// 사람에게 보이는 앱 이름: 접근성 버스의 이름, 설치된 앱의 이름, 앱 ID 차례
+fn app_label(pid: u32, app_id: &str, apps: &[AppRef], installed: &[DesktopApp]) -> String {
+    apps.iter()
+        .find(|app| app.pid == Some(pid) && !app.name.is_empty())
+        .map(|app| app.name.clone())
+        .or_else(|| {
+            installed
+                .iter()
+                .find(|app| app.owns(app_id))
+                .map(|app| app.name.clone())
+        })
+        .unwrap_or_else(|| app_id.to_string())
+}
+
 fn handle(line: &str, agent: &Mutex<Agent>, repls: &Repls, client: Option<&Client>) -> Response {
     let request: Request = match serde_json::from_str(line) {
         Ok(request) => request,
@@ -406,8 +554,9 @@ fn handle(line: &str, agent: &Mutex<Agent>, repls: &Repls, client: Option<&Clien
     };
     let started = Instant::now();
     let method = request.method.clone();
+    let name = client.map_or("", |client| client.name.as_str());
     let dispatch =
-        |policy: Policy, method: &str, params: Value| locked(agent, policy, method, params);
+        |policy: Policy, method: &str, params: Value| locked(agent, policy, name, method, params);
     let response = answer(request, client, &Policy::load, &dispatch, repls);
     tracing::info!(
         client = client.map_or("", |client| client.name.as_str()),
@@ -494,10 +643,11 @@ fn repl_owner(client: Option<&Client>) -> String {
     })
 }
 
-/// 데몬을 잡고 메서드 하나를 처리한다
+/// 데몬을 잡고 메서드 하나를 처리한다. `client`는 요청한 AI의 이름이다
 fn locked(
     agent: &Mutex<Agent>,
     policy: Policy,
+    client: &str,
     method: &str,
     params: Value,
 ) -> Result<Value, Failure> {
@@ -505,6 +655,7 @@ fn locked(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     agent.policy = policy;
+    agent.client = client.to_string();
     async_io::block_on(agent.dispatch(method, params))
 }
 
@@ -601,7 +752,7 @@ impl Agent {
             "act" => {
                 let params: ActParams = serde_json::from_value(params)
                     .map_err(|err| (protocol::INVALID_PARAMS, err.to_string()))?;
-                let acted = self.act(params).await?;
+                let acted = self.act_or_type(params).await?;
                 serde_json::to_value(acted).map_err(|err| agent_error(err.to_string()))
             }
             "screenshot" => {
@@ -615,6 +766,167 @@ impl Agent {
                 format!("unknown method {method}"),
             )),
         }
+    }
+
+    /// 사람이 AI 제어를 멈췄으면 동작하지 않는다(읽기는 된다). 접근성 동작은 컴포지터를 거치지 않으므로 데몬이 먼저
+    /// 본다. 멈춤 상태는 컴포지터가 갖는다. 옛 컴포지터에는 멈춤이 없다
+    async fn check_paused(&self, a11y: &A11y) -> Result<(), Failure> {
+        match a11y.agent_paused().await {
+            Ok(false) => Ok(()),
+            Ok(true) => Err(paused()),
+            Err(err) if atspi::unknown_method(&err) => Ok(()),
+            Err(err) => Err(agent_error(format!(
+                "cannot tell whether the person paused AI control: {}",
+                reason(&err)
+            ))),
+        }
+    }
+
+    /// 이 AI가 그 창을 읽거나 다루기 시작한다고 컴포지터에 알린다(메뉴 막대의 AI 표시). 알리지 못해도(옛
+    /// 컴포지터) 동작은 한다
+    async fn report(&self, a11y: &A11y, pid: u32, title: &str) {
+        if let Err(err) = a11y.report_activity(&self.client, pid, title).await
+            && !atspi::unknown_method(&err)
+        {
+            tracing::debug!("cannot report the agent activity: {err}");
+        }
+    }
+
+    /// 이 세션에서 AI가 다룬 창으로 적는다. ref 없는 키·글·휠과 범위 없는 스냅샷이 이 창을 쓴다. 앱 ID와 레이어
+    /// 표면인지는 컴포지터의 창 목록에서 읽는다
+    async fn aim_at(
+        &mut self,
+        a11y: &A11y,
+        session: &str,
+        pid: u32,
+        title: &str,
+        app: &str,
+        window: Option<(String, String)>,
+    ) {
+        let placed = a11y.windows().await.unwrap_or_default();
+        let mine: Vec<&Placed> = placed.iter().filter(|window| window.pid == pid).collect();
+        let found = mine
+            .iter()
+            .find(|window| window.title == title)
+            .or(mine.last());
+        let aim = Aim {
+            pid,
+            title: title.to_string(),
+            app: app.to_string(),
+            app_id: found.map_or_else(String::new, |window| window.app_id.clone()),
+            window,
+            // 그 pid의 창이 컴포지터에 없으면 셸의 레이어 표면이다 (창 목록을 읽지 못했으면 창으로 본다)
+            layer: !placed.is_empty() && mine.is_empty(),
+        };
+        self.sessions.get(session).set_aim(aim);
+    }
+
+    /// ref도 `--app`도 없는 키·글·휠을 받을 창: 이 세션에서 AI가 마지막으로 다룬 창이 아직 키보드 포커스를 가졌을
+    /// 때만 그 창이다. 사람이 포커스를 옮겼으면 FOCUS_MOVED로 거절한다(사람의 창에 치지 않는다, 설계 3장)
+    async fn aimed_window(
+        &mut self,
+        a11y: &A11y,
+        session: &str,
+        apps: &[AppRef],
+        placed: &[Placed],
+        action: &str,
+    ) -> Result<Chosen, Failure> {
+        let Some(aim) = self.sessions.get(session).aim().cloned() else {
+            return Err(no_aim(action));
+        };
+        let focus = a11y.focus().await;
+        let Some(title) = aim_focused(&aim, focus.as_ref(), apps, placed) else {
+            let installed = desktop::installed(&desktop::language());
+            let now = focus_now(focus.as_ref(), apps, &installed);
+            return Err(focus_moved(&aim, &now, action));
+        };
+        // 창 제목은 앱이 바꿀 수 있다(Firefox는 페이지 제목): 지금 제목으로 적어 둔다
+        let aim = Aim { title, ..aim };
+        self.sessions.get(session).set_aim(aim.clone());
+        let tree = aim.window.as_ref().filter(|(bus, path)| {
+            apps.iter()
+                .any(|app| &app.bus == bus && app.windows.iter().any(|w| &w.path == path))
+        });
+        Ok(match tree {
+            Some((bus, path)) => Chosen::Tree(Box::new(Target {
+                bus: bus.clone(),
+                app: aim.app,
+                window: path.clone(),
+                window_title: aim.title,
+                item: None,
+                parent: None,
+                off_screen: false,
+                web: false,
+                drop_down: false,
+            })),
+            None => Chosen::Blind(aim.pid, aim.title, aim.app),
+        })
+    }
+
+    /// 동작 하나. fill이 다시 읽기에서 글을 지키지 못했으면(Firefox 주소 막대는 SetTextContents에 참을 답하고
+    /// 비어 있었다, 이슈 P3-1) 그 글 칸을 비우고 type의 길로 다시 넣는다. 둘 다 알린다
+    async fn act_or_type(&mut self, params: ActParams) -> Result<Acted, Failure> {
+        let retry = (params.action == "fill" && !params.target.is_empty()).then(|| {
+            (
+                params.session.clone(),
+                params.target.clone(),
+                params.value.clone().unwrap_or_default(),
+                params.settle_ms,
+            )
+        });
+        let failure = match self.act(params).await {
+            Err(failure) if retry.is_some() && fill_not_kept(&failure) => failure,
+            other => return other,
+        };
+        let Some((session, reference, text, settle_ms)) = retry else {
+            return Err(failure);
+        };
+        let step = |action: &str, value: &str| ActParams {
+            session: session.clone(),
+            target: reference.clone(),
+            action: action.into(),
+            value: Some(value.into()),
+            settle_ms,
+            ..ActParams::default()
+        };
+        let typed = match self.act(step("press", "ctrl+a BackSpace")).await {
+            Ok(_) => self.act(step("type", &text)).await,
+            Err(failure) => Err(failure),
+        };
+        let acted = typed.map_err(|(code, message)| {
+            (
+                code,
+                format!("{}; typing it instead failed too: {message}", failure.1),
+            )
+        })?;
+        // type의 키보드 길은 다시 읽어 보지 않으므로 여기서 본다
+        let name = session.unwrap_or_else(|| "default".into());
+        let field = self
+            .sessions
+            .get(&name)
+            .target(&reference)
+            .map(|(bus, path)| (bus.to_string(), path.to_string()));
+        if let Some((bus, path)) = field {
+            let a11y = self.a11y().await?;
+            let expect = Expect::Text(text.clone());
+            if let Some(now) = a11y.text(&bus, &path).await
+                && !expect.holds(&now)
+            {
+                return Err(agent_error(format!(
+                    "{}; typing it instead did not keep it either: it reads {:?}",
+                    failure.1,
+                    shorten(&now, 80)
+                )));
+            }
+        }
+        Ok(Acted {
+            done: format!(
+                "{}; the app did not keep the text when filled, so it was cleared and typed \
+                 instead",
+                acted.done
+            ),
+            ..acted
+        })
     }
 
     /// 접근성 버스. 처음 쓸 때 붙고, 호출이 실패하면 다음 요청에서 다시 붙는다
@@ -736,7 +1048,9 @@ impl Agent {
     async fn snapshot(&mut self, params: SnapshotParams) -> Result<Snapshot, Failure> {
         let a11y = self.a11y().await?;
         let session_name = params.session.clone().unwrap_or_else(|| "default".into());
-        // 범위: ref, 앱, 활성 창 차례
+        // 범위가 AI가 다룬 창이 아니라 키보드 포커스의 창이면 그렇다고 트리 머리에 적는다
+        let mut note: Option<String> = None;
+        // 범위: ref, 앱, AI가 마지막으로 다룬 창, 활성 창 차례
         let (bus, roots, scope) = if let Some(reference) = &params.scope {
             let (bus, path) = self
                 .sessions
@@ -774,18 +1088,39 @@ impl Agent {
                         .iter()
                         .map(|window| window.path.clone())
                         .collect();
+                    // 읽기만 한 앱은 AI가 다룬 창(ref 없는 키·글·휠이 가는 곳)으로 적지 않는다: 사람이 쓰는 창을
+                    // 읽은 뒤 ref 없이 친 글이 사람의 칸에 가지 않게 한다
                     (app.bus.clone(), roots, format!("app {}", app.bus))
                 }
                 None => {
                     if a11y.auth_dialog_focused().await {
                         return Err(auth_dialog());
                     }
-                    let focus = a11y.focus().await;
-                    let Some((app, window)) = active_window(&apps, focus.as_ref()) else {
-                        return Err(self.no_active_window(&a11y, focus.as_ref()).await);
-                    };
-                    let scope = format!("window {} {}", app.bus, window.path);
-                    (app.bus.clone(), vec![window.path.clone()], scope)
+                    // 기본 범위는 이 세션에서 AI가 마지막으로 다룬 창이다. 사람이 포커스를 옮겨도 AI가 읽는 창은 그대로다
+                    let aim = self.sessions.get(&session_name).aim().cloned();
+                    let aimed = aim.as_ref().and_then(|aim| {
+                        let (bus, path) = aim.window.as_ref()?;
+                        let app = apps.iter().find(|app| &app.bus == bus)?;
+                        app.windows
+                            .iter()
+                            .any(|window| &window.path == path)
+                            .then(|| (bus.clone(), path.clone()))
+                    });
+                    match aimed {
+                        Some((bus, path)) => {
+                            let scope = format!("window {bus} {path}");
+                            (bus, vec![path], scope)
+                        }
+                        None => {
+                            let focus = a11y.focus().await;
+                            let Some((app, window)) = active_window(&apps, focus.as_ref()) else {
+                                return Err(self.no_active_window(&a11y, focus.as_ref()).await);
+                            };
+                            note = Some(default_scope_note(aim.as_ref()));
+                            let scope = format!("window {} {}", app.bus, window.path);
+                            (app.bus.clone(), vec![window.path.clone()], scope)
+                        }
+                    }
                 }
             }
         };
@@ -824,6 +1159,17 @@ impl Agent {
                 _ => return Err(failure),
             },
         };
+        // 읽는 것도 알린다: 메뉴 막대의 AI 표시는 AI가 어느 앱을 읽고 다루는지 보인다(설계 6장)
+        if let Some(pid) = a11y.pid(&bus).await {
+            let title = rendered
+                .windows
+                .iter()
+                .find(|(path, _)| roots.contains(path))
+                .or(rendered.windows.first())
+                .map(|(_, title)| title.clone())
+                .unwrap_or_default();
+            self.report(&a11y, pid, &title).await;
+        }
         let key = scope_key(&scope, options);
         // 기다리기(wait)가 다시 읽는 것(peek)은 지난 트리를 바꾸지 않는다: 다음 스냅샷의 diff는 AI가 지난번에 본
         // 트리와 견준 것이어야 한다
@@ -836,7 +1182,13 @@ impl Agent {
         };
         let diff = previous
             .as_deref()
-            .map(|old| diff::unified(old, &rendered.text))
+            .map(|old| {
+                diff::limited(
+                    old,
+                    &rendered.text,
+                    params.max_lines.unwrap_or(diff::MAX_LINES),
+                )
+            })
             .unwrap_or_default();
         tracing::info!(
             items = rendered.items,
@@ -844,10 +1196,16 @@ impl Agent {
             diff = diff.lines().count(),
             "snapshot of {bus}"
         );
+        // 알림 줄은 diff에 들지 않게 견준 뒤에 붙인다
+        let tree = match note {
+            Some(note) => format!("{note}\n{}", rendered.text),
+            None => rendered.text,
+        };
         Ok(Snapshot {
-            tree: rendered.text,
+            tree,
             diff,
             first: previous.is_none() && !params.peek,
+            busy: rendered.busy,
         })
     }
 
@@ -880,6 +1238,10 @@ impl Agent {
         text.push_str(&app_header(app_name, pid));
         text.push('\n');
         let session = self.sessions.get(session);
+        // 이 버스의 ref는 이 프로세스의 것이다: 앱이 끝나거나 다시 뜨면 옛 ref를 쓰지 않는다(TARGET_GONE)
+        if let Some(pid) = pid {
+            session.bind(bus, pid);
+        }
         let root_paths: Vec<&str> = roots.iter().map(String::as_str).collect();
         let lines = tree::render(&tree, &root_paths, &options, &mut |path: &str| {
             session.ref_for(bus, path)
@@ -907,6 +1269,8 @@ impl Agent {
     /// 앱은 새로 띄우지 않고 그 창을 앞으로 가져온다 (macOS의 `open -a`처럼)
     async fn launch(&mut self, params: LaunchParams) -> Result<Launched, Failure> {
         let a11y = self.a11y().await?;
+        // 앱을 열거나 앞으로 가져오는 것도 동작이다: 사람이 멈췄으면 하지 않는다
+        self.check_paused(&a11y).await?;
         let session = params.session.clone().unwrap_or_else(|| "default".into());
         let apps = desktop::installed(&desktop::language());
         let app = desktop::find(&apps, &params.app)
@@ -921,11 +1285,37 @@ impl Agent {
         });
         // 쌓인 순서의 끝(맨 위)부터
         if let Some(open) = placed.iter().rev().find(|window| app.owns(&window.app_id)) {
-            a11y.activate_window(open.pid, &open.title)
-                .await
-                .map_err(|err| agent_error(format!("cannot bring {} forward: {err}", app.name)))?;
+            // 사람이 다른 창을 쓰는 중이면 컴포지터가 활성화를 거절한다: 오류가 아니라 뒤에 둔 채로 알린다
+            let background = match a11y.activate_window(open.pid, &open.title).await {
+                Ok(_) => false,
+                Err(err) if matches!(atspi::declined(&err), Some(Declined::UserActive { .. })) => {
+                    true
+                }
+                Err(err) if atspi::declined(&err).is_some() => {
+                    return Err(refused(&err, &format!("bringing {} forward", app.name)));
+                }
+                Err(err) => {
+                    return Err(agent_error(format!(
+                        "cannot bring {} forward: {err}",
+                        app.name
+                    )));
+                }
+            };
+            self.report(&a11y, open.pid, &open.title).await;
             let running = self.list(&a11y).await?;
-            let tree = match accessible_window(&running, open) {
+            let window = accessible_window(&running, open);
+            // 다른 답처럼 접근성 버스의 앱 이름으로 적는다 (없으면 설치된 앱의 이름)
+            let name = app_label(open.pid, &open.app_id, &running, std::slice::from_ref(&app));
+            self.aim_at(
+                &a11y,
+                &session,
+                open.pid,
+                &open.title,
+                &name,
+                window.clone(),
+            )
+            .await;
+            let tree = match window {
                 Some((bus, path)) => self.window_tree(&a11y, &session, &bus, &path).await?,
                 None => String::new(),
             };
@@ -934,7 +1324,7 @@ impl Agent {
                 id: app.id,
                 window: Some(open.title.clone()),
                 running: true,
-                tree,
+                tree: in_background(background, tree),
             });
         }
 
@@ -987,22 +1377,37 @@ impl Agent {
                 continue;
             };
             let running = self.list(&a11y).await?;
+            // 사람이 치는 중이면 컴포지터가 새 창에 키보드 포커스를 주지 않는다(협조적 활성화). 그러면 뒤에 연 것이다
+            let background = a11y
+                .focus()
+                .await
+                .is_some_and(|focus| focus.pid != open.pid);
             let Some((bus, path)) = accessible_window(&running, open) else {
                 // 터미널(foot)처럼 접근성을 지원하지 않는 앱은 창만 알린다. 창이 늦게 뜬 것이 아니다
                 let since = *appeared.get_or_insert_with(Instant::now);
                 if since.elapsed() >= LAUNCH_TREE_WAIT {
                     self.launching.remove(&app.id);
+                    let (pid, title) = (open.pid, open.title.clone());
+                    self.report(&a11y, pid, &title).await;
+                    self.aim_at(&a11y, &session, pid, &title, &app.name, None)
+                        .await;
                     return Ok(Launched {
                         name: app.name,
                         id: app.id,
-                        window: Some(open.title.clone()),
+                        window: Some(title),
                         running: false,
-                        tree: String::new(),
+                        tree: in_background(background, String::new()),
                     });
                 }
                 continue;
             };
             self.check_app(&a11y, &bus).await?;
+            let (pid, title) = (open.pid, open.title.clone());
+            self.report(&a11y, pid, &title).await;
+            let name = app_label(pid, &open.app_id, &running, std::slice::from_ref(&app));
+            let window = Some((bus.clone(), path.clone()));
+            self.aim_at(&a11y, &session, pid, &title, &name, window)
+                .await;
             let tree = self.window_tree(&a11y, &session, &bus, &path).await?;
             self.launching.remove(&app.id);
             tracing::info!(
@@ -1013,9 +1418,9 @@ impl Agent {
             return Ok(Launched {
                 name: app.name,
                 id: app.id,
-                window: Some(open.title.clone()),
+                window: Some(title),
                 running: false,
-                tree,
+                tree: in_background(background, tree),
             });
         }
         Ok(Launched {
@@ -1066,6 +1471,13 @@ impl Agent {
                     format!("unknown ref {reference} in session {session:?}; take a new snapshot"),
                 )
             })?;
+        // ref는 그 앱의 프로세스에 묶여 있다. 앱이 끝났거나 다시 떴으면 버스 이름의 프로세스가 달라(없어)진다: 옛
+        // ref로 다른 것을 누르지 않는다. 끝난 앱의 버스를 읽다가 접근성 연결을 버리지도 않는다
+        if let Some(bound) = self.sessions.get(session).pid_of(&bus)
+            && a11y.pid(&bus).await != Some(bound)
+        {
+            return Err(target_gone(reference, bound));
+        }
         let items = a11y.tree(&bus).await.map_err(|err| {
             self.a11y = None;
             agent_error(format!("cannot read {bus}: {err}"))
@@ -1101,6 +1513,9 @@ impl Agent {
         }
         Ok(Target {
             bus,
+            app: tree
+                .get(ROOT)
+                .map_or_else(String::new, |app| app.name.clone()),
             window,
             window_title,
             parent: tree.get(&target.parent).cloned(),
@@ -1139,6 +1554,8 @@ impl Agent {
     /// ref가 가리키는 요소에 동작을 하고, 화면이 멈출 때까지 기다려 그 창의 바뀐 줄을 돌려준다
     async fn act(&mut self, params: ActParams) -> Result<Acted, Failure> {
         let a11y = self.a11y().await?;
+        // 사람이 AI 제어를 멈췄으면 어떤 동작도 하지 않는다. 접근성 동작은 컴포지터를 거치지 않으므로 여기서 본다
+        self.check_paused(&a11y).await?;
         if let Some([x, y]) = params.at {
             return self.click_at(&a11y, &params, x, y).await;
         }
@@ -1161,14 +1578,14 @@ impl Agent {
                     "scroll needs a direction (up, down, left, right) or a ref".into(),
                 ));
             }
-            // 키와 휠은 `--app`의 창이나 지금 키보드 포커스를 가진 창으로 간다
+            // 키와 휠은 `--app`의 창이나 이 세션에서 AI가 마지막으로 다룬 창(아직 키보드 포커스를 가졌을 때)으로 간다
             if a11y.auth_dialog_focused().await {
                 return Err(auth_dialog());
             }
-            match self.window_for(&a11y, params.app.as_deref()).await? {
+            match self.window_for(&a11y, &session, &params).await? {
                 Chosen::Tree(target) => *target,
-                Chosen::Blind(pid, title) => {
-                    return self.act_blind(&a11y, &params, pid, &title).await;
+                Chosen::Blind(pid, title, app) => {
+                    return self.act_blind(&a11y, &params, pid, &title, &app).await;
                 }
             }
         } else {
@@ -1182,6 +1599,7 @@ impl Agent {
         self.check_app(&a11y, &found.bus).await?;
         let Target {
             bus,
+            app,
             window,
             window_title,
             item,
@@ -1190,9 +1608,25 @@ impl Agent {
             web,
             drop_down,
         } = found;
+        let pid = a11y.pid(&bus).await;
+        if let Some(pid) = pid {
+            // ref의 창은 이 세션에서 AI가 다룬 창이다 (ref 없는 키·글·휠과 범위 없는 스냅샷이 쓴다)
+            if !params.target.is_empty() {
+                let window = Some((bus.clone(), window.clone()));
+                self.aim_at(&a11y, &session, pid, &window_title, &app, window)
+                    .await;
+            }
+            self.report(&a11y, pid, &window_title).await;
+            // 사람에게 AI가 다루는 요소를 보인다 (포인터로 누르면 AI 포인터가 보이므로 뺀다)
+            if let Some(target) = item.as_ref().filter(|_| !params.pointer) {
+                highlight(&a11y, pid, &window_title, &bus, &target.path).await;
+            }
+        }
 
         let roots = [window.clone()];
         let before = self.render(&a11y, &session, &bus, &roots, FULL).await?;
+        // 키·글·포인터를 넣은 길 (답의 첫 줄에 적는다)
+        let mut via = Via::default();
         // 화면 밖 요소는 사람처럼 먼저 보이게 스크롤한다 (휠만 돌릴 scroll은 그 자리에서 돌린다)
         let wheel_only = params.action == "scroll" && params.amount.is_some();
         let scrolled = match item.as_ref().filter(|_| off_screen && !wheel_only) {
@@ -1203,17 +1637,18 @@ impl Agent {
                     path: &target.path,
                     window_title: &window_title,
                     layer: RefCell::default(),
+                    window: RefCell::default(),
+                    via: Cell::default(),
                 };
-                Some(
-                    scroll_into_view(&element)
-                        .await
-                        .map_err(|(code, message)| {
-                            (code, format!("{}: {message}", params.target))
-                        })?,
-                )
+                let scrolled = scroll_into_view(&element)
+                    .await
+                    .map_err(|(code, message)| (code, format!("{}: {message}", params.target)))?;
+                via.add(element.via.get());
+                Some(scrolled)
             }
             None => None,
         };
+        let process = || pid.ok_or_else(|| agent_error("cannot tell which process owns this app"));
         let (done, expect) = match (params.action.as_str(), &item) {
             ("scroll", Some(_)) if !wheel_only => (
                 scrolled
@@ -1222,32 +1657,34 @@ impl Agent {
                 None,
             ),
             ("scroll", target) => {
-                let pid = a11y
-                    .pid(&bus)
-                    .await
-                    .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
                 let over = target.as_ref().map(|target| (bus.as_str(), target));
                 (
                     wheel(
                         &a11y,
-                        pid,
+                        process()?,
                         &window_title,
                         over,
                         params.amount.unwrap_or_default(),
+                        &mut via,
                     )
                     .await?,
                     None,
                 )
             }
             ("press" | "type", _) => {
-                press(&a11y, &bus, &window_title, item.as_ref(), &params).await?
+                let to = Recipient {
+                    bus: &bus,
+                    pid: process()?,
+                    title: &window_title,
+                };
+                press(&a11y, &to, item.as_ref(), web, &params, &mut via).await?
             }
             ("click", Some(target)) if params.pointer => (
-                pointer_click(&a11y, &bus, &window_title, target).await?,
+                pointer_click(&a11y, &bus, &window_title, target, &mut via).await?,
                 None,
             ),
             ("focus", Some(target)) => (
-                focus_element(&a11y, &bus, &window_title, target).await?,
+                focus_element(&a11y, &bus, &window_title, target, &mut via).await?,
                 None,
             ),
             (_, Some(target)) => {
@@ -1264,11 +1701,14 @@ impl Agent {
                 )
                 .await?
                 {
-                    Some(done) => done,
+                    Some(done) => {
+                        via.accessibility = true;
+                        done
+                    }
                     // 접근성 동작이 없는 요소는 사람처럼 포인터로 누른다
                     None => format!(
                         "{}; {}",
-                        pointer_click(&a11y, &bus, &window_title, target).await?,
+                        pointer_click(&a11y, &bus, &window_title, target, &mut via).await?,
                         if picking {
                             "drop-down list items are clicked with the pointer"
                         } else {
@@ -1283,10 +1723,12 @@ impl Agent {
             }
             (_, None) => unreachable!("only press, type and scroll work without a ref"),
         };
-        let mut done = match scrolled.filter(|_| params.action != "scroll") {
+        let done = match scrolled.filter(|_| params.action != "scroll") {
             Some(scrolled) => format!("{scrolled}, then {done}"),
             None => done,
         };
+        // 답의 첫 줄: 받은 앱·창과 쓴 길(접근성 / 대상 확인 입력)
+        let mut done = via.describe(&app, &window_title, &done);
 
         let settled = match self
             .settle(
@@ -1300,21 +1742,26 @@ impl Agent {
             .await
         {
             Ok(settled) => settled,
-            // 동작이 앱을 끝냈다 (닫기, 문서 버리기): 동작은 됐으므로 실패로 알리지 않는다. 실패로 보이면
-            // AI가 같은 동작을 되풀이할 수 있다
-            Err(_) if a11y.pid(&bus).await.is_none() => {
-                return Ok(Acted {
-                    done: format!("{done}; then the app quit (window {window_title:?} closed)"),
-                    diff: String::new(),
-                    settled_ms: 0,
-                    settled: true,
-                    observed: false,
-                    new_windows: Vec::new(),
-                });
+            // 동작이 앱을 끝냈다 (닫기, 문서 버리기)
+            Err(_) if app_gone(&a11y, &bus).await => {
+                return Ok(quit_after(&bus, &done, &window_title, 0));
             }
             Err(failure) => return Err(failure),
         };
-        let acted = self.finish(&session, &bus, &window, &before, settled, done.clone());
+        // 앱은 마지막으로 읽은 뒤에 끝날 수 있다: 답을 돌려주기 전에 다시 본다(이슈 #1 P1-1. Firefox가 settle의
+        // 상한 직전에 끝났는데 답은 끝나기 전의 diff를 주었다)
+        if app_gone(&a11y, &bus).await {
+            return Ok(quit_after(&bus, &done, &window_title, settled.ms));
+        }
+        let acted = self.finish(
+            &session,
+            &bus,
+            &window,
+            &before,
+            settled,
+            done.clone(),
+            params.max_lines,
+        );
         tracing::info!(
             action = %params.action,
             settled_ms = acted.settled_ms,
@@ -1368,7 +1815,9 @@ impl Agent {
         }
     }
 
-    /// 동작의 답: 동작 전과 멈춘 뒤의 diff, 새로 뜬 창. 다음 스냅샷의 diff는 이 뒤부터다
+    /// 동작의 답: 동작 전과 멈춘 뒤의 diff(`max_lines`보다 많이 바뀌었으면 요약), 새로 뜬 창. 다음 스냅샷의 diff는
+    /// 이 뒤부터다
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         &mut self,
         session: &str,
@@ -1377,6 +1826,7 @@ impl Agent {
         before: &Rendered,
         settled: Settled,
         done: String,
+        max_lines: Option<usize>,
     ) -> Acted {
         let after = settled.after;
         let new_windows = after
@@ -1401,7 +1851,11 @@ impl Agent {
                 new_windows,
             };
         }
-        let diff = diff::unified(&before.text, &after.text);
+        let diff = diff::limited(
+            &before.text,
+            &after.text,
+            max_lines.unwrap_or(diff::MAX_LINES),
+        );
         let scope = format!("window {bus} {window}");
         self.sessions
             .get(session)
@@ -1416,60 +1870,89 @@ impl Agent {
         }
     }
 
-    /// ref 없는 동작(press, type, scroll)을 받을 창: `--app`의 창(트리가 있으면 그 앱의 활성 창이나 첫
-    /// 창)이나 키보드 포커스를 가진 창. `--app`의 창은 키와 휠이 그리로 가게 앞으로 가져온다
-    async fn window_for(&mut self, a11y: &A11y, app: Option<&str>) -> Result<Chosen, Failure> {
+    /// ref 없는 동작(press, type, scroll)을 받을 창.
+    /// - `--app`이 있으면 그 앱의 창(트리가 있으면 활성 창이나 첫 창). 키와 글은 그 창이 키보드 포커스를 가져야
+    ///   들어가므로 앞으로 가져온다(사람이 쓰는 중이면 컴포지터가 거절한다). 휠은 컴포지터가 그 점에서 창을 보므로
+    ///   가져오지 않는다. 셸(레이어 표면만 있는 앱)은 그 표면이 키보드 포커스를 가졌을 때 그 표면이다
+    /// - 없으면 이 세션에서 AI가 마지막으로 다룬 창이 아직 키보드 포커스를 가졌을 때만 그 창이다(aimed_window)
+    async fn window_for(
+        &mut self,
+        a11y: &A11y,
+        session: &str,
+        params: &ActParams,
+    ) -> Result<Chosen, Failure> {
         let apps = self.list(a11y).await?;
-        let Some(query) = app else {
-            let focus = a11y.focus().await;
-            if let Some((app, window)) = active_window(&apps, focus.as_ref()) {
-                return Ok(Chosen::Tree(Box::new(Target {
-                    bus: app.bus.clone(),
-                    window: window.path.clone(),
-                    window_title: window.title.clone(),
-                    item: None,
-                    parent: None,
-                    off_screen: false,
-                    web: false,
-                    drop_down: false,
-                })));
-            }
-            return match focus.filter(|focus| !focus.layer) {
-                Some(focus) => Ok(Chosen::Blind(focus.pid, focus.title)),
-                None => Err(agent_error(
-                    "no window has the keyboard focus; pass --app or a ref",
-                )),
-            };
-        };
         let placed = a11y.windows().await.unwrap_or_else(|err| {
             tracing::warn!("cannot read the window list: {err}");
             Vec::new()
         });
+        let Some(query) = params.app.as_deref() else {
+            return self
+                .aimed_window(a11y, session, &apps, &placed, &params.action)
+                .await;
+        };
+        let keyboard = params.action != "scroll";
         let installed = desktop::installed(&desktop::language());
         if let Ok(app) = find_app(&apps, &placed, &installed, query)
-            && let Some(window) = app
+            && let Some(mut window) = app
                 .windows
                 .iter()
                 .find(|window| window.states & state::ACTIVE != 0)
                 .or_else(|| app.windows.first())
         {
-            if let Some(pid) = app.pid {
-                activate(a11y, pid, &window.title).await?;
+            let pid = app
+                .pid
+                .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
+            let mut title = window.title.clone();
+            // 레이어 표면만 있는 앱(셸): 그 앱의 표면이 키보드 포커스를 가졌으면(열린 메뉴, 모든 앱 패널) 그 표면이다.
+            // 아니면 press가 그 표면이 키보드를 받지 않는다고 알린다
+            let layer = !placed.is_empty() && !placed.iter().any(|placed| placed.pid == pid);
+            if layer {
+                if let Some(focus) = a11y
+                    .focus()
+                    .await
+                    .filter(|focus| focus.layer && focus.pid == pid)
+                {
+                    if let Some(focused) = app.windows.iter().find(|w| w.title == focus.app_id) {
+                        window = focused;
+                    }
+                    title = focus.app_id;
+                }
+            } else if keyboard {
+                activate(a11y, pid, &title).await?;
             }
-            return Ok(Chosen::Tree(Box::new(Target {
+            let target = Target {
                 bus: app.bus.clone(),
+                app: app.name.clone(),
                 window: window.path.clone(),
-                window_title: window.title.clone(),
+                window_title: title,
                 item: None,
                 parent: None,
                 off_screen: false,
                 web: false,
                 drop_down: false,
-            })));
+            };
+            let accessible = Some((target.bus.clone(), target.window.clone()));
+            self.aim_at(
+                a11y,
+                session,
+                pid,
+                &target.window_title,
+                &target.app,
+                accessible,
+            )
+            .await;
+            return Ok(Chosen::Tree(Box::new(target)));
         }
         // 트리가 없는 창 (접근성을 켜기 전에 뜬 Firefox, foot 등)
-        let window = find_window(&placed, &apps, &installed, query)?;
-        Ok(Chosen::Blind(window.pid, window.title.clone()))
+        let window = find_window(&placed, &apps, &installed, query)?.clone();
+        if keyboard {
+            activate(a11y, window.pid, &window.title).await?;
+        }
+        let app = app_label(window.pid, &window.app_id, &apps, &installed);
+        self.aim_at(a11y, session, window.pid, &window.title, &app, None)
+            .await;
+        Ok(Chosen::Blind(window.pid, window.title, app))
     }
 
     /// ref가 `--app`이 가리키는 앱의 것인지. 아니면 어느 앱의 것인지 알린다
@@ -1500,27 +1983,35 @@ impl Agent {
         ))
     }
 
-    /// 접근성 트리가 없는 창에 키·글·휠을 보낸다: 그 창을 앞으로 가져와 보내고, diff는 없다
+    /// 접근성 트리가 없는 창에 키·글·휠을 보낸다: 컴포지터가 그 창을 확인하고 넣는다(window_for가 `--app`의 창은
+    /// 앞으로 가져왔고, 아니면 그 창이 키보드 포커스를 가진 것을 보았다). diff는 없다
     async fn act_blind(
         &mut self,
         a11y: &A11y,
         params: &ActParams,
         pid: u32,
         title: &str,
+        app: &str,
     ) -> Result<Acted, Failure> {
         if self.blocked_pids(a11y).await?.contains(&pid) {
             return Err(blocked_app());
         }
-        activate(a11y, pid, title).await?;
+        self.report(a11y, pid, title).await;
+        let mut via = Via::default();
         let done = if params.action == "scroll" {
-            wheel(a11y, pid, title, None, params.amount.unwrap_or_default()).await?
+            let amount = params.amount.unwrap_or_default();
+            wheel(a11y, pid, title, None, amount, &mut via).await?
         } else {
-            press(a11y, "", title, None, params).await?.0
+            let to = Recipient {
+                bus: "",
+                pid,
+                title,
+            };
+            press(a11y, &to, None, false, params, &mut via).await?.0
         };
+        let done = via.describe(app, title, &done);
         Ok(Acted {
-            done: format!(
-                "{done} in {title:?}, which has no accessibility tree (take a screenshot to see it)"
-            ),
+            done: format!("{done}; it has no accessibility tree (take a screenshot to see it)"),
             diff: String::new(),
             settled_ms: 0,
             settled: true,
@@ -1555,6 +2046,18 @@ impl Agent {
         let window = surface.placed();
         let running = self.list(a11y).await?;
         let tree = accessible_window(&running, &window);
+        // 누르는 창은 이 세션에서 AI가 다룬 창이다
+        let app = app_label(window.pid, &window.app_id, &running, &[]);
+        self.report(a11y, window.pid, &window.title).await;
+        self.aim_at(
+            a11y,
+            &session,
+            window.pid,
+            &window.title,
+            &app,
+            tree.clone(),
+        )
+        .await;
         let before = match &tree {
             Some((bus, path)) => {
                 self.check_app(a11y, bus).await?;
@@ -1579,8 +2082,8 @@ impl Agent {
                     .await
             }
         };
-        let (screen_x, screen_y) = clicked
-            .map_err(|err| agent_error(format!("the pointer click failed: {}", reason(&err))))?;
+        // 사람이 포인터를 쓰는 중이거나 멈췄으면 컴포지터가 거절한다: 그 번호로 알리고 다시 누르지 않는다
+        let (screen_x, screen_y) = clicked.map_err(|err| refused(&err, "the pointer click"))?;
         let done = format!(
             "clicked with the pointer at ({x:.0}, {y:.0}) in {:?} (screen {screen_x:.0}, {screen_y:.0})",
             window.title
@@ -1596,7 +2099,7 @@ impl Agent {
             });
         };
         let roots = [path.clone()];
-        let settled = self
+        let settled = match self
             .settle(
                 a11y,
                 &session,
@@ -1605,8 +2108,28 @@ impl Agent {
                 &before.text,
                 settle_limit(params.settle_ms),
             )
-            .await?;
-        let acted = self.finish(&session, &bus, &path, &before, settled, done);
+            .await
+        {
+            Ok(settled) => settled,
+            // 누르기가 앱을 끝냈다 (act와 같다)
+            Err(_) if app_gone(a11y, &bus).await => {
+                return Ok(quit_after(&bus, &done, &window.title, 0));
+            }
+            Err(failure) => return Err(failure),
+        };
+        // 마지막으로 읽은 뒤에 끝났을 수도 있다 (act와 같다, 이슈 #1 P1-1)
+        if app_gone(a11y, &bus).await {
+            return Ok(quit_after(&bus, &done, &window.title, settled.ms));
+        }
+        let acted = self.finish(
+            &session,
+            &bus,
+            &path,
+            &before,
+            settled,
+            done,
+            params.max_lines,
+        );
         tracing::info!(
             settled_ms = acted.settled_ms,
             diff = acted.diff.lines().count(),
@@ -1688,6 +2211,8 @@ impl Agent {
         let a11y = self.a11y().await?;
         let surface = self.target_surface(&a11y, params.app.as_deref()).await?;
         let window = surface.placed();
+        // 읽는 것도 알린다 (메뉴 막대의 AI 표시)
+        self.report(&a11y, window.pid, &window.title).await;
         let path = match &params.out {
             Some(out) if Path::new(out).is_absolute() => PathBuf::from(out),
             Some(_) => {
@@ -1723,6 +2248,29 @@ impl Agent {
             pid: window.pid,
         })
     }
+}
+
+/// 동작 뒤 앱이 끝났다는 답. 동작은 됐으므로 실패로 알리지 않는다: 실패로 보이면 AI가 같은 동작을 되풀이할 수
+/// 있다. 그 앱에 보낸 최근 접근성 호출을 경고로 남긴다(이슈 #1 P1-3): 어느 호출에 앱이 끝났는지 로그로 알 수 있다
+fn quit_after(bus: &str, done: &str, window_title: &str, settled_ms: u64) -> Acted {
+    atspi::dump_calls(
+        Some(bus),
+        &format!("{bus} quit during an action on its window {window_title:?}"),
+    );
+    Acted {
+        done: format!("{done}; then the app quit (window {window_title:?} closed)"),
+        diff: String::new(),
+        settled_ms,
+        settled: true,
+        observed: false,
+        new_windows: Vec::new(),
+    }
+}
+
+/// 앱이 끝났는지: 그 접근성 버스 이름의 주인이 없다. 고유 이름(:1.33)은 다시 쓰이지 않으므로 다시 뜬 앱도 끝난
+/// 것으로 본다
+async fn app_gone(a11y: &A11y, bus: &str) -> bool {
+    a11y.pid(bus).await.is_none()
 }
 
 /// 동작 뒤 기다린 결과
@@ -1818,6 +2366,39 @@ fn no_tree(window: &str, app_id: &str, pid: u32) -> String {
          another app (see `bunt agent apps`), or use `bunt agent screenshot` and `click --at` \
          on this one"
     )
+}
+
+/// 연 앱의 창이 사람이 쓰는 창 뒤에 남았다는 알림 (launch의 트리 머리)
+const OPENED_IN_BACKGROUND: &str =
+    "# note: opened in the background; the person is using another window";
+
+/// launch의 트리: 뒤에 열었으면 그렇다고 머리에 적는다. 앞으로 가져오지 않았으니 키·글은 --app으로 그 창을 고르거나
+/// ref(접근성)로 다룬다
+fn in_background(background: bool, tree: String) -> String {
+    if background {
+        format!("{OPENED_IN_BACKGROUND}\n{tree}")
+    } else {
+        tree
+    }
+}
+
+/// 범위 없는 스냅샷이 AI가 다룬 창 대신 키보드 포커스의 창을 읽을 때 머리에 적는 줄
+fn default_scope_note(aim: Option<&Aim>) -> String {
+    match aim {
+        None => "# note: this session has not worked on a window yet, so this is the window that \
+                 has the keyboard focus"
+            .into(),
+        Some(aim) if aim.window.is_none() => format!(
+            "# note: the window you worked on last ({} {:?}) has no accessibility tree, so this is \
+             the window that has the keyboard focus",
+            aim.app, aim.title
+        ),
+        Some(aim) => format!(
+            "# note: the window you worked on last ({} {:?}) is gone, so this is the window that \
+             has the keyboard focus",
+            aim.app, aim.title
+        ),
+    }
 }
 
 /// 새 스크린샷 파일의 경로: $XDG_RUNTIME_DIR/buntos/screenshots/screenshot-<ms>.png. 메모리에 있는
@@ -2200,9 +2781,162 @@ fn find_app<'a>(
     }
 }
 
-/// 키를 누르거나(press) 글을 친다(type). ref가 있으면 그 창을 앞으로 가져와 그 요소에 키보드 포커스를
-/// 준 뒤 한다. 누를 때마다 다시 주므로 Tab은 늘 그 요소에서 나아간다. `keep_focus`면 창만 앞으로
-/// 가져오고 창 안의 포커스는 그대로 둔다.
+/// 키·글·휠을 받을 창: 접근성 버스 이름(트리가 없는 창이면 빈 글), 창을 가진 프로세스, 창 제목(셸의 레이어
+/// 표면이면 레이어 이름)
+struct Recipient<'a> {
+    bus: &'a str,
+    pid: u32,
+    title: &'a str,
+}
+
+/// 키·글·포인터를 넣은 길. 답의 첫 줄에 적어 AI가 어느 길로 무엇이 갔는지 안다
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Via {
+    /// 접근성(AT-SPI)의 동작·글·값: 키보드 포커스와 포인터를 쓰지 않는다
+    accessibility: bool,
+    /// 컴포지터가 대상 창을 확인하고 넣은 키·글·포인터(PressKeysOn 등, ClickWindow·ClickLayer)
+    checked: bool,
+    /// 대상을 확인하지 않는 옛 메서드로 넣었다 (셸의 레이어 표면, 옛 컴포지터)
+    unchecked: bool,
+    /// 컴포지터에 대상 확인 메서드가 없었다 (옛 컴포지터)
+    old_compositor: bool,
+}
+
+/// 옛 컴포지터로 키·글·포인터를 넣었을 때 답에 붙이는 경고 (계약 C)
+const UNCHECKED_WARNING: &str =
+    "the compositor cannot check the target; the input may reach another window";
+
+impl Via {
+    fn add(&mut self, other: Via) {
+        self.accessibility |= other.accessibility;
+        self.checked |= other.checked;
+        self.unchecked |= other.unchecked;
+        self.old_compositor |= other.old_compositor;
+    }
+
+    /// 옛 메서드로 넣었다. `old_compositor`면 컴포지터가 새 메서드를 몰랐다
+    fn fell_back(&mut self, old_compositor: bool) {
+        self.unchecked = true;
+        self.old_compositor |= old_compositor;
+    }
+
+    fn label(self) -> String {
+        let mut ways = Vec::new();
+        if self.accessibility {
+            ways.push("accessibility");
+        }
+        if self.checked {
+            ways.push("target-checked input");
+        }
+        if self.unchecked {
+            ways.push("unchecked input");
+        }
+        if ways.is_empty() {
+            ways.push("no input");
+        }
+        ways.join(" and ")
+    }
+
+    /// 답의 첫 줄: `텍스트 편집기 "새 문서" (accessibility): inserted 5 characters …`
+    fn describe(self, app: &str, title: &str, done: &str) -> String {
+        let warning = if self.old_compositor {
+            format!("; warning: {UNCHECKED_WARNING}")
+        } else {
+            String::new()
+        };
+        let who = if app.is_empty() {
+            format!("{title:?}")
+        } else {
+            format!("{app} {title:?}")
+        };
+        format!("{who} ({}): {done}{warning}", self.label())
+    }
+}
+
+/// 브라우저 툴킷 (접근성 ToolkitName). 이 앱의 글 칸(주소 막대, 웹 칸)은 키보드 길로 넣는다
+const BROWSER_TOOLKITS: [&str; 2] = ["Gecko", "Chromium"];
+
+fn is_browser(toolkit: &str) -> bool {
+    BROWSER_TOOLKITS
+        .iter()
+        .any(|browser| browser.eq_ignore_ascii_case(toolkit))
+}
+
+/// 포커스 없이 접근성으로 글을 넣고 지울 글 칸: 편집할 수 있고 웹 페이지와 브라우저 밖에 있다. 웹 칸과 브라우저
+/// 주소 막대는 앱이 접근성 글을 버리거나(Firefox 주소 막대는 SetTextContents에 참을 답하고 비어 있었다) 페이지가
+/// 키 이벤트를 기다리므로 키보드 길로 간다. 암호 칸도 키보드 길이다
+fn accessible_field(item: &Item, web: bool, toolkit: &str) -> bool {
+    item.interfaces & iface::EDITABLE_TEXT != 0
+        && item.role != role::PASSWORD_TEXT
+        && !web
+        && !is_browser(toolkit)
+}
+
+/// "모두 고르고 지우기" 키 (ctrl+a BackSpace, ctrl+a Delete. ⌘A도): 글 칸의 글 지우기로 대신한다
+fn clears_text(keys: &[String]) -> bool {
+    let all = |key: &str| {
+        matches!(
+            key.to_ascii_lowercase().as_str(),
+            "ctrl+a" | "control+a" | "super+a" | "cmd+a" | "meta+a"
+        )
+    };
+    let delete = |key: &str| {
+        matches!(
+            key.to_ascii_lowercase().as_str(),
+            "backspace" | "delete" | "del"
+        )
+    };
+    matches!(keys, [first, second] if all(first) && delete(second))
+}
+
+/// Return 하나: 요소의 activate 동작으로 대신한다
+fn enter_key(keys: &[String]) -> bool {
+    matches!(keys, [key] if matches!(key.to_ascii_lowercase().as_str(), "return" | "enter" | "kp_enter"))
+}
+
+/// 접근성으로 대신할 수 있는 키를 한다: 글 칸의 "모두 고르고 지우기"는 글 지우기(EditableText.DeleteText)로, Return은
+/// 요소의 activate 동작으로. 키보드 포커스를 쓰지 않는다. 대신할 수 없으면(앱이 거절해도) None: 키보드 길로 간다
+async fn accessible_keys(
+    a11y: &A11y,
+    bus: &str,
+    target: &Item,
+    keys: &[String],
+    field: bool,
+    browser: bool,
+) -> Option<String> {
+    if field && clears_text(keys) {
+        match a11y.delete_all_text(bus, &target.path).await {
+            Ok(count) => return Some(format!("deleted its {count} characters")),
+            Err(err) => tracing::debug!("cannot delete the text accessibly: {err}"),
+        }
+    }
+    // 브라우저의 activate 동작은 Return과 달리 칸에 포커스를 줄 뿐이다
+    if !browser && enter_key(keys) {
+        let actions = a11y.actions(bus, &target.path, false).await;
+        if let Some(index) = actions
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case("activate"))
+            && matches!(
+                a11y.do_action(bus, &target.path, index as i32).await,
+                Ok(true)
+            )
+        {
+            return Some("ran its accessible action \"activate\"".into());
+        }
+    }
+    None
+}
+
+/// 키를 누르거나(press) 글을 친다(type).
+///
+/// ref의 글 칸(웹 페이지와 브라우저 밖)은 포커스 없이 접근성으로 다룬다(설계 3장 1층): 글은 끝에 넣고
+/// (EditableText.InsertText), "모두 고르고 지우기"는 글 지우기로, Return은 activate 동작으로 한다. 사람이 다른 창에
+/// 치는 동안에도 섞이지 않고 포커스를 옮기지 않는다. 앞에는 포인터로 눌러 포커스를 주어 사람의 커서를 옮기고 글
+/// 순서를 엉키게 했다(시험 10b).
+///
+/// 나머지는 키보드 길이다: ref가 있으면 그 창을 앞으로 가져와(사람이 쓰는 중이면 컴포지터가 거절한다) 그 요소에
+/// 키보드 포커스를 준 뒤, 컴포지터가 그 창이 아직 키보드 포커스를 가졌는지 보고 넣는다(대상 확인 입력). 사람이
+/// 포커스를 옮겼으면 FOCUS_MOVED로 알리고 되빼앗지 않는다. `keep_focus`면 창만 앞으로 가져온다.
 ///
 /// 글은 앱의 글 입력(text-input)에 확정한다. 글 입력이 켜지지 않으면 ref의 글 칸에는 접근성으로 커서
 /// 자리에 넣고, 그것도 안 되면 `keys`일 때만 글자마다 키를 친다. 몰래 키로 바꿔 치면 포커스가 글 칸을
@@ -2210,10 +2944,11 @@ fn find_app<'a>(
 /// 접근성으로 넣었으면 멈춘 뒤 다시 읽어 볼 글을 함께 돌려준다
 async fn press(
     a11y: &A11y,
-    bus: &str,
-    window_title: &str,
+    to: &Recipient<'_>,
     target: Option<&Item>,
+    web: bool,
     params: &ActParams,
+    via: &mut Via,
 ) -> Result<(String, Option<Expect>), Failure> {
     let typing = params.action == "type";
     let text = params.value.as_deref().unwrap_or_default();
@@ -2227,28 +2962,51 @@ async fn press(
             "press needs keys (e.g. \"ctrl+a BackSpace\")".into(),
         ));
     }
-    if let Some(target) = target {
-        let pid = a11y
-            .pid(bus)
-            .await
-            .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
-        // 셸의 레이어 표면(메뉴 막대, 모든 앱 패널 등)은 앞으로 가져올 창이 없어, 창만 찾던 이 자리에서 "no
-        // window"로 실패했다. 레이어 표면이면 가져오지 않고, 포커스를 준 뒤 그 표면이 키보드를 가졌는지 본다
-        let layer = match compositor_surface(a11y, pid, window_title).await? {
-            Surface::Window(_) => {
-                let activated = a11y
-                    .activate_window(pid, window_title)
-                    .await
-                    .map_err(|err| agent_error(format!("activating the window failed: {err}")))?;
-                if !activated {
-                    return Err(agent_error("the compositor has no window for this app"));
+    let count = text.chars().count();
+    // 앱이 접근성으로 넣은 글을 받지 않아 키보드 길로 친다
+    let mut refused_insert = false;
+    if let Some(target) = target.filter(|_| !params.keep_focus) {
+        let toolkit = a11y.toolkit(to.bus).await.unwrap_or_default();
+        let field = accessible_field(target, web, &toolkit);
+        if typing && field {
+            match a11y.insert_at_end(to.bus, &target.path, text).await {
+                Ok(true) => {
+                    via.accessibility = true;
+                    return Ok((
+                        format!("inserted {count} characters at the end of the text"),
+                        Some(Expect::Contains(text.to_string())),
+                    ));
                 }
-                None
+                Ok(false) => refused_insert = true,
+                Err(err) => {
+                    tracing::debug!("the accessible insert failed: {err}");
+                    refused_insert = true;
+                }
             }
-            Surface::Layer(layer) => Some(layer),
-        };
+        }
+        if !typing {
+            let browser = web || is_browser(&toolkit);
+            if let Some(done) = accessible_keys(a11y, to.bus, target, &keys, field, browser).await {
+                via.accessibility = true;
+                return Ok((format!("{done} (for {})", keys.join(" ")), None));
+            }
+        }
+    }
+    // 셸의 레이어 표면(메뉴 막대, 모든 앱 패널 등)은 앞으로 가져올 창이 없다. 레이어 표면이면 가져오지 않고, 그
+    // 표면이 키보드를 가졌는지 본다
+    let surface = compositor_surface(a11y, to.pid, to.title).await?;
+    if let Some(target) = target {
+        if let Surface::Window(window) = &surface {
+            let activated = a11y
+                .activate_window(to.pid, &window.title)
+                .await
+                .map_err(|err| refused(&err, "activating the window"))?;
+            if !activated {
+                return Err(agent_error("the compositor has no window for this app"));
+            }
+        }
         if !params.keep_focus {
-            focus_element(a11y, bus, window_title, target)
+            focus_element(a11y, to.bus, to.title, target, via)
                 .await
                 .map_err(|(code, message)| {
                     (
@@ -2260,33 +3018,37 @@ async fn press(
                     )
                 })?;
         }
-        // 메뉴 막대와 Dock은 키보드를 받지 않는다. 그대로 치면 키가 포커스를 가진 다른 앱으로 간다
-        if let Some(layer) = layer
-            && !layer_has_keyboard(a11y.focus().await.as_ref(), &layer)
-        {
-            return Err(agent_error(format!(
-                "{} of the shell does not have the keyboard focus, so nothing was {}; click the \
-                 element instead, or open its menu first",
-                layer.namespace,
-                if typing { "typed" } else { "pressed" }
-            )));
-        }
+    }
+    // 메뉴 막대와 Dock은 키보드를 받지 않는다. 그대로 치면 키가 포커스를 가진 다른 앱으로 간다
+    if let Surface::Layer(layer) = &surface
+        && !layer_has_keyboard(a11y.focus().await.as_ref(), layer)
+    {
+        return Err(agent_error(format!(
+            "{} of the shell does not have the keyboard focus, so nothing was {}; click the \
+             element instead, or open its menu first",
+            layer.namespace,
+            if typing { "typed" } else { "pressed" }
+        )));
     }
     if !typing {
-        a11y.press_keys(&keys)
-            .await
-            .map_err(|err| agent_error(format!("pressing keys failed: {err}")))?;
+        send_keys(a11y, to.pid, &surface, &keys, via).await?;
         return Ok((format!("pressed {}", keys.join(" ")), None));
     }
-    let count = text.chars().count();
+    let refused_note = if refused_insert {
+        "the app refused the accessible insert, so "
+    } else {
+        ""
+    };
     if !wait_for_text_input(a11y).await {
         if let Some(target) = target
             .filter(|target| !params.keep_focus && target.interfaces & iface::EDITABLE_TEXT != 0)
+            && !refused_insert
             && a11y
-                .insert_text(bus, &target.path, text)
+                .insert_text(to.bus, &target.path, text)
                 .await
                 .unwrap_or(false)
         {
+            via.accessibility = true;
             return Ok((
                 format!(
                     "inserted {count} characters at the caret (the app did not turn on text input)"
@@ -2299,29 +3061,161 @@ async fn press(
         }
     }
     if params.keys {
-        let how = a11y
-            .type_text(text)
-            .await
-            .map_err(|err| agent_error(format!("typing failed: {}", reason(&err))))?;
+        let how = send_typed(a11y, to.pid, &surface, text, via).await?;
         let how = if how == "text-input" {
             "through the app's text input"
         } else {
             "as keys"
         };
-        return Ok((format!("typed {count} characters {how}"), None));
+        return Ok((
+            format!("{refused_note}typed {count} characters {how}"),
+            None,
+        ));
     }
     // 글 입력이 그새 꺼졌으면 컴포지터는 아무것도 치지 않고 거짓을 준다
-    let committed = a11y
-        .commit_text(text)
-        .await
-        .map_err(|err| agent_error(format!("typing failed: {}", reason(&err))))?;
-    if !committed {
+    if !send_committed(a11y, to.pid, &surface, text, via).await? {
         return Err(nothing_typed(target.map(|_| params.target.as_str())));
     }
     Ok((
-        format!("typed {count} characters through the app's text input"),
+        format!("{refused_note}typed {count} characters through the app's text input"),
         None,
     ))
+}
+
+/// 키를 그 창에 누른다. 컴포지터가 그 창이 키보드 포커스를 가졌는지 같은 디스패치에서 보고 넣는다(PressKeysOn).
+/// 셸의 레이어 표면은 대상을 받는 메서드가 없어 키보드 포커스에 누른다(press가 먼저 그 표면이 포커스를 가졌는지
+/// 본다). 옛 컴포지터도 그렇게 넣고 경고를 붙인다
+async fn send_keys(
+    a11y: &A11y,
+    pid: u32,
+    surface: &Surface,
+    keys: &[String],
+    via: &mut Via,
+) -> Result<(), Failure> {
+    const WHAT: &str = "pressing keys";
+    let old = match surface {
+        Surface::Window(window) => match a11y.press_keys_on(pid, &window.title, keys).await {
+            Ok(()) => {
+                via.checked = true;
+                return Ok(());
+            }
+            Err(err) if atspi::unknown_method(&err) => true,
+            Err(err) => return Err(refused(&err, WHAT)),
+        },
+        Surface::Layer(_) => false,
+    };
+    a11y.press_keys(keys)
+        .await
+        .map_err(|err| refused(&err, WHAT))?;
+    via.fell_back(old);
+    Ok(())
+}
+
+/// 그 창의 켜진 글 입력에 글을 확정한다 (CommitTextOn. 레이어 표면과 옛 컴포지터는 send_keys처럼)
+async fn send_committed(
+    a11y: &A11y,
+    pid: u32,
+    surface: &Surface,
+    text: &str,
+    via: &mut Via,
+) -> Result<bool, Failure> {
+    const WHAT: &str = "typing";
+    let old = match surface {
+        Surface::Window(window) => match a11y.commit_text_on(pid, &window.title, text).await {
+            Ok(committed) => {
+                via.checked = true;
+                return Ok(committed);
+            }
+            Err(err) if atspi::unknown_method(&err) => true,
+            Err(err) => return Err(refused(&err, WHAT)),
+        },
+        Surface::Layer(_) => false,
+    };
+    let committed = a11y
+        .commit_text(text)
+        .await
+        .map_err(|err| refused(&err, WHAT))?;
+    via.fell_back(old);
+    Ok(committed)
+}
+
+/// 그 창에 글을 친다: 글 입력이 켜졌으면 확정하고 아니면 글자마다 키를 친다 (TypeTextOn. `--keys`)
+async fn send_typed(
+    a11y: &A11y,
+    pid: u32,
+    surface: &Surface,
+    text: &str,
+    via: &mut Via,
+) -> Result<String, Failure> {
+    const WHAT: &str = "typing";
+    let old = match surface {
+        Surface::Window(window) => match a11y.type_text_on(pid, &window.title, text).await {
+            Ok(how) => {
+                via.checked = true;
+                return Ok(how);
+            }
+            Err(err) if atspi::unknown_method(&err) => true,
+            Err(err) => return Err(refused(&err, WHAT)),
+        },
+        Surface::Layer(_) => false,
+    };
+    let how = a11y
+        .type_text(text)
+        .await
+        .map_err(|err| refused(&err, WHAT))?;
+    via.fell_back(old);
+    Ok(how)
+}
+
+/// 접근성 동작의 대상 요소를 사람에게 AI 색 테두리로 잠깐 보인다 (ShowAgentTarget). 자리를 모르거나 옛 컴포지터면
+/// 건너뛴다
+async fn highlight(a11y: &A11y, pid: u32, title: &str, bus: &str, path: &str) {
+    let Some(bounds) = a11y.bounds(bus, path).await else {
+        return;
+    };
+    if let Err(err) = a11y.show_target(pid, title, bounds).await
+        && !atspi::unknown_method(&err)
+    {
+        tracing::debug!("cannot show the agent target: {err}");
+    }
+}
+
+/// ref 없는 키·글·휠을 받을 수 있는지: AI가 마지막으로 다룬 창(`aim`)이 지금 키보드 포커스를 가졌다. 맞으면 그
+/// 창의 지금 제목(컴포지터 창 제목, 셸의 레이어 표면이면 그 이름)을 준다. 컴포지터가 넣을 때 다시 본다(R1)
+fn aim_focused(
+    aim: &Aim,
+    focus: Option<&Focus>,
+    apps: &[AppRef],
+    placed: &[Placed],
+) -> Option<String> {
+    let focus = focus?;
+    if aim.layer || focus.layer {
+        return (aim.layer && focus.layer && focus.pid == aim.pid && focus.app_id == aim.title)
+            .then(|| aim.title.clone());
+    }
+    if focus.pid != aim.pid {
+        return None;
+    }
+    // 접근성 창으로 본다: 그 앱에서 활성인 창이 AI의 창이어야 한다. 제목이 바뀌어도(Firefox) 경로는 그대로다
+    if let Some((bus, path)) = &aim.window
+        && let Some(app) = apps.iter().find(|app| &app.bus == bus)
+        && let Some(active) = app
+            .windows
+            .iter()
+            .find(|window| window.states & state::ACTIVE != 0)
+    {
+        return (&active.path == path).then(|| focus.title.clone());
+    }
+    // 트리가 없거나 활성 창을 모르면 제목으로 본다. 그 앱의 창이 하나뿐이면 제목이 바뀐 것이다
+    let windows = placed.iter().filter(|window| window.pid == aim.pid).count();
+    (focus.title == aim.title || windows <= 1).then(|| focus.title.clone())
+}
+
+/// fill이 다시 읽기에서 글을 지키지 못한 오류인지 (Expect::failure의 글)
+const FILL_NOT_KEPT: &str = "did not keep the text";
+
+fn fill_not_kept(failure: &Failure) -> bool {
+    failure.0 == protocol::AGENT_ERROR && failure.1.contains(FILL_NOT_KEPT)
 }
 
 /// 글 입력이 켜지지 않아 아무것도 치지 않았을 때의 오류. 다른 길을 알린다
@@ -2341,19 +3235,22 @@ fn nothing_typed(reference: Option<&str>) -> Failure {
     ))
 }
 
-/// 요소에 키보드 포커스를 준다. GTK4는 접근성의 GrabFocus를 지원하지 않는다(NotSupported). 그래서 글
-/// 칸은 사람처럼 포인터로 눌러 포커스를 주고 커서를 글 끝으로 옮긴다. 다른 요소는 누르면 동작이
-/// 일어나므로 누르지 않는다
+/// 요소에 키보드 포커스를 준다(`focus`, 키보드 길의 press·type). GTK4는 접근성의 GrabFocus를 지원하지
+/// 않는다(NotSupported). 그래서 글 칸은 사람처럼 포인터로 눌러 포커스를 주고 커서를 글 끝으로 옮긴다: 컴포지터가 그
+/// 점의 맨 위가 그 창인지 보고, 사람이 쓰는 중이면 거절한다(ClickOn). 다른 요소는 누르면 동작이 일어나므로 누르지
+/// 않는다. 글 칸의 type --ref는 이 길을 쓰지 않고 접근성으로 넣는다
 async fn focus_element(
     a11y: &A11y,
     bus: &str,
     window_title: &str,
     target: &Item,
+    via: &mut Via,
 ) -> Result<String, Failure> {
     if target.states & state::FOCUSED != 0 {
         return Ok("it already has the keyboard focus".into());
     }
     if matches!(a11y.grab_focus(bus, &target.path).await, Ok(true)) {
+        via.accessibility = true;
         return Ok("moved the keyboard focus to it".into());
     }
     if target.interfaces & iface::EDITABLE_TEXT == 0 {
@@ -2361,7 +3258,7 @@ async fn focus_element(
             "the app cannot move the keyboard focus to this element; click it if that is safe",
         ));
     }
-    pointer_click(a11y, bus, window_title, target).await?;
+    pointer_click(a11y, bus, window_title, target, via).await?;
     let _ = a11y.caret_to_end(bus, &target.path).await;
     Ok("clicked the field to focus it and put the caret at the end".into())
 }
@@ -2380,14 +3277,16 @@ async fn wait_for_text_input(a11y: &A11y) -> bool {
     }
 }
 
-/// 접근성 동작이 없는 요소의 가운데를 포인터로 누른다. 자리는 컴포지터가 놓은 창의 자리와 앱이
-/// 알린 창 안 자리를 더한 것이다. 셸의 레이어 표면(메뉴 막대, Dock, 모든 앱 패널과 그 열린 메뉴)은
-/// 컴포지터가 표면 기준 자리를 받아 누른다
+/// 접근성 동작이 없는 요소의 가운데를 포인터로 누른다. 자리는 앱이 알린 창 안 자리(창 기준 논리 좌표)이고,
+/// 컴포지터가 그 점의 맨 위가 그 창인지 같은 디스패치에서 보고 누른다(ClickOn: 가려 있으면 누르지 않고, 앞으로
+/// 가져와야 하면 사람이 쓰는 중인지 본다). 옛 컴포지터에서는 창을 앞으로 가져와 화면 좌표를 누르고 경고를 붙인다.
+/// 셸의 레이어 표면(메뉴 막대, Dock, 모든 앱 패널과 그 열린 메뉴)은 컴포지터가 표면 기준 자리를 받아 누른다
 async fn pointer_click(
     a11y: &A11y,
     bus: &str,
     window_title: &str,
     target: &Item,
+    via: &mut Via,
 ) -> Result<String, Failure> {
     let pid = a11y
         .pid(bus)
@@ -2408,25 +3307,40 @@ async fn pointer_click(
         f64::from(x) + f64::from(width) / 2.0,
         f64::from(y) + f64::from(height) / 2.0,
     );
+    const WHAT: &str = "the pointer click";
     let at = match surface {
         Surface::Window(window) => {
-            // 다른 창에 가려 있으면 그 창을 누르게 되므로 먼저 앞으로 가져온다
-            activate(a11y, pid, &window.title).await?;
-            let at = (
-                f64::from(window.x) + center.0,
-                f64::from(window.y) + center.1,
-            );
-            a11y.click(at.0, at.1)
-                .await
-                .map_err(|err| agent_error(format!("the pointer click failed: {err}")))?;
-            at
+            match a11y.click_on(pid, &window.title, center.0, center.1).await {
+                Ok(at) => {
+                    via.checked = true;
+                    at
+                }
+                Err(err) if atspi::unknown_method(&err) => {
+                    // 옛 컴포지터: 다른 창에 가려 있으면 그 창을 누르게 되므로 먼저 앞으로 가져온다
+                    activate(a11y, pid, &window.title).await?;
+                    let at = (
+                        f64::from(window.x) + center.0,
+                        f64::from(window.y) + center.1,
+                    );
+                    a11y.click(at.0, at.1)
+                        .await
+                        .map_err(|err| refused(&err, WHAT))?;
+                    via.fell_back(true);
+                    at
+                }
+                Err(err) => return Err(refused(&err, WHAT)),
+            }
         }
         // 레이어 표면은 늘 제 층에 있어 앞으로 가져올 것이 없다. 컴포지터가 그 점에서 포인터가 실제로 이
         // 표면이나 그 열린 메뉴에 가는지 보고 누른다: 자동으로 숨은 막대 자리를 누르면 아래 창이 눌린다
-        Surface::Layer(layer) => a11y
-            .click_layer(pid, &layer.namespace, center.0, center.1)
-            .await
-            .map_err(|err| agent_error(format!("the pointer click failed: {}", reason(&err))))?,
+        Surface::Layer(layer) => {
+            let at = a11y
+                .click_layer(pid, &layer.namespace, center.0, center.1)
+                .await
+                .map_err(|err| refused(&err, WHAT))?;
+            via.checked = true;
+            at
+        }
     };
     Ok(format!(
         "clicked with the pointer at ({:.0}, {:.0})",
@@ -2526,22 +3440,25 @@ fn layer_has_keyboard(focus: Option<&Focus>, layer: &atspi::Layer) -> bool {
     })
 }
 
-/// 창을 앞으로 가져온다
+/// 창을 앞으로 가져와 키보드 포커스를 준다. 사람이 쓰는 중이면 컴포지터가 거절하고(USER_ACTIVE), 데몬은 다시 해
+/// 보지 않고 알린다. 이미 그 창에 포커스가 있으면 컴포지터는 아무것도 바꾸지 않는다
 async fn activate(a11y: &A11y, pid: u32, title: &str) -> Result<(), Failure> {
     a11y.activate_window(pid, title)
         .await
-        .map_err(|err| agent_error(format!("activating the window failed: {err}")))?;
+        .map_err(|err| refused(&err, "activating the window"))?;
     Ok(())
 }
 
 /// 휠을 돌린다: 요소가 있으면 그 위에서, 없으면 창 가운데에서. 눈금 수는 (가로, 세로)이고
-/// 오른쪽·아래가 +다. 휠은 포인터 아래의 스크롤 영역을 움직이므로 요소는 스크롤할 목록이나 문서다
+/// 오른쪽·아래가 +다. 휠은 포인터 아래의 스크롤 영역을 움직이므로 요소는 스크롤할 목록이나 문서다.
+/// 컴포지터가 그 점의 맨 위가 그 창인지 보고 돌린다(ScrollOn). 옛 컴포지터에서는 창을 앞으로 가져와 돌린다
 async fn wheel(
     a11y: &A11y,
     pid: u32,
     window_title: &str,
     over: Option<(&str, &Item)>,
     [dx, dy]: [f64; 2],
+    via: &mut Via,
 ) -> Result<String, Failure> {
     // 셸의 레이어 표면(모든 앱 패널 등)은 창 목록에 없어, 창만 찾던 이 자리에서 "the compositor has no window
     // for this app"으로 실패했다. 레이어 표면이면 컴포지터가 표면 기준 자리에서 돌린다(ScrollLayer)
@@ -2568,15 +3485,26 @@ async fn wheel(
         }
         None => (width / 2.0, height / 2.0),
     };
-    let scrolled = match &surface {
-        Surface::Window(window) => {
-            activate(a11y, pid, &window.title).await?;
-            a11y.scroll(f64::from(window.x) + x, f64::from(window.y) + y, dx, dy)
+    const WHAT: &str = "scrolling";
+    match &surface {
+        Surface::Window(window) => match a11y.scroll_on(pid, &window.title, x, y, dx, dy).await {
+            Ok(()) => via.checked = true,
+            Err(err) if atspi::unknown_method(&err) => {
+                activate(a11y, pid, &window.title).await?;
+                a11y.scroll(f64::from(window.x) + x, f64::from(window.y) + y, dx, dy)
+                    .await
+                    .map_err(|err| refused(&err, WHAT))?;
+                via.fell_back(true);
+            }
+            Err(err) => return Err(refused(&err, WHAT)),
+        },
+        Surface::Layer(layer) => {
+            a11y.scroll_layer(pid, &layer.namespace, x, y, dx, dy)
                 .await
+                .map_err(|err| refused(&err, WHAT))?;
+            via.checked = true;
         }
-        Surface::Layer(layer) => a11y.scroll_layer(pid, &layer.namespace, x, y, dx, dy).await,
-    };
-    scrolled.map_err(|err| agent_error(format!("scrolling failed: {}", reason(&err))))?;
+    }
     let at = (f64::from(placed.x) + x, f64::from(placed.y) + y);
     Ok(format!(
         "scrolled {} at ({:.0}, {:.0})",
@@ -2614,7 +3542,8 @@ trait Scrollable {
     async fn shown(&self) -> bool;
     /// 앱이 요소가 보이게 스스로 스크롤한다 (Component.ScrollTo)
     async fn scroll_to(&self) -> zbus::Result<bool>;
-    /// 요소가 있는 창을 앞으로 가져와 컴포지터가 놓은 자리를 준다. 휠은 포인터 아래의 창으로 간다
+    /// 요소가 있는 창이 컴포지터에서 놓인 자리를 준다. 휠은 포인터 아래의 창으로 가므로 컴포지터가 그 점의 맨 위가
+    /// 그 창인지 보고 돌린다(옛 컴포지터에서는 돌리기 전에 앞으로 가져온다)
     async fn raise_window(&self) -> Result<Placed, Failure>;
     /// 화면의 논리 좌표 (x, y)에서 휠을 돌린다. 눈금 수 dx, dy는 오른쪽·아래가 +다
     async fn wheel(&self, x: f64, y: f64, dx: f64, dy: f64) -> zbus::Result<()>;
@@ -2628,6 +3557,18 @@ struct AppElement<'a> {
     window_title: &'a str,
     /// raise_window가 찾은 셸의 레이어 표면. 휠은 그 표면 기준 자리에서 돌린다(ScrollLayer)
     layer: RefCell<Option<atspi::Layer>>,
+    /// raise_window가 찾은 창. 휠은 그 창 기준 자리에서 돌린다(ScrollOn)
+    window: RefCell<Option<Placed>>,
+    /// 스크롤에 쓴 길 (답의 첫 줄)
+    via: Cell<Via>,
+}
+
+impl AppElement<'_> {
+    fn used(&self, how: impl FnOnce(&mut Via)) {
+        let mut via = self.via.get();
+        how(&mut via);
+        self.via.set(via);
+    }
 }
 
 impl Scrollable for AppElement<'_> {
@@ -2648,7 +3589,11 @@ impl Scrollable for AppElement<'_> {
     }
 
     async fn scroll_to(&self) -> zbus::Result<bool> {
-        self.a11y.scroll_to(self.bus, self.path).await
+        let asked = self.a11y.scroll_to(self.bus, self.path).await;
+        if matches!(asked, Ok(true)) {
+            self.used(|via| via.accessibility = true);
+        }
+        asked
     }
 
     async fn raise_window(&self) -> Result<Placed, Failure> {
@@ -2658,10 +3603,12 @@ impl Scrollable for AppElement<'_> {
             .await
             .ok_or_else(|| agent_error("cannot tell which process owns this app"))?;
         // 셸의 레이어 표면(모든 앱 패널 등)도 찾는다. 창만 찾던 때는 "the compositor has no window for this
-        // app"으로 실패했다. 레이어 표면은 늘 제 층에 있어 앞으로 가져올 것이 없다
+        // app"으로 실패했다. 창을 앞으로 가져오지 않는다: 컴포지터가 휠을 돌릴 때 그 점에서 창을 확인한다
         let surface = compositor_surface(self.a11y, pid, self.window_title).await?;
         match &surface {
-            Surface::Window(window) => activate(self.a11y, pid, &window.title).await?,
+            Surface::Window(window) => {
+                self.window.replace(Some(window.clone()));
+            }
             Surface::Layer(layer) => {
                 self.layer.replace(Some(layer.clone()));
             }
@@ -2671,15 +3618,40 @@ impl Scrollable for AppElement<'_> {
 
     async fn wheel(&self, x: f64, y: f64, dx: f64, dy: f64) -> zbus::Result<()> {
         let layer = self.layer.borrow().clone();
-        match layer {
+        let window = self.window.borrow().clone();
+        match (layer, window) {
             // 화면 좌표를 표면 기준 자리로 바꾼다
-            Some(layer) => {
+            (Some(layer), _) => {
                 let (x, y) = (x - f64::from(layer.x), y - f64::from(layer.y));
                 self.a11y
                     .scroll_layer(layer.pid, &layer.namespace, x, y, dx, dy)
-                    .await
+                    .await?;
+                self.used(|via| via.checked = true);
+                Ok(())
             }
-            None => self.a11y.scroll(x, y, dx, dy).await,
+            // 화면 좌표를 창 기준 자리로 바꾼다
+            (None, Some(window)) => {
+                let (left, top) = (x - f64::from(window.x), y - f64::from(window.y));
+                match self
+                    .a11y
+                    .scroll_on(window.pid, &window.title, left, top, dx, dy)
+                    .await
+                {
+                    Ok(()) => {
+                        self.used(|via| via.checked = true);
+                        Ok(())
+                    }
+                    // 옛 컴포지터: 앞으로 가져와 화면 좌표에서 돌린다
+                    Err(err) if atspi::unknown_method(&err) => {
+                        self.a11y.activate_window(window.pid, &window.title).await?;
+                        self.a11y.scroll(x, y, dx, dy).await?;
+                        self.used(|via| via.fell_back(true));
+                        Ok(())
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            (None, None) => self.a11y.scroll(x, y, dx, dy).await,
         }
     }
 }
@@ -2772,7 +3744,7 @@ async fn wheel_into_view(
         element
             .wheel(center.0, center.1, dx, dy)
             .await
-            .map_err(|err| agent_error(format!("scrolling failed: {}", reason(&err))))?;
+            .map_err(|err| refused(&err, "scrolling"))?;
         turns += 1;
         turned = Some((element.now(), (x, y)));
         element.pause(SCROLL_PAUSE).await;
@@ -3418,6 +4390,320 @@ mod tests {
         ];
         let several = find_window(&windows, &[], &[], "a").unwrap_err().1;
         assert!(several.contains(protocol::BE_MORE_SPECIFIC), "{several}");
+    }
+
+    /// AI가 마지막으로 다룬 창: 텍스트 편집기(pid 40)의 첫 창
+    fn editor_aim() -> Aim {
+        Aim {
+            pid: 40,
+            title: "Untitled".into(),
+            app: "Text Editor".into(),
+            app_id: "org.gnome.TextEditor".into(),
+            window: Some((":1.40".into(), "/w40/0".into())),
+            layer: false,
+        }
+    }
+
+    #[test]
+    fn ref_less_input_goes_only_to_the_window_the_ai_worked_on() {
+        let aim = editor_aim();
+        let editor = [app(40, "Text Editor", &[("Untitled", true)])];
+        let placed_editor = [placed(40, "org.gnome.TextEditor", "Untitled")];
+        let check =
+            |focus: Option<&Focus>, apps: &[AppRef]| aim_focused(&aim, focus, apps, &placed_editor);
+        assert_eq!(
+            check(Some(&focus(40, "Untitled")), &editor).as_deref(),
+            Some("Untitled")
+        );
+        // 사람이 설정(pid 50)을 눌렀다. 포커스가 없을 때도 보내지 않는다
+        assert_eq!(check(Some(&focus(50, "Settings")), &editor), None);
+        assert_eq!(check(None, &editor), None);
+        // 앱이 제목을 바꿨다(Firefox의 페이지 제목): 접근성 창의 경로가 같으면 그 창이고, 지금 제목을 준다
+        assert_eq!(
+            check(Some(&focus(40, "*Untitled")), &editor).as_deref(),
+            Some("*Untitled")
+        );
+        // 같은 앱의 다른 창(사람이 연 둘째 창)이 활성이다
+        let two = [app(
+            40,
+            "Text Editor",
+            &[("Untitled", false), ("Other", true)],
+        )];
+        assert_eq!(check(Some(&focus(40, "Other")), &two), None);
+        // 셸의 레이어 표면(모든 앱 패널)에 포커스가 있다
+        let launcher = Focus {
+            pid: 10,
+            app_id: "bunt-launcher".into(),
+            title: String::new(),
+            layer: true,
+        };
+        assert_eq!(check(Some(&launcher), &editor), None);
+
+        // 트리가 없는 창(foot)은 제목으로 본다. 창이 하나뿐이면 제목이 바뀐 것이다
+        let blind = Aim {
+            pid: 60,
+            title: "~".into(),
+            window: None,
+            ..editor_aim()
+        };
+        let one = [placed(60, "foot", "~/src")];
+        assert_eq!(
+            aim_focused(&blind, Some(&focus(60, "~/src")), &[], &one).as_deref(),
+            Some("~/src")
+        );
+        let many = [placed(60, "foot", "~"), placed(60, "foot", "~/src")];
+        assert_eq!(
+            aim_focused(&blind, Some(&focus(60, "~/src")), &[], &many),
+            None
+        );
+        assert_eq!(
+            aim_focused(&blind, Some(&focus(60, "~")), &[], &many).as_deref(),
+            Some("~")
+        );
+
+        // 셸의 레이어 표면은 그 표면이 키보드 포커스를 가졌을 때만이다
+        let shell = Aim {
+            pid: 10,
+            title: "bunt-launcher".into(),
+            window: None,
+            layer: true,
+            ..editor_aim()
+        };
+        assert_eq!(
+            aim_focused(&shell, Some(&launcher), &[], &[]).as_deref(),
+            Some("bunt-launcher")
+        );
+        let menubar = Focus {
+            app_id: "bunt-menubar".into(),
+            ..launcher.clone()
+        };
+        assert_eq!(aim_focused(&shell, Some(&menubar), &[], &[]), None);
+        assert_eq!(aim_focused(&shell, Some(&focus(10, "x")), &[], &[]), None);
+    }
+
+    #[test]
+    fn refusals_without_a_target_say_where_the_focus_is() {
+        let apps = [app(50, "System Settings", &[("Settings", true)])];
+        let now = focus_now(Some(&focus(50, "Settings")), &apps, &[]);
+        assert_eq!(now, "the keyboard focus is on System Settings \"Settings\"");
+        let (code, message) = focus_moved(&editor_aim(), &now, "type");
+        assert_eq!(code, protocol::FOCUS_MOVED);
+        for part in [
+            "the keyboard focus is on System Settings \"Settings\"",
+            "not on Text Editor \"Untitled\"",
+            "nothing was typed",
+            "--app org.gnome.TextEditor",
+        ] {
+            assert!(message.contains(part), "{part}: {message}");
+        }
+        assert!(
+            focus_moved(&editor_aim(), &now, "scroll")
+                .1
+                .contains("nothing was scrolled")
+        );
+        // 모르는 앱은 앱 ID, 레이어 표면은 그 이름, 포커스가 없으면 그렇다고
+        assert!(
+            focus_now(Some(&focus(70, "Claude")), &[], &[]).contains("org.example.App \"Claude\"")
+        );
+        let layer = Focus {
+            pid: 10,
+            app_id: "bunt-launcher".into(),
+            title: String::new(),
+            layer: true,
+        };
+        assert_eq!(
+            focus_now(Some(&layer), &apps, &[]),
+            "the keyboard focus is on the shell's bunt-launcher"
+        );
+        assert_eq!(
+            focus_now(None, &apps, &[]),
+            "no window has the keyboard focus"
+        );
+        // 다룬 창이 없는 세션은 대상을 고르라고 한다
+        let (code, message) = no_aim("press");
+        assert_eq!(code, protocol::INVALID_PARAMS);
+        assert!(
+            message.contains("--app") && message.contains("a ref"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn compositor_refusals_become_their_own_errors() {
+        let moved = refusal(Some(Declined::FocusMoved), "", "pressing keys");
+        assert_eq!(moved.0, protocol::FOCUS_MOVED);
+        assert!(
+            moved
+                .1
+                .starts_with("pressing keys: the keyboard focus is not on that window")
+        );
+        // REPL의 UserActiveError가 "in N ms"를 읽는다
+        let busy = refusal(
+            Some(Declined::UserActive {
+                retry_after_ms: 1200,
+            }),
+            "",
+            "typing",
+        );
+        assert_eq!(busy.0, protocol::USER_ACTIVE);
+        assert!(busy.1.ends_with("try again in 1200 ms"), "{}", busy.1);
+        assert_eq!(refusal(Some(Declined::Paused), "", "x").0, protocol::PAUSED);
+        // 컴포지터의 다른 거절도 그 뜻의 번호로
+        let auth = "a window only the user can answer is open (authentication, …)";
+        assert_eq!(refusal(None, auth, "x").0, protocol::NOT_ALLOWED);
+        let locked = "the screen is locked; only the user can unlock it with their password";
+        assert_eq!(refusal(None, locked, "x").0, protocol::SCREEN_LOCKED);
+        let gone = "that window is gone; list the windows again";
+        assert_eq!(refusal(None, gone, "x").0, protocol::TARGET_GONE);
+        let other = refusal(None, "something else", "scrolling");
+        assert_eq!(
+            other,
+            (
+                protocol::AGENT_ERROR,
+                "scrolling failed: something else".into()
+            )
+        );
+        // ref의 앱이 끝났다: 기다리기와 AI가 사라진 것으로 읽는 글
+        let (code, message) = target_gone("e5", 812);
+        assert_eq!(code, protocol::TARGET_GONE);
+        assert!(message.contains(protocol::APP_QUIT) && message.contains("pid 812"));
+    }
+
+    #[test]
+    fn answers_name_the_window_and_the_way() {
+        let accessible = Via {
+            accessibility: true,
+            ..Via::default()
+        };
+        assert_eq!(
+            accessible.describe("Text Editor", "Untitled", "inserted 3 characters"),
+            "Text Editor \"Untitled\" (accessibility): inserted 3 characters"
+        );
+        let checked = Via {
+            checked: true,
+            ..Via::default()
+        };
+        assert_eq!(
+            checked.describe("", "e2e canvas", "pressed Return"),
+            "\"e2e canvas\" (target-checked input): pressed Return"
+        );
+        let mut both = accessible;
+        both.add(checked);
+        assert!(
+            both.describe("A", "w", "x")
+                .contains("(accessibility and target-checked input)")
+        );
+        // 옛 컴포지터로 넣었으면 경고를 붙인다(계약 C의 글)
+        let mut old = Via::default();
+        old.fell_back(true);
+        let answer = old.describe("Text Editor", "Untitled", "pressed ctrl+a");
+        assert!(answer.contains("(unchecked input)"), "{answer}");
+        assert!(
+            answer.ends_with(
+                "; warning: the compositor cannot check the target; the input may reach another \
+                 window"
+            ),
+            "{answer}"
+        );
+        // 셸의 레이어 표면에 옛 메서드로 넣은 것은 경고하지 않는다
+        let mut layer = Via::default();
+        layer.fell_back(false);
+        assert!(
+            !layer
+                .describe("bunt-shell", "bunt-menubar", "pressed Escape")
+                .contains("warning")
+        );
+        assert!(
+            Via::default()
+                .describe("A", "w", "x")
+                .contains("(no input)")
+        );
+    }
+
+    #[test]
+    fn keys_that_accessibility_does_instead() {
+        let keys =
+            |text: &str| -> Vec<String> { text.split_whitespace().map(String::from).collect() };
+        for clear in [
+            "ctrl+a BackSpace",
+            "ctrl+a Delete",
+            "super+a backspace",
+            "control+A del",
+        ] {
+            assert!(clears_text(&keys(clear)), "{clear}");
+        }
+        for not in [
+            "ctrl+a",
+            "BackSpace",
+            "ctrl+a BackSpace x",
+            "ctrl+c BackSpace",
+            "Delete ctrl+a",
+        ] {
+            assert!(!clears_text(&keys(not)), "{not}");
+        }
+        assert!(
+            enter_key(&keys("Return")) && enter_key(&keys("KP_Enter")) && enter_key(&keys("enter"))
+        );
+        assert!(!enter_key(&keys("Return Return")) && !enter_key(&keys("ctrl+Return")));
+    }
+
+    #[test]
+    fn text_fields_outside_browsers_take_text_without_the_focus() {
+        let field = Item {
+            interfaces: iface::EDITABLE_TEXT,
+            role: role::TEXT,
+            ..Item::default()
+        };
+        assert!(accessible_field(&field, false, "GTK"));
+        assert!(accessible_field(&field, false, ""));
+        // 웹 칸과 브라우저(Firefox 주소 막대, Chromium·Electron)는 키보드 길이다
+        assert!(!accessible_field(&field, true, "GTK"));
+        assert!(!accessible_field(&field, false, "Gecko"));
+        assert!(!accessible_field(&field, false, "chromium"));
+        let password = Item {
+            role: role::PASSWORD_TEXT,
+            ..field.clone()
+        };
+        assert!(!accessible_field(&password, false, "GTK"));
+        let label = Item {
+            interfaces: 0,
+            ..field
+        };
+        assert!(!accessible_field(&label, false, "GTK"));
+    }
+
+    #[test]
+    fn a_fill_the_app_dropped_is_typed_again() {
+        // act_or_type는 fill의 다시 읽기 실패를 이 글로 알아본다 (Expect::failure와 같이 바뀌어야 한다)
+        let dropped = agent_error(Expect::Text("example.com".into()).failure("e82", ""));
+        assert!(fill_not_kept(&dropped));
+        assert!(!fill_not_kept(&agent_error(
+            Expect::Contains("x".into()).failure("e5", "")
+        )));
+        assert!(!fill_not_kept(&(
+            protocol::USER_ACTIVE,
+            FILL_NOT_KEPT.into()
+        )));
+    }
+
+    #[test]
+    fn notes_say_why_the_scope_or_the_window_is_not_the_usual_one() {
+        assert!(default_scope_note(None).contains("has not worked on a window yet"));
+        let blind = Aim {
+            window: None,
+            ..editor_aim()
+        };
+        assert!(default_scope_note(Some(&blind)).contains("has no accessibility tree"));
+        let gone = default_scope_note(Some(&editor_aim()));
+        assert!(gone.starts_with(
+            "# note: the window you worked on last (Text Editor \"Untitled\") is gone"
+        ));
+        assert_eq!(in_background(false, "tree".into()), "tree");
+        let note = in_background(true, "- app: \"Calculator\"\n".into());
+        assert!(note.starts_with(
+            "# note: opened in the background; the person is using another window\n- app:"
+        ));
+        assert_eq!(paused().0, protocol::PAUSED);
     }
 
     /// 가짜 페이지의 창 높이 (placed()가 놓는 창)

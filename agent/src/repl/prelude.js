@@ -46,12 +46,29 @@
   const BlockedAppError = kind('BlockedAppError');
   const ScreenLockedError = kind('ScreenLockedError');
   const TimeoutError = kind('TimeoutError');
+  // 사람과 함께 쓰는 컴퓨터: 사람이 포커스를 옮겼다, 사람이 쓰는 중이다, 대상이 사라졌다, 사람이 멈췄다
+  const FocusMovedError = kind('FocusMovedError');
+  const TargetGoneError = kind('TargetGoneError');
+  const PausedError = kind('PausedError');
+  class UserActiveError extends DesktopError {
+    constructor(message, code) {
+      super(message, code);
+      this.name = 'UserActiveError';
+      // 다시 해 볼 때까지의 시간(ms). 데몬의 알림 "try again in N ms"에서 읽는다
+      const match = /\bin (\d+) ms\b/.exec(String(message));
+      this.retryAfterMs = match ? Number(match[1]) : null;
+    }
+  }
   // 데몬의 JSON-RPC 오류 번호 (protocol.rs)
   const ERRORS = {
     '-32001': NotAllowedError,
     '-32002': BlockedAppError,
     '-32003': ScreenLockedError,
     '-32004': TimeoutError,
+    '-32005': FocusMovedError,
+    '-32006': UserActiveError,
+    '-32007': TargetGoneError,
+    '-32008': PausedError,
   };
 
   /** 데몬의 메서드 하나를 부른다. 실패는 오류 번호에 맞는 DesktopError로 던진다 */
@@ -398,6 +415,8 @@
 
   // ---- 키보드와 포인터 (ref 없이 창에) ----
 
+  // app.keyboard는 그 앱의 창을 앞으로 가져와 친다(사람이 쓰는 중이면 UserActiveError). desktop.keyboard는 이 세션에서
+  // 마지막으로 다룬 창이 아직 키보드 포커스를 가졌을 때만 친다: 사람이 다른 창으로 옮겼으면 FocusMovedError다
   class Keyboard {
     constructor(query) {
       Object.defineProperty(this, 'query', { value: query });
@@ -494,13 +513,15 @@
       return new Mouse(this.scope);
     }
 
-    /** 압축 접근성 트리. interactive: 누르거나 쓸 수 있는 요소만, hidden: 숨은 요소도, diff: 지난번과 달라진 줄만 보인다 */
+    /** 압축 접근성 트리. interactive: 누르거나 쓸 수 있는 요소만, hidden: 숨은 요소도, diff: 지난번과 달라진 줄만 보인다.
+     *  maxLines: 문서가 통째로 바뀌어 diff가 이보다 길면 요약한다 (기본 400) */
     async snapshot(opts) {
-      const o = options(opts, ['interactive', 'hidden', 'diff'], 'snapshot');
+      const o = options(opts, ['interactive', 'hidden', 'diff', 'maxLines'], 'snapshot');
       const reply = call('snapshot', {
         app: appOf(this.scope),
         interactive: !!o.interactive,
         hidden: !!o.hidden,
+        max_lines: integer(o.maxLines, 'maxLines'),
       });
       return new Snapshot(reply, !!o.diff);
     }
@@ -522,9 +543,10 @@
       return new Screenshot(call('screenshot', { app: appOf(this.scope) }));
     }
 
-    /** 무엇이 나타나거나(gone이면 사라지거나) 창이 뜰 때까지 기다린다: { text } | { role, name } | { window } */
+    /** 무엇이 나타나거나(gone이면 사라지거나) 창이 뜰 때까지 기다린다: { text } | { role, name } | { window } | { loaded }.
+     *  loaded: 보이는 문서를 다 불러올 때까지(불러오는 중이 아닐 때까지). 창 기다리기도 문서를 다 불러오기를 기다린다 */
     async wait(opts) {
-      const o = options(opts, ['text', 'role', 'name', 'exact', 'nth', 'window', 'gone', 'timeout'], 'wait');
+      const o = options(opts, ['text', 'role', 'name', 'exact', 'nth', 'window', 'gone', 'loaded', 'timeout'], 'wait');
       return new Waited(
         call('wait', {
           app: appOf(this.scope),
@@ -535,9 +557,19 @@
           exact: !!o.exact,
           nth: integer(o.nth, 'wait nth'),
           gone: !!o.gone,
+          loaded: !!o.loaded,
           timeout_ms: millis(o.timeout, 'timeout'),
         }),
       );
+    }
+
+    /** 보이는 문서를 다 불러올 때까지 기다린다 (Playwright의 waitForLoadState. 상태 이름은 받기만 하고 모두 "다
+     *  불러옴"으로 본다) */
+    async waitForLoadState(state, opts) {
+      if (state !== null && typeof state === 'object') [state, opts] = [undefined, state];
+      if (state !== undefined) text(state, 'waitForLoadState');
+      const o = options(opts, ['timeout'], 'waitForLoadState');
+      return this.wait({ loaded: true, timeout: o.timeout });
     }
 
     /** 창이 뜰 때까지 기다린다. 제목이 없으면 새로 뜬 창이다 */
@@ -587,12 +619,17 @@
       if (this.window === null) {
         return `# opened ${this.name} (${this.id}); no new window appeared yet. Run desktop.apps()`;
       }
-      const how = this.running ? 'was already open; brought forward' : 'opened';
+      // 사람이 다른 창을 쓰는 중이면 데몬이 앞으로 가져오지 않고 트리 머리에 그렇다고 적는다
+      const background = this.tree.startsWith('# note: opened in the background');
+      let how = 'opened';
+      if (this.running) how = background ? 'was already open; left in the background' : 'was already open; brought forward';
       const head = `# ${this.name} (${this.id}) ${how}: window ${JSON.stringify(this.window)}`;
-      if (this.tree === '') {
-        return `${head}\n# this window has no accessibility tree; use screenshot() and mouse.click(x, y) on it`;
+      const note = background ? this.tree.slice(0, this.tree.indexOf('\n') + 1) : '';
+      const tree = this.tree.slice(note.length);
+      if (tree === '') {
+        return `${head}\n${note}# this window has no accessibility tree; use screenshot() and mouse.click(x, y) on it`;
       }
-      return `${head}\n${this.tree.replace(/\n$/, '')}`;
+      return `${head}\n${note}${tree.replace(/\n$/, '')}`;
     }
   }
 
@@ -633,11 +670,21 @@
     }
 
     get errors() {
-      return { DesktopError, NotAllowedError, BlockedAppError, ScreenLockedError, TimeoutError };
+      return {
+        DesktopError,
+        NotAllowedError,
+        BlockedAppError,
+        ScreenLockedError,
+        TimeoutError,
+        FocusMovedError,
+        UserActiveError,
+        TargetGoneError,
+        PausedError,
+      };
     }
 
     [INSPECT]() {
-      return 'desktop: the active window; desktop.app(name) for an app';
+      return 'desktop: the window you worked on last (else the active window); desktop.app(name) for an app';
     }
   }
 
@@ -823,9 +870,14 @@
 
     /** 이 요소 아래만 읽은 트리 */
     async snapshot(opts) {
-      const o = options(opts, ['interactive', 'hidden', 'diff', 'timeout'], 'snapshot');
+      const o = options(opts, ['interactive', 'hidden', 'diff', 'maxLines', 'timeout'], 'snapshot');
       const ref = this.resolve(millis(o.timeout, 'timeout'));
-      const reply = call('snapshot', { ref, interactive: !!o.interactive, hidden: !!o.hidden });
+      const reply = call('snapshot', {
+        ref,
+        interactive: !!o.interactive,
+        hidden: !!o.hidden,
+        max_lines: integer(o.maxLines, 'maxLines'),
+      });
       return new Snapshot(reply, !!o.diff);
     }
 

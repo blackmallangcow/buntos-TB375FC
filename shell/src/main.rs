@@ -4,6 +4,8 @@
 //! bunt-shell: 메뉴바, Dock, 알림 (wlr-layer-shell 클라이언트, ARCHITECTURE 5.2)
 
 mod agent_access;
+// 메뉴 막대의 AI 표시와 사람만 누르는 AI 제어 창 (AI가 제어하는 동안 보이고, 멈추고 다시 허용한다)
+mod agent_control;
 mod appmenu;
 mod bluetooth;
 // 클립보드 기록: 복사를 받아 메모리에 남기고(clipboard, clipboard_history) 모든 앱 패널에서 다시 고른다(clipboard_panel)

@@ -3,7 +3,7 @@
 
 //! 메뉴바: 왼쪽에 로고 메뉴(macOS의 Apple 메뉴 순서: 이 시스템에 관하여, 시스템 설정, 강제 종료, 잠자기,
 //! 다시 시작, 시스템 종료, 화면 잠금, 로그아웃)와 앞에 있는 앱의 메뉴,
-//! 오른쪽에 메뉴 막대 항목(입력 소스, Bluetooth, 사운드, 배터리, Wi-Fi), 제어 센터,
+//! 오른쪽에 메뉴 막대 항목(AI 제어 표시, 입력 소스, Bluetooth, 사운드, 배터리, Wi-Fi), 제어 센터,
 //! 날짜·시간(누르면 알림 센터). macOS처럼 평소에는 배경이 투명하고 글씨가 흰색이며,
 //! 앞에 있는 창이 화면을 채우면(최대화, 전체 화면) 배경이 검은색이 된다. "메뉴 막대 배경 보기"를
 //! 켜면 늘 흐린 유리 바탕이다. 자동으로 숨고 위쪽 가장자리에서 나오는 것은 컴포지터가 한다
@@ -20,7 +20,7 @@ use gtk4::{self as gtk, gio, glib, prelude::*};
 use gtk4_layer_shell::{Edge, LayerShell};
 
 use crate::{
-    appmenu, bluetooth, control_center,
+    agent_control, appmenu, bluetooth, control_center,
     control_center::Services,
     input_source::{self, InputSources},
     interface_settings, layer_window, menu_names, network, notification_center,
@@ -62,6 +62,8 @@ pub fn build(
     let end = gtk::Box::builder().spacing(2).build();
     // 화면 기록 중에만 보이는 기록 중단 단추는 맨 왼쪽에 둔다 (macOS)
     end.append(&recording::stop_button(tr));
+    // AI가 제어하는 동안과 사람이 멈춘 동안만 보이는 AI 표시. 누르면 사람만 누르는 AI 제어 창을 연다
+    end.append(&agent_control::indicator(app, tr));
     // 앱이 넣는 항목은 시스템 항목 왼쪽에 둔다
     end.append(&status_items::build());
     end.append(&control_center::focus_extra(tr));

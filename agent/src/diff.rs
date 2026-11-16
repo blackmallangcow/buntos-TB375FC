@@ -4,9 +4,14 @@
 //! 두 스냅샷의 줄 단위 차이. Aside의 snapshot()처럼 바뀐 줄만 앞뒤 줄 없이 unified diff 꼴로
 //! 돌려준다 (`@@ -3,0 +4,2 @@`, 지운 줄 `-`, 더한 줄 `+`). 앞뒤의 같은 줄을 먼저 떼고 나머지를
 //! Myers 알고리즘으로 견준다. 거의 다 바뀌었으면 통째로 바꾼 한 덩어리로 낸다.
+//!
+//! 바뀐 줄이 너무 많으면([`limited`]) 줄 대신 요약 한 줄을 낸다: 문서가 통째로 바뀌면 diff는 앞 문서를 모두 지운
+//! 줄이 되어, 읽을 것 없이 모델의 맥락만 채운다.
 
 /// 이보다 많이 다르면 견주기를 그만두고 통째로 바꾼 것으로 본다 (기억은 대략 이 값의 제곱)
 const MAX_EDITS: usize = 1000;
+/// diff가 줄로 보이는 바뀐 줄(지운 줄과 더한 줄) 수의 기본 상한. 넘으면 요약한다 (`--max-lines`)
+pub const MAX_LINES: usize = 400;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Op {
@@ -17,6 +22,13 @@ enum Op {
 
 /// `old`에서 `new`로 바뀐 줄. 같으면 빈 문자열
 pub fn unified(old: &str, new: &str) -> String {
+    limited(old, new, usize::MAX)
+}
+
+/// [`unified`]와 같되, 바뀐 줄(지운 줄과 더한 줄)이 `max_lines`보다 많으면 줄 대신 `#`로 시작하는 요약 한 줄을
+/// 낸다 (이슈 #1 P3-2: 새 탭을 열자 diff가 `@@ -2,1885 +2,51 @@`처럼 앞 문서 1885줄을 지운 줄로 냈다). 앞 트리가
+/// 거의 다 지워졌으면 문서가 바뀌었다고 알린다. 어느 쪽이든 새 스냅샷이 지금 모습을 준다
+pub fn limited(old: &str, new: &str, max_lines: usize) -> String {
     let old: Vec<&str> = old.lines().collect();
     let new: Vec<&str> = new.lines().collect();
     let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
@@ -35,7 +47,29 @@ pub fn unified(old: &str, new: &str) -> String {
         ops.extend(std::iter::repeat_n(Op::Insert, b.len()));
         ops
     });
+    let deleted = ops.iter().filter(|op| **op == Op::Delete).count();
+    let inserted = ops.iter().filter(|op| **op == Op::Insert).count();
+    if deleted + inserted > max_lines {
+        return summary(old.len(), deleted, inserted, max_lines);
+    }
     hunks(a, b, &ops, prefix)
+}
+
+/// 줄 대신 내는 요약. `old_lines`는 앞 트리의 줄 수다
+fn summary(old_lines: usize, deleted: usize, inserted: usize, max_lines: usize) -> String {
+    // 앞 트리가 거의 다(90% 넘게) 지워졌다: 머리줄(앱 이름) 말고는 다 바뀌었다
+    if deleted * 10 > old_lines * 9 {
+        format!(
+            "# the document was replaced: {deleted} lines → {inserted} lines; take a snapshot to \
+             read it\n"
+        )
+    } else {
+        format!(
+            "# {} lines changed ({deleted} removed, {inserted} added), more than the {max_lines} a \
+             diff shows; take a snapshot to read it\n",
+            deleted + inserted
+        )
+    }
 }
 
 /// 앞에서부터의 편집 순서 (같음, 지움, 더함). 편집이 MAX_EDITS를 넘으면 None
@@ -228,6 +262,56 @@ mod tests {
         }
         result.extend(old[cursor..].iter().cloned());
         assert_eq!(result, new);
+    }
+
+    #[test]
+    fn a_replaced_document_is_summed_up() {
+        // 이슈 #1 P3-2: 위키백과 문서(1885줄)에서 새 탭(51줄)으로
+        let tree = |lines: Vec<String>| {
+            let mut tree = vec!["- app: \"Mozilla Firefox\" [pid=7]".to_string()];
+            tree.extend(lines);
+            tree.join("\n")
+        };
+        let article = tree(
+            (0..1885)
+                .map(|n| format!("  - text: \"문단 {n}\""))
+                .collect(),
+        );
+        let new_tab = tree(
+            (0..51)
+                .map(|n| format!("  - link \"바로 가기 {n}\""))
+                .collect(),
+        );
+        assert_eq!(
+            limited(&article, &new_tab, MAX_LINES),
+            "# the document was replaced: 1885 lines → 51 lines; take a snapshot to read it\n"
+        );
+        // 상한을 올리면 줄로 낸다
+        let full = limited(&article, &new_tab, 2000);
+        assert!(full.starts_with("@@ -2,1885 +2,51 @@\n"), "{}", &full[..40]);
+        assert_eq!(full, unified(&article, &new_tab));
+    }
+
+    #[test]
+    fn a_big_change_is_summed_up_and_a_small_one_is_not() {
+        let old: Vec<String> = (0..1000).map(|n| format!("line {n}")).collect();
+        let mut new = old.clone();
+        for line in new.iter_mut().skip(100).step_by(3).take(300) {
+            line.push_str(" changed");
+        }
+        let (old, new) = (old.join("\n"), new.join("\n"));
+        assert_eq!(
+            limited(&old, &new, MAX_LINES),
+            "# 600 lines changed (300 removed, 300 added), more than the 400 a diff shows; take a \
+             snapshot to read it\n"
+        );
+        assert_eq!(limited(&old, &new, 600), unified(&old, &new));
+        // 작은 diff는 그대로다
+        assert_eq!(
+            limited("a\nb\nc", "a\nB\nc", MAX_LINES),
+            "@@ -2 +2 @@\n-b\n+B\n"
+        );
+        assert_eq!(limited("a", "a", 0), "");
     }
 
     #[test]

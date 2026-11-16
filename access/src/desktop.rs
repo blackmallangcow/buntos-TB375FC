@@ -24,12 +24,24 @@ pub struct DesktopApp {
 }
 
 /// 이 실행 파일(과 스크립트)을 실행하는 앱. Exec의 프로그램을 PATH에서 찾고 링크를 풀어 맞춘다.
-/// 스크립트를 바로 실행하는 Exec(`Exec=claude`가 링크를 풀면 cli.js)도 맞는다
+/// 스크립트를 바로 실행하는 Exec(`Exec=claude`가 링크를 풀면 cli.js)도 맞는다. 앱 메뉴에 보이지 않는 항목
+/// (NoDisplay, Hidden)은 앱의 이름이 아니다: Claude Code가 까는 URL 처리 항목(`Name=Claude Code URL Handler`,
+/// `NoDisplay=true`)이 Claude Code의 이름이 되었다(이슈 #1 P2-1). 맞는 항목이 없으면 부르는 쪽이 실행 파일
+/// 이름을 쓴다(identify)
 pub fn desktop_app(exe: &Path, script: Option<&Path>) -> Option<DesktopApp> {
-    let languages = languages();
-    desktop_files().into_iter().find_map(|(id, path)| {
+    find_app(desktop_files(), &languages(), exe, script)
+}
+
+/// `files`(데스크톱 ID, 경로) 가운데 이 실행 파일을 실행하는 첫 앱 항목
+fn find_app(
+    files: Vec<(String, PathBuf)>,
+    languages: &[String],
+    exe: &Path,
+    script: Option<&Path>,
+) -> Option<DesktopApp> {
+    files.into_iter().find_map(|(id, path)| {
         let text = fs::read_to_string(path).ok()?;
-        let entry = Entry::parse(&text, &languages)?;
+        let entry = Entry::parse(&text, languages)?;
         (entry.is_application && runs(&entry.exec, exe, script)).then_some(DesktopApp {
             id,
             name: entry.name,
@@ -122,6 +134,7 @@ fn languages() -> Vec<String> {
 
 /// [Desktop Entry] 묶음에서 쓰는 값
 struct Entry {
+    /// 앱 메뉴에 보이는 앱: Type=Application이고 Hidden·NoDisplay가 아니다 (agent/src/desktop.rs와 같은 판단)
     is_application: bool,
     name: String,
     exec: Vec<String>,
@@ -132,6 +145,7 @@ impl Entry {
         let mut in_entry = false;
         let mut kind = None;
         let mut hidden = false;
+        let mut no_display = false;
         let mut exec = None;
         let mut name = None;
         // (languages 안의 순위, 이름)
@@ -152,6 +166,7 @@ impl Entry {
             match key {
                 "Type" => kind = Some(value.to_owned()),
                 "Hidden" => hidden = value == "true",
+                "NoDisplay" => no_display = value == "true",
                 "Exec" => exec = Some(exec_arguments(value)),
                 "Name" => name = Some(unescape_string(value)),
                 _ => {
@@ -172,7 +187,7 @@ impl Entry {
         }
         let name = localized.map(|(_, name)| name).or(name)?;
         Some(Entry {
-            is_application: kind.as_deref() == Some("Application") && !hidden,
+            is_application: kind.as_deref() == Some("Application") && !hidden && !no_display,
             name,
             exec: exec?,
         })
@@ -337,6 +352,63 @@ mod tests {
             &[],
         );
         assert!(!hidden.unwrap().is_application);
+        let no_display = |value: &str| {
+            Entry::parse(
+                &format!("[Desktop Entry]\nType=Application\nName=X\nExec=x\nNoDisplay={value}"),
+                &[],
+            )
+            .unwrap()
+            .is_application
+        };
+        assert!(!no_display("true"));
+        assert!(no_display("false"));
+    }
+
+    /// 이슈 #1 P2-1: Claude Code가 까는 URL 처리 항목은 클라이언트 이름이 아니다
+    #[test]
+    fn an_entry_hidden_from_menus_does_not_name_the_program() {
+        let data = env::temp_dir().join(format!("bunt-access-desktop-{}", std::process::id()));
+        let applications = data.join("applications");
+        fs::create_dir_all(&applications).unwrap();
+        fs::create_dir_all(data.join("bin")).unwrap();
+        let program = data.join("bin/claude");
+        fs::write(&program, "").unwrap();
+        let program = fs::canonicalize(&program).unwrap();
+        let files = || {
+            let mut files = Vec::new();
+            collect(&applications, "", 0, &mut HashSet::new(), &mut files);
+            files
+        };
+        // ~/.local/share/applications/claude-code-url-handler.desktop (Exec만 이 시험의 프로그램으로 바꿨다)
+        fs::write(
+            applications.join("claude-code-url-handler.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Claude Code URL Handler\nExec=\"{}\" --handle-uri %u\nType=Application\nNoDisplay=true\nMimeType=x-scheme-handler/claude-cli;\n",
+                program.display()
+            ),
+        )
+        .unwrap();
+        let found = find_app(files(), &[], &program, None);
+        // 맞는 항목이 없으면 identify가 실행 파일 이름(claude)을 쓴다
+        assert_eq!(found, None);
+        // 앱 메뉴에 보이는 항목이 있으면 그것이 이름이다 (URL 처리 항목이 이름 차례로 앞이어도)
+        fs::write(
+            applications.join("claude.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Claude Code\nExec={}\nType=Application\n",
+                program.display()
+            ),
+        )
+        .unwrap();
+        let found = find_app(files(), &[], &program, None);
+        let _ = fs::remove_dir_all(&data);
+        assert_eq!(
+            found,
+            Some(DesktopApp {
+                id: "claude".into(),
+                name: "Claude Code".into()
+            })
+        );
     }
 
     #[test]

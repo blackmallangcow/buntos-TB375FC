@@ -305,6 +305,51 @@ if [[ "$agent_refs" != NONE ]]; then
 	echo "e2e 5번(에이전트 앱 간 제어): ${SECONDS}초, ${passed}개 통과"
 fi
 
+# e2e 5번 이어서: 사람과 AI가 함께 쓴다(설계 agent-focus-design 3장, 데몬과 컴포지터의 대상 확인 입력). AI가 텍스트 편집기에
+# 조각을 잇달아 치는 동안 사람이 QMP로 시스템 설정의 검색 칸을 누르고 친다. AI 글은 사람의 칸에, 사람 글은 AI 문서에 가지
+# 않고, AI는 포커스를 되빼앗지 않으며, 사람이 누른 뒤 ref 없는 type은 FocusMovedError다. fill(접근성)은 그대로 되고, 접근성
+# 버스에 Value의 GetAll(이슈 P0)이 나가지 않는다. 사람이 누를 자리는 AI가 그 칸을 포인터로 누른 답의 화면 좌표다. 끝에 설정이
+# 키보드 포커스를 가져 e2e 6번의 앱 차례(설정이 마지막)를 지킨다
+if [[ "$agent_refs" != NONE ]]; then
+	begin 5 /tmp/e2e-agent-apps.sh
+	guest together-watch
+	watching=$answer
+	guest together-prepare
+	point=$answer
+	[[ "$point" =~ ^[0-9]+,[0-9]+$ ]] || fail "e2e 5번(함께 쓰기): 설정 검색 칸의 자리를 읽지 못했다 ($point)"
+	guest together-start
+	[[ "$answer" == started ]] || fail "e2e 5번(함께 쓰기): AI가 치기 시작하지 못했다 ($answer)"
+	# AI가 치기 시작한 뒤 사람이 설정 검색 칸을 누르고 두 번 나눠 친다
+	keys sleep:1.5 "click:$point" sleep:0.5 type:human sleep:1 type:human sleep:0.5
+	guest together-result
+	read -r chunks order human_in_editor ai_in_settings human_text focus before <<<"$answer"
+	check "사람이 누르기 전에는 ref 없는 type이 AI의 창(키보드 포커스)에 간다" "$before" ok
+	check "사람이 치는 동안에도 AI 글이 모두 차례대로 편집기에 들어간다" "$chunks $order" "36 1"
+	check "사람 글이 AI 문서에 가지 않는다" "$human_in_editor" 0
+	check "AI 글이 사람의 칸에 가지 않는다" "$ai_in_settings" 0
+	check "사람 글은 설정 검색 칸에 들어간다" "$human_text" humanhuman
+	check "AI가 사람의 포커스를 되빼앗지 않는다" "$focus" org.buntos.Settings
+	guest together-refless
+	check "사람이 누른 뒤 ref 없는 type은 FocusMovedError다" "$answer" FocusMovedError
+	guest together-fill
+	check "사람이 쓰는 중에도 fill은 AI의 칸만 바꾼다" "$answer" "AI fill|org.buntos.Settings|humanhuman"
+	if [[ "$watching" == watching ]]; then
+		guest together-getall
+		read -r getall gets <<<"$answer"
+		check "접근성 버스에 Value의 GetAll이 나가지 않는다" "$getall" 0
+		((gets > 0)) || echo "e2e 5번 알림: Value를 가진 요소를 읽지 않아 GetAll 확인은 뜻이 적다"
+	else
+		echo "e2e 5번 알림: 게스트에 dbus-monitor가 없어 Value의 GetAll을 보지 않았다"
+	fi
+	if ((failed > 0)); then
+		guest together-log
+		echo "e2e 5번 알림: $answer"
+	fi
+	guest together-cleanup
+	((failed == 0)) || fail "e2e 5번(사람과 AI가 함께 쓴다): ${failed}개 실패"
+	echo "e2e 5번(사람과 AI가 함께 쓴다): ${SECONDS}초, ${passed}개 통과"
+fi
+
 # e2e 6번: 키보드 단축키. 키는 실제 입력과 같은 길(libinput → 컴포지터 단축키 → 앱)을 거치고, 결과는 게스트 쪽
 # 도우미(tests/e2e/shortcuts.sh)가 에이전트와 컴포지터 API로 읽는다. e2e 5번이 연 계산기, 텍스트 편집기,
 # 시스템 설정을 그대로 쓴다
@@ -471,12 +516,23 @@ if [[ "$agent_refs" != NONE ]]; then
 	guest value
 	check "한글·영어·숫자를 섞어 친다: buntOS 2026년 한글 ok" "$answer" "[buntOS 2026년 한글 ok]"
 
-	# 터미널(foot): Phase 1 종료 조건의 터미널 창. 조합하는 중에 띄우면 새 창이 포커스를 가져가므로 조합하던
-	# 글자가 편집기에 확정되어야 한다. foot에서 친 한글은 cat이 받은 바이트(UTF-8)로 본다. 조합 중 Enter는
-	# 조합을 끝내고 줄을 바꾸며, Ctrl+D로 cat이 끝나면 foot도 닫힌다
+	# 터미널(foot): Phase 1 종료 조건의 터미널 창. 사람이 편집기에 조합하는 중에(방금 쳤다) 다른 프로그램이 띄운 새 창은
+	# 키보드를 가져가지 않고 뒤에 뜨며 조합도 그대로다(R3, 사람 우선. 창이 늦게 떠 치는 중이 지났으면 보지 않는다). 사람이
+	# 손을 멈춘 뒤(yield-ms 1.5초) 띄우면 새 창이 포커스를 가져가므로 조합하던 글자가 편집기에 확정되어야 한다. foot에서
+	# 친 한글은 cat이 받은 바이트(UTF-8)로 본다. 조합 중 Enter는 조합을 끝내고 줄을 바꾸며, Ctrl+D로 cat이 끝나면 foot도
+	# 닫힌다
 	guest clear hangul
 	[[ "$answer" == ready ]] || fail "e2e 4번: 텍스트 편집기를 비우지 못했다 ($answer)"
 	keys type:gks sleep:0.3
+	guest foot-behind
+	read -r behind_ms behind <<<"$answer"
+	if [[ "$behind" != "org.gnome.TextEditor []" && "$behind_ms" =~ ^[0-9]+$ ]] && ((behind_ms > 1000)); then
+		echo "e2e 4번 알림: 터미널 창이 늦게 떠(${behind_ms}ms) 사람이 치는 중이 지났을 수 있어 뒤에 뜨는지 보지 않았다 ($behind)"
+	else
+		check "사람이 조합하는 중 다른 프로그램이 띄운 새 창(터미널)은 키보드를 가져가지 않고 뒤에 뜬다" "$behind" \
+			"org.gnome.TextEditor []"
+	fi
+	keys sleep:1.6
 	guest foot-prepare
 	check "조합 중 새 창(터미널)이 뜨면 조합하던 글자가 원래 칸에 확정되고 터미널이 포커스를 받는다" \
 		"$answer" "[한] ready"

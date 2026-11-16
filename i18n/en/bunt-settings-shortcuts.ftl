@@ -106,3 +106,6 @@ shortcut-windows-force-quit = Force Quit Applications
 shortcut-session-lock-screen = Lock Screen
 shortcut-session-log-out = Log Out
 shortcut-session-log-out-now = Log Out Without Confirming
+# AI control (the compositor's agent.pause; same words as the menu bar AI control panel)
+shortcut-category-agent = AI Agents
+shortcut-agent-pause = Pause or Resume AI Control

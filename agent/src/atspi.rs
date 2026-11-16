@@ -30,13 +30,15 @@ pub const ROOT: &str = "/org/a11y/atspi/accessible/root";
 /// 조작하지도 않는다
 pub const AUTH_WINDOW: &str = "bunt-polkit-agent";
 /// 사람만 답하는 셸 창 모두: 관리자 인증 창, Wi-Fi 암호 창(비밀 에이전트), Bluetooth 페어링 창(페어링
-/// 에이전트), 클립보드 기록(모든 앱 패널의 클립보드 보기. 에이전트가 읽거나 항목을 골라 앱에 붙이지 못하게 한다).
+/// 에이전트), 클립보드 기록(모든 앱 패널의 클립보드 보기. 에이전트가 읽거나 항목을 골라 앱에 붙이지 못하게 한다),
+/// 메뉴 막대의 AI 제어 창(멈추기·다시 하기. AI가 스스로 멈춤을 풀지 못하게 한다).
 /// 하나였던 인증 창 검사를 이 목록으로 넓혔다
-pub const HUMAN_ONLY_WINDOWS: [&str; 4] = [
+pub const HUMAN_ONLY_WINDOWS: [&str; 5] = [
     AUTH_WINDOW,
     "bunt-secret-agent",
     "bunt-pairing-agent",
     "bunt-clipboard",
+    "bunt-agent-control",
 ];
 
 /// 사람만 답하는 셸 창의 이름(레이어 이름이나 창의 접근성 이름)인지
@@ -195,6 +197,62 @@ pub async fn screen_locked(session: &Connection) -> bool {
 /// 화면 잠금을 모르는 컴포지터의 오류: GetLocked가 없다(옛 컴포지터)
 fn no_lock_api(error: &str) -> bool {
     error == "org.freedesktop.DBus.Error.UnknownMethod"
+}
+
+/// 컴포지터에 그 메서드가 없다 (옛 컴포지터). 대상 확인 입력(PressKeysOn 등)과 AI 상태 메서드가 없으면 데몬은 옛
+/// 메서드로 넣거나 건너뛴다
+pub fn unknown_method(err: &zbus::Error) -> bool {
+    matches!(err, zbus::Error::MethodError(name, ..) if no_lock_api(name.as_str()))
+}
+
+/// 컴포지터가 사람을 먼저 두어 에이전트의 입력·활성화를 거절한 까닭 (org.buntos.Compositor1.Error.*)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Declined {
+    /// 키보드 포커스가 그 창에 없다 (사람이 옮겼다). 아무것도 보내지 않았다
+    FocusMoved,
+    /// 사람이 쓰는 중이다 (키, 포인터, 끌기). 이만큼 뒤에 다시 해 본다
+    UserActive { retry_after_ms: u64 },
+    /// 사람이 AI 제어를 멈췄다
+    Paused,
+}
+
+/// 사람이 쓰는 중이라는 거절에 다시 해 볼 시간이 없을 때 (컴포지터의 yield-ms 기본값)
+const RETRY_AFTER_DEFAULT_MS: u64 = 1500;
+
+/// 컴포지터의 거절이면 그 까닭
+pub fn declined(err: &zbus::Error) -> Option<Declined> {
+    match err {
+        zbus::Error::MethodError(name, message, _) => {
+            declined_by_name(name.as_str(), message.as_deref().unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+/// 오류 이름과 알림으로 가른다. UserActive의 알림은 "... try again in {ms} ms"다 (계약 A)
+fn declined_by_name(name: &str, message: &str) -> Option<Declined> {
+    match name.strip_prefix("org.buntos.Compositor1.Error.")? {
+        "FocusMoved" => Some(Declined::FocusMoved),
+        "UserActive" => Some(Declined::UserActive {
+            retry_after_ms: retry_after(message).unwrap_or(RETRY_AFTER_DEFAULT_MS),
+        }),
+        "Paused" => Some(Declined::Paused),
+        _ => None,
+    }
+}
+
+/// 알림의 "in {ms} ms"에서 ms (처음 맞는 것)
+fn retry_after(message: &str) -> Option<u64> {
+    message.match_indices("in ").find_map(|(at, _)| {
+        let after = &message[at + 3..];
+        let digits = after
+            .find(|c: char| !c.is_ascii_digit())
+            .map_or(after, |end| &after[..end]);
+        if digits.is_empty() || !after[digits.len()..].starts_with(" ms") {
+            return None;
+        }
+        digits.parse().ok()
+    })
 }
 
 /// 보조 기술이 있다고 알린다 (org.a11y.Status.IsEnabled). Chromium·Electron·Firefox·Qt 앱은 이것을
@@ -425,6 +483,76 @@ impl A11y {
             &(pid, namespace),
         )
         .await
+    }
+
+    // 대상 확인 입력: 그 pid의 창(제목이 같은 것, 없으면 맨 위)이 키보드 포커스를 가졌을 때만(포인터는 그 점의 맨 위가
+    // 그 창일 때만) 컴포지터가 같은 디스패치에서 넣는다. 사람이 쓰는 중이거나 멈췄으면 거절한다(declined). 옛
+    // 컴포지터에는 없다(unknown_method)
+
+    /// 그 창에 키를 차례로 누른다 ("ctrl+a", "Return")
+    pub async fn press_keys_on(&self, pid: u32, title: &str, keys: &[String]) -> zbus::Result<()> {
+        self.compositor("PressKeysOn", &(pid, title, keys)).await
+    }
+
+    /// 그 창에 글을 친다. 앱의 글 입력에 확정했으면 "text-input", 글자마다 키를 쳤으면 "keys"
+    pub async fn type_text_on(&self, pid: u32, title: &str, text: &str) -> zbus::Result<String> {
+        self.compositor("TypeTextOn", &(pid, title, text)).await
+    }
+
+    /// 그 창의 켜진 글 입력에만 글을 확정한다. 켜진 글 입력이 없으면 아무것도 치지 않고 false다
+    pub async fn commit_text_on(&self, pid: u32, title: &str, text: &str) -> zbus::Result<bool> {
+        self.compositor("CommitTextOn", &(pid, title, text)).await
+    }
+
+    /// 그 창 안의 (x, y)를 왼쪽 단추로 누른다. x, y는 창 기준 논리 좌표(접근성 GetExtents의 창 좌표와 같은 틀)다.
+    /// 누른 화면의 논리 좌표를 돌려준다. 창 밖이거나 그 점 위에 다른 것이 있으면 오류다
+    pub async fn click_on(
+        &self,
+        pid: u32,
+        title: &str,
+        x: f64,
+        y: f64,
+    ) -> zbus::Result<(f64, f64)> {
+        self.compositor("ClickOn", &(pid, title, x, y, BUTTON_LEFT))
+            .await
+    }
+
+    /// 그 창 안의 (x, y)에서 휠을 돌린다. x, y는 click_on과 같은 창 기준 논리 좌표, dx, dy는 눈금 수다
+    pub async fn scroll_on(
+        &self,
+        pid: u32,
+        title: &str,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    ) -> zbus::Result<()> {
+        self.compositor("ScrollOn", &(pid, title, x, y, dx, dy))
+            .await
+    }
+
+    /// 사람이 AI 제어를 멈췄는지 (GetAgentState의 첫 값)
+    pub async fn agent_paused(&self) -> zbus::Result<bool> {
+        let (paused, ..): (bool, bool, String, u32, String, String) =
+            self.compositor("GetAgentState", &()).await?;
+        Ok(paused)
+    }
+
+    /// 동작을 시작한다고 알린다: AI 클라이언트의 이름과 대상 창. 셸의 메뉴 막대 AI 표시가 이것을 보인다
+    pub async fn report_activity(&self, client: &str, pid: u32, title: &str) -> zbus::Result<()> {
+        self.compositor("ReportAgentActivity", &(client, pid, title))
+            .await
+    }
+
+    /// 접근성 동작의 대상 요소를 AI 색 테두리로 잠깐 강조한다. x, y, 너비, 높이는 창 기준 논리 좌표다
+    pub async fn show_target(
+        &self,
+        pid: u32,
+        title: &str,
+        (x, y, width, height): (i32, i32, i32, i32),
+    ) -> zbus::Result<()> {
+        self.compositor("ShowAgentTarget", &(pid, title, x, y, width, height))
+            .await
     }
 
     /// D-Bus로 뜨는 앱(DBusActivatable)에 창을 열라고 한다 (org.freedesktop.Application.Activate).
@@ -773,19 +901,28 @@ impl A11y {
             .unwrap_or_default()
     }
 
+    /// 막대·숫자 칸의 값. 속성마다 Properties.Get으로 읽고 Properties.GetAll은 보내지 않는다(이슈 #1 P0):
+    /// at-spi2-core 2.62는 GetAll의 a{sv}를 만들다 속성 하나(MinimumValue)를 못 읽으면 값 없는 항목을 써서,
+    /// 앱이 libdbus의 타입 검사에 걸려 abort한다. Firefox는 값을 모르는 막대에 NaN을 주어 이렇게 끝났다. Get은
+    /// 그때 오류로 답할 뿐이다. 세 호출은 함께 보낸다
     async fn value(&self, bus: &str, path: &str) -> Option<Range> {
-        let all: HashMap<String, OwnedValue> = self
-            .call(bus, path, PROPERTIES, "GetAll", &("org.a11y.atspi.Value",))
-            .await
-            .ok()?;
-        let number = |key: &str| {
-            all.get(key)
+        const VALUE: &str = "org.a11y.atspi.Value";
+        let number = |property: &'static str| async move {
+            self.call::<_, OwnedValue>(bus, path, PROPERTIES, "Get", &(VALUE, property))
+                .await
+                .ok()
                 .and_then(|value| value.downcast_ref::<f64>().ok())
         };
+        let (current, min, max) = join3(
+            number("CurrentValue"),
+            number("MinimumValue"),
+            number("MaximumValue"),
+        )
+        .await;
         Some(Range {
-            current: number("CurrentValue")?,
-            min: number("MinimumValue").unwrap_or(0.0),
-            max: number("MaximumValue").unwrap_or(0.0),
+            current: current?,
+            min: min.unwrap_or(0.0),
+            max: max.unwrap_or(0.0),
         })
     }
 
@@ -824,19 +961,23 @@ impl A11y {
         self.call(bus, path, ACTION, "DoAction", &(index,)).await
     }
 
+    /// 글자 칸의 글자 수 (Text.CharacterCount)
+    async fn character_count(&self, bus: &str, path: &str) -> zbus::Result<i32> {
+        self.call::<_, OwnedValue>(
+            bus,
+            path,
+            PROPERTIES,
+            "Get",
+            &("org.a11y.atspi.Text", "CharacterCount"),
+        )
+        .await?
+        .downcast_ref::<i32>()
+        .map_err(zbus::Error::Variant)
+    }
+
     /// 글자 칸의 커서를 글 끝으로 옮긴다 (Text.SetCaretOffset)
     pub async fn caret_to_end(&self, bus: &str, path: &str) -> zbus::Result<bool> {
-        let count = self
-            .call::<_, OwnedValue>(
-                bus,
-                path,
-                PROPERTIES,
-                "Get",
-                &("org.a11y.atspi.Text", "CharacterCount"),
-            )
-            .await?
-            .downcast_ref::<i32>()
-            .map_err(zbus::Error::Variant)?;
+        let count = self.character_count(bus, path).await?;
         self.call(
             bus,
             path,
@@ -845,6 +986,77 @@ impl A11y {
             &(count,),
         )
         .await
+    }
+
+    /// 글자 칸의 글 끝에 글을 넣는다: 커서를 끝으로 옮기고 끝 자리에 넣는다 (EditableText.InsertText). 키보드
+    /// 포커스와 포인터를 쓰지 않으므로 사람이 다른 창에 치는 동안에도 섞이지 않는다
+    pub async fn insert_at_end(&self, bus: &str, path: &str, text: &str) -> zbus::Result<bool> {
+        let count = self.character_count(bus, path).await?;
+        // 커서를 옮기지 못해도(커서가 없는 칸) 넣는 자리는 끝이다
+        let _ = self
+            .call::<_, bool>(
+                bus,
+                path,
+                "org.a11y.atspi.Text",
+                "SetCaretOffset",
+                &(count,),
+            )
+            .await;
+        let length = i32::try_from(text.len()).unwrap_or(i32::MAX);
+        self.call(
+            bus,
+            path,
+            "org.a11y.atspi.EditableText",
+            "InsertText",
+            &(count, text, length),
+        )
+        .await
+    }
+
+    /// 글자 칸의 글을 모두 지운다 (EditableText.DeleteText). 지운 글자 수를 준다
+    pub async fn delete_all_text(&self, bus: &str, path: &str) -> zbus::Result<i32> {
+        let count = self.character_count(bus, path).await?;
+        if count == 0 {
+            return Ok(0);
+        }
+        let deleted: bool = self
+            .call(
+                bus,
+                path,
+                "org.a11y.atspi.EditableText",
+                "DeleteText",
+                &(0i32, count),
+            )
+            .await?;
+        if !deleted {
+            return Err(zbus::Error::Failure(
+                "the app refused to delete the text".into(),
+            ));
+        }
+        Ok(count)
+    }
+
+    /// 앱의 툴킷 이름 (Application.ToolkitName: "GTK", "Gecko", "Chromium", "Qt"). 모르면 None
+    pub async fn toolkit(&self, bus: &str) -> Option<String> {
+        self.call::<_, OwnedValue>(
+            bus,
+            ROOT,
+            PROPERTIES,
+            "Get",
+            &("org.a11y.atspi.Application", "ToolkitName"),
+        )
+        .await
+        .ok()
+        .and_then(|value| String::try_from(value).ok())
+    }
+
+    /// 요소의 자리와 크기를 한 번만 묻는다 (창 기준 논리 좌표). extents와 달리 모른다는 답을 기다리지 않는다:
+    /// 강조 표시처럼 없어도 되는 것에 쓴다
+    pub async fn bounds(&self, bus: &str, path: &str) -> Option<(i32, i32, i32, i32)> {
+        self.call(bus, path, COMPONENT, "GetExtents", &(COORD_WINDOW,))
+            .await
+            .ok()
+            .filter(|&(_, _, width, height)| width > 0 && height > 0)
     }
 
     /// 글자 칸의 커서 자리에 글을 넣는다 (EditableText.InsertText. 길이는 GTK가 바이트로 읽는다)
@@ -933,7 +1145,8 @@ impl A11y {
     }
 }
 
-/// D-Bus 호출 하나. 바쁘거나 멈춘 앱 하나가 데몬 전체를 붙잡지 않게 기다리는 시간을 둔다
+/// D-Bus 호출 하나. 바쁘거나 멈춘 앱 하나가 데몬 전체를 붙잡지 않게 기다리는 시간을 둔다. 호출마다 기록을
+/// 남긴다([`record`])
 async fn call_on<B, R>(
     connection: &Connection,
     timeout: Duration,
@@ -947,13 +1160,223 @@ where
     B: Serialize + DynamicType,
     R: DeserializeOwned + Type,
 {
+    let arguments = call_arguments(interface, method, body);
+    let started = Instant::now();
     let call = connection.call_method(Some(destination), path, Some(interface), method, body);
-    match select(pin!(call), pin!(Timer::after(timeout))).await {
-        Either::Left((reply, _)) => reply?.body().deserialize(),
+    let result = match select(pin!(call), pin!(Timer::after(timeout))).await {
+        Either::Left((reply, _)) => reply.and_then(|reply| reply.body().deserialize()),
         Either::Right(_) => Err(zbus::Error::Failure(format!(
             "{destination} did not answer {interface}.{method} within {}s",
             timeout.as_secs()
         ))),
+    };
+    record(Call {
+        destination: destination.to_string(),
+        path: path.to_string(),
+        interface: interface.to_string(),
+        method: method.to_string(),
+        arguments,
+        ended: Instant::now(),
+        took: started.elapsed(),
+        error: result.as_ref().err().map(|err| shorten(&err.to_string())),
+    });
+    result
+}
+
+/// 기억하는 최근 D-Bus 호출 수 (이슈 #1 P1-3). 대상 앱이 요청 도중 끝나면 그 앱에 보낸 호출을 경고로 남겨
+/// ([`dump_calls`]) 어느 호출이 앱을 끝냈는지 로그로 알 수 있게 한다. P0 때는 소스를 읽고서야 GetAll을 찾았다
+const CALLS_KEPT: usize = 64;
+/// 기록에 남기는 인자와 오류 글의 글자 수
+const CALL_TEXT: usize = 160;
+
+/// 최근 호출 기록 (모든 버스, 끝난 차례)
+static CALLS: std::sync::Mutex<std::collections::VecDeque<Call>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// 끝난 D-Bus 호출 하나
+#[derive(Clone, Debug)]
+pub struct Call {
+    /// 받는 버스 이름 (앱의 접근성 버스 이름, org.buntos.Compositor 등)
+    pub destination: String,
+    pub path: String,
+    pub interface: String,
+    pub method: String,
+    /// Properties.Get·GetAll의 인자(인터페이스와 속성 이름). 다른 호출의 인자는 남기지 않는다: 넣는 글(type,
+    /// fill)이 로그에 남으면 안 된다
+    pub arguments: String,
+    pub ended: Instant,
+    pub took: Duration,
+    /// 오류 (성공했으면 None)
+    pub error: Option<String>,
+}
+
+impl std::fmt::Display for Call {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ms ago: {} {} {}.{}({}) took {} ms",
+            self.ended.elapsed().as_millis(),
+            self.destination,
+            self.path,
+            self.interface,
+            self.method,
+            self.arguments,
+            self.took.as_millis()
+        )?;
+        match &self.error {
+            Some(error) => write!(f, ", failed: {error}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// 호출을 debug 수준 로그(`RUST_LOG=info,bunt_agent::atspi=debug`)와 최근 호출 기록에 남긴다
+fn record(call: Call) {
+    tracing::debug!(
+        bus = %call.destination,
+        path = %call.path,
+        interface = %call.interface,
+        method = %call.method,
+        arguments = %call.arguments,
+        ms = call.took.as_millis() as u64,
+        error = call.error.as_deref().unwrap_or(""),
+        "D-Bus call"
+    );
+    let mut calls = CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if calls.len() >= CALLS_KEPT {
+        calls.pop_front();
+    }
+    calls.push_back(call);
+}
+
+/// 최근 호출 기록 (오래된 것부터)
+pub fn recent_calls() -> Vec<Call> {
+    CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// 요청 도중 대상 앱이 사라졌을 때, 그 앱(`bus`, 없으면 모든 버스)에 보낸 최근 호출을 warn 수준으로 남긴다
+pub fn dump_calls(bus: Option<&str>, why: &str) {
+    let calls: Vec<Call> = recent_calls()
+        .into_iter()
+        .filter(|call| bus.is_none_or(|bus| call.destination == bus))
+        .collect();
+    let to = bus.map_or_else(|| "any bus".to_string(), |bus| bus.to_string());
+    tracing::warn!(
+        "{why}; the last {} D-Bus calls to {to} (of the last {CALLS_KEPT} calls) follow",
+        calls.len()
+    );
+    for call in &calls {
+        tracing::warn!("  {call}");
+    }
+}
+
+/// 기록에 남길 인자: Properties.Get·GetAll이면 인터페이스와 속성 이름, 아니면 빈 글
+fn call_arguments<B: Serialize>(interface: &str, method: &str, body: &B) -> String {
+    if interface != PROPERTIES || !matches!(method, "Get" | "GetAll") {
+        return String::new();
+    }
+    match serde_json::to_value(body) {
+        Ok(serde_json::Value::Array(values)) => shorten(
+            &values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        _ => String::new(),
+    }
+}
+
+/// 기록에 남길 글을 CALL_TEXT자까지 자른다
+fn shorten(text: &str) -> String {
+    match text.char_indices().nth(CALL_TEXT) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod call_log {
+    use super::*;
+
+    fn call(destination: &str, method: &str) -> Call {
+        Call {
+            destination: destination.into(),
+            path: ROOT.into(),
+            interface: ACCESSIBLE.into(),
+            method: method.into(),
+            arguments: String::new(),
+            ended: Instant::now(),
+            took: Duration::from_millis(3),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn only_property_names_are_kept_as_arguments() {
+        assert_eq!(
+            call_arguments(PROPERTIES, "Get", &("org.a11y.atspi.Value", "MinimumValue")),
+            "org.a11y.atspi.Value, MinimumValue"
+        );
+        assert_eq!(
+            call_arguments(PROPERTIES, "GetAll", &("org.a11y.atspi.Value",)),
+            "org.a11y.atspi.Value"
+        );
+        // 넣는 글은 남기지 않는다
+        assert_eq!(
+            call_arguments(
+                "org.a11y.atspi.EditableText",
+                "SetTextContents",
+                &("secret",)
+            ),
+            ""
+        );
+        assert_eq!(
+            call_arguments(
+                "org.buntos.Compositor1",
+                "TypeText",
+                &("hunter2".to_string(),)
+            ),
+            ""
+        );
+        let long = "x".repeat(500);
+        assert_eq!(
+            call_arguments(PROPERTIES, "Get", &(long.as_str(), "y"))
+                .chars()
+                .count(),
+            CALL_TEXT + 1
+        );
+    }
+
+    #[test]
+    fn the_log_keeps_the_latest_calls() {
+        // 다른 시험도 기록을 쓰므로 이 시험의 버스 이름만 본다
+        for at in 0..CALLS_KEPT + 10 {
+            record(call(":test.log", &format!("M{at}")));
+        }
+        let calls = recent_calls();
+        assert!(calls.len() <= CALLS_KEPT);
+        let ours: Vec<&str> = calls
+            .iter()
+            .filter(|call| call.destination == ":test.log")
+            .map(|call| call.method.as_str())
+            .collect();
+        assert_eq!(ours.last(), Some(&format!("M{}", CALLS_KEPT + 9).as_str()));
+        assert!(!ours.contains(&"M0"));
+        let mut failed = call(":test.log", "GetItems");
+        failed.error = Some("org.freedesktop.DBus.Error.NoReply: gone".into());
+        let line = failed.to_string();
+        assert!(
+            line.contains(":test.log /org/a11y/atspi/accessible/root org.a11y.atspi.Accessible.GetItems() took 3 ms, failed: org.freedesktop.DBus.Error.NoReply"),
+            "{line}"
+        );
     }
 }
 
@@ -992,16 +1415,74 @@ mod tests {
     #[test]
     fn human_only_windows_cover_every_secret_dialog() {
         // 셸의 레이어 이름 (polkit_agent.rs, secret_agent.rs, pairing_agent.rs, clipboard_panel.rs)
+        // 메뉴 막대의 AI 제어 창(멈추기·다시 하기)도 사람만 누른다
         for name in [
             "bunt-polkit-agent",
             "bunt-secret-agent",
             "bunt-pairing-agent",
             "bunt-clipboard",
+            "bunt-agent-control",
         ] {
             assert!(is_human_only(name), "{name}");
         }
         assert!(!is_human_only("bunt-banner"));
         assert!(!is_human_only("bunt-polkit"));
         assert!(!is_human_only(""));
+    }
+
+    #[test]
+    fn the_compositor_refusals_are_told_apart() {
+        let name = |what: &str| format!("org.buntos.Compositor1.Error.{what}");
+        assert_eq!(
+            declined_by_name(
+                &name("FocusMoved"),
+                "the keyboard focus is not on that window any more (the person moved it); nothing \
+                 was sent"
+            ),
+            Some(Declined::FocusMoved)
+        );
+        // 다시 해 볼 시간은 알림의 "in {ms} ms"에서 읽는다 (계약 A의 글)
+        assert_eq!(
+            declined_by_name(
+                &name("UserActive"),
+                "the person is using the computer; nothing was sent; try again in 1200 ms"
+            ),
+            Some(Declined::UserActive {
+                retry_after_ms: 1200
+            })
+        );
+        assert_eq!(
+            declined_by_name(&name("UserActive"), "busy"),
+            Some(Declined::UserActive {
+                retry_after_ms: RETRY_AFTER_DEFAULT_MS
+            })
+        );
+        assert_eq!(
+            declined_by_name(
+                &name("Paused"),
+                "the person paused AI control; only the person can resume it"
+            ),
+            Some(Declined::Paused)
+        );
+        // 그 밖의 오류는 거절이 아니다
+        assert_eq!(declined_by_name(&name("Other"), ""), None);
+        assert_eq!(
+            declined_by_name("org.freedesktop.DBus.Error.AccessDenied", ""),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_times_come_from_the_message() {
+        assert_eq!(retry_after("try again in 700 ms"), Some(700));
+        assert_eq!(retry_after("in use; try again in 1500 ms."), Some(1500));
+        // 숫자가 아닌 "in "은 건너뛴다
+        assert_eq!(
+            retry_after("typing in Settings; try again in 90 ms"),
+            Some(90)
+        );
+        assert_eq!(retry_after("try again in a moment"), None);
+        assert_eq!(retry_after("in 5 s"), None);
+        assert_eq!(retry_after(""), None);
     }
 }

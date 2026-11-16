@@ -18,7 +18,10 @@ use smithay::{
         keyboard::{FilterResult, Keycode, Keysym, KeysymHandle, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    reexports::calloop::timer::{TimeoutAction, Timer},
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::Resource,
+    },
     utils::{Logical, Point, SERIAL_COUNTER, Serial},
     wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
 };
@@ -29,7 +32,7 @@ use crate::{
     screenshot::AreaSelection,
     session_lock,
     shortcuts::{self, Accel, Builtin, Hit, Key, Mods, Place, SwitcherKey, VolumeKey},
-    state::BuntState,
+    state::{BuntState, ClientState},
 };
 
 /// 음량 키를 누르고 있을 때 가장 빠른 되풀이 (칸이 16개뿐이라 글자 키처럼 빠르면 건너뛴다)
@@ -83,10 +86,14 @@ fn modifier_of(sym: Keysym) -> Option<Modifier> {
 }
 
 impl BuntState {
+    /// 실제 장치(libinput)의 입력. 에이전트의 입력은 이 길로 오지 않으므로, 여기서 적는 것은 모두 사람의 입력이다
+    /// (agent_guard.rs의 사람 우선 규칙)
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        let now = std::time::Instant::now();
         match event {
             InputEvent::Keyboard { event } => self.on_keyboard::<I>(event),
             InputEvent::PointerMotion { event } => {
+                self.agent_guard.human.pointer(now);
                 self.pointer_device_used();
                 let Some(pointer) = self.seat.get_pointer() else {
                     return;
@@ -95,6 +102,7 @@ impl BuntState {
                 self.pointer_moved(pos, event.time_msec());
             }
             InputEvent::PointerMotionAbsolute { event } => {
+                self.agent_guard.human.pointer(now);
                 self.pointer_device_used();
                 let Some(output_geo) = self
                     .space
@@ -108,23 +116,39 @@ impl BuntState {
                 self.pointer_moved(pos, event.time_msec());
             }
             InputEvent::PointerButton { event } => {
+                self.agent_guard.human.button(
+                    event.button_code(),
+                    event.state() == ButtonState::Pressed,
+                    now,
+                );
                 self.pointer_device_used();
                 self.on_button::<I>(event);
             }
             InputEvent::PointerAxis { event } => {
+                self.agent_guard.human.pointer(now);
                 self.pointer_device_used();
                 self.on_axis::<I>(event);
             }
             // 터치 화면. 입력 모드와 상관없이 늘 받는다 (touch.rs)
             InputEvent::TouchDown { event } => {
+                self.agent_guard.human.touch_down(now);
                 if self.input_devices.touched() {
                     self.queue_redraw_all();
                 }
                 self.on_touch_down::<I>(event);
             }
-            InputEvent::TouchMotion { event } => self.on_touch_motion::<I>(event),
-            InputEvent::TouchUp { event } => self.on_touch_up::<I>(event),
-            InputEvent::TouchCancel { event } => self.on_touch_cancel::<I>(event),
+            InputEvent::TouchMotion { event } => {
+                self.agent_guard.human.pointer(now);
+                self.on_touch_motion::<I>(event)
+            }
+            InputEvent::TouchUp { event } => {
+                self.agent_guard.human.pointer(now);
+                self.on_touch_up::<I>(event)
+            }
+            InputEvent::TouchCancel { event } => {
+                self.agent_guard.human.pointer(now);
+                self.on_touch_cancel::<I>(event)
+            }
             InputEvent::TouchFrame { event } => self.on_touch_frame::<I>(event),
             // 터치 화면이 붙고 빠지면 seat의 터치를 열고 닫는다. 빠지면 닿아 있던 손가락의 떼기가 오지 않는다
             InputEvent::DeviceAdded { device }
@@ -157,6 +181,9 @@ impl BuntState {
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(&event);
         let pressed = event.state() == KeyState::Pressed;
+        // 사람이 앱에 글을 치는지 (agent_guard.rs의 R3): 포커스가 앱의 표면이고 단축키로 가로채지 않은 키다
+        let to_app = self.keyboard_focus().is_some() && !self.focus_on_shell();
+        let code = event.key_code();
         let hit = keyboard.input::<Option<(Hit, Keycode)>, _>(
             self,
             event.key_code(),
@@ -223,6 +250,13 @@ impl BuntState {
                     None => FilterResult::Forward,
                 }
             },
+        );
+        // 사람의 키다. 가로챈 키(단축키)는 앱에 친 글이 아니다
+        self.agent_guard.human.key(
+            code.raw(),
+            pressed,
+            to_app && hit.is_none(),
+            std::time::Instant::now(),
         );
         if let Some(Some((hit, code))) = hit {
             self.perform(hit, code);
@@ -412,6 +446,8 @@ impl BuntState {
             Builtin::ForceQuit => self
                 .dbus
                 .send(Command::ShortcutActivated("windows.force-quit")),
+            // 사람만 누른다: 에이전트의 키는 컴포지터 단축키를 거치지 않는다 (agent.rs의 agent_keys)
+            Builtin::ToggleAgentPause => self.toggle_agent_paused(),
         }
     }
 
@@ -613,17 +649,21 @@ impl BuntState {
     }
 
     fn on_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
-        self.press_button(event.button_code(), event.state(), event.time_msec());
+        let _ = self.press_button(event.button_code(), event.state(), event.time_msec());
     }
 
     /// 포인터 단추 하나. 누르면 그 아래의 창이나 키보드를 받는 레이어에 포커스를 준다
-    /// (에이전트의 누르기도 이 길로 온다)
-    pub(crate) fn press_button(&mut self, button: u32, state: ButtonState, time: u32) {
-        let Some(pointer) = self.seat.get_pointer() else {
-            return;
-        };
+    /// (에이전트의 누르기도 이 길로 온다). 앱에 보낸 이벤트의 serial을 돌려준다: 에이전트가 적어 두어 제가 연 메뉴의
+    /// 잡기를 가린다 (agent_guard.rs)
+    pub(crate) fn press_button(
+        &mut self,
+        button: u32,
+        state: ButtonState,
+        time: u32,
+    ) -> Option<Serial> {
+        let pointer = self.seat.get_pointer()?;
         if self.screenshot_button(button, state) {
-            return;
+            return None;
         }
         let serial = SERIAL_COUNTER.next_serial();
         let location = pointer.current_location();
@@ -658,6 +698,19 @@ impl BuntState {
             },
         );
         pointer.frame(self);
+        Some(serial)
+    }
+
+    /// 키보드 포커스가 셸(컴포지터가 띄운 특권 클라이언트)의 표면에 있는지: 모든 앱 패널, 메뉴, Dock의 검색 칸. 거기에
+    /// 친 키는 앱에 친 글이 아니다 (agent_guard.rs의 R3)
+    fn focus_on_shell(&self) -> bool {
+        self.keyboard_focus()
+            .and_then(|surface| self.display_handle.get_client(surface.id()).ok())
+            .is_some_and(|client| {
+                client
+                    .get_data::<ClientState>()
+                    .is_some_and(|data| data.privileged)
+            })
     }
 
     /// 누른 자리에 키보드 포커스를 준다. 키보드를 받는 레이어 표면(on_demand)이면 그 표면에, 메뉴바·Dock처럼 키보드를
