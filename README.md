@@ -34,7 +34,25 @@ bunt agent type "안녕하세요" --ref <ref>  # type into a text field, in any 
 bunt agent repl "desktop.app('Calculator').getByRole('button', { name: '7' }).click()"
 ```
 
-The person stays in charge:
+### How to use it
+
+There is nothing extra to install or set up. The `bunt` command and the agent daemon are part of buntOS and work as soon as you log in. You do not add a plugin or an MCP server, and you do not edit a config file.
+
+1. Install the coding agent or agent harness you already use on buntOS. Anything that can run shell commands works, such as Claude Code.
+2. Tell it in the prompt to use `bunt agent`.
+
+```text
+Use bunt agent to work out 6 × 7 in Calculator.
+```
+
+You do not need to teach it the commands in the prompt. `bunt agent --help` and `bunt agent skills` print guides written for models, and the agent reads them itself.
+
+You allow the AI once, at the start. The first time it tries to control an app, a request appears, and you allow it in System Settings › AI Agents.
+
+For an AI app that has no shell, register `bunt mcp` as the command of an MCP server.
+
+### You can set what agents may access
+
 - An AI can control apps only after the person allows it in System Settings › AI Agents. When an AI that is not allowed yet tries, the person sees a request and can deny it or open System Settings to allow it.
 - Only the person answers administrator authentication and password windows.
 - Nothing can be controlled while the screen is locked.
