@@ -1306,6 +1306,11 @@ impl Agent {
             }
             Err(failure) => return Err(failure),
         };
+        // 앱은 마지막으로 읽은 뒤에 끝날 수 있다: 답을 돌려주기 전에 다시 본다(이슈 #1 P1-1. Firefox가 settle의
+        // 상한 직전에 끝났는데 답은 끝나기 전의 diff를 주었다)
+        if app_gone(&a11y, &bus).await {
+            return Ok(quit_after(&bus, &done, &window_title, settled.ms));
+        }
         let acted = self.finish(&session, &bus, &window, &before, settled, done.clone());
         tracing::info!(
             action = %params.action,
@@ -1588,7 +1593,7 @@ impl Agent {
             });
         };
         let roots = [path.clone()];
-        let settled = self
+        let settled = match self
             .settle(
                 a11y,
                 &session,
@@ -1597,7 +1602,19 @@ impl Agent {
                 &before.text,
                 settle_limit(params.settle_ms),
             )
-            .await?;
+            .await
+        {
+            Ok(settled) => settled,
+            // 누르기가 앱을 끝냈다 (act와 같다)
+            Err(_) if app_gone(a11y, &bus).await => {
+                return Ok(quit_after(&bus, &done, &window.title, 0));
+            }
+            Err(failure) => return Err(failure),
+        };
+        // 마지막으로 읽은 뒤에 끝났을 수도 있다 (act와 같다, 이슈 #1 P1-1)
+        if app_gone(a11y, &bus).await {
+            return Ok(quit_after(&bus, &done, &window.title, settled.ms));
+        }
         let acted = self.finish(&session, &bus, &path, &before, settled, done);
         tracing::info!(
             settled_ms = acted.settled_ms,
