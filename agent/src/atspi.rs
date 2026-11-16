@@ -30,13 +30,15 @@ pub const ROOT: &str = "/org/a11y/atspi/accessible/root";
 /// 조작하지도 않는다
 pub const AUTH_WINDOW: &str = "bunt-polkit-agent";
 /// 사람만 답하는 셸 창 모두: 관리자 인증 창, Wi-Fi 암호 창(비밀 에이전트), Bluetooth 페어링 창(페어링
-/// 에이전트), 클립보드 기록(모든 앱 패널의 클립보드 보기. 에이전트가 읽거나 항목을 골라 앱에 붙이지 못하게 한다).
+/// 에이전트), 클립보드 기록(모든 앱 패널의 클립보드 보기. 에이전트가 읽거나 항목을 골라 앱에 붙이지 못하게 한다),
+/// 메뉴 막대의 AI 제어 창(멈추기·다시 하기. AI가 스스로 멈춤을 풀지 못하게 한다).
 /// 하나였던 인증 창 검사를 이 목록으로 넓혔다
-pub const HUMAN_ONLY_WINDOWS: [&str; 4] = [
+pub const HUMAN_ONLY_WINDOWS: [&str; 5] = [
     AUTH_WINDOW,
     "bunt-secret-agent",
     "bunt-pairing-agent",
     "bunt-clipboard",
+    "bunt-agent-control",
 ];
 
 /// 사람만 답하는 셸 창의 이름(레이어 이름이나 창의 접근성 이름)인지
@@ -195,6 +197,62 @@ pub async fn screen_locked(session: &Connection) -> bool {
 /// 화면 잠금을 모르는 컴포지터의 오류: GetLocked가 없다(옛 컴포지터)
 fn no_lock_api(error: &str) -> bool {
     error == "org.freedesktop.DBus.Error.UnknownMethod"
+}
+
+/// 컴포지터에 그 메서드가 없다 (옛 컴포지터). 대상 확인 입력(PressKeysOn 등)과 AI 상태 메서드가 없으면 데몬은 옛
+/// 메서드로 넣거나 건너뛴다
+pub fn unknown_method(err: &zbus::Error) -> bool {
+    matches!(err, zbus::Error::MethodError(name, ..) if no_lock_api(name.as_str()))
+}
+
+/// 컴포지터가 사람을 먼저 두어 에이전트의 입력·활성화를 거절한 까닭 (org.buntos.Compositor1.Error.*)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Declined {
+    /// 키보드 포커스가 그 창에 없다 (사람이 옮겼다). 아무것도 보내지 않았다
+    FocusMoved,
+    /// 사람이 쓰는 중이다 (키, 포인터, 끌기). 이만큼 뒤에 다시 해 본다
+    UserActive { retry_after_ms: u64 },
+    /// 사람이 AI 제어를 멈췄다
+    Paused,
+}
+
+/// 사람이 쓰는 중이라는 거절에 다시 해 볼 시간이 없을 때 (컴포지터의 yield-ms 기본값)
+const RETRY_AFTER_DEFAULT_MS: u64 = 1500;
+
+/// 컴포지터의 거절이면 그 까닭
+pub fn declined(err: &zbus::Error) -> Option<Declined> {
+    match err {
+        zbus::Error::MethodError(name, message, _) => {
+            declined_by_name(name.as_str(), message.as_deref().unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+/// 오류 이름과 알림으로 가른다. UserActive의 알림은 "... try again in {ms} ms"다 (계약 A)
+fn declined_by_name(name: &str, message: &str) -> Option<Declined> {
+    match name.strip_prefix("org.buntos.Compositor1.Error.")? {
+        "FocusMoved" => Some(Declined::FocusMoved),
+        "UserActive" => Some(Declined::UserActive {
+            retry_after_ms: retry_after(message).unwrap_or(RETRY_AFTER_DEFAULT_MS),
+        }),
+        "Paused" => Some(Declined::Paused),
+        _ => None,
+    }
+}
+
+/// 알림의 "in {ms} ms"에서 ms (처음 맞는 것)
+fn retry_after(message: &str) -> Option<u64> {
+    message.match_indices("in ").find_map(|(at, _)| {
+        let after = &message[at + 3..];
+        let digits = after
+            .find(|c: char| !c.is_ascii_digit())
+            .map_or(after, |end| &after[..end]);
+        if digits.is_empty() || !after[digits.len()..].starts_with(" ms") {
+            return None;
+        }
+        digits.parse().ok()
+    })
 }
 
 /// 보조 기술이 있다고 알린다 (org.a11y.Status.IsEnabled). Chromium·Electron·Firefox·Qt 앱은 이것을
@@ -425,6 +483,76 @@ impl A11y {
             &(pid, namespace),
         )
         .await
+    }
+
+    // 대상 확인 입력: 그 pid의 창(제목이 같은 것, 없으면 맨 위)이 키보드 포커스를 가졌을 때만(포인터는 그 점의 맨 위가
+    // 그 창일 때만) 컴포지터가 같은 디스패치에서 넣는다. 사람이 쓰는 중이거나 멈췄으면 거절한다(declined). 옛
+    // 컴포지터에는 없다(unknown_method)
+
+    /// 그 창에 키를 차례로 누른다 ("ctrl+a", "Return")
+    pub async fn press_keys_on(&self, pid: u32, title: &str, keys: &[String]) -> zbus::Result<()> {
+        self.compositor("PressKeysOn", &(pid, title, keys)).await
+    }
+
+    /// 그 창에 글을 친다. 앱의 글 입력에 확정했으면 "text-input", 글자마다 키를 쳤으면 "keys"
+    pub async fn type_text_on(&self, pid: u32, title: &str, text: &str) -> zbus::Result<String> {
+        self.compositor("TypeTextOn", &(pid, title, text)).await
+    }
+
+    /// 그 창의 켜진 글 입력에만 글을 확정한다. 켜진 글 입력이 없으면 아무것도 치지 않고 false다
+    pub async fn commit_text_on(&self, pid: u32, title: &str, text: &str) -> zbus::Result<bool> {
+        self.compositor("CommitTextOn", &(pid, title, text)).await
+    }
+
+    /// 그 창 안의 (x, y)를 왼쪽 단추로 누른다. x, y는 창 기준 논리 좌표(접근성 GetExtents의 창 좌표와 같은 틀)다.
+    /// 누른 화면의 논리 좌표를 돌려준다. 창 밖이거나 그 점 위에 다른 것이 있으면 오류다
+    pub async fn click_on(
+        &self,
+        pid: u32,
+        title: &str,
+        x: f64,
+        y: f64,
+    ) -> zbus::Result<(f64, f64)> {
+        self.compositor("ClickOn", &(pid, title, x, y, BUTTON_LEFT))
+            .await
+    }
+
+    /// 그 창 안의 (x, y)에서 휠을 돌린다. x, y는 click_on과 같은 창 기준 논리 좌표, dx, dy는 눈금 수다
+    pub async fn scroll_on(
+        &self,
+        pid: u32,
+        title: &str,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    ) -> zbus::Result<()> {
+        self.compositor("ScrollOn", &(pid, title, x, y, dx, dy))
+            .await
+    }
+
+    /// 사람이 AI 제어를 멈췄는지 (GetAgentState의 첫 값)
+    pub async fn agent_paused(&self) -> zbus::Result<bool> {
+        let (paused, ..): (bool, bool, String, u32, String, String) =
+            self.compositor("GetAgentState", &()).await?;
+        Ok(paused)
+    }
+
+    /// 동작을 시작한다고 알린다: AI 클라이언트의 이름과 대상 창. 셸의 메뉴 막대 AI 표시가 이것을 보인다
+    pub async fn report_activity(&self, client: &str, pid: u32, title: &str) -> zbus::Result<()> {
+        self.compositor("ReportAgentActivity", &(client, pid, title))
+            .await
+    }
+
+    /// 접근성 동작의 대상 요소를 AI 색 테두리로 잠깐 강조한다. x, y, 너비, 높이는 창 기준 논리 좌표다
+    pub async fn show_target(
+        &self,
+        pid: u32,
+        title: &str,
+        (x, y, width, height): (i32, i32, i32, i32),
+    ) -> zbus::Result<()> {
+        self.compositor("ShowAgentTarget", &(pid, title, x, y, width, height))
+            .await
     }
 
     /// D-Bus로 뜨는 앱(DBusActivatable)에 창을 열라고 한다 (org.freedesktop.Application.Activate).
@@ -833,19 +961,23 @@ impl A11y {
         self.call(bus, path, ACTION, "DoAction", &(index,)).await
     }
 
+    /// 글자 칸의 글자 수 (Text.CharacterCount)
+    async fn character_count(&self, bus: &str, path: &str) -> zbus::Result<i32> {
+        self.call::<_, OwnedValue>(
+            bus,
+            path,
+            PROPERTIES,
+            "Get",
+            &("org.a11y.atspi.Text", "CharacterCount"),
+        )
+        .await?
+        .downcast_ref::<i32>()
+        .map_err(zbus::Error::Variant)
+    }
+
     /// 글자 칸의 커서를 글 끝으로 옮긴다 (Text.SetCaretOffset)
     pub async fn caret_to_end(&self, bus: &str, path: &str) -> zbus::Result<bool> {
-        let count = self
-            .call::<_, OwnedValue>(
-                bus,
-                path,
-                PROPERTIES,
-                "Get",
-                &("org.a11y.atspi.Text", "CharacterCount"),
-            )
-            .await?
-            .downcast_ref::<i32>()
-            .map_err(zbus::Error::Variant)?;
+        let count = self.character_count(bus, path).await?;
         self.call(
             bus,
             path,
@@ -854,6 +986,77 @@ impl A11y {
             &(count,),
         )
         .await
+    }
+
+    /// 글자 칸의 글 끝에 글을 넣는다: 커서를 끝으로 옮기고 끝 자리에 넣는다 (EditableText.InsertText). 키보드
+    /// 포커스와 포인터를 쓰지 않으므로 사람이 다른 창에 치는 동안에도 섞이지 않는다
+    pub async fn insert_at_end(&self, bus: &str, path: &str, text: &str) -> zbus::Result<bool> {
+        let count = self.character_count(bus, path).await?;
+        // 커서를 옮기지 못해도(커서가 없는 칸) 넣는 자리는 끝이다
+        let _ = self
+            .call::<_, bool>(
+                bus,
+                path,
+                "org.a11y.atspi.Text",
+                "SetCaretOffset",
+                &(count,),
+            )
+            .await;
+        let length = i32::try_from(text.len()).unwrap_or(i32::MAX);
+        self.call(
+            bus,
+            path,
+            "org.a11y.atspi.EditableText",
+            "InsertText",
+            &(count, text, length),
+        )
+        .await
+    }
+
+    /// 글자 칸의 글을 모두 지운다 (EditableText.DeleteText). 지운 글자 수를 준다
+    pub async fn delete_all_text(&self, bus: &str, path: &str) -> zbus::Result<i32> {
+        let count = self.character_count(bus, path).await?;
+        if count == 0 {
+            return Ok(0);
+        }
+        let deleted: bool = self
+            .call(
+                bus,
+                path,
+                "org.a11y.atspi.EditableText",
+                "DeleteText",
+                &(0i32, count),
+            )
+            .await?;
+        if !deleted {
+            return Err(zbus::Error::Failure(
+                "the app refused to delete the text".into(),
+            ));
+        }
+        Ok(count)
+    }
+
+    /// 앱의 툴킷 이름 (Application.ToolkitName: "GTK", "Gecko", "Chromium", "Qt"). 모르면 None
+    pub async fn toolkit(&self, bus: &str) -> Option<String> {
+        self.call::<_, OwnedValue>(
+            bus,
+            ROOT,
+            PROPERTIES,
+            "Get",
+            &("org.a11y.atspi.Application", "ToolkitName"),
+        )
+        .await
+        .ok()
+        .and_then(|value| String::try_from(value).ok())
+    }
+
+    /// 요소의 자리와 크기를 한 번만 묻는다 (창 기준 논리 좌표). extents와 달리 모른다는 답을 기다리지 않는다:
+    /// 강조 표시처럼 없어도 되는 것에 쓴다
+    pub async fn bounds(&self, bus: &str, path: &str) -> Option<(i32, i32, i32, i32)> {
+        self.call(bus, path, COMPONENT, "GetExtents", &(COORD_WINDOW,))
+            .await
+            .ok()
+            .filter(|&(_, _, width, height)| width > 0 && height > 0)
     }
 
     /// 글자 칸의 커서 자리에 글을 넣는다 (EditableText.InsertText. 길이는 GTK가 바이트로 읽는다)
@@ -1212,16 +1415,74 @@ mod tests {
     #[test]
     fn human_only_windows_cover_every_secret_dialog() {
         // 셸의 레이어 이름 (polkit_agent.rs, secret_agent.rs, pairing_agent.rs, clipboard_panel.rs)
+        // 메뉴 막대의 AI 제어 창(멈추기·다시 하기)도 사람만 누른다
         for name in [
             "bunt-polkit-agent",
             "bunt-secret-agent",
             "bunt-pairing-agent",
             "bunt-clipboard",
+            "bunt-agent-control",
         ] {
             assert!(is_human_only(name), "{name}");
         }
         assert!(!is_human_only("bunt-banner"));
         assert!(!is_human_only("bunt-polkit"));
         assert!(!is_human_only(""));
+    }
+
+    #[test]
+    fn the_compositor_refusals_are_told_apart() {
+        let name = |what: &str| format!("org.buntos.Compositor1.Error.{what}");
+        assert_eq!(
+            declined_by_name(
+                &name("FocusMoved"),
+                "the keyboard focus is not on that window any more (the person moved it); nothing \
+                 was sent"
+            ),
+            Some(Declined::FocusMoved)
+        );
+        // 다시 해 볼 시간은 알림의 "in {ms} ms"에서 읽는다 (계약 A의 글)
+        assert_eq!(
+            declined_by_name(
+                &name("UserActive"),
+                "the person is using the computer; nothing was sent; try again in 1200 ms"
+            ),
+            Some(Declined::UserActive {
+                retry_after_ms: 1200
+            })
+        );
+        assert_eq!(
+            declined_by_name(&name("UserActive"), "busy"),
+            Some(Declined::UserActive {
+                retry_after_ms: RETRY_AFTER_DEFAULT_MS
+            })
+        );
+        assert_eq!(
+            declined_by_name(
+                &name("Paused"),
+                "the person paused AI control; only the person can resume it"
+            ),
+            Some(Declined::Paused)
+        );
+        // 그 밖의 오류는 거절이 아니다
+        assert_eq!(declined_by_name(&name("Other"), ""), None);
+        assert_eq!(
+            declined_by_name("org.freedesktop.DBus.Error.AccessDenied", ""),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_times_come_from_the_message() {
+        assert_eq!(retry_after("try again in 700 ms"), Some(700));
+        assert_eq!(retry_after("in use; try again in 1500 ms."), Some(1500));
+        // 숫자가 아닌 "in "은 건너뛴다
+        assert_eq!(
+            retry_after("typing in Settings; try again in 90 ms"),
+            Some(90)
+        );
+        assert_eq!(retry_after("try again in a moment"), None);
+        assert_eq!(retry_after("in 5 s"), None);
+        assert_eq!(retry_after(""), None);
     }
 }

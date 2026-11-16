@@ -59,8 +59,17 @@ pub const BLOCKED_APP: i64 = -32002;
 pub const SCREEN_LOCKED: i64 = -32003;
 /// 기다리던 것이 시간 상한 안에 일어나지 않았다 (`wait`)
 pub const TIMEOUT: i64 = -32004;
-/// 대상 앱이 끝났거나 다시 떴다: 받은 ref와 기다리던 것은 그 앱의 것이었다. 새 스냅샷을 읽어야 한다
+/// 사람이 키보드 포커스를 다른 창으로 옮겨, 그 창에 보내려던 키·글·휠을 보내지 않았다. 되빼앗지 않는다: ref나
+/// `--app`으로 대상을 다시 고른다
+pub const FOCUS_MOVED: i64 = -32005;
+/// 사람이 지금 컴퓨터를 쓰고 있어(키를 치거나 포인터를 움직이는 중) 아무것도 보내지 않았다. 알림 글의
+/// "try again in N ms"가 다시 해 볼 때까지의 시간이다
+pub const USER_ACTIVE: i64 = -32006;
+/// ref, 동작, 기다리기의 대상 앱(창)이 끝났거나 다시 떴다(pid가 바뀌었다). 받은 ref와 기다리던 것은 그 앱의
+/// 것이었으므로 새로 스냅샷을 읽는다
 pub const TARGET_GONE: i64 = -32007;
+/// 사람이 AI 제어를 멈췄다. 읽기는 되고, 다시 하기는 사람만 누른다
+pub const PAUSED: i64 = -32008;
 
 /// 데몬 알림(AGENT_ERROR)의 앞머리: `app`에 맞는 앱이 없다. 기다리기는 이것을 그 앱이 없는 것으로 읽는다
 pub const NO_APP_MATCHES: &str = "no app matches";
