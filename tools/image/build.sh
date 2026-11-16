@@ -61,7 +61,13 @@ stage_components() {
 	# BUNTOS_CARGO가 있으면 그 명령으로 빌드한다 (CI: tools/image/cargo-debian.sh, 머리말 참고)
 	cargo=${BUNTOS_CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 	target="${CARGO_TARGET_DIR:-$build_root/cargo-target}"
-	(cd "$repo" && CARGO_TARGET_DIR="$target" "$cargo" build --release --locked --workspace)
+	# `bunt --version`과 buntd-agent의 시작 기록이 알리는 빌드 커밋. 바깥에서 주면 그 값(git 정보 없이 꺼낸 트리 사본),
+	# 아니면 이 저장소의 HEAD이고 바뀐 파일이 있으면 -dirty를 붙인다. 값이 바뀌면 cargo가 에이전트를 다시 빌드한다
+	local commit=${BUNTOS_COMMIT:-}
+	if [[ -z "$commit" ]] && commit=$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null); then
+		git -C "$repo" diff --quiet HEAD -- 2>/dev/null || commit+=-dirty
+	fi
+	(cd "$repo" && BUNTOS_COMMIT="${commit:-unknown}" CARGO_TARGET_DIR="$target" "$cargo" build --release --locked --workspace)
 	rm -rf "$out/stage"
 	install -D -m 0755 "$target/release/bunt-comp" "$out/stage/usr/bin/bunt-comp"
 	install -D -m 0755 "$target/release/bunt-shell" "$out/stage/usr/bin/bunt-shell"
