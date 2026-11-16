@@ -152,6 +152,16 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--repl-worker") {
         worker::main();
     }
+    // 이 빌드의 크레이트 판과 커밋 (이슈 #1 P1-2). 커밋은 빌드할 때의 BUNTOS_COMMIT (이미지 빌드가 넣는다)
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    const COMMIT: &str = match option_env!("BUNTOS_COMMIT") {
+        Some(commit) if !commit.is_empty() => commit,
+        _ => "unknown",
+    };
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("buntd-agent {VERSION} (commit {COMMIT})");
+        return;
+    }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -167,6 +177,8 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // 기기의 보고와 소스 커밋을 맞춰 보게 판을 남긴다
+    tracing::info!("buntd-agent {VERSION} (commit {COMMIT}) started");
     let agent = Arc::new(Mutex::new(Agent::default()));
     let repls = Arc::new(Repls::new(Box::new(Worker::spawn)));
     // 오래 쉰 REPL과 스스로 끝난 워커를 때때로 거둔다

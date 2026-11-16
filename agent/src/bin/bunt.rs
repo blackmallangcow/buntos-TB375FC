@@ -25,6 +25,7 @@ use serde_json::Value;
 const USAGE: &str = "\
 Usage: bunt agent <command> [options]
        bunt mcp [--session <name>]
+       bunt --version
 
 Read and control the desktop through accessibility trees (buntd-agent). `bunt mcp` speaks MCP
 on standard input and output for AI apps without a shell: its tools are repl and skills.
@@ -105,6 +106,14 @@ Options for all:
 /// scroll의 기본 눈금 수
 const SCROLL_NOTCHES: f64 = 5.0;
 
+/// 이 빌드의 크레이트 판과 커밋 (이슈 #1 P1-2: 기기의 바이너리가 어느 소스인지 알 길이 없었다). 커밋은 빌드할
+/// 때의 환경 변수 BUNTOS_COMMIT에서 받는다(이미지 빌드가 넣는다). 없으면 unknown
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const COMMIT: &str = match option_env!("BUNTOS_COMMIT") {
+    Some(commit) if !commit.is_empty() => commit,
+    _ => "unknown",
+};
+
 fn main() -> ExitCode {
     // `| head`처럼 읽는 쪽이 먼저 닫으면 다른 명령줄 도구처럼 조용히 끝난다 (Rust는 SIGPIPE를 무시해
     // println!이 패닉한다)
@@ -134,6 +143,10 @@ fn main() -> ExitCode {
         ["agent", "skills", rest @ ..] => skills(rest),
         ["agent", "launch", app, rest @ ..] => launch(app, rest),
         ["mcp", rest @ ..] => serve_mcp(rest),
+        ["--version" | "-V" | "version"] | ["agent", "--version" | "-V"] => {
+            println!("{}", version());
+            return ExitCode::SUCCESS;
+        }
         []
         | ["help" | "-h" | "--help", ..]
         | ["agent"]
@@ -150,6 +163,11 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `bunt --version`의 글: `bunt 0.1.0 (commit 9802da5)`
+fn version() -> String {
+    format!("bunt {VERSION} (commit {COMMIT})")
 }
 
 fn apps(args: &[&str]) -> Result<(), String> {
