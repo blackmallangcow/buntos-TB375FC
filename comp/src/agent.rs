@@ -373,11 +373,17 @@ impl BuntState {
         self.agent_guard.admit(touches, self.pointer_hold(), now)
     }
 
-    /// 사람의 손가락과 포인터 잡기
+    /// 사람의 손가락, 포인터 잡기, 키보드를 받는 사람의 메뉴
     fn pointer_hold(&self) -> PointerHold {
+        let grab = self.human_grab();
         PointerHold {
             fingers: self.touch.fingers_down(),
-            grab: self.human_grab(),
+            grab,
+            // 키보드 포커스가 메뉴(팝업)에 있고 그 잡기가 사람의 것이다
+            menu: grab
+                && self
+                    .keyboard_focus()
+                    .is_some_and(|focus| self.popups.find_popup(&focus).is_some()),
         }
     }
 

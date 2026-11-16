@@ -9,7 +9,7 @@
 //!   시작한 포인터 잡기(옮기기, 크기 바꾸기, 메뉴, 끌어 놓기, 스크린샷 영역 고르기)가 있으면 에이전트의 입력과 포커스
 //!   바꾸기를 UserActive로 거절하고 다시 해 볼 때를 알린다. 키·글은 사람의 키보드와, 포인터 동작은 사람의 포인터와
 //!   견주고, 키보드 포커스를 바꾸는 일은 둘 다와 견준다. 사람이 키를 누르고 있으면 포인터 동작도 거절한다: 에이전트의
-//!   누르기가 사람의 ⇧·⌘와 섞인다.
+//!   누르기가 사람의 ⇧·⌘와 섞인다. 사람이 연 메뉴가 키보드를 받는 동안은 키·글도 거절한다: 키가 그 메뉴로 간다.
 //! - **R3 새 창:** 사람이 앱에 글을 치는 중이면 다른 앱의 새 창은 키보드를 가져가지 않고 사람의 창 뒤에 뜬다(macOS의
 //!   협조적 활성화). 판단은 여기서, 창 놓기는 state.rs에서 한다.
 //! - **R4 멈춤:** 사람이 메뉴 막대(셸)나 단축키(⌃⌥⌘.)로 AI 제어를 멈추면 에이전트의 모든 입력과 포커스 바꾸기를 Paused로
@@ -110,6 +110,8 @@ pub struct PointerHold {
     pub fingers: bool,
     /// 사람이 시작한 포인터 잡기(옮기기, 크기 바꾸기, 메뉴, 끌어 놓기)나 스크린샷 영역 고르기가 있다
     pub grab: bool,
+    /// 사람이 연 메뉴가 키보드를 받고 있다. 에이전트의 키가 그 메뉴로 가므로 키·글도 미룬다
+    pub menu: bool,
 }
 
 /// 에이전트의 동작이 사람의 무엇과 부딪치는지
@@ -215,7 +217,7 @@ impl AgentGuard {
         let keys_held = !human.keys.is_empty();
         let mut waits = Vec::new();
         if touches.keyboard {
-            waits.push(keys_held.then_some(whole));
+            waits.push((keys_held || hold.menu).then_some(whole));
             waits.push(left(human.last_key, self.yield_for, now));
         }
         if touches.pointer {
@@ -354,6 +356,7 @@ mod tests {
     const IDLE: PointerHold = PointerHold {
         fingers: false,
         grab: false,
+        menu: false,
     };
 
     #[test]
@@ -450,12 +453,9 @@ mod tests {
         for hold in [
             PointerHold {
                 fingers: true,
-                grab: false,
+                ..IDLE
             },
-            PointerHold {
-                fingers: false,
-                grab: true,
-            },
+            PointerHold { grab: true, ..IDLE },
         ] {
             assert_eq!(
                 guard.admit(Touches::POINTER, hold, after(start, 20_000)),
@@ -466,6 +466,31 @@ mod tests {
                 Ok(())
             );
         }
+    }
+
+    /// 사람이 연 메뉴가 키보드를 받는 동안은 에이전트의 키·글도 미룬다: 그 키는 사람의 메뉴로 간다(VM 시험). 메뉴는
+    /// 포인터 잡기이기도 해 누르기와 휠도 미룬다
+    #[test]
+    fn a_menu_the_person_opened_holds_keys_and_clicks() {
+        let (guard, start) = guard();
+        let menu = PointerHold {
+            grab: true,
+            menu: true,
+            ..IDLE
+        };
+        for touches in [Touches::KEYBOARD, Touches::POINTER, Touches::FOCUS] {
+            assert_eq!(
+                guard.admit(touches, menu, after(start, 10_000)),
+                Err(Refused::UserActive { retry_ms: 1500 })
+            );
+        }
+        assert_eq!(
+            guard.keyboard_target(Some(&"editor"), &"editor", menu, start),
+            Err(Refused::UserActive { retry_ms: 1500 })
+        );
+        // 사람이 창을 끄는 잡기(메뉴가 아니다)는 다른 창에 치는 에이전트의 글을 막지 않는다
+        let drag = PointerHold { grab: true, ..IDLE };
+        assert_eq!(guard.admit(Touches::KEYBOARD, drag, start), Ok(()));
     }
 
     /// 두 장치를 다 보는 활성화는 더 오래 기다릴 쪽을 알린다
