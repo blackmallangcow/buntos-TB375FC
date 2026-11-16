@@ -10,7 +10,24 @@ set -u
 
 user=buntos
 desktop=/home/$user/Desktop
-A() { sudo -u "$user" XDG_RUNTIME_DIR=/run/user/1000 bunt agent "$@"; }
+# 사람이 방금 입력했으면(QMP 키·누르기) 컴포지터가 에이전트의 입력을 미루고 "try again in N ms"로 알린다(사람 우선,
+# ARCHITECTURE 6.3절). AI가 하듯 그만큼 기다렸다 다시 한다(다섯 번까지). 표준 출력과 오류는 그대로 낸다
+agent_retry() {
+	local err rc ms try
+	err=$(mktemp)
+	for try in 1 2 3 4 5 6; do
+		"$@" 2>"$err"
+		rc=$?
+		ms=$(grep -a -o 'try again in [0-9]* ms' "$err" | grep -o '[0-9]*' | head -1)
+		if [[ $rc -eq 0 || -z "$ms" || $try -eq 6 ]]; then
+			cat "$err" >&2
+			rm -f "$err"
+			return "$rc"
+		fi
+		sleep "$(awk -v ms="$ms" 'BEGIN { printf "%.2f", (ms + 100) / 1000 }')"
+	done
+}
+A() { agent_retry sudo -u "$user" XDG_RUNTIME_DIR=/run/user/1000 bunt agent "$@"; }
 # 셸의 데스크탑 항목 창에 보이는 항목 이름 (접근성 트리 차례, |로 잇는다)
 items() {
 	A snapshot --app bunt-shell | awk '/^- window "bunt-desktop"/{on=1; next} /^- window/{on=0} on' |
