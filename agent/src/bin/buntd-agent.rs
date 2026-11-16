@@ -489,10 +489,10 @@ fn no_aim(action: &str) -> Failure {
 
 /// 사람이 키보드 포커스를 옮겨 ref 없는 키·글·휠을 보내지 않을 때의 알림: 지금 포커스를 가진 곳과 다른 길
 fn focus_moved(aim: &Aim, now: &str, action: &str) -> Failure {
-    let done = match action {
-        "type" => "typed",
-        "press" => "pressed",
-        _ => "scrolled",
+    let (done, wanted) = match action {
+        "type" => ("typed", "type into"),
+        "press" => ("pressed", "press keys in"),
+        _ => ("scrolled", "scroll"),
     };
     let app = if aim.app_id.is_empty() {
         aim.pid.to_string()
@@ -503,8 +503,8 @@ fn focus_moved(aim: &Aim, now: &str, action: &str) -> Failure {
         protocol::FOCUS_MOVED,
         format!(
             "{now}, not on {} {:?}, the window you worked on last; the person may be using it, \
-             so nothing was {done}. Pass --app {app} or a ref to {action} into your window \
-             (fill and accessible actions need no focus)",
+             so nothing was {done}. Pass --app {app} or a ref to {wanted} your window (fill and \
+             accessible actions need no focus)",
             aim.app, aim.title
         ),
     )
@@ -1304,12 +1304,14 @@ impl Agent {
             self.report(&a11y, open.pid, &open.title).await;
             let running = self.list(&a11y).await?;
             let window = accessible_window(&running, open);
+            // 다른 답처럼 접근성 버스의 앱 이름으로 적는다 (없으면 설치된 앱의 이름)
+            let name = app_label(open.pid, &open.app_id, &running, std::slice::from_ref(&app));
             self.aim_at(
                 &a11y,
                 &session,
                 open.pid,
                 &open.title,
-                &app.name,
+                &name,
                 window.clone(),
             )
             .await;
@@ -1402,15 +1404,10 @@ impl Agent {
             self.check_app(&a11y, &bus).await?;
             let (pid, title) = (open.pid, open.title.clone());
             self.report(&a11y, pid, &title).await;
-            self.aim_at(
-                &a11y,
-                &session,
-                pid,
-                &title,
-                &app.name,
-                Some((bus.clone(), path.clone())),
-            )
-            .await;
+            let name = app_label(pid, &open.app_id, &running, std::slice::from_ref(&app));
+            let window = Some((bus.clone(), path.clone()));
+            self.aim_at(&a11y, &session, pid, &title, &name, window)
+                .await;
             let tree = self.window_tree(&a11y, &session, &bus, &path).await?;
             self.launching.remove(&app.id);
             tracing::info!(
@@ -2924,7 +2921,7 @@ async fn accessible_keys(
                 Ok(true)
             )
         {
-            return Some("ran its accessible action \"activate\" (for Return)".into());
+            return Some("ran its accessible action \"activate\"".into());
         }
     }
     None
