@@ -25,6 +25,30 @@ pub struct Config {
     /// 입력 모드 (input_mode.rs). 없으면 장치로 정한다
     #[serde(default)]
     pub input: Input,
+    /// AI 에이전트 입력의 사람 우선 규칙 (agent_guard.rs). 없으면 기본값이다
+    #[serde(default)]
+    pub agent: Agent,
+}
+
+/// AI 에이전트 (agent_guard.rs)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Agent {
+    /// 사람의 키·포인터·터치 입력 뒤 에이전트의 입력과 포커스 바꾸기를 미루는 시간 (ms)
+    #[serde(default = "default_yield_ms")]
+    pub yield_ms: u64,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Self {
+            yield_ms: default_yield_ms(),
+        }
+    }
+}
+
+fn default_yield_ms() -> u64 {
+    crate::agent_guard::DEFAULT_YIELD_MS
 }
 
 /// 입력 모드 (설계안 5.1절)
@@ -145,6 +169,21 @@ mod tests {
         assert!(!config.session.exit_with_shell);
         // 입력 모드는 장치로 정한다
         assert_eq!(config.input.mode, ModeSetting::Auto);
+        // 사람 입력 뒤 AI는 1.5초 기다린다
+        assert_eq!(config.agent.yield_ms, 1500);
+    }
+
+    /// [agent]에 yield-ms가 빠져도 기본값으로 읽고, 적은 값은 그대로 쓴다. [agent]가 아예 없는 설정은 로그인 화면의
+    /// 시험이 본다
+    #[test]
+    fn agent_yield_defaults_and_overrides() {
+        let empty = DEFAULT.replace("yield-ms = 1500\n", "");
+        assert_ne!(empty, DEFAULT, "comp.toml sets yield-ms");
+        let config: Config = toml::from_str(&empty).unwrap();
+        assert_eq!(config.agent.yield_ms, crate::agent_guard::DEFAULT_YIELD_MS);
+        let config: Config =
+            toml::from_str(&DEFAULT.replace("yield-ms = 1500", "yield-ms = 400")).unwrap();
+        assert_eq!(config.agent.yield_ms, 400);
     }
 
     /// 로그인 화면의 설정(greeter/data/root/etc/buntos/greeter.toml): 잠그지 않고, bunt-greeter가 끝나면
@@ -160,6 +199,8 @@ mod tests {
         assert_eq!(config.session.shell, ["bunt-greeter"]);
         // [input]이 없는 설정도 읽고, 입력 모드는 장치로 정한다
         assert_eq!(config.input.mode, ModeSetting::Auto);
+        // [agent]가 없으면 기본값이다
+        assert_eq!(config.agent.yield_ms, crate::agent_guard::DEFAULT_YIELD_MS);
     }
 
     #[test]

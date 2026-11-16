@@ -5,9 +5,16 @@
 //! (D-Bus의 에이전트 전용 메서드, ARCHITECTURE 6장). 입력은 사용자의 seat에 넣으며 실제 입력과
 //! 같은 길을 거친다. 키는 컴포지터 단축키를 거치지 않는다. 에이전트 전용 seat는 뒤에 둔다.
 //! 셸의 레이어 표면(메뉴 막대, Dock, 모든 앱 패널과 그 열린 메뉴)도 목록과 포인터 누르기로 다룬다.
-//! 사람만 답하는 창(AUTH_NAMESPACES)은 목록에 들지 않고 누를 수도 없다
+//! 사람만 답하는 창(AUTH_NAMESPACES)은 목록에 들지 않고 누를 수도 없다.
+//!
+//! 사람이 먼저다(agent_guard.rs). 대상을 받는 입력(PressKeysOn 등)은 같은 디스패치 안에서 키보드 포커스나 그 점의 표면이
+//! 그 창인지 본 뒤 넣는다(R1). 사람이 쓰는 중이면(R2) 입력과 포커스 바꾸기를 거절한다. 잠금과 사람만 답하는 창은
+//! 그보다 먼저 본다
 
-use std::{sync::mpsc, time::Duration};
+use std::{
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
@@ -24,9 +31,11 @@ use smithay::{
 };
 
 use crate::{
+    agent_guard::{PointerHold, Touches},
     dbus::{AgentRequest, Chord, LayerInfo, Refused, Typed, WindowInfo},
     state::BuntState,
 };
+use smithay::utils::IsAlive;
 // 셸의 레이어 표면(메뉴 막대, Dock 등)과 그 열린 메뉴 누르기
 use smithay::{
     reexports::wayland_server::protocol::wl_surface::WlSurface, wayland::shell::wlr_layer::Layer,
@@ -46,12 +55,14 @@ use smithay::{
 const KEYCODES: std::ops::RangeInclusive<u32> = 8..=255;
 /// 사람만 답하는 셸 창의 레이어 이름: 관리자 인증 창(polkit 인증 에이전트), Wi-Fi 암호 창(NetworkManager
 /// 비밀 에이전트), Bluetooth 페어링 창(BlueZ 페어링 에이전트), 클립보드 기록(모든 앱 패널의 클립보드 보기.
-/// 에이전트가 읽거나 항목을 골라 앱에 붙이지 못하게 한다). 하나였던 이름을 목록으로 넓혔다
-const AUTH_NAMESPACES: [&str; 4] = [
+/// 에이전트가 읽거나 항목을 골라 앱에 붙이지 못하게 한다), AI 제어 창(메뉴 막대의 AI 표시를 누르면 뜨는 멈추기·다시
+/// 하기. AI가 스스로 멈춤을 풀지 못한다). 하나였던 이름을 목록으로 넓혔다
+const AUTH_NAMESPACES: [&str; 5] = [
     "bunt-polkit-agent",
     "bunt-secret-agent",
     "bunt-pairing-agent",
     "bunt-clipboard",
+    "bunt-agent-control",
 ];
 /// 글 입력에 한 번에 확정하는 바이트 수. Wayland 메시지 하나는 4KB를 넘지 못한다
 const COMMIT_BYTES: usize = 2048;
@@ -71,6 +82,7 @@ impl BuntState {
         // 인증 창이 떠 있는 동안에는 에이전트가 입력을 넣거나 포커스를 옮기지 못한다. 에이전트가 대신
         // 답하거나, 사람이 칠 암호가 다른 창으로 가는 일을 막는다
         let refused = locked.or_else(|| self.auth_dialog_open().then_some(Refused::AuthDialog));
+        let now = Instant::now();
         match request {
             AgentRequest::Windows(reply) => {
                 let _ = reply.send(match locked {
@@ -87,23 +99,21 @@ impl BuntState {
             AgentRequest::Activate { pid, title, reply } => {
                 let _ = reply.send(match refused {
                     Some(why) => Err(why),
-                    None => Ok(self.agent_activate(pid, &title)),
+                    None => self.agent_activate(pid, &title, now),
                 });
             }
+            // 대상이 없는 옛 키·글(옛 데몬 호환)도 사람이 치는 중이면 거절한다 (R2a)
             AgentRequest::Keys { chords, reply } => {
-                let _ = reply.send(match refused {
-                    Some(why) => Err(why),
-                    None => {
-                        self.agent_keys(&chords);
-                        Ok(())
-                    }
-                });
+                let _ = reply.send(
+                    self.gate(refused, Touches::KEYBOARD, now)
+                        .map(|()| self.agent_keys(&chords)),
+                );
             }
             AgentRequest::Type { text, reply } => {
-                let _ = reply.send(match refused {
-                    Some(why) => Err(why),
-                    None => self.agent_type(&text),
-                });
+                let _ = reply.send(
+                    self.gate(refused, Touches::KEYBOARD, now)
+                        .and_then(|()| self.agent_type(&text)),
+                );
             }
             AgentRequest::Click {
                 x,
@@ -111,14 +121,15 @@ impl BuntState {
                 button,
                 reply,
             } => {
+                let pos = Point::<f64, Logical>::from((x, y));
                 let _ = reply.send(match refused {
                     Some(why) => Err(why),
                     // 화면 키보드는 사람만 누른다. 에이전트가 누르면 막은 앱에도 글을 칠 수 있다 (osk.rs)
-                    None if self.over_keyboard((x, y).into()) => Err(Refused::Keyboard),
-                    None => {
-                        self.agent_click(x, y, button);
-                        Ok(())
-                    }
+                    None if self.over_keyboard(pos) => Err(Refused::Keyboard),
+                    // 사람이 포인터를 쓰는 중이면(R2b), 누르기가 키보드 포커스를 옮기면 키보드를 쓰는 중이어도(R2a) 거절한다
+                    None => self
+                        .admit(self.press_touches(pos), now)
+                        .map(|()| self.agent_click(x, y, button)),
                 });
             }
             AgentRequest::Scroll {
@@ -127,17 +138,17 @@ impl BuntState {
                 dx,
                 dy,
                 reply,
-            } => match refused {
-                Some(why) => {
+            } => match self.gate(refused, Touches::POINTER, now) {
+                Ok(()) => self.agent_scroll(WheelAt::Screen((x, y).into()), dx, dy, reply),
+                Err(why) => {
                     let _ = reply.send(Err(why));
                 }
-                None => self.agent_scroll(x, y, dx, dy, reply),
             },
             AgentRequest::Commit { text, reply } => {
-                let _ = reply.send(match refused {
-                    Some(why) => Err(why),
-                    None => Ok(self.commit_text(&text)),
-                });
+                let _ = reply.send(
+                    self.gate(refused, Touches::KEYBOARD, now)
+                        .map(|()| self.commit_text(&text)),
+                );
             }
             // 그 창만 그리므로 인증 창은 들지 않는다. 읽기라 인증 창이 떠 있어도 막지 않지만, 잠긴 동안에는 막는다
             AgentRequest::Capture { pid, title, reply } => {
@@ -156,7 +167,9 @@ impl BuntState {
             } => {
                 let _ = reply.send(match refused {
                     Some(why) => Err(why),
-                    None => self.agent_click_window(pid, &title, (x, y), button),
+                    None => {
+                        self.agent_click_window(pid, &title, WindowPoint::Pixels(x, y), button, now)
+                    }
                 });
             }
             AgentRequest::Layers(reply) => {
@@ -175,7 +188,7 @@ impl BuntState {
             } => {
                 let _ = reply.send(match refused {
                     Some(why) => Err(why),
-                    None => self.agent_click_layer(pid, &namespace, (x, y), button),
+                    None => self.agent_click_layer(pid, &namespace, (x, y), button, now),
                 });
             }
             AgentRequest::ScrollLayer {
@@ -186,12 +199,29 @@ impl BuntState {
                 dx,
                 dy,
                 reply,
-            } => match refused.map_or_else(|| self.layer_point(pid, &namespace, (x, y)), Err) {
-                Ok(pos) => self.agent_scroll(pos.x, pos.y, dx, dy, reply),
-                Err(why) => {
-                    let _ = reply.send(Err(why));
+            } => {
+                let checked = match refused {
+                    Some(why) => Err(why),
+                    None => self
+                        .layer_point(pid, &namespace, (x, y))
+                        .and_then(|_| self.admit(Touches::POINTER, now)),
+                };
+                match checked {
+                    Ok(()) => self.agent_scroll(
+                        WheelAt::Layer {
+                            pid,
+                            namespace,
+                            local: (x, y),
+                        },
+                        dx,
+                        dy,
+                        reply,
+                    ),
+                    Err(why) => {
+                        let _ = reply.send(Err(why));
+                    }
                 }
-            },
+            }
             // 창 그림(Capture)과 같다: 읽기라 인증 창이 떠 있어도 막지 않지만, 잠긴 동안에는 막는다
             AgentRequest::CaptureLayer {
                 pid,
@@ -203,7 +233,277 @@ impl BuntState {
                     None => self.agent_capture_layer(pid, &namespace),
                 });
             }
+            // 대상을 받는 키·글: 키보드 포커스가 그 창일 때만, 같은 디스패치 안에서 넣는다 (R1)
+            AgentRequest::KeysOn {
+                pid,
+                title,
+                chords,
+                reply,
+            } => {
+                let _ = reply.send(
+                    refused
+                        .map_or(Ok(()), Err)
+                        .and_then(|()| self.keyboard_target(pid, &title, now))
+                        .map(|()| self.agent_keys(&chords)),
+                );
+            }
+            AgentRequest::TypeOn {
+                pid,
+                title,
+                text,
+                reply,
+            } => {
+                let _ = reply.send(
+                    refused
+                        .map_or(Ok(()), Err)
+                        .and_then(|()| self.keyboard_target(pid, &title, now))
+                        .and_then(|()| self.agent_type(&text)),
+                );
+            }
+            AgentRequest::CommitOn {
+                pid,
+                title,
+                text,
+                reply,
+            } => {
+                let _ = reply.send(
+                    refused
+                        .map_or(Ok(()), Err)
+                        .and_then(|()| self.keyboard_target(pid, &title, now))
+                        .map(|()| self.commit_text(&text)),
+                );
+            }
+            AgentRequest::ClickOn {
+                pid,
+                title,
+                x,
+                y,
+                button,
+                reply,
+            } => {
+                let _ = reply.send(match refused {
+                    Some(why) => Err(why),
+                    None => self.agent_click_window(
+                        pid,
+                        &title,
+                        WindowPoint::Logical(x, y),
+                        button,
+                        now,
+                    ),
+                });
+            }
+            AgentRequest::ScrollOn {
+                pid,
+                title,
+                x,
+                y,
+                dx,
+                dy,
+                reply,
+            } => {
+                let local = Point::from((x, y));
+                let checked = match refused {
+                    Some(why) => Err(why),
+                    None => self.scroll_target(pid, &title, local, now),
+                };
+                match checked {
+                    Ok(window) => {
+                        self.agent_scroll(WheelAt::Window { window, local }, dx, dy, reply)
+                    }
+                    Err(why) => {
+                        let _ = reply.send(Err(why));
+                    }
+                }
+            }
         }
+    }
+
+    /// 앞서 본 거절(잠금, 사람만 답하는 창)이 없으면 사람이 쓰는 중인지(R2) 본다
+    fn gate(
+        &self,
+        refused: Option<Refused>,
+        touches: Touches,
+        now: Instant,
+    ) -> Result<(), Refused> {
+        match refused {
+            Some(why) => Err(why),
+            None => self.admit(touches, now),
+        }
+    }
+
+    /// R2 (agent_guard.rs): 사람이 그 장치를 쓰는 중이면 UserActive
+    fn admit(&self, touches: Touches, now: Instant) -> Result<(), Refused> {
+        self.agent_guard.admit(touches, self.pointer_hold(), now)
+    }
+
+    /// 사람의 손가락과 포인터 잡기
+    fn pointer_hold(&self) -> PointerHold {
+        PointerHold {
+            fingers: self.touch.fingers_down(),
+            grab: self.human_grab(),
+        }
+    }
+
+    /// 사람이 시작한 포인터 잡기(옮기기, 크기 바꾸기, 메뉴, 끌어 놓기)나 스크린샷 영역 고르기가 있는지. 에이전트의
+    /// 누르기·키로 연 메뉴의 잡기는 그 serial로 가린다: 에이전트는 제가 연 메뉴의 항목을 누를 수 있다
+    fn human_grab(&self) -> bool {
+        self.screenshot_area.is_some()
+            || self.seat.get_pointer().is_some_and(|pointer| {
+                pointer.is_grabbed()
+                    && !self
+                        .agent_guard
+                        .agent_serials()
+                        .any(|serial| pointer.has_grab(serial))
+            })
+    }
+
+    /// 그 점을 누를 때 사람의 무엇과 부딪치는지: 키보드 포커스가 옮겨 가면 키보드도
+    fn press_touches(&self, pos: Point<f64, Logical>) -> Touches {
+        if self.press_moves_focus(pos) {
+            Touches::FOCUS
+        } else {
+            Touches::POINTER
+        }
+    }
+
+    /// 그 점을 누르면 키보드 포커스가 다른 표면으로 가는지. 누르기가 포커스를 정하는 차례(input.rs의 focus_at)를
+    /// 그대로 따라 본다
+    fn press_moves_focus(&self, pos: Point<f64, Logical>) -> bool {
+        // 잡기가 있으면 누르기는 잡기로 가고 포커스를 정하지 않는다 (press_button)
+        if self
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed())
+        {
+            return false;
+        }
+        let current = self
+            .keyboard_focus()
+            .map(|surface| self.root_surface(&surface));
+        if let Some(layer) = self.keyboard_layer_under(pos) {
+            return current.as_ref() != Some(&layer);
+        }
+        if self.is_over_top_layer(pos) {
+            return false;
+        }
+        match self.space.element_under(pos) {
+            // 키보드를 독점하는 레이어(모든 앱 패널 등)가 떠 있으면 창을 눌러도 키보드는 그대로다 (focus_window)
+            Some((window, _)) => self.exclusive_layer().is_none() && !self.window_has_focus(window),
+            None => current != self.desktop_layer_under(pos),
+        }
+    }
+
+    /// 키보드 포커스(의 뿌리 표면)가 이 창에 있는지. 그 창의 열린 메뉴에 있어도 그 창이다
+    fn holds_keyboard(&self, window: &Window) -> bool {
+        let Some(toplevel) = window.toplevel() else {
+            return false;
+        };
+        self.keyboard_focus()
+            .is_some_and(|focus| self.root_surface(&focus) == *toplevel.wl_surface())
+    }
+
+    /// 키보드 포커스가 이 창에 있고 창이 화면에 놓여 있는지. 아니면 활성화가 포커스를 바꾼다
+    fn window_has_focus(&self, window: &Window) -> bool {
+        self.space.element_geometry(window).is_some() && self.holds_keyboard(window)
+    }
+
+    /// R1과 R2a: 키·글을 넣을 그 창이 키보드 포커스를 가졌고(그 창의 열린 메뉴도 그 창이다) 사람이 치는 중이 아닌지
+    fn keyboard_target(&self, pid: u32, title: &str, now: Instant) -> Result<(), Refused> {
+        let window = self.agent_window(pid, title).ok_or(Refused::NoWindow)?;
+        let toplevel = window.toplevel().ok_or(Refused::NoWindow)?;
+        let focus = self
+            .keyboard_focus()
+            .map(|surface| self.root_surface(&surface));
+        self.agent_guard.keyboard_target(
+            focus.as_ref(),
+            toplevel.wl_surface(),
+            self.pointer_hold(),
+            now,
+        )
+    }
+
+    /// 창 기준 점(논리 좌표)에 포인터가 닿는지. 사람의 포인터와 같은 길(surface_under)로 그 점의 표면을 찾는다: 그 창의
+    /// 표면이나 하위 표면, 열린 메뉴면 닿는다
+    fn reach(&self, window: &Window, local: Point<f64, Logical>) -> Reach {
+        let Some(toplevel) = window.toplevel().filter(|_| window.alive()) else {
+            return Reach::Never(Refused::NoWindow);
+        };
+        // 최소화하거나 가린 창
+        let Some(geometry) = self.space.element_geometry(window) else {
+            return Reach::Behind;
+        };
+        let pos = geometry.loc.to_f64() + local;
+        let under = self
+            .surface_under(pos)
+            .map(|(surface, _)| self.root_surface(&surface));
+        if under.as_ref() == Some(toplevel.wl_surface()) {
+            return Reach::At(pos);
+        }
+        if outside(local, geometry.size.to_f64()) {
+            return Reach::Never(Refused::OffWindow {
+                width: geometry.size.w,
+                height: geometry.size.h,
+            });
+        }
+        // 메뉴 막대, Dock, 알림, 화면 키보드처럼 창 위에 늘 있는 표면은 창을 앞으로 가져와도 덮는다
+        if self.is_over_top_layer(pos) {
+            return Reach::Never(Refused::Covered);
+        }
+        Reach::Behind
+    }
+
+    /// ScrollOn의 창: 그 점이 보이면 그대로 돌린다. 창이 내려졌거나 다른 창에 가렸으면 앞으로 가져오는데, 그러면
+    /// 키보드 포커스가 바뀌므로 사람이 키보드를 쓰는 중이어도 거절한다
+    fn scroll_target(
+        &mut self,
+        pid: u32,
+        title: &str,
+        local: Point<f64, Logical>,
+        now: Instant,
+    ) -> Result<Window, Refused> {
+        let window = self.agent_window(pid, title).ok_or(Refused::NoWindow)?;
+        match self.reach(&window, local) {
+            Reach::At(_) => self.admit(Touches::POINTER, now)?,
+            Reach::Never(why) => return Err(why),
+            Reach::Behind => {
+                self.admit(Touches::FOCUS, now)?;
+                self.focus_window(&window, SERIAL_COUNTER.next_serial());
+                if !matches!(self.reach(&window, local), Reach::At(_)) {
+                    return Err(Refused::Covered);
+                }
+            }
+        }
+        Ok(window)
+    }
+
+    /// 휠을 돌릴 전역 논리 좌표. 처음과 100ms 뒤에 다시 돌릴 때 같은 확인을 한다
+    fn wheel_point(&self, at: &WheelAt) -> Result<Point<f64, Logical>, Refused> {
+        match at {
+            WheelAt::Screen(pos) => Ok(*pos),
+            WheelAt::Window { window, local } => match self.reach(window, *local) {
+                Reach::At(pos) => Ok(pos),
+                Reach::Behind => Err(Refused::Covered),
+                Reach::Never(why) => Err(why),
+            },
+            WheelAt::Layer {
+                pid,
+                namespace,
+                local,
+            } => self.layer_point(*pid, namespace, *local),
+        }
+    }
+
+    /// 포인터가 새 표면에 들어가 기다린 뒤 휠을 돌리기 직전에 다시 본다: 그사이 잠겼거나, 사람만 답하는 창이 떴거나,
+    /// 사람이 포인터를 썼거나(R2b), 대상이 가렸으면(R1) 돌리지 않는다
+    fn wheel_again(&self, at: &WheelAt) -> Result<Point<f64, Logical>, Refused> {
+        if self.session_lock.is_locked() {
+            return Err(Refused::Locked);
+        }
+        if self.auth_dialog_open() {
+            return Err(Refused::AuthDialog);
+        }
+        self.admit(Touches::POINTER, Instant::now())?;
+        self.wheel_point(at)
     }
 
     fn auth_dialog_open(&self) -> bool {
@@ -268,8 +568,11 @@ impl BuntState {
         namespace: &str,
         (x, y): (f64, f64),
         button: u32,
+        now: Instant,
     ) -> Result<(f64, f64), Refused> {
         let pos = self.layer_point(pid, namespace, (x, y))?;
+        // 사람이 포인터를 쓰는 중이면(R2b), 키보드를 받는 셸 표면으로 포커스를 옮기는 누르기는 키보드를 쓰는 중이어도
+        self.admit(self.press_touches(pos), now)?;
         self.agent_click(pos.x, pos.y, button);
         Ok((pos.x, pos.y))
     }
@@ -374,34 +677,22 @@ impl BuntState {
     }
 
     /// 그 pid의 창 가운데 제목이 같은 창, 없으면 맨 위 창을 앞으로 가져온다. 최소화하거나 가린 창도
-    /// 고를 수 있고, 고르면 제자리에 다시 놓인다
-    fn agent_activate(&mut self, pid: u32, title: &str) -> bool {
-        let windows: Vec<Window> = self
-            .space
-            .elements()
-            .rev()
-            .chain(self.hidden.iter().map(|hidden| &hidden.window))
-            .filter(|window| self.client_pid(window) == pid)
-            .cloned()
-            .collect();
-        let titled = windows.iter().find(|window| {
-            window.toplevel().is_some_and(|toplevel| {
-                with_states(toplevel.wl_surface(), |states| {
-                    states
-                        .data_map
-                        .get::<XdgToplevelSurfaceData>()
-                        .is_some_and(|data| data.lock().unwrap().title.as_deref() == Some(title))
-                })
-            })
-        });
-        let Some(window) = titled.or(windows.first()).cloned() else {
-            return false;
+    /// 고를 수 있고, 고르면 제자리에 다시 놓인다. 창이 없으면 false. 키보드 포커스를 바꾸므로 사람이 키보드나 포인터를
+    /// 쓰는 중이면 거절한다(R2). 이미 포커스를 가진 창이면 아무것도 바꾸지 않으므로 거절하지 않는다
+    fn agent_activate(&mut self, pid: u32, title: &str, now: Instant) -> Result<bool, Refused> {
+        let Some(window) = self.agent_window(pid, title) else {
+            return Ok(false);
         };
+        if self.window_has_focus(&window) {
+            return Ok(true);
+        }
+        self.admit(Touches::FOCUS, now)?;
         self.focus_window(&window, SERIAL_COUNTER.next_serial());
-        true
+        Ok(true)
     }
 
-    /// 수정 키를 누르고, 키를 눌렀다 떼고, 수정 키를 거꾸로 뗀다
+    /// 수정 키를 누르고, 키를 눌렀다 떼고, 수정 키를 거꾸로 뗀다. 키의 serial을 적어 두어, 에이전트의 키로 연 메뉴의
+    /// 잡기를 사람의 것으로 보지 않는다 (agent_guard.rs)
     fn agent_keys(&mut self, chords: &[Chord]) {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
@@ -425,14 +716,11 @@ impl BuntState {
             };
             let send = |state: &mut BuntState, code: Keycode, key_state: KeyState| {
                 let time = state.start_time.elapsed().as_millis() as u32;
-                keyboard.input::<(), _>(
-                    state,
-                    code,
-                    key_state,
-                    SERIAL_COUNTER.next_serial(),
-                    time,
-                    |_, _, _| FilterResult::Forward,
-                );
+                let serial = SERIAL_COUNTER.next_serial();
+                state.agent_guard.note_agent_serial(serial);
+                keyboard.input::<(), _>(state, code, key_state, serial, time, |_, _, _| {
+                    FilterResult::Forward
+                });
             };
             for code in &codes {
                 send(self, *code, KeyState::Pressed);
@@ -519,17 +807,24 @@ impl BuntState {
     fn agent_click(&mut self, x: f64, y: f64, button: u32) {
         let time = self.start_time.elapsed().as_millis() as u32;
         self.pointer_moved((x, y).into(), time);
-        self.press_button(button, ButtonState::Pressed, time);
-        self.press_button(button, ButtonState::Released, time.saturating_add(1));
+        for (state, at) in [
+            (ButtonState::Pressed, time),
+            (ButtonState::Released, time.saturating_add(1)),
+        ] {
+            // 에이전트의 누르기로 연 메뉴의 잡기는 사람의 것이 아니다 (agent_guard.rs)
+            if let Some(serial) = self.press_button(button, state, at) {
+                self.agent_guard.note_agent_serial(serial);
+            }
+        }
     }
 
-    /// 포인터를 (x, y)로 옮겨 휠을 돌리고 답한다. dx, dy는 눈금 수이고 오른쪽·아래가 +다. 시스템 설정의
+    /// 포인터를 그 자리로 옮겨 휠을 돌리고 답한다. dx, dy는 눈금 수이고 오른쪽·아래가 +다. 시스템 설정의
     /// 스크롤 속도와 자연스러운 스크롤은 사람의 장치에만 쓴다. 포인터가 다른 표면에 들어가면
-    /// ENTER_PAUSE 뒤에 그 자리에서 한 번 더 움직이고 돌린다
+    /// ENTER_PAUSE 뒤에 그 자리에서 한 번 더 움직이고 돌린다. 그때 잠금, 사람만 답하는 창, 사람의 포인터,
+    /// 대상(창이나 레이어 표면이 아직 그 점에 있는지)을 다시 본다
     fn agent_scroll(
         &mut self,
-        x: f64,
-        y: f64,
+        at: WheelAt,
         dx: f64,
         dy: f64,
         reply: mpsc::Sender<Result<(), Refused>>,
@@ -538,9 +833,16 @@ impl BuntState {
             let _ = reply.send(Ok(()));
             return;
         };
+        let pos = match self.wheel_point(&at) {
+            Ok(pos) => pos,
+            Err(why) => {
+                let _ = reply.send(Err(why));
+                return;
+            }
+        };
         let before = pointer.current_focus();
         let time = self.start_time.elapsed().as_millis() as u32;
-        self.pointer_moved((x, y).into(), time);
+        self.pointer_moved(pos, time);
         if pointer.current_focus() == before {
             self.agent_wheel(dx, dy);
             let _ = reply.send(Ok(()));
@@ -549,17 +851,12 @@ impl BuntState {
         let timer = self.loop_handle.insert_source(
             Timer::from_duration(ENTER_PAUSE),
             move |_, _, state| {
-                // 기다리는 사이에 화면이 잠겼거나 인증 창이 떴으면 돌리지 않는다
-                let _ = reply.send(if state.session_lock.is_locked() {
-                    Err(Refused::Locked)
-                } else if state.auth_dialog_open() {
-                    Err(Refused::AuthDialog)
-                } else {
+                let _ = reply.send(state.wheel_again(&at).map(|pos| {
+                    // 창이 움직였으면 그 창의 지금 자리다
                     let time = state.start_time.elapsed().as_millis() as u32;
-                    state.pointer_moved((x, y).into(), time);
+                    state.pointer_moved(pos, time);
                     state.agent_wheel(dx, dy);
-                    Ok(())
-                });
+                }));
                 TimeoutAction::Drop
             },
         );
@@ -588,7 +885,7 @@ impl BuntState {
 
     /// 그 pid의 창 가운데 제목이 같은 창, 없으면 맨 위 창 (agent_activate와 같은 차례). 최소화하거나
     /// 가린 창도 고른다
-    fn agent_window(&self, pid: u32, title: &str) -> Option<Window> {
+    pub(crate) fn agent_window(&self, pid: u32, title: &str) -> Option<Window> {
         let windows: Vec<&Window> = self
             .space
             .elements()
@@ -650,57 +947,104 @@ impl BuntState {
         Ok((image, scale))
     }
 
-    /// 창 안의 한 점을 포인터로 누른다. (x, y)는 창 스크린샷(capture_window)의 픽셀이다. 창이 앞에
-    /// 없으면 먼저 가져온다. 키보드 포커스가 이미 이 창에 있으면 열린 메뉴가 닫히지 않게 그대로 둔다.
-    /// 그 점이 창 밖이거나 그 위에 다른 것(이 창의 대화 상자, 다른 창, Dock·메뉴 막대·알림)이 있으면
-    /// 누르지 않는다: 스크린샷에 보인 것과 다른 것을 누르게 된다
+    /// 창 안의 한 점을 포인터로 누른다(ClickWindow, ClickOn). 점은 창 스크린샷(capture_window)의 픽셀이거나 창 기준
+    /// 논리 좌표다. 창이 앞에 없으면 먼저 가져온다. 키보드 포커스가 이미 이 창에 있으면 열린 메뉴가 닫히지 않게 그대로
+    /// 둔다. 그 점이 창 밖이거나 그 위에 다른 것(이 창의 대화 상자, 다른 창, Dock·메뉴 막대·알림)이 있으면 누르지
+    /// 않는다: 스크린샷에 보인 것과 다른 것을 누르게 된다. 창 기준 논리 좌표는 그 창의 열린 메뉴면 창 밖이어도 누른다.
+    /// 사람이 포인터를 쓰는 중이면 거절하고, 창을 앞으로 가져와야 하면 키보드를 쓰는 중이어도 거절한다 (R2)
     fn agent_click_window(
         &mut self,
         pid: u32,
         title: &str,
-        (x, y): (f64, f64),
+        point: WindowPoint,
         button: u32,
+        now: Instant,
     ) -> Result<(f64, f64), Refused> {
         let window = self.agent_window(pid, title).ok_or(Refused::NoWindow)?;
-        let surface = window
-            .toplevel()
-            .map(|toplevel| toplevel.wl_surface().clone());
-        let focused = self
-            .seat
-            .get_keyboard()
-            .and_then(|keyboard| keyboard.current_focus())
-            .map(|focus| self.root_surface(&focus));
-        if focused.is_none() || focused != surface || self.space.element_geometry(&window).is_none()
-        {
+        let local = match point {
+            WindowPoint::Pixels(x, y) => {
+                let scale = self
+                    .window_output(&window)
+                    .map_or(1.0, |output| output.current_scale().fractional_scale());
+                let size = window.geometry().size.to_f64();
+                let local = Point::<f64, Logical>::from((x / scale, y / scale));
+                if outside(local, size) {
+                    let pixels = size.to_physical(scale);
+                    return Err(Refused::Outside {
+                        width: pixels.w.round() as u32,
+                        height: pixels.h.round() as u32,
+                    });
+                }
+                local
+            }
+            WindowPoint::Logical(x, y) => Point::from((x, y)),
+        };
+        // 창을 앞으로 가져와도 닿지 않으면(창 밖, 늘 위에 있는 막대) 포커스를 옮기지 않고 거절한다
+        if let Reach::Never(why) = self.reach(&window, local) {
+            return Err(why);
+        }
+        let focused = self.window_has_focus(&window);
+        self.admit(
+            if focused {
+                Touches::POINTER
+            } else {
+                Touches::FOCUS
+            },
+            now,
+        )?;
+        if !focused {
             self.focus_window(&window, SERIAL_COUNTER.next_serial());
         }
-        let geometry = self
-            .space
-            .element_geometry(&window)
-            .ok_or(Refused::NoWindow)?;
-        let scale = self
-            .window_output(&window)
-            .map_or(1.0, |output| output.current_scale().fractional_scale());
-        let size = geometry.size.to_f64();
-        let local = Point::<f64, Logical>::from((x / scale, y / scale));
-        if local.x >= size.w || local.y >= size.h || local.x < 0.0 || local.y < 0.0 {
-            let pixels = size.to_physical(scale);
-            return Err(Refused::Outside {
-                width: pixels.w.round() as u32,
-                height: pixels.h.round() as u32,
-            });
-        }
-        let pos = geometry.loc.to_f64() + local;
-        let on_top = self
-            .space
-            .element_under(pos)
-            .is_some_and(|(under, _)| *under == window);
-        if !on_top || self.is_over_top_layer(pos) {
-            return Err(Refused::Covered);
-        }
+        let pos = match self.reach(&window, local) {
+            Reach::At(pos) => pos,
+            Reach::Behind => return Err(Refused::Covered),
+            Reach::Never(why) => return Err(why),
+        };
         self.agent_click(pos.x, pos.y, button);
         Ok((pos.x, pos.y))
     }
+}
+
+/// 창 안의 점 (ClickWindow, ClickOn)
+#[derive(Clone, Copy, Debug)]
+enum WindowPoint {
+    /// 창 스크린샷(CaptureWindow)의 픽셀
+    Pixels(f64, f64),
+    /// 창 기준 논리 좌표 (창 영역의 왼쪽 위가 (0, 0). AT-SPI의 창 좌표와 같은 틀)
+    Logical(f64, f64),
+}
+
+/// 창 기준 점에 포인터가 닿는지 (BuntState::reach)
+#[derive(Debug)]
+enum Reach {
+    /// 닿는다: 그 전역 논리 좌표
+    At(Point<f64, Logical>),
+    /// 창이 내려져 있거나 다른 창(그 창의 대화 상자 포함)이 덮었다. 창을 앞으로 가져오면 닿을 수 있다
+    Behind,
+    /// 창을 앞으로 가져와도 닿지 않는다: 창이 없거나, 창 밖이거나, 늘 위에 있는 셸 표면이 덮었다
+    Never(Refused),
+}
+
+/// 휠을 돌릴 곳. 포인터가 새 표면에 들어가 기다린 뒤에 다시 찾는다
+enum WheelAt {
+    /// 옛 Scroll: 전역 논리 좌표
+    Screen(Point<f64, Logical>),
+    /// ScrollOn: 창 기준 논리 좌표. 창이 움직였으면 따라간다
+    Window {
+        window: Window,
+        local: Point<f64, Logical>,
+    },
+    /// ScrollLayer: 레이어 표면 기준 논리 좌표
+    Layer {
+        pid: u32,
+        namespace: String,
+        local: (f64, f64),
+    },
+}
+
+/// 창 기준 점이 창 영역 밖인지
+fn outside(local: Point<f64, Logical>, size: smithay::utils::Size<f64, Logical>) -> bool {
+    local.x < 0.0 || local.y < 0.0 || local.x >= size.w || local.y >= size.h
 }
 
 /// 사람만 답하는 셸 창의 레이어 이름인지
@@ -881,6 +1225,42 @@ mod tests {
             choose_layer(&placed, 20, "bunt-menubar").err(),
             Some(Refused::NoWindow)
         );
+    }
+
+    /// 셸의 AI 제어 창(멈추기·다시 하기)은 사람만 답한다: 목록에 들지 않고, 누를 수 없고, 떠 있는 동안 에이전트의
+    /// 입력은 모두 거절된다(auth_dialog_open). AI가 스스로 멈춤을 풀지 못한다
+    #[test]
+    fn the_ai_control_window_is_for_people_only() {
+        assert!(human_only("bunt-agent-control"));
+        let mut placed = shell_layers();
+        placed.push(PlacedLayer {
+            pid: 10,
+            namespace: "bunt-agent-control".into(),
+            surface: (),
+            area: Rectangle::new((900, 24).into(), (300, 200).into()),
+            scale: 1.0,
+        });
+        assert!(
+            listed(placed)
+                .iter()
+                .all(|layer| layer.namespace != "bunt-agent-control")
+        );
+        assert_eq!(
+            choose_layer::<()>(&[], 10, "bunt-agent-control").err(),
+            Some(Refused::AuthDialog)
+        );
+    }
+
+    /// 창 기준 논리 좌표의 창 밖: 왼쪽 위 끝은 안, 오른쪽·아래 끝은 밖이다
+    #[test]
+    fn points_outside_the_window_area() {
+        let size = smithay::utils::Size::<f64, Logical>::from((800.0, 600.0));
+        assert!(!outside((0.0, 0.0).into(), size));
+        assert!(!outside((799.5, 599.5).into(), size));
+        assert!(outside((800.0, 10.0).into(), size));
+        assert!(outside((10.0, 600.0).into(), size));
+        assert!(outside((-0.5, 10.0).into(), size));
+        assert!(outside((10.0, -1.0).into(), size));
     }
 
     /// 셸의 화면 키보드는 에이전트에게 보이지 않고 눌리지도 않는다. 사람만 답하는 창과 달리 떠 있어도 에이전트의

@@ -42,6 +42,7 @@ use crate::screenshot::{self, Image, write_png};
 use zbus::{
     Message, blocking, fdo, interface,
     message::Header,
+    names::ErrorName,
     object_server::SignalEmitter,
     zvariant::{DynamicType, Value},
 };
@@ -212,53 +213,133 @@ pub enum Refused {
     NotShown,
     /// 누를 점이 화면 키보드다. 화면 키보드는 사람만 누른다 (osk.rs)
     Keyboard,
+    /// 키보드 포커스가 그 창에 없다: 사람이 옮겼다 (R1, agent_guard.rs)
+    FocusMoved,
+    /// 사람이 쓰는 중이다. 이만큼(ms) 뒤에 다시 해 본다 (R2)
+    UserActive { retry_ms: u64 },
+    /// 누를 점이 창 밖이다 (ClickOn·ScrollOn의 창 기준 논리 좌표. 창의 논리 크기)
+    OffWindow { width: i32, height: i32 },
+}
+
+/// 사람 우선 규칙의 D-Bus 오류 이름 (AI 동시 사용 계약 A)
+const FOCUS_MOVED_ERROR: &str = "org.buntos.Compositor1.Error.FocusMoved";
+const USER_ACTIVE_ERROR: &str = "org.buntos.Compositor1.Error.UserActive";
+/// 그 오류의 메시지. 데몬이 UserActive의 메시지에서 `in (\d+) ms`를 읽는다
+const FOCUS_MOVED_MESSAGE: &str =
+    "the keyboard focus is not on that window any more (the person moved it); nothing was sent";
+
+/// 에이전트 메서드의 오류. 전부터 있던 거절은 fdo 오류 이름 그대로 보내고, 사람 우선 규칙의 거절(FocusMoved,
+/// UserActive)은 org.buntos.Compositor1.Error.* 이름으로 보낸다. 데몬이 이름으로 가려 AI에게 알린다
+#[derive(Debug)]
+pub enum AgentError {
+    Fdo(fdo::Error),
+    FocusMoved,
+    /// 다시 해 볼 ms를 담은 메시지
+    UserActive(String),
+}
+
+impl AgentError {
+    fn user_active(retry_ms: u64) -> Self {
+        Self::UserActive(format!(
+            "the person is using the computer; nothing was sent; try again in {retry_ms} ms"
+        ))
+    }
+}
+
+impl From<fdo::Error> for AgentError {
+    fn from(err: fdo::Error) -> Self {
+        Self::Fdo(err)
+    }
+}
+
+impl zbus::DBusError for AgentError {
+    fn create_reply(&self, call: &Header<'_>) -> zbus::Result<Message> {
+        match self {
+            Self::Fdo(err) => err.create_reply(call),
+            other => Message::error(call, other.name())?
+                .build(&(other.description().unwrap_or_default(),)),
+        }
+    }
+
+    fn name(&self) -> ErrorName<'_> {
+        match self {
+            Self::Fdo(err) => err.name(),
+            Self::FocusMoved => ErrorName::from_static_str_unchecked(FOCUS_MOVED_ERROR),
+            Self::UserActive(_) => ErrorName::from_static_str_unchecked(USER_ACTIVE_ERROR),
+        }
+    }
+
+    fn description(&self) -> Option<&str> {
+        match self {
+            Self::Fdo(err) => err.description(),
+            Self::FocusMoved => Some(FOCUS_MOVED_MESSAGE),
+            Self::UserActive(message) => Some(message),
+        }
+    }
 }
 
 /// 에이전트 입력 요청의 답을 기다린다
-fn answer<T>(answer: mpsc::Receiver<Result<T, Refused>>) -> fdo::Result<T> {
+fn answer<T>(answer: mpsc::Receiver<Result<T, Refused>>) -> Result<T, AgentError> {
     answer_within(answer, AGENT_REPLY)
 }
 
-fn answer_within<T>(answer: mpsc::Receiver<Result<T, Refused>>, wait: Duration) -> fdo::Result<T> {
+fn answer_within<T>(
+    answer: mpsc::Receiver<Result<T, Refused>>,
+    wait: Duration,
+) -> Result<T, AgentError> {
     match answer.recv_timeout(wait) {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(Refused::AuthDialog)) => Err(fdo::Error::AccessDenied(
+        Ok(Err(why)) => Err(refusal(why)),
+        Err(_) => Err(fdo::Error::Failed("the compositor did not answer".into()).into()),
+    }
+}
+
+/// 에이전트에게 알리는 거절과 할 일
+fn refusal(why: Refused) -> AgentError {
+    let err = match why {
+        Refused::FocusMoved => return AgentError::FocusMoved,
+        Refused::UserActive { retry_ms } => return AgentError::user_active(retry_ms),
+        Refused::AuthDialog => fdo::Error::AccessDenied(
             "a window only the user can answer is open (authentication, network password, Bluetooth \
-             pairing or clipboard history)"
+             pairing, clipboard history or AI control)"
                 .into(),
-        )),
-        Ok(Err(Refused::NotOnLayout(missing))) => Err(fdo::Error::InvalidArgs(format!(
+        ),
+        Refused::NotOnLayout(missing) => fdo::Error::InvalidArgs(format!(
             "{missing:?} is not on the keyboard layout; fill the field instead"
-        ))),
-        Ok(Err(Refused::NoWindow)) => Err(fdo::Error::Failed(
-            "that window is gone; list the windows again".into(),
         )),
-        Ok(Err(Refused::Outside { width, height })) => Err(fdo::Error::InvalidArgs(format!(
+        Refused::NoWindow => {
+            fdo::Error::Failed("that window is gone; list the windows again".into())
+        }
+        Refused::Outside { width, height } => fdo::Error::InvalidArgs(format!(
             "the point is outside the window ({width}x{height} pixels in its screenshot)"
-        ))),
-        Ok(Err(Refused::Covered)) => Err(fdo::Error::Failed(
+        )),
+        Refused::OffWindow { width, height } => fdo::Error::InvalidArgs(format!(
+            "the point is outside the window ({width}x{height} logical pixels from its top-left \
+             corner); nothing was sent"
+        )),
+        Refused::Covered => fdo::Error::Failed(
             "something else is on top of that point (a dialog, another window, the Dock or the \
              menu bar), so nothing was clicked; take a new screenshot"
                 .into(),
-        )),
-        Ok(Err(Refused::CaptureFailed)) => Err(fdo::Error::Failed(
-            "the compositor could not draw the window".into(),
-        )),
-        Ok(Err(Refused::Locked)) => Err(fdo::Error::AccessDenied(
+        ),
+        Refused::CaptureFailed => {
+            fdo::Error::Failed("the compositor could not draw the window".into())
+        }
+        Refused::Locked => fdo::Error::AccessDenied(
             "the screen is locked; only the user can unlock it with their password".into(),
-        )),
-        Ok(Err(Refused::NotShown)) => Err(fdo::Error::Failed(
+        ),
+        Refused::NotShown => fdo::Error::Failed(
             "that part of the shell is not under that point: it is hidden (the menu bar and the \
              Dock can hide automatically) or something covers it, so nothing was clicked"
                 .into(),
-        )),
-        Ok(Err(Refused::Keyboard)) => Err(fdo::Error::AccessDenied(
+        ),
+        Refused::Keyboard => fdo::Error::AccessDenied(
             "that point is on the on-screen keyboard, which only people press; enter keys with \
              PressKeys or TypeText"
                 .into(),
-        )),
-        Err(_) => Err(fdo::Error::Failed("the compositor did not answer".into())),
-    }
+        ),
+    };
+    AgentError::Fdo(err)
 }
 
 /// 에이전트가 친 글이 간 길
@@ -362,6 +443,46 @@ pub enum AgentRequest {
         pid: u32,
         namespace: String,
         reply: mpsc::Sender<Result<(Image, f64), Refused>>,
+    },
+    /// 그 pid의 창(제목이 같은 것 먼저)이 키보드 포커스를 가졌을 때만 키를 차례로 누른다 (R1)
+    KeysOn {
+        pid: u32,
+        title: String,
+        chords: Vec<Chord>,
+        reply: mpsc::Sender<Result<(), Refused>>,
+    },
+    /// 그 창이 키보드 포커스를 가졌을 때만 글을 친다 (Type과 같은 길)
+    TypeOn {
+        pid: u32,
+        title: String,
+        text: String,
+        reply: mpsc::Sender<Result<Typed, Refused>>,
+    },
+    /// 그 창이 키보드 포커스를 가졌을 때만 켜진 글 입력에 글을 확정한다 (Commit과 같은 길)
+    CommitOn {
+        pid: u32,
+        title: String,
+        text: String,
+        reply: mpsc::Sender<Result<bool, Refused>>,
+    },
+    /// 그 창 안의 점(창 기준 논리 좌표)을 누른다. 누른 화면의 논리 좌표를 돌려준다
+    ClickOn {
+        pid: u32,
+        title: String,
+        x: f64,
+        y: f64,
+        button: u32,
+        reply: mpsc::Sender<Result<(f64, f64), Refused>>,
+    },
+    /// 그 창 안의 점(창 기준 논리 좌표)에서 휠을 돌린다
+    ScrollOn {
+        pid: u32,
+        title: String,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+        reply: mpsc::Sender<Result<(), Refused>>,
     },
 }
 
@@ -701,6 +822,37 @@ async fn check_shell(
     }
 }
 
+/// 누를 점이 수인지
+fn check_point(x: f64, y: f64) -> fdo::Result<()> {
+    if x.is_finite() && y.is_finite() {
+        Ok(())
+    } else {
+        Err(fdo::Error::InvalidArgs("x and y must be numbers".into()))
+    }
+}
+
+/// 휠을 돌릴 점이 수이고 눈금 수가 MAX_NOTCHES 안인지
+fn check_wheel(x: f64, y: f64, dx: f64, dy: f64) -> fdo::Result<()> {
+    if [x, y, dx, dy].iter().all(|value| value.is_finite())
+        && dx.abs() <= MAX_NOTCHES
+        && dy.abs() <= MAX_NOTCHES
+    {
+        Ok(())
+    } else {
+        Err(fdo::Error::InvalidArgs(format!(
+            "x and y must be numbers, dx and dy at most {MAX_NOTCHES} notches"
+        )))
+    }
+}
+
+/// 키 이름들 (PressKeys, PressKeysOn)
+fn parse_chords(keys: &[String]) -> fdo::Result<Vec<Chord>> {
+    keys.iter()
+        .map(|key| parse_chord(key))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(fdo::Error::InvalidArgs)
+}
+
 /// "ctrl+s", "shift+Tab", "Return" 같은 키 이름. 수정 키는 ctrl, shift, alt(option), super(cmd)다
 fn parse_chord(text: &str) -> Result<Chord, String> {
     let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
@@ -818,7 +970,7 @@ impl Api {
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
-    ) -> fdo::Result<bool> {
+    ) -> Result<bool, AgentError> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::TextInput(reply)))?;
@@ -831,7 +983,7 @@ impl Api {
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
-    ) -> fdo::Result<Vec<(u32, String, String, i32, i32, i32, i32, bool)>> {
+    ) -> Result<Vec<(u32, String, String, i32, i32, i32, i32, bool)>, AgentError> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Windows(reply)))?;
@@ -861,7 +1013,7 @@ impl Api {
         #[zbus(connection)] connection: &zbus::Connection,
         pid: u32,
         title: String,
-    ) -> fdo::Result<bool> {
+    ) -> Result<bool, AgentError> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Activate { pid, title, reply }))?;
@@ -875,13 +1027,9 @@ impl Api {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
         keys: Vec<String>,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), AgentError> {
         check_agent(connection, &header).await?;
-        let chords = keys
-            .iter()
-            .map(|key| parse_chord(key))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(fdo::Error::InvalidArgs)?;
+        let chords = parse_chords(&keys)?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Keys { chords, reply }))?;
         answer(receiver)
@@ -895,7 +1043,7 @@ impl Api {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
         text: String,
-    ) -> fdo::Result<String> {
+    ) -> Result<String, AgentError> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Type { text, reply }))?;
@@ -914,11 +1062,9 @@ impl Api {
         x: f64,
         y: f64,
         button: u32,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), AgentError> {
         check_agent(connection, &header).await?;
-        if !x.is_finite() || !y.is_finite() {
-            return Err(fdo::Error::InvalidArgs("x and y must be numbers".into()));
-        }
+        check_point(x, y)?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Click {
             x,
@@ -939,16 +1085,9 @@ impl Api {
         y: f64,
         dx: f64,
         dy: f64,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), AgentError> {
         check_agent(connection, &header).await?;
-        if ![x, y, dx, dy].iter().all(|value| value.is_finite())
-            || dx.abs() > MAX_NOTCHES
-            || dy.abs() > MAX_NOTCHES
-        {
-            return Err(fdo::Error::InvalidArgs(format!(
-                "x and y must be numbers, dx and dy at most {MAX_NOTCHES} notches"
-            )));
-        }
+        check_wheel(x, y, dx, dy)?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Scroll {
             x,
@@ -968,7 +1107,7 @@ impl Api {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
         text: String,
-    ) -> fdo::Result<bool> {
+    ) -> Result<bool, AgentError> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Commit { text, reply }))?;
@@ -984,7 +1123,7 @@ impl Api {
         #[zbus(connection)] connection: &zbus::Connection,
         pid: u32,
         title: String,
-    ) -> fdo::Result<(u32, u32, f64, Vec<u8>)> {
+    ) -> Result<(u32, u32, f64, Vec<u8>), AgentError> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Capture { pid, title, reply }))?;
@@ -1008,11 +1147,9 @@ impl Api {
         x: f64,
         y: f64,
         button: u32,
-    ) -> fdo::Result<(f64, f64)> {
+    ) -> Result<(f64, f64), AgentError> {
         check_agent(connection, &header).await?;
-        if !x.is_finite() || !y.is_finite() {
-            return Err(fdo::Error::InvalidArgs("x and y must be numbers".into()));
-        }
+        check_point(x, y)?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::ClickWindow {
             pid,
@@ -1033,7 +1170,7 @@ impl Api {
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
-    ) -> fdo::Result<Vec<(u32, String, i32, i32, i32, i32, f64)>> {
+    ) -> Result<Vec<(u32, String, i32, i32, i32, i32, f64)>, AgentError> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::Layers(reply)))?;
@@ -1068,11 +1205,9 @@ impl Api {
         x: f64,
         y: f64,
         button: u32,
-    ) -> fdo::Result<(f64, f64)> {
+    ) -> Result<(f64, f64), AgentError> {
         check_agent(connection, &header).await?;
-        if !x.is_finite() || !y.is_finite() {
-            return Err(fdo::Error::InvalidArgs("x and y must be numbers".into()));
-        }
+        check_point(x, y)?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::ClickLayer {
             pid,
@@ -1100,16 +1235,9 @@ impl Api {
         y: f64,
         dx: f64,
         dy: f64,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), AgentError> {
         check_agent(connection, &header).await?;
-        if ![x, y, dx, dy].iter().all(|value| value.is_finite())
-            || dx.abs() > MAX_NOTCHES
-            || dy.abs() > MAX_NOTCHES
-        {
-            return Err(fdo::Error::InvalidArgs(format!(
-                "x and y must be numbers, dx and dy at most {MAX_NOTCHES} notches"
-            )));
-        }
+        check_wheel(x, y, dx, dy)?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::ScrollLayer {
             pid,
@@ -1132,7 +1260,7 @@ impl Api {
         #[zbus(connection)] connection: &zbus::Connection,
         pid: u32,
         namespace: String,
-    ) -> fdo::Result<(u32, u32, f64, Vec<u8>)> {
+    ) -> Result<(u32, u32, f64, Vec<u8>), AgentError> {
         check_agent(connection, &header).await?;
         let (reply, receiver) = mpsc::channel();
         self.request(Request::Agent(AgentRequest::CaptureLayer {
@@ -1145,6 +1273,135 @@ impl Api {
         write_png(&image, &mut png)
             .map_err(|err| fdo::Error::Failed(format!("cannot make the PNG: {err}")))?;
         Ok((image.width, image.height, scale, png))
+    }
+
+    /// 에이전트 전용: 그 pid의 창(제목이 같은 것 먼저, 없으면 맨 위)이 키보드 포커스를 가졌을 때만 키를 차례로 누른다.
+    /// 키 이름은 PressKeys와 같다. 포커스를 확인하고 키를 넣는 일은 컴포지터의 한 차례에 한다. 포커스가 그 창에 없으면
+    /// (사람이 옮겼다) FocusMoved, 사람이 치는 중이면 UserActive로 거절하고 아무것도 보내지 않는다
+    async fn press_keys_on(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        title: String,
+        keys: Vec<String>,
+    ) -> Result<(), AgentError> {
+        check_agent(connection, &header).await?;
+        let chords = parse_chords(&keys)?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::KeysOn {
+            pid,
+            title,
+            chords,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
+    /// 에이전트 전용: 그 창이 키보드 포커스를 가졌을 때만 글을 친다. 길과 답("text-input" 또는 "keys")은 TypeText와 같고,
+    /// 거절은 PressKeysOn과 같다
+    async fn type_text_on(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        title: String,
+        text: String,
+    ) -> Result<String, AgentError> {
+        check_agent(connection, &header).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::TypeOn {
+            pid,
+            title,
+            text,
+            reply,
+        }))?;
+        Ok(match answer(receiver)? {
+            Typed::TextInput => "text-input",
+            Typed::Keys => "keys",
+        }
+        .into())
+    }
+
+    /// 에이전트 전용: 그 창이 키보드 포커스를 가졌을 때만 켜진 글 입력에 글을 확정한다. 켜진 글 입력이 없으면 false다
+    /// (CommitText와 같다). 거절은 PressKeysOn과 같다
+    async fn commit_text_on(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        title: String,
+        text: String,
+    ) -> Result<bool, AgentError> {
+        check_agent(connection, &header).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::CommitOn {
+            pid,
+            title,
+            text,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
+    /// 에이전트 전용: 그 창 안의 (x, y)를 누른다. x, y는 창 기준 논리 좌표다: 창 영역(xdg 창 영역)의 왼쪽 위가 (0, 0)이고
+    /// AT-SPI GetExtents(COORD_TYPE_WINDOW)와 같은 틀이다. 그 창의 열린 메뉴는 창 밖이어도 누른다. 키보드 포커스가 그 창에
+    /// 없으면 먼저 앞으로 가져온다(ClickWindow와 같다). 그 점에서 포인터가 그 창에 가지 않으면(창 밖, 다른 창·막대에 가림)
+    /// 누르지 않는다. 사람이 포인터를 쓰는 중이면, 포커스를 옮겨야 할 때는 사람이 키보드를 쓰는 중이어도 UserActive로
+    /// 거절한다. 누른 화면의 논리 좌표를 돌려준다
+    #[allow(clippy::too_many_arguments)]
+    async fn click_on(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        title: String,
+        x: f64,
+        y: f64,
+        button: u32,
+    ) -> Result<(f64, f64), AgentError> {
+        check_agent(connection, &header).await?;
+        check_point(x, y)?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::ClickOn {
+            pid,
+            title,
+            x,
+            y,
+            button,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
+    /// 에이전트 전용: 그 창 안의 (x, y)로 포인터를 옮겨 휠을 돌린다. 좌표는 ClickOn, 눈금은 Scroll과 같다. 창을 앞으로
+    /// 가져오지 않고 돌리며, 그 점이 다른 창에 가렸거나 창이 내려져 있을 때만 가져온다. 포인터가 새 표면에 들어가 100ms
+    /// 기다린 뒤 돌릴 때도 같은 확인을 다시 한다. 거절은 ClickOn과 같다
+    #[allow(clippy::too_many_arguments)]
+    async fn scroll_on(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        title: String,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    ) -> Result<(), AgentError> {
+        check_agent(connection, &header).await?;
+        check_wheel(x, y, dx, dy)?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::ScrollOn {
+            pid,
+            title,
+            x,
+            y,
+            dx,
+            dy,
+            reply,
+        }))?;
+        answer(receiver)
     }
 
     /// 키보드 포커스: (클라이언트 pid, 앱 ID나 레이어 이름, 창 제목, 레이어 표면인지).
@@ -1722,7 +1979,10 @@ mod tests {
         let refusal = |why: Refused| {
             let (reply, receiver) = mpsc::channel::<Result<(), Refused>>();
             reply.send(Err(why)).unwrap();
-            answer(receiver).unwrap_err()
+            match answer(receiver).unwrap_err() {
+                AgentError::Fdo(err) => err,
+                other => panic!("{other:?}"),
+            }
         };
         match refusal(Refused::Outside {
             width: 800,
@@ -1755,12 +2015,68 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // 창 기준 논리 좌표의 창 밖은 논리 크기로 알린다
+        match refusal(Refused::OffWindow {
+            width: 640,
+            height: 480,
+        }) {
+            fdo::Error::InvalidArgs(message) => {
+                assert!(message.contains("640x480 logical pixels"), "{message}");
+                assert!(message.contains("nothing was sent"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // 사람만 답하는 창에는 셸의 AI 제어 창도 있다
+        match refusal(Refused::AuthDialog) {
+            fdo::Error::AccessDenied(message) => {
+                assert!(message.contains("AI control"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
         // 답이 없으면 기다린 뒤 실패한다
         let (_reply, receiver) = mpsc::channel::<Result<(), Refused>>();
         assert!(matches!(
             answer_within(receiver, Duration::from_millis(1)),
-            Err(fdo::Error::Failed(_))
+            Err(AgentError::Fdo(fdo::Error::Failed(_)))
         ));
+    }
+
+    /// 사람 우선 규칙의 거절은 계약의 D-Bus 오류 이름과 메시지로 간다. 데몬은 UserActive의 메시지에서 `in (\d+) ms`를
+    /// 읽는다. 전부터 있던 거절은 fdo 이름 그대로다
+    #[test]
+    fn people_first_refusals_have_their_own_error_names() {
+        use zbus::DBusError;
+
+        let refused = |why: Refused| {
+            let (reply, receiver) = mpsc::channel::<Result<(), Refused>>();
+            reply.send(Err(why)).unwrap();
+            let err = answer(receiver).unwrap_err();
+            (
+                err.name().to_string(),
+                err.description().unwrap_or_default().to_string(),
+            )
+        };
+        assert_eq!(
+            refused(Refused::FocusMoved),
+            (
+                "org.buntos.Compositor1.Error.FocusMoved".to_string(),
+                "the keyboard focus is not on that window any more (the person moved it); \
+                 nothing was sent"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            refused(Refused::UserActive { retry_ms: 1234 }),
+            (
+                "org.buntos.Compositor1.Error.UserActive".to_string(),
+                "the person is using the computer; nothing was sent; try again in 1234 ms"
+                    .to_string()
+            )
+        );
+        let (name, _) = refused(Refused::NoWindow);
+        assert_eq!(name, "org.freedesktop.DBus.Error.Failed");
+        let (name, _) = refused(Refused::Locked);
+        assert_eq!(name, "org.freedesktop.DBus.Error.AccessDenied");
     }
 
     /// 셸과 화면 키보드가 쓰는 입력 모드 API를 진짜 세션 버스에서 본다: 서비스 스레드가 이름을 얻고,
@@ -1850,13 +2166,128 @@ mod tests {
         assert_eq!(input_mode().unwrap(), "touch");
     }
 
+    /// 대상을 받는 입력의 거절을 진짜 세션 버스에서 본다(input_mode 시험과 같은 틀). 에이전트 전용 메서드는 다른
+    /// 프로그램에 fdo의 AccessDenied로 답하고, 사람 우선 규칙의 거절은 계약의 이름과 메시지로 버스에 실린다
+    #[test]
+    fn people_first_errors_on_a_session_bus() {
+        use smithay::reexports::calloop::channel;
+        use zbus::proxy::CacheProperties;
+
+        const DBUS_RUN_SESSION: &str = "/usr/bin/dbus-run-session";
+        const INSIDE: &str = "BUNT_COMP_TEST_SESSION_BUS";
+        const TEST: &str = "dbus::tests::people_first_errors_on_a_session_bus";
+        const WAIT: Duration = Duration::from_secs(10);
+
+        if std::env::var_os(INSIDE).is_none() {
+            if !std::path::Path::new(DBUS_RUN_SESSION).exists() {
+                eprintln!("no {DBUS_RUN_SESSION}; skipping");
+                return;
+            }
+            let output = std::process::Command::new(DBUS_RUN_SESSION)
+                .arg("--")
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(INSIDE, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let (requests, _channel) = channel::channel();
+        let _service = Service::start(requests);
+        let connection = blocking::Connection::session().unwrap();
+        let proxy: blocking::Proxy<'_> = blocking::proxy::Builder::new(&connection)
+            .destination(BUS_NAME)
+            .unwrap()
+            .path(OBJECT_PATH)
+            .unwrap()
+            .interface(INTERFACE)
+            .unwrap()
+            .cache_properties(CacheProperties::No)
+            .build()
+            .unwrap();
+        let error_name = |err: zbus::Error| match err {
+            zbus::Error::MethodError(name, ..) => name.to_string(),
+            other => panic!("{other:?}"),
+        };
+        // 에이전트 전용 메서드는 buntd-agent가 아닌 프로그램에 fdo 이름 그대로 거절한다. 서비스 스레드가 버스에 붙어
+        // 이름을 얻을 때까지 기다린다
+        let deadline = std::time::Instant::now() + WAIT;
+        let keys = loop {
+            let name = error_name(
+                proxy
+                    .call::<_, _, ()>("PressKeysOn", &(1u32, "", vec!["a"]))
+                    .unwrap_err(),
+            );
+            if name == "org.freedesktop.DBus.Error.AccessDenied"
+                || std::time::Instant::now() >= deadline
+            {
+                break name;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(keys, "org.freedesktop.DBus.Error.AccessDenied");
+
+        // 사람 우선 거절의 이름과 메시지가 그대로 버스에 실린다
+        struct Refuser;
+        #[interface(name = "org.buntos.Test1")]
+        impl Refuser {
+            fn refuse(&self, which: u32) -> Result<(), AgentError> {
+                Err(match which {
+                    0 => AgentError::FocusMoved,
+                    _ => AgentError::user_active(250),
+                })
+            }
+        }
+        let _server = blocking::connection::Builder::session()
+            .unwrap()
+            .name("org.buntos.Test.Refuser")
+            .unwrap()
+            .serve_at("/org/buntos/Test", Refuser)
+            .unwrap()
+            .build()
+            .unwrap();
+        let refuser: blocking::Proxy<'_> = blocking::proxy::Builder::new(&connection)
+            .destination("org.buntos.Test.Refuser")
+            .unwrap()
+            .path("/org/buntos/Test")
+            .unwrap()
+            .interface("org.buntos.Test1")
+            .unwrap()
+            .cache_properties(CacheProperties::No)
+            .build()
+            .unwrap();
+        for (which, name, text) in [
+            (0u32, FOCUS_MOVED_ERROR, FOCUS_MOVED_MESSAGE),
+            (
+                1,
+                USER_ACTIVE_ERROR,
+                "the person is using the computer; nothing was sent; try again in 250 ms",
+            ),
+        ] {
+            match refuser.call::<_, _, ()>("Refuse", &(which,)).unwrap_err() {
+                zbus::Error::MethodError(got, Some(message), _) => {
+                    assert_eq!(got.as_str(), name);
+                    assert_eq!(message, text);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     /// 에이전트가 화면 키보드를 누르려 하면 키를 넣는 제 길을 알린다 (osk.rs)
     #[test]
     fn keyboard_refusals_point_the_agent_to_its_own_keys() {
         let (reply, receiver) = mpsc::channel::<Result<(), Refused>>();
         reply.send(Err(Refused::Keyboard)).unwrap();
         match answer(receiver).unwrap_err() {
-            fdo::Error::AccessDenied(message) => {
+            AgentError::Fdo(fdo::Error::AccessDenied(message)) => {
                 assert!(message.contains("on-screen keyboard"), "{message}");
                 assert!(message.contains("PressKeys"), "{message}");
             }

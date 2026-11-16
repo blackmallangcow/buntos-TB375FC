@@ -234,6 +234,11 @@ impl Touch {
         self.pointer_idle
     }
 
+    /// 화면에 사람의 손가락이 닿아 있는지. 에이전트는 손가락을 쓰지 않는다 (agent_guard.rs의 사람 우선 규칙)
+    pub fn fingers_down(&self) -> bool {
+        !self.fingers.is_empty()
+    }
+
     /// 사람이 포인터를 움직였다 (input.rs의 pointer_moved). 손가락으로 꺼낸 막대는 포인터의 규칙(막대를 떠나면 잠시 뒤
     /// 숨기)으로 돌아간다
     pub fn pointer_moved(&mut self) {

@@ -4,6 +4,8 @@
 //! bunt-comp: buntOS Wayland 컴포지터 (Smithay 기반, ARCHITECTURE D4)
 
 mod agent;
+// 사람과 AI가 함께 쓸 때 사람을 먼저 두는 규칙, AI 멈춤과 활동
+mod agent_guard;
 mod background_effect;
 mod blur;
 mod clipboard;

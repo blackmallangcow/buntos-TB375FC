@@ -566,6 +566,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             SessionEvent::PauseSession => {
                 libinput.suspend();
                 state.backend.drm.pause();
+                // 다른 가상 터미널로 가면 누르고 있던 키와 단추를 떼는 이벤트가 오지 않는다 (agent_guard.rs)
+                state.agent_guard.human.release_all();
             }
             SessionEvent::ActivateSession => {
                 if libinput.resume().is_err() {

@@ -628,6 +628,8 @@ impl BuntState {
             plan(keymap, layout, key)
         });
         let (code, shift) = planned.map_err(KeysRefused::NotOnLayout)?;
+        // 사람이 화면 키보드로 친 키다: 에이전트는 사람이 치는 동안 기다린다 (agent_guard.rs)
+        self.note_on_screen_typing();
         // 앱에 옮겨 보내며 되풀이하던 단축키는 다른 키를 누르면 멈춘다 (input.rs의 on_keyboard와 같다)
         self.stop_key_repeat();
         let time = self.start_time.elapsed().as_millis() as u32;
@@ -665,11 +667,24 @@ impl BuntState {
             return Err(KeysRefused::NotOffered(command));
         }
         if let Some(Hit::Send { keys, .. }) = shortcuts::action_of(command.shortcut(), place) {
+            self.note_on_screen_typing();
             // 앱에 옮겨 보내며 되풀이하던 단축키는 다른 키를 누르면 멈춘다 (input.rs의 on_keyboard와 같다)
             self.stop_key_repeat();
             self.send_keys(&keys);
         }
         Ok(())
+    }
+
+    /// 사람이 화면 키보드로 키나 단축 줄 단추를 눌렀다. 실제 키보드의 키처럼 적는다. 셸 표면(모든 앱 패널의 검색 칸)에
+    /// 친 것은 앱에 친 글이 아니다
+    fn note_on_screen_typing(&mut self) {
+        let to_app = self
+            .keyboard_focus()
+            .and_then(|surface| self.display_handle.get_client(surface.id()).ok())
+            .is_some_and(|client| !may_use(client.get_data::<ClientState>()));
+        self.agent_guard
+            .human
+            .tapped(to_app, std::time::Instant::now());
     }
 
     /// 지금 켜진 글 입력이 암호 칸이라고 알렸는지
