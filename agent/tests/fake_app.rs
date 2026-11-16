@@ -19,7 +19,7 @@ use std::{
 };
 
 use bunt_agent::{
-    atspi::A11y,
+    atspi::{self, A11y},
     tree::{Item, Range, iface, role},
 };
 use futures_util::StreamExt;
@@ -241,4 +241,27 @@ fn values_are_read_one_property_at_a_time() {
     ];
     assert_eq!(gets(SLIDER), expected);
     assert_eq!(gets(UNKNOWN), expected);
+
+    // 호출 기록 (이슈 #1 P1-3): 버스, 경로, 인터페이스, 메서드, 인자, 오류가 남는다
+    let calls: Vec<atspi::Call> = atspi::recent_calls()
+        .into_iter()
+        .filter(|call| call.destination == app)
+        .collect();
+    assert_eq!(calls.len(), 6, "{calls:?}");
+    let failed: Vec<&atspi::Call> = calls.iter().filter(|call| call.error.is_some()).collect();
+    assert_eq!(failed.len(), 1, "{calls:?}");
+    assert_eq!(failed[0].path, UNKNOWN);
+    assert_eq!(failed[0].interface, PROPERTIES);
+    assert_eq!(failed[0].method, "Get");
+    assert_eq!(failed[0].arguments, "org.a11y.atspi.Value, MinimumValue");
+    assert!(
+        failed[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("org.freedesktop.DBus.Error.Failed"),
+        "{failed:?}"
+    );
+    // 덤프는 로그만 쓴다
+    atspi::dump_calls(Some(&app), "the fake app went away");
 }

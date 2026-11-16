@@ -942,7 +942,8 @@ impl A11y {
     }
 }
 
-/// D-Bus 호출 하나. 바쁘거나 멈춘 앱 하나가 데몬 전체를 붙잡지 않게 기다리는 시간을 둔다
+/// D-Bus 호출 하나. 바쁘거나 멈춘 앱 하나가 데몬 전체를 붙잡지 않게 기다리는 시간을 둔다. 호출마다 기록을
+/// 남긴다([`record`])
 async fn call_on<B, R>(
     connection: &Connection,
     timeout: Duration,
@@ -956,13 +957,223 @@ where
     B: Serialize + DynamicType,
     R: DeserializeOwned + Type,
 {
+    let arguments = call_arguments(interface, method, body);
+    let started = Instant::now();
     let call = connection.call_method(Some(destination), path, Some(interface), method, body);
-    match select(pin!(call), pin!(Timer::after(timeout))).await {
-        Either::Left((reply, _)) => reply?.body().deserialize(),
+    let result = match select(pin!(call), pin!(Timer::after(timeout))).await {
+        Either::Left((reply, _)) => reply.and_then(|reply| reply.body().deserialize()),
         Either::Right(_) => Err(zbus::Error::Failure(format!(
             "{destination} did not answer {interface}.{method} within {}s",
             timeout.as_secs()
         ))),
+    };
+    record(Call {
+        destination: destination.to_string(),
+        path: path.to_string(),
+        interface: interface.to_string(),
+        method: method.to_string(),
+        arguments,
+        ended: Instant::now(),
+        took: started.elapsed(),
+        error: result.as_ref().err().map(|err| shorten(&err.to_string())),
+    });
+    result
+}
+
+/// 기억하는 최근 D-Bus 호출 수 (이슈 #1 P1-3). 대상 앱이 요청 도중 끝나면 그 앱에 보낸 호출을 경고로 남겨
+/// ([`dump_calls`]) 어느 호출이 앱을 끝냈는지 로그로 알 수 있게 한다. P0 때는 소스를 읽고서야 GetAll을 찾았다
+const CALLS_KEPT: usize = 64;
+/// 기록에 남기는 인자와 오류 글의 글자 수
+const CALL_TEXT: usize = 160;
+
+/// 최근 호출 기록 (모든 버스, 끝난 차례)
+static CALLS: std::sync::Mutex<std::collections::VecDeque<Call>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// 끝난 D-Bus 호출 하나
+#[derive(Clone, Debug)]
+pub struct Call {
+    /// 받는 버스 이름 (앱의 접근성 버스 이름, org.buntos.Compositor 등)
+    pub destination: String,
+    pub path: String,
+    pub interface: String,
+    pub method: String,
+    /// Properties.Get·GetAll의 인자(인터페이스와 속성 이름). 다른 호출의 인자는 남기지 않는다: 넣는 글(type,
+    /// fill)이 로그에 남으면 안 된다
+    pub arguments: String,
+    pub ended: Instant,
+    pub took: Duration,
+    /// 오류 (성공했으면 None)
+    pub error: Option<String>,
+}
+
+impl std::fmt::Display for Call {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ms ago: {} {} {}.{}({}) took {} ms",
+            self.ended.elapsed().as_millis(),
+            self.destination,
+            self.path,
+            self.interface,
+            self.method,
+            self.arguments,
+            self.took.as_millis()
+        )?;
+        match &self.error {
+            Some(error) => write!(f, ", failed: {error}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// 호출을 debug 수준 로그(`RUST_LOG=info,bunt_agent::atspi=debug`)와 최근 호출 기록에 남긴다
+fn record(call: Call) {
+    tracing::debug!(
+        bus = %call.destination,
+        path = %call.path,
+        interface = %call.interface,
+        method = %call.method,
+        arguments = %call.arguments,
+        ms = call.took.as_millis() as u64,
+        error = call.error.as_deref().unwrap_or(""),
+        "D-Bus call"
+    );
+    let mut calls = CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if calls.len() >= CALLS_KEPT {
+        calls.pop_front();
+    }
+    calls.push_back(call);
+}
+
+/// 최근 호출 기록 (오래된 것부터)
+pub fn recent_calls() -> Vec<Call> {
+    CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// 요청 도중 대상 앱이 사라졌을 때, 그 앱(`bus`, 없으면 모든 버스)에 보낸 최근 호출을 warn 수준으로 남긴다
+pub fn dump_calls(bus: Option<&str>, why: &str) {
+    let calls: Vec<Call> = recent_calls()
+        .into_iter()
+        .filter(|call| bus.is_none_or(|bus| call.destination == bus))
+        .collect();
+    let to = bus.map_or_else(|| "any bus".to_string(), |bus| bus.to_string());
+    tracing::warn!(
+        "{why}; the last {} D-Bus calls to {to} (of the last {CALLS_KEPT} calls) follow",
+        calls.len()
+    );
+    for call in &calls {
+        tracing::warn!("  {call}");
+    }
+}
+
+/// 기록에 남길 인자: Properties.Get·GetAll이면 인터페이스와 속성 이름, 아니면 빈 글
+fn call_arguments<B: Serialize>(interface: &str, method: &str, body: &B) -> String {
+    if interface != PROPERTIES || !matches!(method, "Get" | "GetAll") {
+        return String::new();
+    }
+    match serde_json::to_value(body) {
+        Ok(serde_json::Value::Array(values)) => shorten(
+            &values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        _ => String::new(),
+    }
+}
+
+/// 기록에 남길 글을 CALL_TEXT자까지 자른다
+fn shorten(text: &str) -> String {
+    match text.char_indices().nth(CALL_TEXT) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod call_log {
+    use super::*;
+
+    fn call(destination: &str, method: &str) -> Call {
+        Call {
+            destination: destination.into(),
+            path: ROOT.into(),
+            interface: ACCESSIBLE.into(),
+            method: method.into(),
+            arguments: String::new(),
+            ended: Instant::now(),
+            took: Duration::from_millis(3),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn only_property_names_are_kept_as_arguments() {
+        assert_eq!(
+            call_arguments(PROPERTIES, "Get", &("org.a11y.atspi.Value", "MinimumValue")),
+            "org.a11y.atspi.Value, MinimumValue"
+        );
+        assert_eq!(
+            call_arguments(PROPERTIES, "GetAll", &("org.a11y.atspi.Value",)),
+            "org.a11y.atspi.Value"
+        );
+        // 넣는 글은 남기지 않는다
+        assert_eq!(
+            call_arguments(
+                "org.a11y.atspi.EditableText",
+                "SetTextContents",
+                &("secret",)
+            ),
+            ""
+        );
+        assert_eq!(
+            call_arguments(
+                "org.buntos.Compositor1",
+                "TypeText",
+                &("hunter2".to_string(),)
+            ),
+            ""
+        );
+        let long = "x".repeat(500);
+        assert_eq!(
+            call_arguments(PROPERTIES, "Get", &(long.as_str(), "y"))
+                .chars()
+                .count(),
+            CALL_TEXT + 1
+        );
+    }
+
+    #[test]
+    fn the_log_keeps_the_latest_calls() {
+        // 다른 시험도 기록을 쓰므로 이 시험의 버스 이름만 본다
+        for at in 0..CALLS_KEPT + 10 {
+            record(call(":test.log", &format!("M{at}")));
+        }
+        let calls = recent_calls();
+        assert!(calls.len() <= CALLS_KEPT);
+        let ours: Vec<&str> = calls
+            .iter()
+            .filter(|call| call.destination == ":test.log")
+            .map(|call| call.method.as_str())
+            .collect();
+        assert_eq!(ours.last(), Some(&format!("M{}", CALLS_KEPT + 9).as_str()));
+        assert!(!ours.contains(&"M0"));
+        let mut failed = call(":test.log", "GetItems");
+        failed.error = Some("org.freedesktop.DBus.Error.NoReply: gone".into());
+        let line = failed.to_string();
+        assert!(
+            line.contains(":test.log /org/a11y/atspi/accessible/root org.a11y.atspi.Accessible.GetItems() took 3 ms, failed: org.freedesktop.DBus.Error.NoReply"),
+            "{line}"
+        );
     }
 }
 

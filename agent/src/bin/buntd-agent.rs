@@ -1300,17 +1300,9 @@ impl Agent {
             .await
         {
             Ok(settled) => settled,
-            // 동작이 앱을 끝냈다 (닫기, 문서 버리기): 동작은 됐으므로 실패로 알리지 않는다. 실패로 보이면
-            // AI가 같은 동작을 되풀이할 수 있다
-            Err(_) if a11y.pid(&bus).await.is_none() => {
-                return Ok(Acted {
-                    done: format!("{done}; then the app quit (window {window_title:?} closed)"),
-                    diff: String::new(),
-                    settled_ms: 0,
-                    settled: true,
-                    observed: false,
-                    new_windows: Vec::new(),
-                });
+            // 동작이 앱을 끝냈다 (닫기, 문서 버리기)
+            Err(_) if app_gone(&a11y, &bus).await => {
+                return Ok(quit_after(&bus, &done, &window_title, 0));
             }
             Err(failure) => return Err(failure),
         };
@@ -1723,6 +1715,29 @@ impl Agent {
             pid: window.pid,
         })
     }
+}
+
+/// 동작 뒤 앱이 끝났다는 답. 동작은 됐으므로 실패로 알리지 않는다: 실패로 보이면 AI가 같은 동작을 되풀이할 수
+/// 있다. 그 앱에 보낸 최근 접근성 호출을 경고로 남긴다(이슈 #1 P1-3): 어느 호출에 앱이 끝났는지 로그로 알 수 있다
+fn quit_after(bus: &str, done: &str, window_title: &str, settled_ms: u64) -> Acted {
+    atspi::dump_calls(
+        Some(bus),
+        &format!("{bus} quit during an action on its window {window_title:?}"),
+    );
+    Acted {
+        done: format!("{done}; then the app quit (window {window_title:?} closed)"),
+        diff: String::new(),
+        settled_ms,
+        settled: true,
+        observed: false,
+        new_windows: Vec::new(),
+    }
+}
+
+/// 앱이 끝났는지: 그 접근성 버스 이름의 주인이 없다. 고유 이름(:1.33)은 다시 쓰이지 않으므로 다시 뜬 앱도 끝난
+/// 것으로 본다
+async fn app_gone(a11y: &A11y, bus: &str) -> bool {
+    a11y.pid(bus).await.is_none()
 }
 
 /// 동작 뒤 기다린 결과
