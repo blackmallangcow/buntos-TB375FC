@@ -1,0 +1,704 @@
+From: buntOS contributors
+Subject: [PATCH] rtc: mt6685: add the alarm
+
+Stock wakes the tablet with this alarm every 10 seconds while a charger is
+in, to look after the battery. Without alarm operations and a wakeup
+source the alarm timers have no RTC to wake the system with, and systemd
+says "/dev/rtc0 not enabled for wakeup events".
+
+The alarm registers hold the same fields as the time. Their other bits
+belong to the bootloader and to Android, so they are written back as read.
+The day of the week is masked, as in the MediaTek driver. All of it goes to
+the RTC with one write trigger, so that no half written alarm goes off, and
+it is read back to check that it took.
+
+The interrupt comes from the interrupt controller of the PMIC, which keeps
+it masked while the thread runs and clears its own status. Reading IRQ_STA
+clears that of the RTC. After an alarm, BBPU and IRQ_EN get what the
+MediaTek driver writes then: the alarm off, then its status reset, with
+PWREN set.
+
+At shutdown an alarm still on is turned off and PWREN cleared, as the
+MediaTek driver leaves the RTC after every shutdown. Left on, the alarm
+would power the device on, and the bootloader would turn it off again as an
+unknown boot.
+
+Without an interrupt in the device tree there is no alarm, as before.
+
+Tested on a Lenovo TB375FC: an alarm while awake comes as one interrupt
+and leaves the alarm off, and alarms woke the system from suspend to
+idle 30 times, each at its second.
+---
+ drivers/rtc/rtc-mt6685.c |  491 ++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 449 insertions(+), 42 deletions(-)
+
+diff --git a/drivers/rtc/rtc-mt6685.c b/drivers/rtc/rtc-mt6685.c
+--- a/drivers/rtc/rtc-mt6685.c
++++ b/drivers/rtc/rtc-mt6685.c
+@@ -10,8 +10,14 @@
+  *
+  * The bootloader and the other operating system on a device keep what they need
+  * in this block too: the reason for a boot, the state of the power key, a
+- * power-off alarm. So this driver only reads and sets the time, and its regmap
+- * refuses to write anywhere else.
++ * power-off alarm. So this driver writes only the time, the fields of the
++ * alarm, its interrupt and what the MediaTek driver writes to BBPU for the
++ * alarm, and its regmap refuses to write anywhere else. The alarm fields share
++ * their registers with values of the others, which are written back as read.
++ *
++ * The alarm can wake the system. It comes through the interrupt controller of
++ * the PMIC, and it is turned off when it goes off and at shutdown, so that it
++ * never powers the device on.
+  */
+ 
+ #include <linux/array_size.h>
+@@ -19,9 +25,12 @@
+ #include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/err.h>
++#include <linux/interrupt.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_wakeirq.h>
+ #include <linux/regmap.h>
+ #include <linux/rtc.h>
+ #include <linux/spmi.h>
+@@ -42,13 +51,34 @@
+  * registers are 16 bits wide, in two bytes on the SPMI bus.
+  */
+ #define MT6685_RTC_BBPU			0x588
++/* Lets the alarm power the device on */
++#define  MT6685_RTC_BBPU_PWREN		BIT(0)
++/* Written, clears AL_STA */
++#define  MT6685_RTC_BBPU_RESET_AL	BIT(3)
+ #define  MT6685_RTC_BBPU_CBUSY		BIT(6)
++#define  MT6685_RTC_BBPU_AL_STA		BIT(7)
++/* Written to the high byte with every write of BBPU */
++#define  MT6685_RTC_BBPU_KEY		0x43
++/* Reading it clears it */
++#define MT6685_RTC_IRQ_STA		0x58a
++#define  MT6685_RTC_IRQ_STA_AL		BIT(0)
++#define MT6685_RTC_IRQ_EN		0x58c
++#define  MT6685_RTC_IRQ_EN_AL		BIT(0)
++#define MT6685_RTC_AL_MASK		0x590
++/* The alarm leaves out the day of the week, as in the MediaTek driver */
++#define  MT6685_RTC_AL_MASK_DOW		BIT(4)
+ #define MT6685_RTC_TC_SEC		0x592
+ #define MT6685_RTC_TC_MIN		0x594
+ #define MT6685_RTC_TC_HOU		0x596
+ #define MT6685_RTC_TC_DOM		0x598
+ #define MT6685_RTC_TC_MTH		0x59c
+ #define MT6685_RTC_TC_YEA		0x59e
++#define MT6685_RTC_AL_SEC		0x5a0
++#define MT6685_RTC_AL_MIN		0x5a2
++#define MT6685_RTC_AL_HOU		0x5a4
++#define MT6685_RTC_AL_DOM		0x5a6
++#define MT6685_RTC_AL_MTH		0x5aa
++#define MT6685_RTC_AL_YEA		0x5ac
+ #define MT6685_RTC_WRTGR		0x5c2
+ /* Tells if the registers are locked, read only through debugfs */
+ #define MT6685_RTC_SPAR_MACRO		0x5d8
+@@ -87,10 +117,21 @@ enum mt6685_rtc_tc_field {
+  * The time is in the low bytes. The MediaTek driver writes the day of the week
+  * from an unset variable and never reads it, so it is not here.
+  */
+-static const struct {
++struct mt6685_rtc_field {
+ 	u16 reg;
+ 	u8 mask;
+-} mt6685_rtc_tc_regs[MT6685_TC_COUNT] = {
++};
++
++struct mt6685_rtc {
++	struct device *dev;
++	struct regmap *map;
++	struct rtc_device *rdev;
++	int irq;			/* 0 without an alarm */
++	/* One sequence of register writes and the write trigger at a time */
++	struct mutex lock;
++};
++
++static const struct mt6685_rtc_field mt6685_rtc_tc_regs[MT6685_TC_COUNT] = {
+ 	[MT6685_TC_SEC] = { MT6685_RTC_TC_SEC, GENMASK(5, 0) },
+ 	[MT6685_TC_MIN] = { MT6685_RTC_TC_MIN, GENMASK(5, 0) },
+ 	[MT6685_TC_HOUR] = { MT6685_RTC_TC_HOU, GENMASK(4, 0) },
+@@ -99,6 +140,16 @@ static const struct {
+ 	[MT6685_TC_YEAR] = { MT6685_RTC_TC_YEA, GENMASK(6, 0) },
+ };
+ 
++/* The low bytes of the alarm, the same fields as the time */
++static const struct mt6685_rtc_field mt6685_rtc_al_regs[MT6685_TC_COUNT] = {
++	[MT6685_TC_SEC] = { MT6685_RTC_AL_SEC, GENMASK(5, 0) },
++	[MT6685_TC_MIN] = { MT6685_RTC_AL_MIN, GENMASK(5, 0) },
++	[MT6685_TC_HOUR] = { MT6685_RTC_AL_HOU, GENMASK(4, 0) },
++	[MT6685_TC_DOM] = { MT6685_RTC_AL_DOM, GENMASK(4, 0) },
++	[MT6685_TC_MON] = { MT6685_RTC_AL_MTH, GENMASK(3, 0) },
++	[MT6685_TC_YEAR] = { MT6685_RTC_AL_YEA, GENMASK(6, 0) },
++};
++
+ /*
+  * The counter runs from its own clock. The registers show it only after they
+  * have had their clocks for a moment, and a write needs the clocks to take
+@@ -147,17 +198,69 @@ static int mt6685_rtc_write_reg(struct regmap *map, unsigned int reg,
+ 	return regmap_write(map, reg + 1, 0);
+ }
+ 
+-static int mt6685_rtc_read_tc(struct regmap *map, struct rtc_time *tm)
++/* Changes the bits of a low byte, with the high byte written back as read */
++static int mt6685_rtc_update_reg(struct regmap *map, unsigned int reg,
++				 unsigned int mask, unsigned int val)
++{
++	unsigned int lo, hi;
++	int ret;
++
++	ret = regmap_read(map, reg, &lo);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(map, reg + 1, &hi);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(map, reg, (lo & ~mask) | (val & mask));
++	if (ret)
++		return ret;
++
++	return regmap_write(map, reg + 1, hi);
++}
++
++/* BBPU takes a write only with its key in the high byte */
++static int mt6685_rtc_write_bbpu(struct regmap *map, unsigned int val)
++{
++	int ret;
++
++	ret = regmap_write(map, MT6685_RTC_BBPU, val);
++	if (ret)
++		return ret;
++
++	return regmap_write(map, MT6685_RTC_BBPU + 1, MT6685_RTC_BBPU_KEY);
++}
++
++/* What was written reaches the counter and the alarm with this, all at once */
++static int mt6685_rtc_trigger(struct regmap *map)
++{
++	unsigned int bbpu;
++	int ret;
++
++	ret = mt6685_rtc_write_reg(map, MT6685_RTC_WRTGR, 1);
++	if (ret)
++		return ret;
++
++	return regmap_read_poll_timeout(map, MT6685_RTC_BBPU, bbpu,
++					!(bbpu & MT6685_RTC_BBPU_CBUSY),
++					MT6685_RTC_CBUSY_POLL_US,
++					MT6685_RTC_CBUSY_TIMEOUT_US);
++}
++
++static int mt6685_rtc_read_fields(struct regmap *map,
++				  const struct mt6685_rtc_field *regs,
++				  struct rtc_time *tm)
+ {
+ 	unsigned int val[MT6685_TC_COUNT];
+ 	int i, ret;
+ 
+ 	for (i = 0; i < MT6685_TC_COUNT; i++) {
+-		ret = regmap_read(map, mt6685_rtc_tc_regs[i].reg, &val[i]);
++		ret = regmap_read(map, regs[i].reg, &val[i]);
+ 		if (ret)
+ 			return ret;
+ 
+-		val[i] &= mt6685_rtc_tc_regs[i].mask;
++		val[i] &= regs[i].mask;
+ 	}
+ 
+ 	tm->tm_sec = val[MT6685_TC_SEC];
+@@ -170,18 +273,47 @@ static int mt6685_rtc_read_tc(struct regmap *map, struct rtc_time *tm)
+ 	return 0;
+ }
+ 
++static int mt6685_rtc_read_tc(struct regmap *map, struct rtc_time *tm)
++{
++	return mt6685_rtc_read_fields(map, mt6685_rtc_tc_regs, tm);
++}
++
++static void mt6685_rtc_fields(const struct rtc_time *tm,
++			      unsigned int val[MT6685_TC_COUNT])
++{
++	val[MT6685_TC_SEC] = tm->tm_sec;
++	val[MT6685_TC_MIN] = tm->tm_min;
++	val[MT6685_TC_HOUR] = tm->tm_hour;
++	val[MT6685_TC_DOM] = tm->tm_mday;
++	val[MT6685_TC_MON] = tm->tm_mon + 1;
++	val[MT6685_TC_YEAR] = tm->tm_year - MT6685_RTC_YEAR_OFFSET;
++}
++
++/* Only the alarm's bits: the rest of these registers belongs to the others */
++static int mt6685_rtc_write_al(struct regmap *map, const struct rtc_time *tm)
++{
++	unsigned int val[MT6685_TC_COUNT];
++	int i, ret;
++
++	mt6685_rtc_fields(tm, val);
++
++	for (i = 0; i < MT6685_TC_COUNT; i++) {
++		ret = mt6685_rtc_update_reg(map, mt6685_rtc_al_regs[i].reg,
++					    mt6685_rtc_al_regs[i].mask, val[i]);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
+ static int mt6685_rtc_write_tc(struct regmap *map, const struct rtc_time *tm)
+ {
+-	const unsigned int val[MT6685_TC_COUNT] = {
+-		[MT6685_TC_SEC] = tm->tm_sec,
+-		[MT6685_TC_MIN] = tm->tm_min,
+-		[MT6685_TC_HOUR] = tm->tm_hour,
+-		[MT6685_TC_DOM] = tm->tm_mday,
+-		[MT6685_TC_MON] = tm->tm_mon + 1,
+-		[MT6685_TC_YEAR] = tm->tm_year - MT6685_RTC_YEAR_OFFSET,
+-	};
++	unsigned int val[MT6685_TC_COUNT];
+ 	int i, ret;
+ 
++	mt6685_rtc_fields(tm, val);
++
+ 	for (i = 0; i < MT6685_TC_COUNT; i++) {
+ 		ret = mt6685_rtc_write_reg(map, mt6685_rtc_tc_regs[i].reg,
+ 					   val[i]);
+@@ -205,13 +337,16 @@ static int mt6685_rtc_refresh(struct regmap *map)
+ 	return ret ?: ret_gate;
+ }
+ 
+-static int mt6685_rtc_read_time(struct device *dev, struct rtc_time *tm)
++static int mt6685_rtc_read_tc_locked(struct mt6685_rtc *rtc,
++				     struct rtc_time *tm)
+ {
+-	struct regmap *map = dev_get_drvdata(dev);
++	struct regmap *map = rtc->map;
+ 	int tries = MT6685_RTC_READ_TRIES;
+ 	unsigned int sec;
+ 	int ret;
+ 
++	guard(mutex)(&rtc->lock);
++
+ 	do {
+ 		if (!tries--)
+ 			return -EIO;
+@@ -229,6 +364,18 @@ static int mt6685_rtc_read_time(struct device *dev, struct rtc_time *tm)
+ 			return ret;
+ 	} while ((sec & mt6685_rtc_tc_regs[MT6685_TC_SEC].mask) < tm->tm_sec);
+ 
++	return 0;
++}
++
++static int mt6685_rtc_read_time(struct device *dev, struct rtc_time *tm)
++{
++	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
++	int ret;
++
++	ret = mt6685_rtc_read_tc_locked(rtc, tm);
++	if (ret)
++		return ret;
++
+ 	ret = rtc_valid_tm(tm);
+ 	if (ret)
+ 		return ret;
+@@ -272,22 +419,13 @@ static int mt6685_rtc_verify_time(struct device *dev, struct regmap *map,
+ static int mt6685_rtc_write_time(struct device *dev, struct regmap *map,
+ 				 struct rtc_time *tm)
+ {
+-	unsigned int bbpu;
+ 	int ret;
+ 
+ 	ret = mt6685_rtc_write_tc(map, tm);
+ 	if (ret)
+ 		return ret;
+ 
+-	/* The time reaches the counter with this, all at once */
+-	ret = mt6685_rtc_write_reg(map, MT6685_RTC_WRTGR, 1);
+-	if (ret)
+-		return ret;
+-
+-	ret = regmap_read_poll_timeout(map, MT6685_RTC_BBPU, bbpu,
+-				       !(bbpu & MT6685_RTC_BBPU_CBUSY),
+-				       MT6685_RTC_CBUSY_POLL_US,
+-				       MT6685_RTC_CBUSY_TIMEOUT_US);
++	ret = mt6685_rtc_trigger(map);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -296,9 +434,12 @@ static int mt6685_rtc_write_time(struct device *dev, struct regmap *map,
+ 
+ static int mt6685_rtc_set_time(struct device *dev, struct rtc_time *tm)
+ {
+-	struct regmap *map = dev_get_drvdata(dev);
++	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
++	struct regmap *map = rtc->map;
+ 	int ret, ret_gate;
+ 
++	guard(mutex)(&rtc->lock);
++
+ 	ret = mt6685_rtc_ungate(map);
+ 	if (!ret)
+ 		ret = mt6685_rtc_write_time(dev, map, tm);
+@@ -308,15 +449,195 @@ static int mt6685_rtc_set_time(struct device *dev, struct rtc_time *tm)
+ 	return ret ?: ret_gate;
+ }
+ 
++static int mt6685_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alm)
++{
++	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
++	struct regmap *map = rtc->map;
++	unsigned int en, bbpu;
++	int ret;
++
++	guard(mutex)(&rtc->lock);
++
++	ret = mt6685_rtc_refresh(map);
++	if (ret)
++		return ret;
++
++	ret = mt6685_rtc_read_fields(map, mt6685_rtc_al_regs, &alm->time);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(map, MT6685_RTC_IRQ_EN, &en);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(map, MT6685_RTC_BBPU, &bbpu);
++	if (ret)
++		return ret;
++
++	alm->enabled = !!(en & MT6685_RTC_IRQ_EN_AL);
++	alm->pending = !!(bbpu & MT6685_RTC_BBPU_AL_STA);
++
++	return 0;
++}
++
++static int mt6685_rtc_write_alarm(struct mt6685_rtc *rtc,
++				  struct rtc_wkalrm *alm)
++{
++	struct regmap *map = rtc->map;
++	struct rtc_time have;
++	int ret;
++
++	ret = mt6685_rtc_write_al(map, &alm->time);
++	if (ret)
++		return ret;
++
++	ret = mt6685_rtc_write_reg(map, MT6685_RTC_AL_MASK,
++				   MT6685_RTC_AL_MASK_DOW);
++	if (ret)
++		return ret;
++
++	ret = mt6685_rtc_update_reg(map, MT6685_RTC_IRQ_EN,
++				    MT6685_RTC_IRQ_EN_AL,
++				    alm->enabled ? MT6685_RTC_IRQ_EN_AL : 0);
++	if (ret)
++		return ret;
++
++	/* All of it at once, so that no half written alarm goes off */
++	ret = mt6685_rtc_trigger(map);
++	if (ret)
++		return ret;
++
++	ret = mt6685_rtc_read_fields(map, mt6685_rtc_al_regs, &have);
++	if (ret)
++		return ret;
++
++	if (rtc_tm_to_time64(&have) != rtc_tm_to_time64(&alm->time)) {
++		dev_err(rtc->dev,
++			"the RTC did not take the alarm: wrote %ptR, reads %ptR\n",
++			&alm->time, &have);
++		return -EIO;
++	}
++
++	return 0;
++}
++
++static int mt6685_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
++{
++	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
++	int ret, ret_gate;
++
++	guard(mutex)(&rtc->lock);
++
++	ret = mt6685_rtc_ungate(rtc->map);
++	if (!ret)
++		ret = mt6685_rtc_write_alarm(rtc, alm);
++
++	ret_gate = mt6685_rtc_gate(rtc->map);
++
++	return ret ?: ret_gate;
++}
++
++static int mt6685_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
++{
++	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
++	struct regmap *map = rtc->map;
++	int ret, ret_gate;
++
++	guard(mutex)(&rtc->lock);
++
++	ret = mt6685_rtc_ungate(map);
++	if (!ret)
++		ret = mt6685_rtc_update_reg(map, MT6685_RTC_IRQ_EN,
++					    MT6685_RTC_IRQ_EN_AL,
++					    enabled ? MT6685_RTC_IRQ_EN_AL : 0);
++	if (!ret)
++		ret = mt6685_rtc_trigger(map);
++
++	ret_gate = mt6685_rtc_gate(map);
++
++	return ret ?: ret_gate;
++}
++
+ static const struct rtc_class_ops mt6685_rtc_ops = {
+ 	.read_time = mt6685_rtc_read_time,
+ 	.set_time = mt6685_rtc_set_time,
++	.read_alarm = mt6685_rtc_read_alarm,
++	.set_alarm = mt6685_rtc_set_alarm,
++	.alarm_irq_enable = mt6685_rtc_alarm_irq_enable,
+ };
+ 
++/*
++ * After the alarm, as the MediaTek driver does it: off, and its status in BBPU
++ * cleared. PWREN stays as that driver leaves it. Called with the clocks on.
++ */
++static int mt6685_rtc_alarm_done(struct regmap *map)
++{
++	int ret;
++
++	ret = mt6685_rtc_write_bbpu(map, MT6685_RTC_BBPU_PWREN);
++	if (ret)
++		return ret;
++
++	ret = mt6685_rtc_update_reg(map, MT6685_RTC_IRQ_EN,
++				    MT6685_RTC_IRQ_EN_AL, 0);
++	if (ret)
++		return ret;
++
++	ret = mt6685_rtc_trigger(map);
++	if (ret)
++		return ret;
++
++	ret = mt6685_rtc_write_bbpu(map, MT6685_RTC_BBPU_PWREN |
++				    MT6685_RTC_BBPU_RESET_AL);
++	if (ret)
++		return ret;
++
++	return mt6685_rtc_trigger(map);
++}
++
++/*
++ * The interrupt controller of the PMIC keeps this masked until it returns, and
++ * clears its own status. The status of the RTC clears when read.
++ */
++static irqreturn_t mt6685_rtc_irq(int irq, void *data)
++{
++	struct mt6685_rtc *rtc = data;
++	struct regmap *map = rtc->map;
++	unsigned int sta = 0;
++	int ret;
++
++	scoped_guard(mutex, &rtc->lock) {
++		ret = mt6685_rtc_ungate(map);
++		if (!ret)
++			ret = regmap_read(map, MT6685_RTC_IRQ_STA, &sta);
++		if (!ret && (sta & MT6685_RTC_IRQ_STA_AL))
++			ret = mt6685_rtc_alarm_done(map);
++		if (ret)
++			dev_err_ratelimited(rtc->dev, "alarm interrupt: %d\n",
++					    ret);
++
++		mt6685_rtc_gate(map);
++	}
++
++	if (!sta)
++		return IRQ_NONE;
++
++	if (sta & MT6685_RTC_IRQ_STA_AL)
++		rtc_update_irq(rtc->rdev, 1, RTC_IRQF | RTC_AF);
++
++	return IRQ_HANDLED;
++}
++
++/* The day of the week of the alarm (0x5a8) is left out: it is masked */
+ static const struct regmap_range mt6685_rtc_wr_ranges[] = {
+ 	regmap_reg_range(MT6685_SCK_TOP_CKPDN_SET, MT6685_SCK_TOP_CKPDN_CLR),
++	regmap_reg_range(MT6685_RTC_BBPU, MT6685_RTC_BBPU + 1),
++	regmap_reg_range(MT6685_RTC_IRQ_EN, MT6685_RTC_IRQ_EN + 1),
++	regmap_reg_range(MT6685_RTC_AL_MASK, MT6685_RTC_AL_MASK + 1),
+ 	regmap_reg_range(MT6685_RTC_TC_SEC, MT6685_RTC_TC_DOM + 1),
+ 	regmap_reg_range(MT6685_RTC_TC_MTH, MT6685_RTC_TC_YEA + 1),
++	regmap_reg_range(MT6685_RTC_AL_SEC, MT6685_RTC_AL_DOM + 1),
++	regmap_reg_range(MT6685_RTC_AL_MTH, MT6685_RTC_AL_YEA + 1),
+ 	regmap_reg_range(MT6685_RTC_WRTGR, MT6685_RTC_WRTGR + 1),
+ };
+ 
+@@ -325,11 +646,14 @@ static const struct regmap_access_table mt6685_rtc_wr_table = {
+ 	.n_yes_ranges = ARRAY_SIZE(mt6685_rtc_wr_ranges),
+ };
+ 
+-/* Keeps debugfs away from the registers that change when read, like IRQ_STA */
+ static const struct regmap_range mt6685_rtc_rd_ranges[] = {
+ 	regmap_reg_range(MT6685_HWCID, MT6685_HWCID),
+ 	regmap_reg_range(MT6685_SCK_TOP_CKPDN, MT6685_SCK_TOP_CKPDN),
+ 	regmap_reg_range(MT6685_RTC_BBPU, MT6685_RTC_BBPU),
++	regmap_reg_range(MT6685_RTC_IRQ_STA, MT6685_RTC_IRQ_STA),
++	regmap_reg_range(MT6685_RTC_IRQ_EN, MT6685_RTC_IRQ_EN + 1),
++	regmap_reg_range(MT6685_RTC_AL_SEC, MT6685_RTC_AL_DOM + 1),
++	regmap_reg_range(MT6685_RTC_AL_MTH, MT6685_RTC_AL_YEA + 1),
+ 	regmap_reg_range(MT6685_RTC_TC_SEC, MT6685_RTC_TC_SEC),
+ 	regmap_reg_range(MT6685_RTC_TC_MIN, MT6685_RTC_TC_MIN),
+ 	regmap_reg_range(MT6685_RTC_TC_HOU, MT6685_RTC_TC_HOU),
+@@ -344,12 +668,23 @@ static const struct regmap_access_table mt6685_rtc_rd_table = {
+ 	.n_yes_ranges = ARRAY_SIZE(mt6685_rtc_rd_ranges),
+ };
+ 
++/* Keeps debugfs away from what changes when read */
++static const struct regmap_range mt6685_rtc_precious_ranges[] = {
++	regmap_reg_range(MT6685_RTC_IRQ_STA, MT6685_RTC_IRQ_STA),
++};
++
++static const struct regmap_access_table mt6685_rtc_precious_table = {
++	.yes_ranges = mt6685_rtc_precious_ranges,
++	.n_yes_ranges = ARRAY_SIZE(mt6685_rtc_precious_ranges),
++};
++
+ static const struct regmap_config mt6685_rtc_regmap_config = {
+ 	.reg_bits = 16,
+ 	.val_bits = 8,
+ 	.max_register = MT6685_RTC_SPAR_MACRO,
+ 	.wr_table = &mt6685_rtc_wr_table,
+ 	.rd_table = &mt6685_rtc_rd_table,
++	.precious_table = &mt6685_rtc_precious_table,
+ };
+ 
+ static void mt6685_rtc_remove_sdev(void *data)
+@@ -384,27 +719,98 @@ static struct regmap *mt6685_rtc_init_regmap(struct device *dev)
+ 	return devm_regmap_init_spmi_ext(sdev, &mt6685_rtc_regmap_config);
+ }
+ 
++/* The alarm as a wake-up source */
++static int mt6685_rtc_init_alarm(struct mt6685_rtc *rtc, int irq)
++{
++	struct device *dev = rtc->dev;
++	int ret;
++
++	ret = devm_request_threaded_irq(dev, irq, NULL, mt6685_rtc_irq,
++					IRQF_ONESHOT, dev_name(dev), rtc);
++	if (ret)
++		return ret;
++
++	rtc->irq = irq;
++
++	ret = devm_device_init_wakeup(dev);
++	if (ret)
++		return ret;
++
++	return devm_pm_set_wake_irq(dev, irq);
++}
++
+ static int mt6685_rtc_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+-	struct rtc_device *rdev;
+-	struct regmap *map;
++	struct mt6685_rtc *rtc;
++	int irq, ret;
++
++	rtc = devm_kzalloc(dev, sizeof(*rtc), GFP_KERNEL);
++	if (!rtc)
++		return -ENOMEM;
++
++	rtc->dev = dev;
++	ret = devm_mutex_init(dev, &rtc->lock);
++	if (ret)
++		return ret;
++
++	rtc->map = mt6685_rtc_init_regmap(dev);
++	if (IS_ERR(rtc->map))
++		return dev_err_probe(dev, PTR_ERR(rtc->map),
++				     "cannot get regmap\n");
++
++	platform_set_drvdata(pdev, rtc);
++
++	rtc->rdev = devm_rtc_allocate_device(dev);
++	if (IS_ERR(rtc->rdev))
++		return PTR_ERR(rtc->rdev);
++
++	rtc->rdev->ops = &mt6685_rtc_ops;
++	rtc->rdev->range_min = mktime64(1968, 1, 1, 0, 0, 0);
++	rtc->rdev->range_max = mktime64(2095, 12, 31, 23, 59, 59);
++
++	/* Without its interrupt in the device tree there is no alarm */
++	irq = platform_get_irq_optional(pdev, 0);
++	if (irq > 0) {
++		ret = mt6685_rtc_init_alarm(rtc, irq);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "cannot set up the alarm\n");
++	} else if (irq == -ENXIO) {
++		clear_bit(RTC_FEATURE_ALARM, rtc->rdev->features);
++	} else {
++		return irq;
++	}
++
++	return devm_rtc_register_device(rtc->rdev);
++}
++
++/*
++ * An alarm left on would power the device on, with no reason to boot. Off as
++ * the MediaTek driver leaves it at every shutdown, PWREN included.
++ */
++static void mt6685_rtc_shutdown(struct platform_device *pdev)
++{
++	struct mt6685_rtc *rtc = platform_get_drvdata(pdev);
++	struct regmap *map = rtc->map;
++	unsigned int en;
+ 
+-	map = mt6685_rtc_init_regmap(dev);
+-	if (IS_ERR(map))
+-		return dev_err_probe(dev, PTR_ERR(map), "cannot get regmap\n");
++	if (!rtc->irq)
++		return;
+ 
+-	platform_set_drvdata(pdev, map);
++	disable_irq(rtc->irq);
+ 
+-	rdev = devm_rtc_allocate_device(dev);
+-	if (IS_ERR(rdev))
+-		return PTR_ERR(rdev);
++	guard(mutex)(&rtc->lock);
+ 
+-	rdev->ops = &mt6685_rtc_ops;
+-	rdev->range_min = mktime64(1968, 1, 1, 0, 0, 0);
+-	rdev->range_max = mktime64(2095, 12, 31, 23, 59, 59);
++	if (!mt6685_rtc_ungate(map) &&
++	    !regmap_read(map, MT6685_RTC_IRQ_EN, &en) &&
++	    (en & MT6685_RTC_IRQ_EN_AL) &&
++	    !mt6685_rtc_write_bbpu(map, 0) &&
++	    !mt6685_rtc_update_reg(map, MT6685_RTC_IRQ_EN,
++				   MT6685_RTC_IRQ_EN_AL, 0))
++		mt6685_rtc_trigger(map);
+ 
+-	return devm_rtc_register_device(rdev);
++	mt6685_rtc_gate(map);
+ }
+ 
+ static const struct of_device_id mt6685_rtc_of_match[] = {
+@@ -419,6 +825,7 @@ static struct platform_driver mt6685_rtc_driver = {
+ 		.of_match_table = mt6685_rtc_of_match,
+ 	},
+ 	.probe = mt6685_rtc_probe,
++	.shutdown = mt6685_rtc_shutdown,
+ };
+ module_platform_driver(mt6685_rtc_driver);
+ 

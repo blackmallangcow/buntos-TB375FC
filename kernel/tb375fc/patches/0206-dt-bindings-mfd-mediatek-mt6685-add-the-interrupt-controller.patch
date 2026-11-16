@@ -1,0 +1,74 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: mfd: mediatek,mt6685: add the interrupt controller
+
+The MT6685 raises the alarm of its RTC on the SPMI bus as the other
+MediaTek SPMI PMICs raise their interrupts, from a status and an enable bit
+in its SCK_TOP registers. Describe it as an interrupt controller like them,
+with the same three cells, so that the RTC can take its alarm from it.
+
+It stays optional: where nothing takes the interrupt, the PMIC needs none
+of these properties.
+---
+ .../devicetree/bindings/mfd/mediatek,mt6685.yaml   |   19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
+--- a/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt6685.yaml
+@@ -12,7 +12,8 @@ maintainers:
+ 
+ description:
+   The clock buffer of the SoC together with an RTC and some auxiliary functions.
+-  Other devices read the state of the clock buffer from it.
++  Other devices read the state of the clock buffer from it. It has one
++  interrupt, number 0, which is that of the RTC.
+ 
+ properties:
+   compatible:
+@@ -21,6 +22,14 @@ properties:
+   reg:
+     maxItems: 1
+ 
++  interrupts:
++    maxItems: 1
++
++  interrupt-controller: true
++
++  '#interrupt-cells':
++    const: 3
++
+   '#address-cells':
+     const: 1
+ 
+@@ -38,10 +47,14 @@ required:
+   - '#address-cells'
+   - '#size-cells'
+ 
++dependencies:
++  interrupt-controller: [ interrupts, '#interrupt-cells' ]
++
+ additionalProperties: false
+ 
+ examples:
+   - |
++    #include <dt-bindings/interrupt-controller/irq.h>
+     #include <dt-bindings/spmi/spmi.h>
+ 
+     spmi {
+@@ -51,12 +64,16 @@ examples:
+         pmic@9 {
+             compatible = "mediatek,mt6685";
+             reg = <0x9 SPMI_USID>;
++            interrupts = <0x9 0 IRQ_TYPE_LEVEL_HIGH>;
++            interrupt-controller;
++            #interrupt-cells = <3>;
+             #address-cells = <1>;
+             #size-cells = <0>;
+ 
+             rtc@580 {
+                 compatible = "mediatek,mt6685-rtc";
+                 reg = <0x580>;
++                interrupts = <0x9 0 IRQ_TYPE_LEVEL_HIGH>;
+             };
+         };
+     };

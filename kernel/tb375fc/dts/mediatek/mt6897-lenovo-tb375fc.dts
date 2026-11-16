@@ -1378,26 +1378,30 @@
 
 	/*
 	 * Clock buffer, RTC and more. Nothing here touches the clock buffer. The
-	 * MFD driver only populates the children, and the connectivity driver reads
-	 * the frequency of the RF chip's clock from it.
+	 * MFD driver passes on the one interrupt, that of the RTC, and populates
+	 * the children. The connectivity driver reads the frequency of the RF
+	 * chip's clock from it.
 	 * TODO(2b): enable with the RTC, or with consys in 2d, whichever is first.
 	 */
 	mt6685: pmic@9 {
 		compatible = "mediatek,mt6685";
 		reg = <0x9 SPMI_USID>;
+		interrupts = <0x9 0 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-controller;
+		#interrupt-cells = <3>;
 		#address-cells = <1>;
 		#size-cells = <0>;
 		status = "disabled";
 
 		/*
-		 * The firmware's alarm interrupt is left out on purpose: the driver
-		 * has no alarm, and the PMIC has no interrupt controller yet.
+		 * The alarm wakes the system, as in the stock tree.
 		 * TODO(2b): enable to read and set the time. It writes the two clock
 		 * gates when reading, and the time when asked to.
 		 */
 		mt6685_rtc: rtc@580 {
 			compatible = "mediatek,mt6685-rtc";
 			reg = <0x580>;
+			interrupts = <0x9 0 IRQ_TYPE_LEVEL_HIGH>;
 			status = "disabled";
 		};
 	};

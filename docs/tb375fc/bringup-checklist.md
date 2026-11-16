@@ -579,7 +579,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
 
 ### 6.10 MT6685 RTC
 
-패치 0110~0113이고, 남은 알람은 PMIF 고침 0114와 함께 본다. 코드와 레지스터 모델로 확인했을 뿐 기기에서 돌려 보지 않았다. 모델도 벤더 자료로 만든 것이다. 2b의 USB 가젯 셸이 뜬 뒤에 한다. 안드로이드와 LK가 같은 칩을 쓰므로 읽기부터 한다.
+패치 0110~0113이고(알람과 깨우기는 0206~0208, 12번), 남은 알람은 PMIF 고침 0114와 함께 본다. 코드와 레지스터 모델로 확인했을 뿐 기기에서 돌려 보지 않았다. 모델도 벤더 자료로 만든 것이다. 2b의 USB 가젯 셸이 뜬 뒤에 한다. 안드로이드와 LK가 같은 칩을 쓰므로 읽기부터 한다.
 
 **넘어가기 전(안드로이드, adb, 잠긴 채로 된다):**
 
@@ -647,7 +647,7 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
     - 리눅스 → 안드로이드: `date -u`가 맞다. 안드로이드 알람이 울린다. 부팅 사유가 이상하지 않다. LK가 RTC를 다시 초기화하지 않는다(날짜가 2010 근처로 돌아가지 않는다).
     - 안드로이드 → 리눅스: 다시 맞다.
 
-9. [ ] `poweroff`를 본다. **드라이버가 벤더의 종료 쓰기를 하지 않는다.** 벤더는 종료마다 BBPU의 PWREN을 내리고(`0x588`) `TOP2_ELR1`(`0x12f`) bit 0을 올린다("Normal sequence power off when PON falling"). LK의 종료 콜백도 `0x129`에 1을 쓰고 `0x12f` bit 0을 올린다(`RG_SEQ_OFF`).
+9. [ ] `poweroff`를 본다. **드라이버는 벤더의 종료 쓰기 가운데 알람 끄기만 한다**(0208: 켜진 알람이 있을 때만 PWREN과 `IRQ_EN.AL`을 내린다). 벤더는 종료마다 BBPU의 PWREN을 내리고(`0x588`) `TOP2_ELR1`(`0x12f`) bit 0을 올린다("Normal sequence power off when PON falling"). LK의 종료 콜백도 `0x129`에 1을 쓰고 `0x12f` bit 0을 올린다(`RG_SEQ_OFF`).
 
     - 정말 꺼지는가(전류가 떨어지는가, 전원 키로 다시 켜지는가). 다시 켠 뒤 LK가 이상한 부팅 사유를 말하지 않는가.
     - 필요하면 그때 RTC나 MFD의 `.shutdown`에 넣는다. 지금은 넣지 않았다(이 칸은 시간과 알람이 아니다).
@@ -677,7 +677,18 @@ mtu3·xsphy, 보드 `dr_mode = "peripheral"`, configfs ACM + NCM이다. 2026-11-
     - **계속 나온다**(5초에 10줄까지, 그 뒤 `callbacks suppressed` 수가 는다. 느려지거나 멈출 수 있다): 칩이 RCS를 다시 내는 것이다. 0114로 모자란다. 1번의 줄을 지키고, 12번에서 칩 쪽 원인을 지우는 처리를 먼저 넣는다.
     - **아무 줄도 없다:** `SCK_TOP_INT_CON0`이 재부팅을 넘어 남지 않거나 LK가 지우는 것이다. 위험이 없으니 1번의 줄을 뺀다.
 
-12. [ ] 알람은 이 뒤에 정한다. 인터럽트 길을 기기에서 본 다음이다.
+12. [x] (2026-11-16, #325) 알람과 깨우기(패치 0206~0208). MFD가 MT6685의 인터럽트 하나(`SCK_TOP_INT_CON0`·`STATUS0`의 bit 0)를 받는 인터럽트 컨트롤러가 되어, 전원 키와 같은 길(SID 9 → PMIF → EINT 248)로 깨운다. 스레드가 도는 동안 칩에서 막혀 있다. RCS 완료 쓰기와 칩 ID 읽기는 하지 않는다(벤더도 하지 않는다).
+
+    ```bash
+    ls /sys/class/rtc/rtc0            # wakealarm, alarmtimer.0.auto
+    cat /sys/class/rtc/rtc0/device/power/wakeup
+    grep rtc@580 /proc/interrupts
+    ```
+
+    - 깨어 있을 때 `+5`초 알람: 인터럽트가 한 번 늘고(되풀이 없음) `wakealarm`이 비고 `alarm_IRQ: no`로 돌아왔다.
+    - s2idle 15초: 22:43:05에 잠들어 알람 시각 22:43:20에 스스로 깼다. 감시 잠자기 시험에서 10초 알람으로 16번 더 깼다(9.7절).
+    - 부팅 때 BBPU는 `0x01`(PWREN만)이었다(#323의 debugfs). 알람 뒤 드라이버가 쓰는 값도 벤더처럼 `KEY|PWREN`, 이어서 `RESET_AL`이다.
+    - **`rtcwake`로 시험하지 않는다.** systemd-sleep 훅(`buntos-usb-gadget`)을 건너뛰어 가젯이 붙은 채라 mtu3가 잠자기를 막는다(`ip sleep failed`, `-EBUSY`). `/usr/lib/systemd/systemd-sleep suspend`를 직접 부른다.
 
 **첫 소비자 메모:** 오디오(단계 3)의 `mt6368` 코덱이 BBCK5(`DCXO_EXTBUF5_CW0` `0x79e`)를 켠다. 벤더의 `mt6685_set_dcxo()` 대신 코덱이 `mediatek,dcxo`로 MT6685에 직접 쓴다(패치 0162).
 

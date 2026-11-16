@@ -1,0 +1,190 @@
+From: buntOS contributors
+Subject: [PATCH] mfd: mtk-spmi-pmic: take the interrupt of the MT6685 RTC
+
+The alarm of the MT6685 RTC reaches the SoC like the interrupts of the
+other PMICs here: bit 0 of SCK_TOP_INT_STATUS0 is set while bit 0 of
+SCK_TOP_INT_CON0 enables it, and the PMIC raises SID 9 on the SPMI
+controller. There is no group register, so this is one group with one
+interrupt. Handling it here keeps the interrupt masked in the PMIC while
+the RTC driver handles it, and the alarm wakes the system through the SPMI
+controller the way the power key of the MT6363 does.
+
+What differs from the others:
+
+ - No chip ID read and no RCS_IRQ_DONE write. Neither register is in what
+   is known of this chip, and the MediaTek drivers for it write nothing
+   after an interrupt.
+
+ - The regmap covers the two interrupt registers only. One over the whole
+   chip would let debugfs read the RTC registers that clear when read.
+
+ - The variant applies only to a node that is an interrupt controller.
+   Without that, probing still only populates the children, which is all
+   the connectivity subsystem needs.
+
+Probing masks and clears all eight bits, as for the other PMICs. The
+MediaTek drivers use only bit 0, and enable and clear it the same way.
+---
+ drivers/mfd/mtk-spmi-pmic.c |   85 +++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 74 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/mfd/mtk-spmi-pmic.c b/drivers/mfd/mtk-spmi-pmic.c
+--- a/drivers/mfd/mtk-spmi-pmic.c
++++ b/drivers/mfd/mtk-spmi-pmic.c
+@@ -31,6 +31,10 @@
+ #define MTK_SPMI_PMIC_REG_CHIP_ID	0xb
+ #define MTK_SPMI_PMIC_RCS_IRQ_DONE	0x41b
+ 
++/* The MT6685 has one interrupt, the one of its RTC, in bit 0 */
++#define MT6685_REG_SCK_TOP_INT_CON0	0x528
++#define MT6685_REG_SCK_TOP_INT_STATUS0	0x534
++
+ /**
+  * struct mtk_spmi_pmic_irq_grp - Group of interrupts in SPMI PMIC
+  * @hwirq_base:   First interrupt number of this group
+@@ -58,12 +62,20 @@ struct mtk_spmi_pmic_irq_grp {
+  *               group needs attention because of a group IRQ;
+  *               if this is zero, it means that there is only one
+  *               group and the device has no irqgroup register
++ * @regmap_config: Registers this driver may access, NULL for all of them
++ * @no_chip_id:  The PMIC has no chip ID at MTK_SPMI_PMIC_REG_CHIP_ID to
++ *               read for waking it up
++ * @no_rcs_done: The PMIC has no MTK_SPMI_PMIC_RCS_IRQ_DONE to write after
++ *               its interrupts were handled
+  */
+ struct mtk_spmi_pmic_variant {
+ 	const struct mtk_spmi_pmic_irq_grp *pmic_irq;
++	const struct regmap_config *regmap_config;
+ 	u8 num_groups;
+ 	u8 con_reg_len;
+ 	u8 irq_grp_reg;
++	bool no_chip_id;
++	bool no_rcs_done;
+ };
+ 
+ /**
+@@ -314,9 +326,11 @@ static void mtk_spmi_pmic_handle_chained_irq(struct irq_desc *desc)
+ 	}
+ 
+ 	/* The RCS flag has to be cleared even if the IRQ was not handled. */
+-	ret = regmap_write(regmap, MTK_SPMI_PMIC_RCS_IRQ_DONE, 1);
+-	if (ret)
+-		dev_warn(pmic->dev, "Could not clear RCS flag!\n");
++	if (!variant->no_rcs_done) {
++		ret = regmap_write(regmap, MTK_SPMI_PMIC_RCS_IRQ_DONE, 1);
++		if (ret)
++			dev_warn(pmic->dev, "Could not clear RCS flag!\n");
++	}
+ 
+ 	/* No group needing attention is very unlikely to happen: let it pass */
+ 	if (!irq_handled && val)
+@@ -370,9 +384,11 @@ static int mtk_spmi_pmic_irq_init(struct device *dev, struct regmap *regmap,
+ 		}
+ 	}
+ 
+-	ret = regmap_write(regmap, MTK_SPMI_PMIC_RCS_IRQ_DONE, 1);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "Cannot clear the RCS flag\n");
++	if (!variant->no_rcs_done) {
++		ret = regmap_write(regmap, MTK_SPMI_PMIC_RCS_IRQ_DONE, 1);
++		if (ret)
++			return dev_err_probe(dev, ret, "Cannot clear the RCS flag\n");
++	}
+ 
+ 	pmic->dom = irq_domain_create_tree(fwnode, &mtk_spmi_pmic_irq_domain_ops, pmic);
+ 	if (!pmic->dom)
+@@ -418,6 +434,10 @@ static const struct mtk_spmi_pmic_irq_grp mt6373_irq_groups[] = {
+ 	MTK_SPMI_PMIC_IRQ_GROUP(MT6373, MISC,	3, 56, 71),
+ };
+ 
++static const struct mtk_spmi_pmic_irq_grp mt6685_irq_groups[] = {
++	MTK_SPMI_PMIC_IRQ_GROUP(MT6685, SCK,	0,  0,  0),
++};
++
+ static const struct mtk_spmi_pmic_variant mt6363_variant = {
+ 	.pmic_irq = mt6363_irq_groups,
+ 	.num_groups = ARRAY_SIZE(mt6363_irq_groups),
+@@ -446,6 +466,43 @@ static const struct regmap_config mtk_spmi_regmap_config = {
+ 	.fast_io	= true,
+ };
+ 
++static const struct regmap_range mt6685_ranges[] = {
++	regmap_reg_range(MT6685_REG_SCK_TOP_INT_CON0, MT6685_REG_SCK_TOP_INT_CON0),
++	regmap_reg_range(MT6685_REG_SCK_TOP_INT_STATUS0, MT6685_REG_SCK_TOP_INT_STATUS0),
++};
++
++static const struct regmap_access_table mt6685_table = {
++	.yes_ranges	= mt6685_ranges,
++	.n_yes_ranges	= ARRAY_SIZE(mt6685_ranges),
++};
++
++/*
++ * Only the interrupt, so that debugfs can't read the registers of the RTC
++ * that clear when read.
++ */
++static const struct regmap_config mt6685_regmap_config = {
++	.reg_bits	= 16,
++	.val_bits	= MTK_SPMI_PMIC_VAL_BITS,
++	.max_register	= MT6685_REG_SCK_TOP_INT_STATUS0,
++	.rd_table	= &mt6685_table,
++	.wr_table	= &mt6685_table,
++	.fast_io	= true,
++};
++
++/*
++ * Neither of the registers the others have for waking the PMIC up and for
++ * ending an interrupt are known for this one, and the MediaTek drivers use
++ * neither. Its control registers are 16 bits wide, each with a SET and a CLR.
++ */
++static const struct mtk_spmi_pmic_variant mt6685_variant = {
++	.pmic_irq = mt6685_irq_groups,
++	.num_groups = ARRAY_SIZE(mt6685_irq_groups),
++	.con_reg_len = 6,
++	.regmap_config = &mt6685_regmap_config,
++	.no_chip_id = true,
++	.no_rcs_done = true,
++};
++
+ static int mtk_spmi_pmic_probe(struct spmi_device *sdev)
+ {
+ 	const struct mtk_spmi_pmic_variant *variant;
+@@ -454,12 +511,17 @@ static int mtk_spmi_pmic_probe(struct spmi_device *sdev)
+ 	unsigned int chip_id;
+ 	int ret;
+ 
+-	/* Without interrupts, the sub-devices need nothing from here */
++	/*
++	 * Without interrupts, the sub-devices need nothing from here. The
++	 * MT6685 is an interrupt controller only where something takes its
++	 * interrupt.
++	 */
+ 	variant = device_get_match_data(dev);
+-	if (!variant)
++	if (!variant || !of_property_present(dev->of_node, "interrupt-controller"))
+ 		return devm_of_platform_populate(dev);
+ 
+-	regmap = devm_regmap_init_spmi_ext(sdev, &mtk_spmi_regmap_config);
++	regmap = devm_regmap_init_spmi_ext(sdev, variant->regmap_config ?:
++					   &mtk_spmi_regmap_config);
+ 	if (IS_ERR(regmap))
+ 		return PTR_ERR(regmap);
+ 
+@@ -468,7 +530,8 @@ static int mtk_spmi_pmic_probe(struct spmi_device *sdev)
+ 	 * mode: wake it up with a read and ignore the result, as the MT6363
+ 	 * regulator driver does.
+ 	 */
+-	regmap_read(regmap, MTK_SPMI_PMIC_REG_CHIP_ID, &chip_id);
++	if (!variant->no_chip_id)
++		regmap_read(regmap, MTK_SPMI_PMIC_REG_CHIP_ID, &chip_id);
+ 
+ 	if (variant->num_groups) {
+ 		ret = mtk_spmi_pmic_irq_init(dev, regmap, variant);
+@@ -483,7 +546,7 @@ static const struct of_device_id mtk_pmic_spmi_id_table[] = {
+ 	{ .compatible = "mediatek,mt6363", .data = &mt6363_variant },
+ 	{ .compatible = "mediatek,mt6368", .data = &mt6368_variant },
+ 	{ .compatible = "mediatek,mt6373", .data = &mt6373_variant },
+-	{ .compatible = "mediatek,mt6685" },
++	{ .compatible = "mediatek,mt6685", .data = &mt6685_variant },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, mtk_pmic_spmi_id_table);
