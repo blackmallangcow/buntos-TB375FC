@@ -394,6 +394,14 @@ impl BuntState {
             })
     }
 
+    /// 에이전트가 창을 앞으로 가져와 포커스를 준다. 그 serial(키보드 들어옴)도 적어 둔다: 앱이 그 serial로 메뉴의 잡기를
+    /// 시작하면 사람의 잡기로 보지 않는다
+    fn agent_focus_window(&mut self, window: &Window) {
+        let serial = SERIAL_COUNTER.next_serial();
+        self.agent_guard.note_agent_serial(serial);
+        self.focus_window(window, serial);
+    }
+
     /// 그 점을 누를 때 사람의 무엇과 부딪치는지: 키보드 포커스가 옮겨 가면 키보드도
     fn press_touches(&self, pos: Point<f64, Logical>) -> Touches {
         if self.press_moves_focus(pos) {
@@ -504,7 +512,7 @@ impl BuntState {
             Reach::Never(why) => return Err(why),
             Reach::Behind => {
                 self.admit(Touches::FOCUS, now)?;
-                self.focus_window(&window, SERIAL_COUNTER.next_serial());
+                self.agent_focus_window(&window);
                 if !matches!(self.reach(&window, local), Reach::At(_)) {
                     return Err(Refused::Covered);
                 }
@@ -796,7 +804,7 @@ impl BuntState {
             return Ok(true);
         }
         self.admit(Touches::FOCUS, now)?;
-        self.focus_window(&window, SERIAL_COUNTER.next_serial());
+        self.agent_focus_window(&window);
         Ok(true)
     }
 
@@ -1102,7 +1110,7 @@ impl BuntState {
             now,
         )?;
         if !focused {
-            self.focus_window(&window, SERIAL_COUNTER.next_serial());
+            self.agent_focus_window(&window);
         }
         let pos = match self.reach(&window, local) {
             Reach::At(pos) => pos,
