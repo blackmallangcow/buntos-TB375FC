@@ -7,15 +7,16 @@
 //! - 데몬이 ShowAgentTarget으로 창 기준 논리 사각형을 알리면 TARGET_SHOWN_FOR(1.2초) 동안 보인다. 새 강조는 앞의 것을
 //!   바꾼다. 사람만 답하는 창이 떠 있거나 사람이 AI 제어를 멈춘 동안에는 받지 않는다(agent.rs).
 //! - 창을 따라 움직인다: 그릴 때마다 창의 지금 자리에 놓는다. 창 밖으로 나간 부분은 자르고, 창이 내려지면 그리지 않는다.
-//! - 입력을 받지 않는 그림일 뿐이다. 커서 바로 아래, 모든 창과 막대 위에 그린다(udev.rs). 에이전트의 창 그림
-//!   (capture_window)은 창만 그리므로 들지 않고, 사람의 스크린샷에도 커서처럼 넣지 않는다. 화면 기록에는 든다.
+//! - 입력을 받지 않는 그림일 뿐이다. 대상 창의 맨 앞 표면 바로 위에 그린다(udev.rs): 그 창을 덮은 창과 막대는 테두리도
+//!   덮어, 사람이 쓰는 창 위에 AI 테두리가 뜨지 않는다. 에이전트의 창 그림(capture_window)은 창만 그리므로 들지 않고,
+//!   사람의 스크린샷에도 커서처럼 넣지 않는다. 화면 기록에는 든다.
 //! - 잠긴 동안에는 그리지 않는다. 보일 때와 사라질 때만 다시 그린다(계속 그리는 루프가 없다).
 
 use std::{collections::HashMap, time::Duration};
 
 use smithay::{
     backend::renderer::{
-        element::Kind,
+        element::{Id, Kind},
         gles::{
             GlesError, GlesPixelProgram, GlesRenderer, Uniform, UniformName, UniformType,
             element::PixelShaderElement,
@@ -114,6 +115,17 @@ impl BuntState {
         let target = self.agent_target.shown.as_ref()?;
         let geometry = self.space.element_geometry(&target.window)?;
         Rectangle::new(geometry.loc + target.rect.loc, target.rect.size).intersection(geometry)
+    }
+
+    /// 대상 창의 표면(하위 표면과 열린 메뉴 포함)의 렌더 요소 ID. 테두리를 그 창의 맨 앞 표면 바로 위에 끼운다(udev.rs):
+    /// 그 창을 덮은 창과 막대는 테두리도 덮는다. 사람의 창 위에 AI 테두리가 떠 사람의 창을 겨누는 것처럼 보이지 않게 한다
+    pub fn agent_target_ids(&self) -> Vec<Id> {
+        self.agent_target
+            .shown
+            .as_ref()
+            .and_then(|target| target.window.toplevel())
+            .map(|toplevel| crate::screenshot::surface_ids(toplevel.wl_surface()))
+            .unwrap_or_default()
     }
 }
 

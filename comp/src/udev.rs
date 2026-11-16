@@ -1325,11 +1325,16 @@ impl BuntState {
             Some(surface) => self.bar_places(&surface.output),
             None => Vec::new(),
         };
-        // AI 대상 강조 (agent_target.rs): 창의 지금 자리를 따른다. 잠긴 동안에는 그리지 않는다
+        // AI 대상 강조 (agent_target.rs): 창의 지금 자리를 따르고, 그 창의 쌓인 자리에 그린다. 잠긴 동안에는 그리지 않는다
         let agent_target = if self.session_lock.is_locked() {
             None
         } else {
             self.agent_target_rect()
+        };
+        let agent_target_ids = if agent_target.is_some() {
+            self.agent_target_ids()
+        } else {
+            Vec::new()
         };
 
         let UdevData {
@@ -1412,16 +1417,12 @@ impl BuntState {
                 }
             }
         }
-        // AI 대상 강조 테두리: 커서 바로 아래, 모든 창과 막대 위. 입력을 받지 않는 그림일 뿐이다. 커서처럼 스크린샷에는
-        // 넣지 않고(아래 cursor_ids) 화면 기록에는 넣는다. 에이전트의 창 그림(capture_window)은 창만 그려 들지 않는다
-        if let Some(element) =
+        // AI 대상 강조 테두리. 창과 막대를 모은 뒤 대상 창의 자리에 끼운다
+        let highlight =
             self.agent_target
-                .element(renderer, &output.name(), output_geo, agent_target, scale.x)
-        {
-            elements.push(OutputRenderElements::Highlight(element));
-        }
-        // 스크린샷에는 커서를 넣지 않는다
-        let cursor_ids: Vec<Id> = elements
+                .element(renderer, &output.name(), output_geo, agent_target, scale.x);
+        // 스크린샷에는 커서를 넣지 않는다 (AI 대상 강조 테두리도 아래에서 더한다)
+        let mut cursor_ids: Vec<Id> = elements
             .iter()
             .map(|element| element.id().clone())
             .collect();
@@ -1462,6 +1463,19 @@ impl BuntState {
         }
         if !locked {
             screenshot::place_overlay(&mut elements, space_start, selection, &output);
+        }
+        // AI 대상 강조 테두리: 대상 창의 맨 앞 표면(열린 메뉴 포함) 바로 위에 끼운다. 그 창을 덮은 창과 막대가 테두리도
+        // 덮어, 사람이 쓰는 창 위에 AI 테두리가 뜨지 않는다. 입력을 받지 않는 그림일 뿐이다. 커서처럼 스크린샷에는 넣지
+        // 않고 화면 기록에는 넣는다. 에이전트의 창 그림(capture_window)은 창만 그려 들지 않는다. 그 창이 이 화면에 없으면
+        // 그리지 않는다
+        let space_start = space_start.min(elements.len());
+        if let Some(element) = highlight
+            && let Some(at) = elements[space_start..]
+                .iter()
+                .position(|element| agent_target_ids.contains(element.id()))
+        {
+            cursor_ids.push(element.id().clone());
+            elements.insert(space_start + at, OutputRenderElements::Highlight(element));
         }
 
         // 배경화면은 물리 픽셀 크기로 만들었으므로 논리 크기를 주어 배율과 상관없이 화면을 채운다
