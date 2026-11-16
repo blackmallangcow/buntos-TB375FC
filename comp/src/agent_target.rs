@@ -135,8 +135,9 @@ const GLOW: f32 = 8.0;
 const CORNER: f32 = 6.0;
 /// 바깥 빛의 가장 진한 불투명도
 const GLOW_ALPHA: f32 = 0.3;
-/// systemPurple. 컴포지터는 밝은·어두운 화면을 모르므로 밝은 화면의 값(#AF52DE)을 쓴다. 어두운 화면의 값은 #BF5AF2다
-const COLOR: [f32; 3] = [175.0 / 255.0, 82.0 / 255.0, 222.0 / 255.0];
+/// systemPurple (HIG 2025 값, theme/tokens.css의 `--purple`·`--agent`와 같다. 셸의 메뉴 막대 AI 표시와 같은 색이다).
+/// 컴포지터는 밝은·어두운 화면을 모르므로 밝은 화면의 값 rgb(203, 48, 224)를 쓴다. 어두운 화면의 값은 rgb(219, 52, 242)다
+const COLOR: [f32; 3] = [203.0 / 255.0, 48.0 / 255.0, 224.0 / 255.0];
 
 /// 둥근 사각형 테두리와 옅은 바깥 빛. 선은 대상 사각형 바로 바깥에 그려 대상을 가리지 않고, 안쪽은 투명하다.
 /// 가장자리는 물리 픽셀 하나만큼 부드럽게 한다. smithay 픽셀 셰이더 규약(#version 없이 GLSL ES 1.00, v_coords·size·alpha·
@@ -378,7 +379,7 @@ mod tests {
         let at = |x, y| testing::pixel(&pixels, size.0 as usize, x, y);
         // 위쪽 선의 가운데 (대상 위 1픽셀)
         let line = at(60, 29);
-        let purple = [175u8, 82, 222];
+        let purple = [203u8, 48, 224];
         for (got, want) in line.iter().zip(purple) {
             assert!(got.abs_diff(want) <= 24, "line {line:?}");
         }
