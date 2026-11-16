@@ -12,20 +12,27 @@
 //!   누르기가 사람의 ⇧·⌘와 섞인다.
 //! - **R3 새 창:** 사람이 앱에 글을 치는 중이면 다른 앱의 새 창은 키보드를 가져가지 않고 사람의 창 뒤에 뜬다(macOS의
 //!   협조적 활성화). 판단은 여기서, 창 놓기는 state.rs에서 한다.
+//! - **R4 멈춤:** 사람이 메뉴 막대(셸)나 단축키(⌃⌥⌘.)로 AI 제어를 멈추면 에이전트의 모든 입력과 포커스 바꾸기를 Paused로
+//!   거절한다. 읽기는 된다. 멈춤은 컴포지터가 갖고 사람만 푼다. 데몬이 다시 시작해도 그대로다.
+//! - **활동:** 데몬이 알린 AI 이름과 대상 창은 마지막 알림 뒤 5초 동안 "활동 중"이다. 셸이 메뉴 막대에 보인다.
 
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
 };
 
-use smithay::utils::Serial;
+use smithay::{reexports::calloop::RegistrationToken, utils::Serial};
 
 use crate::dbus::Refused;
 
 /// 사람 입력 뒤 에이전트가 기다리는 기본 시간 (comp.toml `[agent] yield-ms`)
 pub const DEFAULT_YIELD_MS: u64 = 1500;
+/// 마지막 ReportAgentActivity 뒤 활동 중으로 보이는 시간
+pub const ACTIVE_FOR: Duration = Duration::from_secs(5);
 /// 기억해 두는 에이전트 입력의 serial 수. 에이전트가 메뉴를 연 누르기의 serial이 그 뒤에 친 키에 밀려나지 않게 넉넉히 둔다
 const AGENT_SERIALS: usize = 512;
+/// AI 이름(ReportAgentActivity의 client)의 최대 글자 수. 메뉴 막대에 보인다
+const CLIENT_CHARS: usize = 64;
 
 /// 사람의 실제 입력 기록. 에이전트의 입력은 이것을 바꾸지 않는다
 #[derive(Debug, Default)]
@@ -129,12 +136,42 @@ impl Touches {
     };
 }
 
+/// 셸과 에이전트에 알리는 AI 제어 상태 (GetAgentState, AgentStateChanged)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentStatus {
+    pub paused: bool,
+    /// 마지막 ReportAgentActivity 뒤 5초가 지나지 않았다
+    pub active: bool,
+    /// 마지막으로 알린 AI 클라이언트의 이름
+    pub client: String,
+    /// 마지막으로 알린 대상 창의 pid, 앱 ID, 제목. 창을 찾지 못했으면 앱 ID는 비고 제목은 알린 그대로다
+    pub pid: u32,
+    pub app_id: String,
+    pub title: String,
+}
+
+/// 마지막으로 알린 에이전트 활동
+#[derive(Debug, Default)]
+struct Activity {
+    client: String,
+    pid: u32,
+    app_id: String,
+    title: String,
+    at: Option<Instant>,
+}
+
 pub struct AgentGuard {
     /// 사람 입력 뒤 에이전트가 기다리는 시간
     yield_for: Duration,
     pub human: HumanInput,
+    paused: bool,
     /// 에이전트가 넣은 키·단추의 serial (최근 것). 그 serial로 시작한 잡기(에이전트가 연 메뉴)는 사람의 것이 아니다
     agent_serials: VecDeque<Serial>,
+    activity: Activity,
+    /// 셸과 에이전트에 마지막으로 알린 상태
+    published: AgentStatus,
+    /// 활동이 끝날 때(active가 꺼질 때)를 기다리는 타이머
+    pub activity_timer: Option<RegistrationToken>,
 }
 
 impl AgentGuard {
@@ -142,12 +179,27 @@ impl AgentGuard {
         Self {
             yield_for: Duration::from_millis(yield_ms),
             human: HumanInput::default(),
+            paused: false,
             agent_serials: VecDeque::new(),
+            activity: Activity::default(),
+            published: AgentStatus::default(),
+            activity_timer: None,
         }
     }
 
-    /// R2: 사람이 그 장치를 쓰는 중이면 UserActive(다시 해 볼 때까지의 ms)
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    /// R4와 R2: 멈췄으면 Paused, 사람이 그 장치를 쓰는 중이면 UserActive(다시 해 볼 때까지의 ms)
     pub fn admit(&self, touches: Touches, hold: PointerHold, now: Instant) -> Result<(), Refused> {
+        if self.paused {
+            return Err(Refused::Paused);
+        }
         match self.busy(touches, hold, now) {
             Some(retry_ms) => Err(Refused::UserActive { retry_ms }),
             None => Ok(()),
@@ -173,9 +225,9 @@ impl AgentGuard {
         waits.into_iter().flatten().max()
     }
 
-    /// 대상을 받는 키·글(PressKeysOn, TypeTextOn, CommitTextOn)을 넣어도 되는지. 키보드 포커스의 뿌리 표면이 대상 창이
-    /// 아니면 FocusMoved(R1), 사람이 키보드를 쓰는 중이면 UserActive(R2a)다. 포커스가 옮겨 간 것은 기다려도 풀리지
-    /// 않으므로 사람이 쓰는 중인 것보다 먼저 알린다
+    /// 대상을 받는 키·글(PressKeysOn, TypeTextOn, CommitTextOn)을 넣어도 되는지. 멈췄으면 Paused(R4), 키보드 포커스의
+    /// 뿌리 표면이 대상 창이 아니면 FocusMoved(R1), 사람이 키보드를 쓰는 중이면 UserActive(R2a)다. 포커스가 옮겨 간 것은
+    /// 기다려도 풀리지 않으므로 사람이 쓰는 중인 것보다 먼저 알린다
     pub fn keyboard_target<S: PartialEq>(
         &self,
         focus: Option<&S>,
@@ -183,6 +235,9 @@ impl AgentGuard {
         hold: PointerHold,
         now: Instant,
     ) -> Result<(), Refused> {
+        if self.paused {
+            return Err(Refused::Paused);
+        }
         if focus != Some(target) {
             return Err(Refused::FocusMoved);
         }
@@ -219,6 +274,57 @@ impl AgentGuard {
     pub fn agent_serials(&self) -> impl Iterator<Item = Serial> + '_ {
         self.agent_serials.iter().copied()
     }
+
+    /// 데몬이 알린 활동 (ReportAgentActivity). 앱 ID와 제목은 컴포지터가 그 창에서 채운 것이다
+    pub fn report(&mut self, client: &str, pid: u32, app_id: String, title: String, now: Instant) {
+        self.activity = Activity {
+            client: client_name(client),
+            pid,
+            app_id,
+            title,
+            at: Some(now),
+        };
+    }
+
+    /// 활동 중(active)이 꺼질 때까지 남은 시간. 활동 중이 아니면 None
+    pub fn active_left(&self, now: Instant) -> Option<Duration> {
+        let at = self.activity.at?;
+        ACTIVE_FOR
+            .checked_sub(now.saturating_duration_since(at))
+            .filter(|left| !left.is_zero())
+    }
+
+    pub fn status(&self, now: Instant) -> AgentStatus {
+        AgentStatus {
+            paused: self.paused,
+            active: self.active_left(now).is_some(),
+            client: self.activity.client.clone(),
+            pid: self.activity.pid,
+            app_id: self.activity.app_id.clone(),
+            title: self.activity.title.clone(),
+        }
+    }
+
+    /// 마지막으로 알린 뒤 상태가 바뀌었으면 그 상태. 알린 것으로 적는다
+    pub fn changed(&mut self, now: Instant) -> Option<AgentStatus> {
+        let status = self.status(now);
+        if status == self.published {
+            return None;
+        }
+        self.published = status.clone();
+        Some(status)
+    }
+}
+
+/// 메뉴 막대에 보일 AI 이름: 제어 문자를 빼고 CLIENT_CHARS 글자까지
+fn client_name(client: &str) -> String {
+    client
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(CLIENT_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// 사람 입력 뒤 기다릴 시간이 남았으면 그 ms (올림, 1 이상)
@@ -374,6 +480,31 @@ mod tests {
         );
     }
 
+    /// R4: 멈춘 동안은 사람이 쉬어도 모두 거절하고, 사람이 다시 하기 전에는 풀리지 않는다
+    #[test]
+    fn pausing_refuses_everything_until_the_person_resumes() {
+        let (mut guard, start) = guard();
+        guard.set_paused(true);
+        for touches in [Touches::KEYBOARD, Touches::POINTER, Touches::FOCUS] {
+            assert_eq!(
+                guard.admit(touches, IDLE, after(start, 60_000)),
+                Err(Refused::Paused)
+            );
+        }
+        // 멈춤이 사람의 입력보다 먼저다
+        guard.human.key(38, true, true, start);
+        assert_eq!(
+            guard.admit(Touches::KEYBOARD, IDLE, start),
+            Err(Refused::Paused)
+        );
+        guard.set_paused(false);
+        guard.human.key(38, false, true, start);
+        assert_eq!(
+            guard.admit(Touches::KEYBOARD, IDLE, after(start, 1500)),
+            Ok(())
+        );
+    }
+
     /// R3: 사람이 앱에 글을 치는 중이면 새 창이 키보드를 가져가지 않는다. 단축키(⌥⏎로 터미널)나 셸(모든 앱 패널에서
     /// ⏎)로 연 창, 사람이 누른 뒤에 뜬 창은 포커스를 받는다
     #[test]
@@ -406,8 +537,8 @@ mod tests {
         assert!(!guard.human_typing(after(start, 10_500)));
     }
 
-    /// R1: 대상을 받는 키·글은 키보드 포커스의 뿌리 표면이 그 창일 때만 넣는다. 포커스가 옮겨 간 것은 사람이 치는 중인
-    /// 것보다 먼저 알린다
+    /// R1: 대상을 받는 키·글은 키보드 포커스의 뿌리 표면이 그 창일 때만 넣는다. 멈춤이 먼저고, 포커스가 옮겨 간 것은
+    /// 사람이 치는 중인 것보다 먼저 알린다
     #[test]
     fn targeted_keys_need_the_focus_on_their_window() {
         let (mut guard, start) = guard();
@@ -441,6 +572,11 @@ mod tests {
         assert_eq!(
             guard.keyboard_target(Some(&editor), &editor, IDLE, after(start, 3100)),
             Ok(())
+        );
+        guard.set_paused(true);
+        assert_eq!(
+            guard.keyboard_target(Some(&settings), &editor, IDLE, after(start, 9000)),
+            Err(Refused::Paused)
         );
     }
 
@@ -480,6 +616,66 @@ mod tests {
             guard.admit(Touches::KEYBOARD, IDLE, start),
             Err(Refused::UserActive { retry_ms: 1 })
         );
+    }
+
+    /// 활동은 마지막 알림 뒤 5초 동안이다. 바뀐 상태만 알린다
+    #[test]
+    fn activity_lasts_five_seconds_after_the_last_report() {
+        let (mut guard, start) = guard();
+        assert_eq!(guard.changed(start), None);
+        guard.report(
+            "Claude",
+            42,
+            "org.gnome.TextEditor".into(),
+            "새 문서".into(),
+            start,
+        );
+        let status = guard.changed(start).expect("a report changes the state");
+        assert_eq!(
+            status,
+            AgentStatus {
+                paused: false,
+                active: true,
+                client: "Claude".into(),
+                pid: 42,
+                app_id: "org.gnome.TextEditor".into(),
+                title: "새 문서".into(),
+            }
+        );
+        // 같은 대상을 다시 알리면 상태는 그대로이고 5초를 새로 잰다
+        guard.report(
+            "Claude",
+            42,
+            "org.gnome.TextEditor".into(),
+            "새 문서".into(),
+            after(start, 3000),
+        );
+        assert_eq!(guard.changed(after(start, 3000)), None);
+        assert_eq!(
+            guard.active_left(after(start, 4000)),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(guard.changed(after(start, 7999)), None);
+        let ended = guard.changed(after(start, 8000)).expect("activity ends");
+        assert!(!ended.active);
+        // 끝난 뒤에도 마지막 AI와 대상은 남는다
+        assert_eq!((ended.client.as_str(), ended.pid), ("Claude", 42));
+        assert_eq!(guard.active_left(after(start, 8000)), None);
+        // 멈춤도 바뀐 상태다
+        guard.set_paused(true);
+        assert!(
+            guard
+                .changed(after(start, 9000))
+                .is_some_and(|status| status.paused)
+        );
+        assert_eq!(guard.changed(after(start, 9000)), None);
+    }
+
+    #[test]
+    fn client_names_are_short_and_printable() {
+        assert_eq!(client_name("  Claude Code\n"), "Claude Code");
+        assert_eq!(client_name(&"가".repeat(100)).chars().count(), CLIENT_CHARS);
+        assert_eq!(client_name("a\u{1b}[31mb"), "a[31mb");
     }
 
     #[test]

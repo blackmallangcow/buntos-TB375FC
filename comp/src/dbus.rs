@@ -46,6 +46,8 @@ use zbus::{
     object_server::SignalEmitter,
     zvariant::{DynamicType, Value},
 };
+// AI 제어 상태 (GetAgentState, AgentStateChanged)
+use crate::agent_guard::AgentStatus;
 
 const BUS_NAME: &str = "org.buntos.Compositor";
 const OBJECT_PATH: &str = "/org/buntos/Compositor";
@@ -159,6 +161,8 @@ pub struct Snapshot {
     pub recording: bool,
     /// 포인터 모드와 터치 모드 (input_mode.rs)
     pub input_mode: crate::input_mode::InputMode,
+    /// AI 제어의 멈춤과 활동 (agent_guard.rs)
+    pub agent: AgentStatus,
 }
 
 /// 에이전트가 보는 창 하나 (GetWindows)
@@ -217,6 +221,8 @@ pub enum Refused {
     FocusMoved,
     /// 사람이 쓰는 중이다. 이만큼(ms) 뒤에 다시 해 본다 (R2)
     UserActive { retry_ms: u64 },
+    /// 사람이 AI 제어를 멈췄다. 사람만 다시 한다 (R4)
+    Paused,
     /// 누를 점이 창 밖이다 (ClickOn·ScrollOn의 창 기준 논리 좌표. 창의 논리 크기)
     OffWindow { width: i32, height: i32 },
 }
@@ -224,18 +230,21 @@ pub enum Refused {
 /// 사람 우선 규칙의 D-Bus 오류 이름 (AI 동시 사용 계약 A)
 const FOCUS_MOVED_ERROR: &str = "org.buntos.Compositor1.Error.FocusMoved";
 const USER_ACTIVE_ERROR: &str = "org.buntos.Compositor1.Error.UserActive";
+const PAUSED_ERROR: &str = "org.buntos.Compositor1.Error.Paused";
 /// 그 오류의 메시지. 데몬이 UserActive의 메시지에서 `in (\d+) ms`를 읽는다
 const FOCUS_MOVED_MESSAGE: &str =
     "the keyboard focus is not on that window any more (the person moved it); nothing was sent";
+const PAUSED_MESSAGE: &str = "the person paused AI control; only the person can resume it";
 
 /// 에이전트 메서드의 오류. 전부터 있던 거절은 fdo 오류 이름 그대로 보내고, 사람 우선 규칙의 거절(FocusMoved,
-/// UserActive)은 org.buntos.Compositor1.Error.* 이름으로 보낸다. 데몬이 이름으로 가려 AI에게 알린다
+/// UserActive, Paused)은 org.buntos.Compositor1.Error.* 이름으로 보낸다. 데몬이 이름으로 가려 AI에게 알린다
 #[derive(Debug)]
 pub enum AgentError {
     Fdo(fdo::Error),
     FocusMoved,
     /// 다시 해 볼 ms를 담은 메시지
     UserActive(String),
+    Paused,
 }
 
 impl AgentError {
@@ -266,6 +275,7 @@ impl zbus::DBusError for AgentError {
             Self::Fdo(err) => err.name(),
             Self::FocusMoved => ErrorName::from_static_str_unchecked(FOCUS_MOVED_ERROR),
             Self::UserActive(_) => ErrorName::from_static_str_unchecked(USER_ACTIVE_ERROR),
+            Self::Paused => ErrorName::from_static_str_unchecked(PAUSED_ERROR),
         }
     }
 
@@ -274,6 +284,7 @@ impl zbus::DBusError for AgentError {
             Self::Fdo(err) => err.description(),
             Self::FocusMoved => Some(FOCUS_MOVED_MESSAGE),
             Self::UserActive(message) => Some(message),
+            Self::Paused => Some(PAUSED_MESSAGE),
         }
     }
 }
@@ -299,6 +310,7 @@ fn refusal(why: Refused) -> AgentError {
     let err = match why {
         Refused::FocusMoved => return AgentError::FocusMoved,
         Refused::UserActive { retry_ms } => return AgentError::user_active(retry_ms),
+        Refused::Paused => return AgentError::Paused,
         Refused::AuthDialog => fdo::Error::AccessDenied(
             "a window only the user can answer is open (authentication, network password, Bluetooth \
              pairing, clipboard history or AI control)"
@@ -484,6 +496,13 @@ pub enum AgentRequest {
         dy: f64,
         reply: mpsc::Sender<Result<(), Refused>>,
     },
+    /// 에이전트가 하는 일: AI 클라이언트의 이름과 대상 창. 앱 ID는 컴포지터가 그 창에서 채운다
+    Activity {
+        client: String,
+        pid: u32,
+        title: String,
+        reply: mpsc::Sender<Result<(), Refused>>,
+    },
 }
 
 /// D-Bus에서 이벤트 루프로 넘기는 변경 요청 (값은 이미 확인했다)
@@ -549,6 +568,8 @@ pub enum Request {
     Agent(AgentRequest),
     /// 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
     Session(SessionRequest),
+    /// 셸(메뉴 막대의 AI 표시)에서 사람이 AI 제어를 멈췄거나(true) 다시 했다(false) (agent_guard.rs)
+    AgentPaused(bool),
 }
 
 /// 컴포지터가 D-Bus 스레드에 시키는 일
@@ -580,6 +601,8 @@ pub enum Command {
     RecordingSaved { path: String, preview: String },
     /// InputModeChanged 신호를 보낸다: 포인터 모드와 터치 모드가 바뀌었다 (input_mode.rs)
     InputModeChanged(crate::input_mode::InputMode),
+    /// AgentStateChanged 신호를 보낸다: AI 제어를 멈췄거나 다시 했고, 활동이 시작했거나 바뀌었거나 끝났다
+    AgentStateChanged(AgentStatus),
 }
 
 pub struct Service {
@@ -656,8 +679,23 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
             Command::InputModeChanged(mode) => {
                 emit(&connection, "InputModeChanged", &(mode.as_str(),))
             }
+            Command::AgentStateChanged(status) => {
+                emit(&connection, "AgentStateChanged", &agent_state(status))
+            }
         }
     }
+}
+
+/// GetAgentState와 AgentStateChanged의 값 (paused, active, client, pid, app_id, title)
+fn agent_state(status: AgentStatus) -> (bool, bool, String, u32, String, String) {
+    (
+        status.paused,
+        status.active,
+        status.client,
+        status.pid,
+        status.app_id,
+        status.title,
+    )
 }
 
 /// 알림을 띄운다. 제목을 앱 이름으로도 쓴다 (macOS의 스크린샷 알림처럼)
@@ -1277,7 +1315,8 @@ impl Api {
 
     /// 에이전트 전용: 그 pid의 창(제목이 같은 것 먼저, 없으면 맨 위)이 키보드 포커스를 가졌을 때만 키를 차례로 누른다.
     /// 키 이름은 PressKeys와 같다. 포커스를 확인하고 키를 넣는 일은 컴포지터의 한 차례에 한다. 포커스가 그 창에 없으면
-    /// (사람이 옮겼다) FocusMoved, 사람이 치는 중이면 UserActive로 거절하고 아무것도 보내지 않는다
+    /// (사람이 옮겼다) FocusMoved, 사람이 치는 중이면 UserActive, 사람이 AI 제어를 멈췄으면 Paused로 거절하고 아무것도
+    /// 보내지 않는다
     async fn press_keys_on(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -1347,8 +1386,8 @@ impl Api {
     /// 에이전트 전용: 그 창 안의 (x, y)를 누른다. x, y는 창 기준 논리 좌표다: 창 영역(xdg 창 영역)의 왼쪽 위가 (0, 0)이고
     /// AT-SPI GetExtents(COORD_TYPE_WINDOW)와 같은 틀이다. 그 창의 열린 메뉴는 창 밖이어도 누른다. 키보드 포커스가 그 창에
     /// 없으면 먼저 앞으로 가져온다(ClickWindow와 같다). 그 점에서 포인터가 그 창에 가지 않으면(창 밖, 다른 창·막대에 가림)
-    /// 누르지 않는다. 사람이 포인터를 쓰는 중이면, 포커스를 옮겨야 할 때는 사람이 키보드를 쓰는 중이어도 UserActive로
-    /// 거절한다. 누른 화면의 논리 좌표를 돌려준다
+    /// 누르지 않는다. 사람이 포인터를 쓰는 중이면, 포커스를 옮겨야 할 때는 사람이 키보드를 쓰는 중이어도 UserActive로,
+    /// 멈췄으면 Paused로 거절한다. 누른 화면의 논리 좌표를 돌려준다
     #[allow(clippy::too_many_arguments)]
     async fn click_on(
         &self,
@@ -1403,6 +1442,71 @@ impl Api {
         }))?;
         answer(receiver)
     }
+
+    /// 셸과 에이전트 전용: AI 제어 상태 (멈췄는지, 활동 중인지, AI 이름, 대상 창의 pid·앱 ID·제목). 활동 중은 마지막
+    /// ReportAgentActivity 뒤 5초 동안이다. 활동이 끝난 뒤에도 마지막 AI와 대상은 그대로 알린다
+    async fn get_agent_state(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<(bool, bool, String, u32, String, String)> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        if check_shell(connection, &header, shell_pid).await.is_err() {
+            check_agent(connection, &header).await.map_err(|_| {
+                fdo::Error::AccessDenied(format!(
+                    "only the shell started by the compositor or {AGENT_PATH} may call this"
+                ))
+            })?;
+        }
+        Ok(agent_state(self.snapshot.lock().unwrap().agent.clone()))
+    }
+
+    /// 셸 전용: 사람이 메뉴 막대의 AI 표시에서 AI 제어를 멈추거나(true) 다시 한다(false). 멈춘 동안 에이전트의 입력과 창
+    /// 활성화는 Paused로 거절한다. 단축키(agent.pause)로도 바꾼다
+    async fn set_agent_paused(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        paused: bool,
+    ) -> fdo::Result<()> {
+        let shell_pid = self.snapshot.lock().unwrap().shell_pid;
+        check_shell(connection, &header, shell_pid).await?;
+        self.request(Request::AgentPaused(paused))
+    }
+
+    /// 에이전트 전용: 동작을 시작할 때 AI 클라이언트의 이름과 대상 창(pid, 제목)을 알린다. 컴포지터가 그 창의 앱 ID를
+    /// 채우고, 5초 동안 활동 중으로 알린다(AgentStateChanged). 멈춘 동안에도 받는다: 사람이 무엇이 읽는지 본다
+    async fn report_agent_activity(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        client: String,
+        pid: u32,
+        title: String,
+    ) -> Result<(), AgentError> {
+        check_agent(connection, &header).await?;
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::Activity {
+            client,
+            pid,
+            title,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
+    /// AI 제어 상태가 바뀌었다 (GetAgentState와 같은 값): 멈췄거나 다시 했고, 활동이 시작했거나 대상이 바뀌었거나 마지막
+    /// 알림 뒤 5초가 지나 끝났다
+    #[zbus(signal)]
+    async fn agent_state_changed(
+        emitter: &SignalEmitter<'_>,
+        paused: bool,
+        active: bool,
+        client: &str,
+        pid: u32,
+        app_id: &str,
+        title: &str,
+    ) -> zbus::Result<()>;
 
     /// 키보드 포커스: (클라이언트 pid, 앱 ID나 레이어 이름, 창 제목, 레이어 표면인지).
     /// 포커스가 없으면 pid가 0이다
@@ -2073,6 +2177,13 @@ mod tests {
                     .to_string()
             )
         );
+        assert_eq!(
+            refused(Refused::Paused),
+            (
+                "org.buntos.Compositor1.Error.Paused".to_string(),
+                "the person paused AI control; only the person can resume it".to_string()
+            )
+        );
         let (name, _) = refused(Refused::NoWindow);
         assert_eq!(name, "org.freedesktop.DBus.Error.Failed");
         let (name, _) = refused(Refused::Locked);
@@ -2166,17 +2277,20 @@ mod tests {
         assert_eq!(input_mode().unwrap(), "touch");
     }
 
-    /// 대상을 받는 입력의 거절을 진짜 세션 버스에서 본다(input_mode 시험과 같은 틀). 에이전트 전용 메서드는 다른
-    /// 프로그램에 fdo의 AccessDenied로 답하고, 사람 우선 규칙의 거절은 계약의 이름과 메시지로 버스에 실린다
+    /// 셸의 AI 표시가 쓰는 AI 제어 API와 사람 우선 거절을 진짜 세션 버스에서 본다(input_mode 시험과 같은 틀).
+    /// GetAgentState는 셸이나 에이전트만 읽고, AgentStateChanged(bbsuss)가 오고, SetAgentPaused는 셸만 불러 이벤트 루프로
+    /// 넘기며, 에이전트 전용 메서드는 다른 프로그램에 fdo의 AccessDenied로 답한다. 새 거절 셋은 계약의 이름과 메시지로
+    /// 버스에 실린다
     #[test]
-    fn people_first_errors_on_a_session_bus() {
+    fn agent_state_and_people_first_errors_on_a_session_bus() {
         use smithay::reexports::calloop::channel;
         use zbus::proxy::CacheProperties;
 
         const DBUS_RUN_SESSION: &str = "/usr/bin/dbus-run-session";
         const INSIDE: &str = "BUNT_COMP_TEST_SESSION_BUS";
-        const TEST: &str = "dbus::tests::people_first_errors_on_a_session_bus";
+        const TEST: &str = "dbus::tests::agent_state_and_people_first_errors_on_a_session_bus";
         const WAIT: Duration = Duration::from_secs(10);
+        type State = (bool, bool, String, u32, String, String);
 
         if std::env::var_os(INSIDE).is_none() {
             if !std::path::Path::new(DBUS_RUN_SESSION).exists() {
@@ -2199,8 +2313,10 @@ mod tests {
             return;
         }
 
-        let (requests, _channel) = channel::channel();
-        let _service = Service::start(requests);
+        let (requests, channel) = channel::channel();
+        let service = Service::start(requests);
+        // 이 시험 프로세스를 셸로 둔다 (check_shell은 부른 쪽의 pid를 견준다)
+        service.update(|snapshot| snapshot.shell_pid = std::process::id());
         let connection = blocking::Connection::session().unwrap();
         let proxy: blocking::Proxy<'_> = blocking::proxy::Builder::new(&connection)
             .destination(BUS_NAME)
@@ -2212,27 +2328,92 @@ mod tests {
             .cache_properties(CacheProperties::No)
             .build()
             .unwrap();
+        let state = || proxy.call::<_, _, State>("GetAgentState", &());
+        let deadline = std::time::Instant::now() + WAIT;
+        let first = loop {
+            match state() {
+                Ok(state) => break state,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(err) => panic!("GetAgentState: {err}"),
+            }
+        };
+        assert_eq!(first, agent_state(AgentStatus::default()));
+
+        let signals = proxy.receive_signal("AgentStateChanged").unwrap();
+        let (received, signal) = mpsc::channel();
+        std::thread::spawn(move || {
+            for message in signals {
+                if received.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let status = AgentStatus {
+            paused: true,
+            active: true,
+            client: "Claude".into(),
+            pid: 42,
+            app_id: "org.gnome.TextEditor".into(),
+            title: "새 문서".into(),
+        };
+        service.update(|snapshot| snapshot.agent = status.clone());
+        service.send(Command::AgentStateChanged(status.clone()));
+        let message = signal.recv_timeout(WAIT).expect("AgentStateChanged");
+        let body = message.body();
+        // 본문은 인자 여섯 개다: zbus는 튜플 본문을 인자 목록으로 보낸다(헤더의 서명에 괄호가 없다). 받는 쪽은 인자가
+        // 여럿인 서명을 구조체로 읽어 to_string()이 괄호를 붙이므로 괄호 없이 견준다
+        assert_eq!(body.signature().to_string_no_parens(), "bbsuss");
+        assert_eq!(
+            body.deserialize::<State>().unwrap(),
+            agent_state(status.clone())
+        );
+        assert_eq!(state().unwrap(), agent_state(status));
+
+        // 셸이 멈춤을 바꾸면 이벤트 루프로 넘긴다
+        proxy.call::<_, _, ()>("SetAgentPaused", &(false,)).unwrap();
+        let deadline = std::time::Instant::now() + WAIT;
+        let request = loop {
+            match channel.try_recv() {
+                Ok(request) => break request,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(err) => panic!("no request: {err}"),
+            }
+        };
+        assert!(
+            matches!(request, Request::AgentPaused(false)),
+            "{request:?}"
+        );
+
         let error_name = |err: zbus::Error| match err {
             zbus::Error::MethodError(name, ..) => name.to_string(),
             other => panic!("{other:?}"),
         };
-        // 에이전트 전용 메서드는 buntd-agent가 아닌 프로그램에 fdo 이름 그대로 거절한다. 서비스 스레드가 버스에 붙어
-        // 이름을 얻을 때까지 기다린다
-        let deadline = std::time::Instant::now() + WAIT;
-        let keys = loop {
-            let name = error_name(
-                proxy
-                    .call::<_, _, ()>("PressKeysOn", &(1u32, "", vec!["a"]))
-                    .unwrap_err(),
-            );
-            if name == "org.freedesktop.DBus.Error.AccessDenied"
-                || std::time::Instant::now() >= deadline
-            {
-                break name;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        assert_eq!(keys, "org.freedesktop.DBus.Error.AccessDenied");
+        // 에이전트 전용 메서드는 buntd-agent가 아닌 프로그램에 fdo 이름 그대로 거절한다
+        let keys = proxy
+            .call::<_, _, ()>("PressKeysOn", &(1u32, "", vec!["a"]))
+            .unwrap_err();
+        assert_eq!(error_name(keys), "org.freedesktop.DBus.Error.AccessDenied");
+        let report = proxy
+            .call::<_, _, ()>("ReportAgentActivity", &("Claude", 1u32, ""))
+            .unwrap_err();
+        assert_eq!(
+            error_name(report),
+            "org.freedesktop.DBus.Error.AccessDenied"
+        );
+        // 셸이 아니면 멈춤을 바꾸지도, 상태를 읽지도 못한다
+        service.update(|snapshot| snapshot.shell_pid = 1);
+        let pause = proxy
+            .call::<_, _, ()>("SetAgentPaused", &(true,))
+            .unwrap_err();
+        assert_eq!(error_name(pause), "org.freedesktop.DBus.Error.AccessDenied");
+        assert_eq!(
+            error_name(state().unwrap_err()),
+            "org.freedesktop.DBus.Error.AccessDenied"
+        );
 
         // 사람 우선 거절의 이름과 메시지가 그대로 버스에 실린다
         struct Refuser;
@@ -2241,7 +2422,8 @@ mod tests {
             fn refuse(&self, which: u32) -> Result<(), AgentError> {
                 Err(match which {
                     0 => AgentError::FocusMoved,
-                    _ => AgentError::user_active(250),
+                    1 => AgentError::user_active(250),
+                    _ => AgentError::Paused,
                 })
             }
         }
@@ -2270,6 +2452,7 @@ mod tests {
                 USER_ACTIVE_ERROR,
                 "the person is using the computer; nothing was sent; try again in 250 ms",
             ),
+            (2, PAUSED_ERROR, PAUSED_MESSAGE),
         ] {
             match refuser.call::<_, _, ()>("Refuse", &(which,)).unwrap_err() {
                 zbus::Error::MethodError(got, Some(message), _) => {

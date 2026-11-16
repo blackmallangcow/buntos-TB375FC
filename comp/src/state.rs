@@ -2274,6 +2274,8 @@ impl BuntState {
             Request::Agent(request) => self.agent_request(request),
             // 화면 잠금, 로그아웃, 앱 목록, 강제 종료 (session.rs)
             Request::Session(request) => self.session_request(request),
+            // 셸의 AI 표시에서 사람이 멈추거나 다시 했다 (agent.rs)
+            Request::AgentPaused(paused) => self.set_agent_paused(paused),
         }
     }
 

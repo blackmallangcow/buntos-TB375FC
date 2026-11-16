@@ -446,6 +446,8 @@ impl BuntState {
             Builtin::ForceQuit => self
                 .dbus
                 .send(Command::ShortcutActivated("windows.force-quit")),
+            // 사람만 누른다: 에이전트의 키는 컴포지터 단축키를 거치지 않는다 (agent.rs의 agent_keys)
+            Builtin::ToggleAgentPause => self.toggle_agent_paused(),
         }
     }
 

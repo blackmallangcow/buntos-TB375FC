@@ -8,8 +8,8 @@
 //! 사람만 답하는 창(AUTH_NAMESPACES)은 목록에 들지 않고 누를 수도 없다.
 //!
 //! 사람이 먼저다(agent_guard.rs). 대상을 받는 입력(PressKeysOn 등)은 같은 디스패치 안에서 키보드 포커스나 그 점의 표면이
-//! 그 창인지 본 뒤 넣는다(R1). 사람이 쓰는 중이면(R2) 입력과 포커스 바꾸기를 거절한다. 잠금과 사람만 답하는 창은
-//! 그보다 먼저 본다
+//! 그 창인지 본 뒤 넣는다(R1). 사람이 쓰는 중이면(R2) 입력과 포커스 바꾸기를 거절하고, 사람이 멈췄으면(R4) 모두
+//! 거절한다. 잠금과 사람만 답하는 창은 그보다 먼저 본다
 
 use std::{
     sync::mpsc,
@@ -31,8 +31,8 @@ use smithay::{
 };
 
 use crate::{
-    agent_guard::{PointerHold, Touches},
-    dbus::{AgentRequest, Chord, LayerInfo, Refused, Typed, WindowInfo},
+    agent_guard::{ACTIVE_FOR, PointerHold, Touches},
+    dbus::{AgentRequest, Chord, Command, LayerInfo, Refused, Typed, WindowInfo},
     state::BuntState,
 };
 use smithay::utils::IsAlive;
@@ -82,6 +82,8 @@ impl BuntState {
         // 인증 창이 떠 있는 동안에는 에이전트가 입력을 넣거나 포커스를 옮기지 못한다. 에이전트가 대신
         // 답하거나, 사람이 칠 암호가 다른 창으로 가는 일을 막는다
         let refused = locked.or_else(|| self.auth_dialog_open().then_some(Refused::AuthDialog));
+        // 사람이 AI 제어를 멈춘 동안에는 입력과 포커스 바꾸기를 모두 거절한다(R4). 읽기는 된다
+        let stopped = refused.or_else(|| self.agent_guard.paused().then_some(Refused::Paused));
         let now = Instant::now();
         match request {
             AgentRequest::Windows(reply) => {
@@ -97,7 +99,7 @@ impl BuntState {
                 });
             }
             AgentRequest::Activate { pid, title, reply } => {
-                let _ = reply.send(match refused {
+                let _ = reply.send(match stopped {
                     Some(why) => Err(why),
                     None => self.agent_activate(pid, &title, now),
                 });
@@ -105,13 +107,13 @@ impl BuntState {
             // 대상이 없는 옛 키·글(옛 데몬 호환)도 사람이 치는 중이면 거절한다 (R2a)
             AgentRequest::Keys { chords, reply } => {
                 let _ = reply.send(
-                    self.gate(refused, Touches::KEYBOARD, now)
+                    self.gate(stopped, Touches::KEYBOARD, now)
                         .map(|()| self.agent_keys(&chords)),
                 );
             }
             AgentRequest::Type { text, reply } => {
                 let _ = reply.send(
-                    self.gate(refused, Touches::KEYBOARD, now)
+                    self.gate(stopped, Touches::KEYBOARD, now)
                         .and_then(|()| self.agent_type(&text)),
                 );
             }
@@ -122,7 +124,7 @@ impl BuntState {
                 reply,
             } => {
                 let pos = Point::<f64, Logical>::from((x, y));
-                let _ = reply.send(match refused {
+                let _ = reply.send(match stopped {
                     Some(why) => Err(why),
                     // 화면 키보드는 사람만 누른다. 에이전트가 누르면 막은 앱에도 글을 칠 수 있다 (osk.rs)
                     None if self.over_keyboard(pos) => Err(Refused::Keyboard),
@@ -138,7 +140,7 @@ impl BuntState {
                 dx,
                 dy,
                 reply,
-            } => match self.gate(refused, Touches::POINTER, now) {
+            } => match self.gate(stopped, Touches::POINTER, now) {
                 Ok(()) => self.agent_scroll(WheelAt::Screen((x, y).into()), dx, dy, reply),
                 Err(why) => {
                     let _ = reply.send(Err(why));
@@ -146,7 +148,7 @@ impl BuntState {
             },
             AgentRequest::Commit { text, reply } => {
                 let _ = reply.send(
-                    self.gate(refused, Touches::KEYBOARD, now)
+                    self.gate(stopped, Touches::KEYBOARD, now)
                         .map(|()| self.commit_text(&text)),
                 );
             }
@@ -165,7 +167,7 @@ impl BuntState {
                 button,
                 reply,
             } => {
-                let _ = reply.send(match refused {
+                let _ = reply.send(match stopped {
                     Some(why) => Err(why),
                     None => {
                         self.agent_click_window(pid, &title, WindowPoint::Pixels(x, y), button, now)
@@ -186,7 +188,7 @@ impl BuntState {
                 button,
                 reply,
             } => {
-                let _ = reply.send(match refused {
+                let _ = reply.send(match stopped {
                     Some(why) => Err(why),
                     None => self.agent_click_layer(pid, &namespace, (x, y), button, now),
                 });
@@ -200,7 +202,7 @@ impl BuntState {
                 dy,
                 reply,
             } => {
-                let checked = match refused {
+                let checked = match stopped {
                     Some(why) => Err(why),
                     None => self
                         .layer_point(pid, &namespace, (x, y))
@@ -241,7 +243,7 @@ impl BuntState {
                 reply,
             } => {
                 let _ = reply.send(
-                    refused
+                    stopped
                         .map_or(Ok(()), Err)
                         .and_then(|()| self.keyboard_target(pid, &title, now))
                         .map(|()| self.agent_keys(&chords)),
@@ -254,7 +256,7 @@ impl BuntState {
                 reply,
             } => {
                 let _ = reply.send(
-                    refused
+                    stopped
                         .map_or(Ok(()), Err)
                         .and_then(|()| self.keyboard_target(pid, &title, now))
                         .and_then(|()| self.agent_type(&text)),
@@ -267,7 +269,7 @@ impl BuntState {
                 reply,
             } => {
                 let _ = reply.send(
-                    refused
+                    stopped
                         .map_or(Ok(()), Err)
                         .and_then(|()| self.keyboard_target(pid, &title, now))
                         .map(|()| self.commit_text(&text)),
@@ -281,7 +283,7 @@ impl BuntState {
                 button,
                 reply,
             } => {
-                let _ = reply.send(match refused {
+                let _ = reply.send(match stopped {
                     Some(why) => Err(why),
                     None => self.agent_click_window(
                         pid,
@@ -302,7 +304,7 @@ impl BuntState {
                 reply,
             } => {
                 let local = Point::from((x, y));
-                let checked = match refused {
+                let checked = match stopped {
                     Some(why) => Err(why),
                     None => self.scroll_target(pid, &title, local, now),
                 };
@@ -315,23 +317,39 @@ impl BuntState {
                     }
                 }
             }
+            // 활동 알림은 입력이 아니라 멈춘 동안에도 받는다: 사람이 무엇을 읽는지 메뉴 막대에서 본다. 잠긴 동안에는
+            // 창을 찾지 않는다
+            AgentRequest::Activity {
+                client,
+                pid,
+                title,
+                reply,
+            } => {
+                let _ = reply.send(match locked {
+                    Some(why) => Err(why),
+                    None => {
+                        self.agent_report(&client, pid, &title, now);
+                        Ok(())
+                    }
+                });
+            }
         }
     }
 
-    /// 앞서 본 거절(잠금, 사람만 답하는 창)이 없으면 사람이 쓰는 중인지(R2) 본다
+    /// 멈춤(R4)이나 앞서 본 거절이 없으면 사람이 쓰는 중인지(R2) 본다
     fn gate(
         &self,
-        refused: Option<Refused>,
+        stopped: Option<Refused>,
         touches: Touches,
         now: Instant,
     ) -> Result<(), Refused> {
-        match refused {
+        match stopped {
             Some(why) => Err(why),
             None => self.admit(touches, now),
         }
     }
 
-    /// R2 (agent_guard.rs): 사람이 그 장치를 쓰는 중이면 UserActive
+    /// R4와 R2 (agent_guard.rs): 멈췄으면 Paused, 사람이 그 장치를 쓰는 중이면 UserActive
     fn admit(&self, touches: Touches, now: Instant) -> Result<(), Refused> {
         self.agent_guard.admit(touches, self.pointer_hold(), now)
     }
@@ -494,7 +512,7 @@ impl BuntState {
     }
 
     /// 포인터가 새 표면에 들어가 기다린 뒤 휠을 돌리기 직전에 다시 본다: 그사이 잠겼거나, 사람만 답하는 창이 떴거나,
-    /// 사람이 포인터를 썼거나(R2b), 대상이 가렸으면(R1) 돌리지 않는다
+    /// 사람이 멈췄거나 포인터를 썼거나(R4, R2b), 대상이 가렸으면(R1) 돌리지 않는다
     fn wheel_again(&self, at: &WheelAt) -> Result<Point<f64, Logical>, Refused> {
         if self.session_lock.is_locked() {
             return Err(Refused::Locked);
@@ -504,6 +522,74 @@ impl BuntState {
         }
         self.admit(Touches::POINTER, Instant::now())?;
         self.wheel_point(at)
+    }
+
+    /// 사람이 AI 제어를 멈추거나(true) 다시 한다(false): 셸의 메뉴 막대(SetAgentPaused)와 단축키(agent.pause). 에이전트는
+    /// 이 길에 닿지 못한다
+    pub fn set_agent_paused(&mut self, paused: bool) {
+        if self.agent_guard.paused() == paused {
+            return;
+        }
+        self.agent_guard.set_paused(paused);
+        tracing::info!(
+            "AI control {} by the person",
+            if paused { "paused" } else { "resumed" }
+        );
+        self.publish_agent_state();
+    }
+
+    /// 단축키(agent.pause, 기본 ⌃⌥⌘.)로 멈춤을 바꾼다
+    pub fn toggle_agent_paused(&mut self) {
+        let paused = !self.agent_guard.paused();
+        self.set_agent_paused(paused);
+    }
+
+    /// AI 제어 상태가 바뀌었으면 D-Bus 사본에 적고 셸과 에이전트에 알린다 (AgentStateChanged)
+    fn publish_agent_state(&mut self) {
+        if let Some(status) = self.agent_guard.changed(Instant::now()) {
+            self.dbus.update(|snapshot| snapshot.agent = status.clone());
+            self.dbus.send(Command::AgentStateChanged(status));
+        }
+    }
+
+    /// 데몬이 알린 활동(ReportAgentActivity). 대상 창을 찾으면 그 앱 ID와 지금 제목을 채운다. 마지막 알림 뒤
+    /// ACTIVE_FOR가 지나면 활동이 끝났다고 알린다
+    fn agent_report(&mut self, client: &str, pid: u32, title: &str, now: Instant) {
+        let window = (pid != 0).then(|| self.agent_window(pid, title)).flatten();
+        let (app_id, title) = match window {
+            Some(window) => (
+                window_app_id(&window).unwrap_or_default(),
+                window_title(&window).unwrap_or_default(),
+            ),
+            None => (String::new(), title.to_string()),
+        };
+        self.agent_guard.report(client, pid, app_id, title, now);
+        self.publish_agent_state();
+        if let Some(token) = self.agent_guard.activity_timer.take() {
+            self.loop_handle.remove(token);
+        }
+        let timer = self
+            .loop_handle
+            .insert_source(Timer::from_duration(ACTIVE_FOR), |_, _, state| {
+                state.activity_timer_fired()
+            });
+        match timer {
+            Ok(token) => self.agent_guard.activity_timer = Some(token),
+            Err(err) => tracing::warn!("failed to time the agent's activity: {}", err.error),
+        }
+    }
+
+    /// 활동 타이머: 마지막 알림 뒤 ACTIVE_FOR가 지났으면 활동이 끝났다고 알린다. 그사이 새 알림이 왔으면 남은 만큼 더
+    /// 기다린다
+    fn activity_timer_fired(&mut self) -> TimeoutAction {
+        match self.agent_guard.active_left(Instant::now()) {
+            Some(left) => TimeoutAction::ToDuration(left),
+            None => {
+                self.agent_guard.activity_timer = None;
+                self.publish_agent_state();
+                TimeoutAction::Drop
+            }
+        }
     }
 
     fn auth_dialog_open(&self) -> bool {
@@ -820,7 +906,7 @@ impl BuntState {
 
     /// 포인터를 그 자리로 옮겨 휠을 돌리고 답한다. dx, dy는 눈금 수이고 오른쪽·아래가 +다. 시스템 설정의
     /// 스크롤 속도와 자연스러운 스크롤은 사람의 장치에만 쓴다. 포인터가 다른 표면에 들어가면
-    /// ENTER_PAUSE 뒤에 그 자리에서 한 번 더 움직이고 돌린다. 그때 잠금, 사람만 답하는 창, 사람의 포인터,
+    /// ENTER_PAUSE 뒤에 그 자리에서 한 번 더 움직이고 돌린다. 그때 잠금, 사람만 답하는 창, 멈춤, 사람의 포인터,
     /// 대상(창이나 레이어 표면이 아직 그 점에 있는지)을 다시 본다
     fn agent_scroll(
         &mut self,
@@ -1115,6 +1201,17 @@ fn window_title(window: &Window) -> Option<String> {
             .data_map
             .get::<XdgToplevelSurfaceData>()
             .and_then(|data| data.lock().unwrap().title.clone())
+    })
+}
+
+/// 창의 앱 ID (xdg_toplevel)
+fn window_app_id(window: &Window) -> Option<String> {
+    let toplevel = window.toplevel()?;
+    with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().unwrap().app_id.clone())
     })
 }
 
