@@ -106,3 +106,6 @@ shortcut-windows-force-quit = 응용 프로그램 강제 종료
 shortcut-session-lock-screen = 화면 잠금
 shortcut-session-log-out = 로그아웃
 shortcut-session-log-out-now = 확인 없이 로그아웃
+# AI 제어 (컴포지터의 agent.pause. 메뉴 막대 AI 표시의 제어 창과 같은 말)
+shortcut-category-agent = AI 에이전트
+shortcut-agent-pause = AI 제어 멈추기 또는 다시 허용

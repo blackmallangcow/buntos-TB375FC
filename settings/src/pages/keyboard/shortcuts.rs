@@ -49,11 +49,13 @@ pub(super) const SWITCH_SOURCE: &str = "input.switch-source";
 
 /// 분류: ID, 배지 기호, 배지 색. 사이드바는 이 순서이고, 모르는 분류(새 컴포지터)는 맨 뒤에 회색
 /// 키보드 배지로 붙인다
-const CATEGORIES: [(&str, &str, Tint); 7] = [
+const CATEGORIES: [(&str, &str, Tint); 8] = [
     ("launcher", "view-app-grid-symbolic", Tint::Graphite),
     ("windows", "focus-windows-symbolic", Tint::Blue),
     // 화면 잠금과 로그아웃 (macOS의 Apple 메뉴 단축키)
     ("session", "system-lock-screen-symbolic", Tint::Graphite),
+    // AI 제어 멈추기 (컴포지터의 agent.pause). 배지는 AI 에이전트 페이지와 같다
+    ("agent", "org.buntos.Agent-symbolic", Tint::Pink),
     ("input", "preferences-desktop-locale-symbolic", Tint::Indigo),
     ("screenshots", "camera-photo-symbolic", Tint::Gray),
     (TEXT_CATEGORY, "insert-text-symbolic", Tint::Gray),
@@ -1201,7 +1203,7 @@ mod tests {
     use super::*;
 
     /// 컴포지터가 처음 내놓는 단축키 (분류마다 보이는 순서)
-    const KNOWN: [&str; 58] = [
+    const KNOWN: [&str; 59] = [
         "launcher.show",
         "launcher.dock-autohide",
         "windows.next-app",
@@ -1260,6 +1262,7 @@ mod tests {
         "session.lock-screen",
         "session.log-out",
         "session.log-out-now",
+        "agent.pause",
     ];
 
     fn shortcut(id: &str, category: &str) -> Shortcut {
