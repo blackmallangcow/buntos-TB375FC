@@ -333,6 +333,25 @@ impl BuntState {
                     }
                 });
             }
+            // 대상 강조는 사람만 답하는 창이 떠 있거나 멈춘 동안에는 그리지 않는다: AI가 무엇을 하려는 것처럼 보이지 않게 한다
+            AgentRequest::ShowTarget {
+                pid,
+                title,
+                x,
+                y,
+                width,
+                height,
+                reply,
+            } => {
+                let _ = reply.send(match stopped {
+                    Some(why) => Err(why),
+                    None => self.agent_show_target(
+                        pid,
+                        &title,
+                        Rectangle::new((x, y).into(), (width, height).into()),
+                    ),
+                });
+            }
         }
     }
 
@@ -535,6 +554,10 @@ impl BuntState {
             "AI control {} by the person",
             if paused { "paused" } else { "resumed" }
         );
+        // 멈추면 보이던 대상 강조도 거둔다
+        if paused {
+            self.clear_agent_target();
+        }
         self.publish_agent_state();
     }
 

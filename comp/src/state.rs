@@ -233,6 +233,8 @@ pub struct BuntState {
     pub osk: crate::osk::OskState,
     /// 사람의 실제 입력 기록, 사람 우선 규칙, AI 멈춤과 활동 (agent_guard.rs)
     pub agent_guard: crate::agent_guard::AgentGuard,
+    /// AI 대상 강조 테두리 (agent_target.rs)
+    pub agent_target: crate::agent_target::AgentTarget,
 }
 
 impl BuntState {
@@ -411,6 +413,7 @@ impl BuntState {
             input_devices,
             osk,
             agent_guard,
+            agent_target: crate::agent_target::AgentTarget::default(),
         })
     }
 

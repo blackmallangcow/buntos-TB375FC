@@ -67,6 +67,8 @@ const AGENT_REPLY: Duration = Duration::from_secs(2);
 const CAPTURE_REPLY: Duration = Duration::from_secs(5);
 /// 에이전트가 한 번에 돌릴 수 있는 휠 눈금 수
 const MAX_NOTCHES: f64 = 50.0;
+/// ShowAgentTarget 사각형의 좌표와 크기가 넘지 못하는 값 (논리 픽셀). 창 자리에 더해도 넘치지 않게 한다
+const MAX_TARGET: i32 = 1 << 20;
 
 /// 시스템 설정에 보이는 출력 하나
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -501,6 +503,16 @@ pub enum AgentRequest {
         client: String,
         pid: u32,
         title: String,
+        reply: mpsc::Sender<Result<(), Refused>>,
+    },
+    /// 그 창 기준 논리 사각형을 AI 색 테두리로 잠깐 보인다
+    ShowTarget {
+        pid: u32,
+        title: String,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
         reply: mpsc::Sender<Result<(), Refused>>,
     },
 }
@@ -1490,6 +1502,43 @@ impl Api {
             client,
             pid,
             title,
+            reply,
+        }))?;
+        answer(receiver)
+    }
+
+    /// 에이전트 전용: 그 창 기준 논리 사각형(ClickOn과 같은 틀)을 AI 색 둥근 테두리로 1.2초 보인다. 테두리는 창을 따라
+    /// 움직이고, 입력을 받지 않으며, CaptureWindow에 들지 않는다. 창 밖으로 나간 부분은 그리지 않는다. 잠긴 동안, 사람만
+    /// 답하는 창이 떠 있는 동안, 멈춘 동안은 거절한다
+    #[allow(clippy::too_many_arguments)]
+    async fn show_agent_target(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        pid: u32,
+        title: String,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<(), AgentError> {
+        check_agent(connection, &header).await?;
+        let within = |value: i32| (-MAX_TARGET..=MAX_TARGET).contains(&value);
+        if width <= 0 || height <= 0 || ![x, y, width, height].into_iter().all(within) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "the rectangle needs a size and coordinates within {MAX_TARGET} (got {x}, {y}, \
+                 {width}x{height})"
+            ))
+            .into());
+        }
+        let (reply, receiver) = mpsc::channel();
+        self.request(Request::Agent(AgentRequest::ShowTarget {
+            pid,
+            title,
+            x,
+            y,
+            width,
+            height,
             reply,
         }))?;
         answer(receiver)

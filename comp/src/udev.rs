@@ -1325,6 +1325,12 @@ impl BuntState {
             Some(surface) => self.bar_places(&surface.output),
             None => Vec::new(),
         };
+        // AI 대상 강조 (agent_target.rs): 창의 지금 자리를 따른다. 잠긴 동안에는 그리지 않는다
+        let agent_target = if self.session_lock.is_locked() {
+            None
+        } else {
+            self.agent_target_rect()
+        };
 
         let UdevData {
             renderer,
@@ -1405,6 +1411,14 @@ impl BuntState {
                     }
                 }
             }
+        }
+        // AI 대상 강조 테두리: 커서 바로 아래, 모든 창과 막대 위. 입력을 받지 않는 그림일 뿐이다. 커서처럼 스크린샷에는
+        // 넣지 않고(아래 cursor_ids) 화면 기록에는 넣는다. 에이전트의 창 그림(capture_window)은 창만 그려 들지 않는다
+        if let Some(element) =
+            self.agent_target
+                .element(renderer, &output.name(), output_geo, agent_target, scale.x)
+        {
+            elements.push(OutputRenderElements::Highlight(element));
         }
         // 스크린샷에는 커서를 넣지 않는다
         let cursor_ids: Vec<Id> = elements
