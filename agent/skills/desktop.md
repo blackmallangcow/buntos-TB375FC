@@ -18,6 +18,35 @@ apps through `buntd-agent`, either with the `bunt agent` command or with JavaScr
 - Windows only a person answers: the administrator password dialog, Wi-Fi passwords, Bluetooth
   pairing and the lock screen. You cannot read them or type into them. Ask the user.
 - While the screen is locked everything fails with `ScreenLockedError` until the user unlocks it.
+- The user can pause AI control from the menu bar. Until they resume it, every action fails with
+  `PausedError`; reading still works. Only they can resume it.
+
+## Sharing the computer with the user
+
+The user keeps working while you do. buntOS puts them first and never lets you take their
+keyboard focus.
+
+- Accessible actions need no keyboard focus and work while the user types elsewhere: `click`
+  on elements with an accessible action, `fill`, `set`, `select`, `check`, and `type` or `press`
+  on a text field outside web pages and browsers (`type` adds the text at the end of the field,
+  `press "ctrl+a BackSpace"` clears it, `press Return` runs the field's activate action). Prefer
+  them.
+- Keys, text and the wheel without a ref (`desktop.keyboard`, `type`, `press` and `scroll`
+  without `--app`) go only to the window you worked on last, and only while it still has the
+  keyboard focus. When the user has moved the focus they fail with `FocusMovedError`, which names
+  the window that has it. Use a ref, or name the app.
+- Keys to an app (`app.keyboard`, `--app`), text on web pages and browser address bars, pointer
+  clicks and the wheel go through the compositor. It checks that the window still has the
+  keyboard focus (for the pointer: that it is on top at that point) and refuses while the user
+  is typing or using the pointer: `UserActiveError`, with `retryAfterMs`. Nothing was sent.
+- Never take the focus back: do not activate the window again or click again to get it. Read the
+  window again and continue with refs, or try later.
+- `snapshot()` without an app reads the window you worked on last, not the one the user is
+  using. When there is none it reads the active window and says so in its first line.
+- Opening an app while the user works in another window leaves it in the background.
+- The first line of every action names the app and window that received it and the way:
+  `accessibility` or `target-checked input`. `unchecked input` with a warning means the
+  compositor could not check the target.
 
 ## Reading
 
@@ -27,7 +56,7 @@ apps through `buntd-agent`, either with the `bunt agent` command or with JavaScr
 4. `screenshot()` only when the tree does not show it (a canvas, a game, a drawn chart); then
    `mouse.click(x, y)` with the pixels of that screenshot.
 
-Trees name the window that has the keyboard focus unless you name an app. Name apps by desktop
+Trees show the window you worked on last unless you name an app. Name apps by desktop
 ID (`org.gnome.Calculator`) to stay independent of the user's language; `desktop.installed()`
 lists them. A window without a tree is listed with `tree: false`: Chromium, Electron, Firefox
 and Qt apps started before an AI was first allowed expose it only after a restart, and some
@@ -37,9 +66,11 @@ terminals (foot) never do.
 
 - Prefer refs and roles over pixels. Actions wait until the window stops changing and report
   what changed, new windows, and whether the app quit.
-- `fill` replaces a field's text and checks it; `type` types into the focused field in any
-  language (it fails rather than pressing keys elsewhere when no field has the focus; pass
-  `keys: true` for terminals and games).
+- `fill` replaces a field's text and checks it; when the app drops the text (a browser address
+  bar) it clears the field and types it, and says so. `type` with a ref adds text to that field
+  in any language; without a ref it types into the focused field of your window (it fails
+  rather than pressing keys elsewhere when no field has the focus; pass `keys: true` for
+  terminals and games).
 - Elements scrolled out of view in a web page are marked `[offscreen]`; acting on them scrolls
   them into view first. GTK lists only build the rows on screen: scroll the list and read again.
 - Use `wait` for things that take time (a page loading, a dialog opening, a result appearing)
@@ -51,4 +82,5 @@ terminals (foot) never do.
   `org.gnome.Nautilus`, System Settings `org.buntos.Settings`, Firefox `firefox-esr`, Image
   Viewer `org.gnome.Loupe`, Document Viewer `org.gnome.Papers`; `desktop.installed()` lists the
   rest. The menu bar, Dock and Control Center belong to the app `bunt-shell`.
-- Opening an app that is already open brings its window forward instead of opening a second one.
+- Opening an app that is already open brings its window forward instead of opening a second one
+  (it stays in the background while the user is using another window).

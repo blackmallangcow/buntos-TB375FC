@@ -28,7 +28,7 @@ const calc = desktop.app('Calculator')  // app name, desktop ID, window title or
 await calc.snapshot()                    // compact tree: - button "=" [ref=e185]
 await calc.snapshot({ interactive: true })  // only what can be clicked or typed into
 await calc.snapshot({ diff: true })      // only the lines that changed since the last snapshot
-await desktop.snapshot()                 // the window that has the keyboard focus
+await desktop.snapshot()                 // the window you worked on last (else the focused one)
 await desktop.apps()                     // running apps and their windows
 await desktop.installed()                // apps that can be opened
 await calc.locator('e159').snapshot()    // only below a ref
@@ -61,23 +61,34 @@ match a part of it without `exact`.
 await calc.getByRole('button', { name: '7' }).click()    // accessible action, else the pointer
 await calc.locator('e185').click({ pointer: true })      // press it with the pointer
 await editor.locator('e9').fill('text')                  // replace a field's text, checked afterwards
-await editor.locator('e9').type('안녕하세요')              // type into a field, any language
-await editor.locator('e9').press('Control+a Backspace')  // keys with the focus on the element
+await editor.locator('e9').type('안녕하세요')              // add text at the end of a field, any language
+await editor.locator('e9').press('Control+a Backspace')  // clear a field (other keys: focus, then keys)
 await settings.locator('e26').set(6)                     // slider or spin button value
 await settings.getByRole('switch', { name: 'Wi-Fi' }).check()  // also uncheck(), focus(), select()
 await page.locator('e40').scrollIntoView()               // scroll until it is on screen
 await page.locator('e3').scroll('down', 5)               // turn the wheel over a list or page
 await calc.keyboard.press('Escape')                      // keys to the app's window, no ref
+await desktop.keyboard.type('more')                      // only while your last window has the focus
 await term.keyboard.type('ls', { keys: true })           // keys: true presses a key per character
 await canvas.mouse.click(120, 340)                       // window pixels of its screenshot
 await desktop.launch('org.gnome.TextEditor')             // open an app (or bring it forward)
 ```
 
+The user works on this computer while you do. Text fields outside web pages and browsers take
+`type`, `fill` and `press('Control+a Backspace')` through accessibility, without the keyboard
+focus, so they work while the user types elsewhere. `desktop.keyboard` and `desktop.mouse.wheel`
+go only to the window you worked on last, and only while it still has the keyboard focus. Keys
+to an app, text on web pages, pointer clicks and the wheel are checked by the compositor, which
+refuses while the user is typing or using the pointer. A refused action sent nothing; do not
+take the focus back by activating or clicking again.
+
 Every action waits until the window stops changing (at most 3 s; `settle` option in ms) and
-returns what it did and the diff of that window, so you rarely need a new snapshot:
+returns what it did and the diff of that window, so you rarely need a new snapshot. The first
+line names the app and window that received it and the way (`accessibility` or
+`target-checked input`):
 
 ```
-# e185: clicked with the accessible action "click" (settled in 533 ms)
+# e185: Calculator "Calculator" (accessibility): clicked with the accessible action "click" (settled in 533 ms)
 @@ -4 +4 @@
 -  - textbox [ref=e159] [focused] [value="6×7"]
 +  - textbox [ref=e159] [focused] [value="42"]
@@ -125,6 +136,13 @@ Failures throw `DesktopError` with a `code`; these have their own names:
 - `BlockedAppError` (-32002): the user blocked AI agents from this app. Leave it alone.
 - `ScreenLockedError` (-32003): the screen is locked; wait until the user unlocks it.
 - `TimeoutError` (-32004): what you waited for did not happen in time.
+- `FocusMovedError` (-32005): the user moved the keyboard focus away from your window, so
+  nothing was sent. Use a ref or `desktop.app(name)`; never take the focus back.
+- `UserActiveError` (-32006): the user is typing or using the pointer, so nothing was sent.
+  `retryAfterMs` says when to try again; meanwhile use accessible actions.
+- `TargetGoneError` (-32007): the app of that ref quit or restarted. Take a new snapshot.
+- `PausedError` (-32008): the user paused AI control. Reading still works; only the user can
+  resume it.
 
 The messages come from the daemon and name its command-line options: `--app` is
 `desktop.app(name)`, `--ref` a locator, `--keys` the `keys` option, `--keep-focus` the
