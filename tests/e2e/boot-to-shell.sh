@@ -516,12 +516,23 @@ if [[ "$agent_refs" != NONE ]]; then
 	guest value
 	check "한글·영어·숫자를 섞어 친다: buntOS 2026년 한글 ok" "$answer" "[buntOS 2026년 한글 ok]"
 
-	# 터미널(foot): Phase 1 종료 조건의 터미널 창. 조합하는 중에 띄우면 새 창이 포커스를 가져가므로 조합하던
-	# 글자가 편집기에 확정되어야 한다. foot에서 친 한글은 cat이 받은 바이트(UTF-8)로 본다. 조합 중 Enter는
-	# 조합을 끝내고 줄을 바꾸며, Ctrl+D로 cat이 끝나면 foot도 닫힌다
+	# 터미널(foot): Phase 1 종료 조건의 터미널 창. 사람이 편집기에 조합하는 중에(방금 쳤다) 다른 프로그램이 띄운 새 창은
+	# 키보드를 가져가지 않고 뒤에 뜨며 조합도 그대로다(R3, 사람 우선. 창이 늦게 떠 치는 중이 지났으면 보지 않는다). 사람이
+	# 손을 멈춘 뒤(yield-ms 1.5초) 띄우면 새 창이 포커스를 가져가므로 조합하던 글자가 편집기에 확정되어야 한다. foot에서
+	# 친 한글은 cat이 받은 바이트(UTF-8)로 본다. 조합 중 Enter는 조합을 끝내고 줄을 바꾸며, Ctrl+D로 cat이 끝나면 foot도
+	# 닫힌다
 	guest clear hangul
 	[[ "$answer" == ready ]] || fail "e2e 4번: 텍스트 편집기를 비우지 못했다 ($answer)"
 	keys type:gks sleep:0.3
+	guest foot-behind
+	read -r behind_ms behind <<<"$answer"
+	if [[ "$behind" != "org.gnome.TextEditor []" && "$behind_ms" =~ ^[0-9]+$ ]] && ((behind_ms > 1000)); then
+		echo "e2e 4번 알림: 터미널 창이 늦게 떠(${behind_ms}ms) 사람이 치는 중이 지났을 수 있어 뒤에 뜨는지 보지 않았다 ($behind)"
+	else
+		check "사람이 조합하는 중 다른 프로그램이 띄운 새 창(터미널)은 키보드를 가져가지 않고 뒤에 뜬다" "$behind" \
+			"org.gnome.TextEditor []"
+	fi
+	keys sleep:1.6
 	guest foot-prepare
 	check "조합 중 새 창(터미널)이 뜨면 조합하던 글자가 원래 칸에 확정되고 터미널이 포커스를 받는다" \
 		"$answer" "[한] ready"

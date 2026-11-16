@@ -8,7 +8,7 @@
 # type은 글 입력으로 확정해 조합을 거치지 않는다. 확인은 에이전트(앱의 글)와 입력기 상태(fcitx5)로 한다.
 # 직렬 콘솔의 root로 실행하며 마지막 줄이 답이다(답이 없으면 호스트가 기다리므로 늘 한 줄을 낸다).
 # 사용법: hangul.sh prepare | state | focus-list | clear hangul|english | value | focus-other |
-#         other-value | foot-prepare | foot | firefox-prepare | firefox-wait first|second |
+#         other-value | foot-behind | foot-prepare | foot | firefox-prepare | firefox-wait first|second |
 #         firefox-values | firefox-focus first|second | cleanup
 set -u
 
@@ -153,9 +153,32 @@ other-value)
 	echo "[$(grep -m1 textbox <<<"$tree" | value)]"
 	A fill "$(ref textbox <<<"$tree")" "" >/dev/null 2>&1
 	;;
+foot-behind)
+	# 사람이 편집기에 조합하는 중에(방금 앱에 쳤다) 다른 프로그램이 띄운 새 창(터미널)은 키보드를 가져가지 않고 사람의
+	# 창 뒤에 뜬다(R3, 사람 우선). 창이 목록에 보일 때까지 기다려, 보이기까지 걸린 ms, 키보드 포커스를 가진 앱(창이 뜨지
+	# 않았으면 no-window), 편집기의 글(조합하던 글자는 아직 문서에 없다)을 낸다. 띄운 터미널은 닫는다
+	rm -f "$foot_file"
+	start=$(date +%s%N)
+	spawn foot --working-directory=/tmp sh -c "cat >$foot_file"
+	focused=no-window
+	for _ in $(seq 50); do
+		A apps 2>/dev/null | grep -a -q ' app=foot ' && focused= && break
+		sleep 0.1
+	done
+	took=$((($(date +%s%N) - start) / 1000000))
+	sleep 0.3
+	focused=${focused:-$(focus_app)}
+	text=$(editor_value)
+	pkill -n -x foot
+	for _ in $(seq 25); do
+		pgrep -x foot >/dev/null || break
+		sleep 0.2
+	done
+	echo "$took $focused [$text]"
+	;;
 foot-prepare)
-	# 터미널(foot)을 띄워 cat이 받은 바이트를 파일에 쓰게 한다. 새 창이 키보드 포커스를 가져가므로, 조합하던
-	# 글자가 있으면 편집기에 확정되어야 한다. 편집기의 글과 준비 결과를 낸다
+	# 터미널(foot)을 띄워 cat이 받은 바이트를 파일에 쓰게 한다. 사람이 손을 멈춘 뒤(yield-ms가 지났다) 뜬 새 창은 키보드
+	# 포커스를 가져가므로, 조합하던 글자가 있으면 편집기에 확정되어야 한다. 편집기의 글과 준비 결과를 낸다
 	rm -f "$foot_file"
 	spawn foot --working-directory=/tmp sh -c "cat >$foot_file"
 	for _ in $(seq 50); do
