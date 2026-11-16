@@ -4,21 +4,22 @@
 #
 # 충전을 지켜본다. 30초마다 상태를 남기고, 배터리 40도나 커넥터 55도(ADC 값 6880 아래)를 넘으면 충전을 멈춘다.
 # 멈춘 뒤에도 기록은 이어 간다. 다시 충전하려면 서비스를 다시 시작한다
+#
+# 'charge-guard check'는 한 번만 보고 이 부팅의 기록에 잇는다. 멈추면 그 줄을 출력한다. 아래 sleep은 잠든 시간을
+# 세지 않으므로, 충전기를 꽂은 채 잠든 동안에는 charge-sleep이 30초마다 이것을 부른다
 D=/var/log/buntos-charge
 C=/sys/class/power_supply/mt6375-charger
 G=/sys/class/power_supply/mm8013
-mkdir -p "$D"
-# 부팅마다 기록 하나, 최근 다섯 개만 둔다
-ls -1t "$D"/*.log 2>/dev/null | tail -n +5 | xargs -r rm -f
-L=$D/$(date +%Y%m%d-%H%M%S).log
+once=
 stop() {
 	m="$(date +%T) GUARD STOPPED CHARGING: $1"
 	echo "$m" >>"$L"
 	echo "buntos-charge: $m" >/dev/kmsg
 	echo inhibit-charge >"$C/charge_behaviour" 2>>"$L"
 	sync
+	[ -z "$once" ] || echo "$m"
 }
-while :; do
+check() {
 	line=$(/usr/libexec/buntos/charge-status)
 	echo "$line" >>"$L"
 	sync
@@ -27,5 +28,21 @@ while :; do
 	# 0은 못 읽은 것이다
 	[ "${bat:-0}" -ge 400 ] && stop "battery $bat"
 	[ "${raw:-0}" -gt 0 ] && [ "${raw:-0}" -lt 6880 ] && stop "connector raw $raw"
+}
+mkdir -p "$D"
+# 이 감시의 기록만 센다. charge-sleep의 sleep.log는 건드리지 않는다
+logs() { ls -1t "$D"/[0-9]*-[0-9]*.log 2>/dev/null; }
+if [ "${1:-}" = check ]; then
+	once=1
+	L=$(logs | head -n 1)
+	[ -n "$L" ] || L=$D/$(date +%Y%m%d-%H%M%S).log
+	check
+	exit 0
+fi
+# 부팅마다 기록 하나, 최근 다섯 개만 둔다
+logs | tail -n +5 | xargs -r rm -f
+L=$D/$(date +%Y%m%d-%H%M%S).log
+while :; do
+	check
 	sleep 30
 done

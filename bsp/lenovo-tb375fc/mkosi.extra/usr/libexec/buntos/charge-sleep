@@ -17,6 +17,9 @@ the ExecStart of systemd-suspend.service:
   off until the pump stops, a key or the lid, or the charger goes.
 - A key, the lid or anything else that woke the system before the alarm ends the job,
   as a normal resume does. So does a failed suspend.
+- The temperature guard of buntos-charge.service looks every 30 seconds by a timer that
+  does not count time asleep. While that service runs, every third check here has it
+  look once.
 
 Without a charger, the RTC alarm or the driver parameter it is one plain systemd-sleep.
 
@@ -50,6 +53,11 @@ SLACK_MS = 5000
 CHECK_WAIT_S = 3.0
 # How often to look while the pump runs and the system stays up
 PUMP_LOOK_S = 5.0
+# The guard looks every 30 seconds awake: every third check of 10 seconds here
+GUARD = "/usr/libexec/buntos/charge-guard"
+GUARD_UNIT = "buntos-charge.service"
+GUARD_EVERY = 3
+GUARD_TIMEOUT_S = 20
 
 EV_KEY, EV_SW = 0x01, 0x05
 KEY_POWER, SW_LID = 116, 0x00
@@ -143,6 +151,20 @@ def test_writes(test, check):
         if w.get("cycle") == check:
             ok = write(w["path"], w["value"])
             log(f"test: {w['path']} <- {w['value']} {'ok' if ok else 'failed'}")
+
+
+def guard():
+    """One look of the temperature guard, which stops charging when it is too warm"""
+    if subprocess.run(["systemctl", "is-active", "--quiet", GUARD_UNIT]).returncode != 0:
+        return
+    try:
+        r = subprocess.run([GUARD, "check"], capture_output=True, text=True,
+                           timeout=GUARD_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"guard: {e}")
+        return
+    for line in r.stdout.splitlines():
+        log("guard: " + line)
 
 
 def suspend_once():
@@ -268,6 +290,8 @@ def watch():
         check += 1
         log(f"check {check}{'' if seen else ' (driver did not report)'}: " + state())
         test_writes(test, check)
+        if check % GUARD_EVERY == 0:
+            guard()
 
 
 def main():
