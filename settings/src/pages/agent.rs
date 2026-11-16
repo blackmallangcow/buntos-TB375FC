@@ -312,7 +312,9 @@ impl AgentPage {
         apps: &[gio::AppInfo],
     ) -> gtk::ListBoxRow {
         let icon = program_icon(&client.exe, client.script.as_deref(), apps);
-        let (row, accessories) = widgets::rich_row(Some(&icon), &client.name, None);
+        // 예전 규칙으로 저장된 이름("Claude Code URL Handler")은 지금 규칙의 이름으로 보인다 (이슈 #1 리뷰)
+        let name = bunt_access::shown_name(&client.name, &client.exe, client.script.as_deref());
+        let (row, accessories) = widgets::rich_row(Some(&icon), &name, None);
         row.set_tooltip_text(Some(&client_tooltip(
             client,
             &self.context.tr.get("agent-client-any-version"),
@@ -321,7 +323,7 @@ impl AgentPage {
             .active(client.enabled)
             .valign(gtk::Align::Center)
             .build();
-        switch.update_property(&[gtk::accessible::Property::Label(&client.name)]);
+        switch.update_property(&[gtk::accessible::Property::Label(&name)]);
         let page = Rc::downgrade(self);
         let (exe, script) = (client.exe.clone(), client.script.clone());
         switch.connect_active_notify(move |switch| {
@@ -452,6 +454,15 @@ impl AgentPage {
                 })
                 .filter(|request| {
                     request.exe.is_file() && request.script.as_deref().is_none_or(Path::is_file)
+                })
+                // 예전 규칙으로 남은 이름은 지금 규칙의 이름으로 보이고 그 이름으로 더한다
+                .map(|mut request| {
+                    request.name = bunt_access::shown_name(
+                        &request.name,
+                        &request.exe,
+                        request.script.as_deref(),
+                    );
+                    request
                 })
                 .collect()
         };

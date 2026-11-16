@@ -27,7 +27,7 @@ mod pattern;
 mod policy;
 mod requests;
 
-pub use desktop::{DesktopApp, desktop_app};
+pub use desktop::{DesktopApp, desktop_app, shown_name};
 pub use identify::{ProgramError, can_identify, identify, program_client};
 pub use pattern::version_pattern;
 pub use policy::{

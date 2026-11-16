@@ -93,11 +93,14 @@ impl AgentAccess {
         if self.window.borrow().is_some() {
             return;
         }
-        let Some(request) = bunt_access::request_to_ask(&Policy::load()) else {
+        let Some(mut request) = bunt_access::request_to_ask(&Policy::load()) else {
             return;
         };
         // 창을 띄우기 전에 남겨, 그사이 파일이 다시 바뀌어도 두 번 묻지 않는다
         bunt_access::mark_asked(&request.exe, request.script.as_deref());
+        // 예전 규칙으로 남은 이름은 지금 규칙의 이름으로 묻는다 (이슈 #1 리뷰)
+        request.name =
+            bunt_access::shown_name(&request.name, &request.exe, request.script.as_deref());
         self.show(request);
     }
 
