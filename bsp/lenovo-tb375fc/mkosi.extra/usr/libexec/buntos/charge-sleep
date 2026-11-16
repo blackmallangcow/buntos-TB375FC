@@ -1,0 +1,286 @@
+#!/usr/bin/python3
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Suspend for the TB375FC that keeps watching the battery while a charger is in.
+
+Stock wakes every 10 seconds with an RTC alarm while a charger is connected, so the
+charger follows the battery and charges as fast asleep as awake. This does the same as
+the ExecStart of systemd-suspend.service:
+
+- It arms the RTC, tells the charger driver that the system looks again within that
+  time (mt6375_charger.sleep_check_ms), and suspends through systemd-sleep. After a wake
+  by the alarm alone it waits for the driver's check, writes one line to the log and
+  suspends again. All of it is one suspend job, so the session and the screen stay
+  asleep.
+- While the charge pump runs it does not suspend: the pump wants attention every few
+  seconds and a PPS source a new request every 10. The system stays up with the screen
+  off until the pump stops, a key or the lid, or the charger goes.
+- A key, the lid or anything else that woke the system before the alarm ends the job,
+  as a normal resume does. So does a failed suspend.
+
+Without a charger, the RTC alarm or the driver parameter it is one plain systemd-sleep.
+
+/run/buntos/charge-sleep-test (JSON) is for unattended tests: "until" (epoch seconds)
+ends the job at that time, and "writes" ([{"cycle": n, "path": p, "value": v}]) writes
+values to files at the given check.
+"""
+
+import json
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+
+RTC = "/sys/class/rtc/rtc0"
+CHG = "/sys/class/power_supply/mt6375-charger"
+PUMP = "/sys/class/power_supply/upm6720-direct"
+GAUGE = "/sys/class/power_supply/mm8013"
+PARAMS = "/sys/module/mt6375_charger/parameters"
+LOG_DIR = "/var/log/buntos-charge"
+LOG = LOG_DIR + "/sleep.log"
+LOG_MAX = 4 << 20
+TEST = "/run/buntos/charge-sleep-test"
+
+# Stock looks every 10 seconds. The driver gets some slack on top for the resume
+INTERVAL_S = 10
+SLACK_MS = 5000
+# The driver's check runs right after the resume; give up waiting for it after this
+CHECK_WAIT_S = 3.0
+# How often to look while the pump runs and the system stays up
+PUMP_LOOK_S = 5.0
+
+EV_KEY, EV_SW = 0x01, 0x05
+KEY_POWER, SW_LID = 116, 0x00
+EVENT = struct.Struct("llHHi")
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def write(path, value):
+    try:
+        with open(path, "w") as f:
+            f.write(str(value))
+        return True
+    except OSError as e:
+        log(f"write {path}: {e.strerror}")
+        return False
+
+
+def log(message):
+    line = time.strftime("%Y-%m-%dT%H:%M:%S") + " " + message
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX:
+            os.replace(LOG, LOG + ".1")
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def state():
+    """One line of what the charger does now, for the log"""
+    fields = [
+        ("t", GAUGE + "/temp"),
+        ("uv", GAUGE + "/voltage_now"),
+        ("ua", GAUGE + "/current_now"),
+        ("cap", GAUGE + "/capacity"),
+        ("st", CHG + "/status"),
+        ("cc", CHG + "/constant_charge_current"),
+        ("cv", CHG + "/constant_charge_voltage"),
+        ("aicr", CHG + "/input_current_limit"),
+        ("pump", PUMP + "/online"),
+    ]
+    return " ".join(f"{k}={read(p, '-')}" for k, p in fields)
+
+
+def charger_in():
+    return read(CHG + "/online") == "1"
+
+
+def pump_on():
+    return read(PUMP + "/online") == "1"
+
+
+def can_watch():
+    return (charger_in() and os.path.exists(RTC + "/wakealarm") and
+            os.path.exists(PARAMS + "/sleep_check_ms"))
+
+
+def key_count():
+    """Events of the wakeup sources of the power key and the lid"""
+    total = 0
+    base = "/sys/class/wakeup"
+    for w in os.listdir(base) if os.path.isdir(base) else []:
+        name = read(f"{base}/{w}/name")
+        if name.endswith(":keys") or name == "gpio-keys":
+            total += int(read(f"{base}/{w}/event_count", "0") or 0)
+    return total
+
+
+def load_test():
+    try:
+        with open(TEST) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def test_over(test):
+    return "until" in test and time.time() >= test["until"]
+
+
+def test_writes(test, check):
+    for w in test.get("writes", []):
+        if w.get("cycle") == check:
+            ok = write(w["path"], w["value"])
+            log(f"test: {w['path']} <- {w['value']} {'ok' if ok else 'failed'}")
+
+
+def suspend_once():
+    return subprocess.run(["/usr/lib/systemd/systemd-sleep", "suspend"]).returncode
+
+
+def arm(seconds):
+    write(RTC + "/wakealarm", 0)
+    return write(RTC + "/wakealarm", f"+{seconds}")
+
+
+def disarm():
+    write(RTC + "/wakealarm", 0)
+    write(PARAMS + "/sleep_check_ms", 0)
+
+
+def input_devices():
+    """The power key and the lid, opened for reading"""
+    found = []
+    base = "/sys/class/input"
+    for e in sorted(os.listdir(base)):
+        if not e.startswith("event"):
+            continue
+        name = read(f"{base}/{e}/device/name")
+        if name.endswith("keys") or name == "gpio-keys":
+            try:
+                found.append(os.open(f"/dev/input/{e}", os.O_RDONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+    return found
+
+
+def user_input(fds, timeout):
+    """True when the power key went down or the lid opened within the timeout"""
+    if not fds:
+        time.sleep(timeout)
+        return False
+    ready, _, _ = select.select(fds, [], [], timeout)
+    for fd in ready:
+        try:
+            data = os.read(fd, EVENT.size * 64)
+        except OSError:
+            continue
+        for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
+            _, _, etype, code, value = EVENT.unpack_from(data, i)
+            if etype == EV_KEY and code == KEY_POWER and value == 1:
+                return True
+            if etype == EV_SW and code == SW_LID and value == 0:
+                return True
+    return False
+
+
+def stay_up_while_pumping(test):
+    """The pump runs: keep the system up, screen off. Returns why it stopped"""
+    inhibit = subprocess.Popen(
+        ["systemd-inhibit", "--what=handle-power-key:handle-lid-switch",
+         "--who=buntOS charge-sleep", "--why=charging through the pump",
+         "--mode=block", "sleep", "infinity"])
+    fds = input_devices()
+    log("pump: staying up, " + state())
+    try:
+        last = time.monotonic()
+        while True:
+            if user_input(fds, PUMP_LOOK_S):
+                return "key"
+            if test_over(test):
+                return "test"
+            if not charger_in():
+                return "unplugged"
+            if not pump_on():
+                return "pump off"
+            if time.monotonic() - last >= 30:
+                log("pump: " + state())
+                last = time.monotonic()
+    finally:
+        for fd in fds:
+            os.close(fd)
+        inhibit.terminate()
+        inhibit.wait()
+
+
+def watch():
+    test = load_test()
+    check = 0
+    log("start: " + state())
+    while True:
+        if test_over(test):
+            return "test"
+        if not charger_in():
+            disarm()
+            log("unplugged: plain suspend")
+            suspend_once()
+            return "plain"
+        if pump_on():
+            why = stay_up_while_pumping(test)
+            log(f"pump: {why}, " + state())
+            if why != "pump off":
+                return why
+            continue
+
+        keys = key_count()
+        checks = int(read(PARAMS + "/sleep_checks", "0") or 0)
+        write(PARAMS + "/sleep_check_ms", INTERVAL_S * 1000 + SLACK_MS)
+        if not arm(INTERVAL_S):
+            disarm()
+            suspend_once()
+            return "no alarm"
+        due = time.time() + INTERVAL_S
+        if suspend_once() != 0:
+            return "suspend failed"
+
+        early = time.time() < due - 1
+        if early or key_count() != keys:
+            return "woken early" if early else "key"
+
+        # The alarm alone woke it: let the driver look, then sleep again
+        end = time.monotonic() + CHECK_WAIT_S
+        while int(read(PARAMS + "/sleep_checks", "0") or 0) == checks:
+            if time.monotonic() > end:
+                break
+            time.sleep(0.05)
+        seen = int(read(PARAMS + "/sleep_checks", "0") or 0) != checks
+        check += 1
+        log(f"check {check}{'' if seen else ' (driver did not report)'}: " + state())
+        test_writes(test, check)
+
+
+def main():
+    if not can_watch():
+        return suspend_once()
+    why = "error"
+    try:
+        why = watch()
+    finally:
+        disarm()
+        log(f"end: {why}, " + state())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,197 @@
+From: buntOS contributors
+Subject: [PATCH] power: supply: mt6375-charger: charge as awake in a watched suspend
+
+In suspend charging goes on only gently, at 500 mA for both currents, as
+nothing follows the battery while the work is frozen. Stock wakes every
+10 seconds with an RTC alarm to look instead, and so charges as fast
+asleep as awake.
+
+Let user space say that it wakes the system again soon. Before a suspend
+it sets sleep_check_ms to the time within which it resumes, here from an
+RTC alarm, and the driver then leaves charging as the work last set it:
+the limits, the charge voltage and CHG_EN. After the resume the work
+runs at once as always, decides again from a new reading of the gauge,
+and counts that look in sleep_checks, so that user space knows the
+driver has looked before it suspends again. The charge pump still stops
+in suspend, as it wants attention every few seconds and the source a new
+request every 10: user space keeps the system up while the pump runs.
+
+A suspend without sleep_check_ms charges gently or not at all, as
+before. So does one where the work could not have seen what matters: a
+gauge that did not read, a failed setup or the boost. With a reason to
+stop, charging stops in suspend as it would awake, and the work still
+looks and counts after the resume, so that charging starts again from
+there once the reason is gone.
+
+Should the system not wake as promised, charging goes on as it was set,
+under the voltage limit, the thermal regulation, the overvoltage
+protection and the safety timer of the chip.
+
+Tested on a Lenovo TB375FC with charge-sleep and the RTC alarm of
+0206-0208, in two unattended runs of 16 and 13 wakes, 10 seconds apart:
+asleep it charged at 3 A and 4.34 V as awake, about 2.9 A into the
+battery. With a battery temperature injected for the test, the next look
+set 4.24 V after 47 C and stopped charging after 51 C, and charging came
+back at 4.34 V after the real temperature again.
+---
+ drivers/power/supply/mt6375-charger.c |   79 +++++++++++++++++++++++++++++----
+ 1 file changed, 70 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/power/supply/mt6375-charger.c b/drivers/power/supply/mt6375-charger.c
+--- a/drivers/power/supply/mt6375-charger.c
++++ b/drivers/power/supply/mt6375-charger.c
+@@ -196,6 +196,27 @@ module_param(direct_charge, bool, 0644);
+ MODULE_PARM_DESC(direct_charge,
+ 		 "Charge directly through the charge pump from a PPS source");
+ 
++/*
++ * Set by user space before a suspend that it ends again within this many
++ * milliseconds to let the work look at the battery, as stock does every 10
++ * seconds with an RTC alarm. Charging then goes on asleep as the work last set
++ * it, and the work looks again at once after the resume. 0 keeps charging
++ * gentle in suspend.
++ */
++static unsigned int sleep_check_ms;
++module_param(sleep_check_ms, uint, 0644);
++MODULE_PARM_DESC(sleep_check_ms,
++		 "Suspends wake within this many ms to let the driver look (0: none)");
++
++/*
++ * How often the work looked right after the resume from such a suspend, for
++ * user space to know when to suspend again. It counts whether charging went on
++ * in that suspend or had to stop.
++ */
++static unsigned int sleep_checks;
++module_param(sleep_checks, uint, 0444);
++MODULE_PARM_DESC(sleep_checks, "Looks right after a suspend with sleep_check_ms");
++
+ enum mt6375_chg_field {
+ 	F_CHG_EN, F_BUCK_EN, F_HZ, F_IAICR, F_ILIM_EN, F_VMIVR, F_CV, F_VREC,
+ 	F_CC, F_CHG_TMR, F_CHG_TMR_EN, F_EOC_RST, F_TE, F_IEOC, F_BLEED_DIS_EN,
+@@ -317,6 +338,9 @@ struct mt6375_chg {
+ 	bool dc_no_source;
+ 	unsigned long dc_no_source_at;
+ 	bool asleep;			/* set up for suspend, until the work */
++	bool announced;			/* asleep with the work back soon */
++	bool watched;			/* and charging on as awake */
++	bool check_due;			/* resumed from that, until the work */
+ };
+ 
+ /* The chip wants these set differently for the boost than for charging */
+@@ -1724,6 +1748,10 @@ static void mt6375_chg_work(struct work_struct *work)
+ 	mt6375_chg_control(chg, &now);
+ 	if (health != mt6375_chg_health(chg))
+ 		power_supply_changed(chg->psy);
++	if (chg->check_due) {
++		chg->check_due = false;
++		WRITE_ONCE(sleep_checks, sleep_checks + 1);
++	}
+ 	start = want && !now.dc_active && !chg->setup_failed;
+ 	mutex_unlock(&chg->lock);
+ 
+@@ -1834,8 +1862,11 @@ static int mt6375_chg_init_irqs(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-/* 0 with the charge pump known to be off afterwards */
+-static int mt6375_chg_stop_control(struct mt6375_chg *chg)
++/*
++ * 0 with the charge pump known to be off afterwards. Unless kept, the limits go
++ * to where nobody needs to watch them.
++ */
++static int mt6375_chg_stop_work(struct mt6375_chg *chg, bool keep)
+ {
+ 	int ret;
+ 
+@@ -1845,13 +1876,18 @@ static int mt6375_chg_stop_control(struct mt6375_chg *chg)
+ 	mutex_lock(&chg->lock);
+ 	WRITE_ONCE(chg->dc_hold, false);
+ 	chg->dc_started = false;
+-	if (mt6375_chg_check_boost(chg) <= 0 && chg->taken_over)
++	if (!keep && mt6375_chg_check_boost(chg) <= 0 && chg->taken_over)
+ 		mt6375_chg_set_unsupervised(chg);
+ 	mutex_unlock(&chg->lock);
+ 
+ 	return ret == -ENODEV ? 0 : ret;
+ }
+ 
++static int mt6375_chg_stop_control(struct mt6375_chg *chg)
++{
++	return mt6375_chg_stop_work(chg, false);
++}
++
+ static void mt6375_chg_release_control(void *data)
+ {
+ 	mt6375_chg_stop_control(data);
+@@ -2023,6 +2059,19 @@ static bool mt6375_chg_may_charge_asleep(struct mt6375_chg *chg)
+ 	       !mt6375_chg_check_boost(chg);
+ }
+ 
++/*
++ * In a watched suspend the work is back within sleep_check_ms and decides again
++ * at once, so charging goes on as it last set it, as it would awake. Only what
++ * the work could not have seen keeps the gentle way: a gauge that did not read,
++ * a failed setup, the boost, or a reason to stop.
++ */
++static bool mt6375_chg_may_charge_watched(struct mt6375_chg *chg)
++{
++	return chg->taken_over && !mt6375_chg_must_stop(chg) &&
++	       !chg->read_fails && !chg->setup_failed &&
++	       !mt6375_chg_check_boost(chg);
++}
++
+ /*
+  * At the USB default for both currents, which warms the battery by little,
+  * under the voltage limit and the thermal regulation of the chip, and only
+@@ -2084,15 +2133,19 @@ stop:
+ static int mt6375_chg_suspend(struct device *dev)
+ {
+ 	struct mt6375_chg *chg = dev_get_drvdata(dev);
++	bool watch = READ_ONCE(sleep_check_ms);
+ 	int pump, ret = 0;
+ 
+ 	if (!chg->can_control)
+ 		return 0;
+ 
+-	pump = mt6375_chg_stop_control(chg);
++	pump = mt6375_chg_stop_work(chg, watch);
+ 
+ 	mutex_lock(&chg->lock);
+-	if (!pump && mt6375_chg_may_charge_asleep(chg))
++	chg->announced = watch;
++	if (watch && !pump && mt6375_chg_may_charge_watched(chg))
++		chg->watched = true;
++	else if (!pump && mt6375_chg_may_charge_asleep(chg))
+ 		ret = mt6375_chg_charge_asleep(chg);
+ 	else if (chg->taken_over || mt6375_chg_must_stop(chg))
+ 		ret = mt6375_chg_stop_charging(chg);
+@@ -2107,9 +2160,10 @@ static int mt6375_chg_suspend(struct device *dev)
+ }
+ 
+ /*
+- * Every resume goes through the work's putting back. Restoring a hibernation
+- * image runs the suspend above in the kernel that boots first, so this kernel
+- * would not know that charging went on.
++ * Every other resume goes through the work's putting back. Restoring a
++ * hibernation image runs the suspend above in the kernel that boots first, so
++ * this kernel would not know that charging went on. A watched suspend is only
++ * ever a suspend to idle or to RAM: charge-sleep sets sleep_check_ms for those.
+  */
+ static int mt6375_chg_resume(struct device *dev)
+ {
+@@ -2119,7 +2173,14 @@ static int mt6375_chg_resume(struct device *dev)
+ 		return 0;
+ 
+ 	mutex_lock(&chg->lock);
+-	chg->asleep = true;
++	if (chg->announced) {
++		chg->announced = false;
++		chg->check_due = true;
++	}
++	if (chg->watched)
++		chg->watched = false;
++	else
++		chg->asleep = true;
+ 	mutex_unlock(&chg->lock);
+ 
+ 	mt6375_chg_start_work(chg);

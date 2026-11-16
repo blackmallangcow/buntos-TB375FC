@@ -32,6 +32,8 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 
 전원 키: `logind.conf.d/50-tb375fc.conf`가 누르면 잠들게 하고, 10초 잡기는 커널이 한다(패치 0186). 컴퓨터에 꽂힌 USB 가젯은 컨트롤러가 잠들지 못하게 해서 `system-sleep/buntos-usb-gadget`가 잠든 동안 뗀다. 자세한 것은 [체크리스트 9.7절](../../docs/tb375fc/bringup-checklist.md)이다.
 
+잠든 동안 충전: 충전기가 꽂혀 있으면 잠자기가 `libexec/buntos/charge-sleep`으로 간다(`systemd-suspend.service.d/50-buntos-charge-sleep.conf`). 순정처럼 RTC 알람으로 10초마다 화면 없이 깨어, 충전 드라이버가 온도와 전압을 다시 보고 깨어 있을 때와 같이 충전하게 한 뒤 다시 잠든다(패치 0205~0208). 차지 펌프가 도는 동안은 잠들지 않고 화면만 끈 채 깨어 있다. 키, 덮개, 충전기 뽑기에 끝나고, 기록은 `/var/log/buntos-charge/sleep.log`에 남는다. 충전기가 없으면 예전과 같은 잠자기다.
+
 Wi-Fi, 소리, 충전은 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
 
 GPU에는 Mesa 26.3이 있어야 한다(G615는 26.3부터 돈다. 이미지의 Debian 스냅숏은 26.1이다). `mesa/build.sh`가 꾸러미 `buntos-mesa`로 만들어 `/opt/mesa`에 넣고 `/etc/ld.so.conf.d/00-opt-mesa.conf`로 Debian의 Mesa보다 먼저 찾게 한다. GPU 펌웨어(`arm/mali/arch11.8/mali_csffw.bin`)는 Debian의 `firmware-misc-nonfree`에 있다.
