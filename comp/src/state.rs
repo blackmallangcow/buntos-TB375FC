@@ -219,6 +219,8 @@ pub struct BuntState {
     refill_timer: Option<RegistrationToken>,
     pub dbus: dbus::Service,
     pub input_method_process: InputMethodProcess,
+    /// 키보드를 잡은 입력기의 연결 (ime.rs의 tell_input_method_key_repeat)
+    pub input_method_client: Option<smithay::reexports::wayland_server::backend::ClientId>,
     pub input_method_exited: channel::Sender<()>,
     /// 입력기가 앱에 보이고 있는 조합 중인 글자. 포커스를 옮기기 전에 확정한다
     pub preedit: Preedit,
@@ -409,6 +411,7 @@ impl BuntState {
             refill_timer: None,
             dbus,
             input_method_process: InputMethodProcess::default(),
+            input_method_client: None,
             input_method_exited,
             preedit: Preedit::default(),
             backend,
@@ -2323,6 +2326,7 @@ impl BuntState {
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.change_repeat_info(rate as i32, delay as i32);
         }
+        self.tell_input_method_key_repeat(rate as i32, delay as i32);
         self.prefs.keyboard = Some(KeyRepeat { delay, rate });
         self.prefs.save();
         self.dbus.update(|snapshot| {

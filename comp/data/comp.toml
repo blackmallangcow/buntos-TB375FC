@@ -10,7 +10,7 @@ bottom = "#f2a7c3"
 
 [keyboard]
 layout = "us"
-repeat-delay = 200
+repeat-delay = 400
 repeat-rate = 25
 
 [effects]

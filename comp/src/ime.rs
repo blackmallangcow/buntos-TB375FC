@@ -128,6 +128,34 @@ impl BuntState {
         });
     }
 
+    /// 키 반복 설정(지연, 속도)이 바뀐 것을 입력기가 잡은 키보드에 알린다. 글 칸에 치는 키는 입력기가 받아
+    /// 되풀이하는데(fcitx5), smithay는 입력기가 키보드를 잡을 때에만 반복 설정을 보내고 바뀐 것은 앱의
+    /// 키보드에만 알린다. 그래서 시스템 설정에서 바꿔도 다시 로그인하기 전에는 글 칸에서 옛 값으로 되풀이했다
+    pub fn tell_input_method_key_repeat(&self, rate: i32, delay: i32) {
+        let Some(client) = self.input_method_client.clone() else {
+            return;
+        };
+        // 이 닫힘 안에서는 백엔드의 다른 함수를 부를 수 없다(잠금). ID만 모은다
+        let mut grabs = Vec::new();
+        let listed = self
+            .display_handle
+            .backend_handle()
+            .with_all_objects_for(client, |id| {
+                if id.interface().name == ZwpInputMethodKeyboardGrabV2::interface().name {
+                    grabs.push(id);
+                }
+            });
+        if listed.is_err() {
+            // 입력기가 끝났다. 다시 뜨면 키보드를 잡으며 새 값을 받는다
+            return;
+        }
+        for id in grabs {
+            if let Ok(grab) = ZwpInputMethodKeyboardGrabV2::from_id(&self.display_handle, id) {
+                grab.repeat_info(rate, delay);
+            }
+        }
+    }
+
     pub fn input_method_exited(&mut self) {
         let process = &mut self.input_method_process;
         if process
@@ -271,6 +299,10 @@ impl Dispatch<ZwpInputMethodV2, InputMethodUserData<BuntState>> for BuntState {
         data_init: &mut DataInit<'_, Self>,
     ) {
         match &request {
+            // 키 반복 설정이 바뀌면 이 입력기가 잡은 키보드에도 알리려고 적어 둔다 (tell_input_method_key_repeat)
+            zwp_input_method_v2::Request::GrabKeyboard { .. } => {
+                state.input_method_client = Some(client.id());
+            }
             zwp_input_method_v2::Request::SetPreeditString { text, .. } => {
                 state.preedit.set_preedit(text);
             }
