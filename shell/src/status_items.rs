@@ -323,6 +323,7 @@ fn item_widget(
             // 항목에 접근성 이름을 단다(GTK 4.24의 GtkModelButton은 이름이 비어 있다)
             crate::menu_names::follow(&popover);
             button.set_popover(Some(&popover));
+            crate::popups::guard(&button);
             // 열기 직전에 앱에 알린다 (앱이 메뉴를 고칠 수 있다)
             let opening = menu.clone();
             popover.connect_show(move |_| opening.about_to_show());

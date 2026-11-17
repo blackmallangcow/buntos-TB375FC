@@ -4,7 +4,7 @@
 //! 화면 키보드의 배열 (iPadOS 키보드, 설계안 5.2절). GTK에 기대지 않는 표다.
 //!
 //! - 한 줄은 1/4 키 단위로 [`COLUMNS`]칸이다. 글자 키는 4칸(1키)이고, 줄마다 기능 키의 너비를 맞춰 46칸을 채운다.
-//! - 글자 키가 보내는 것은 지금 키 배열(us)의 글자다. 한글(2벌식)은 자모 자리의 라틴 글자를 보내고 입력기(fcitx5)가
+//! - 글자 키가 보내는 것은 지금 키 배열(us)의 글자다. 한글(두벌식)은 자모 자리의 라틴 글자를 보내고 입력기(fcitx5)가
 //!   조합한다(ㅂ은 q, Shift의 ㅃ은 Q). Shift를 눌러도 같은 자모인 키는 소문자를 보낸다.
 //! - 지금 키 배열에 없는 글자(€ £ ¥ • ₩)는 키로 칠 수 없어 넣지 않았다. iPadOS의 #+= 둘째 줄과 다르다.
 //! - 단축 줄(iPadOS의 shortcuts bar): 키 줄 위의 줄이고 왼쪽 끝에 오려두기, 복사하기, 붙여넣기가 그림으로 놓인다. 키의
@@ -15,7 +15,7 @@ pub const COLUMNS: u8 = 46;
 /// 단축 줄의 단추 하나의 칸 수. iPadOS 26의 단추는 글자 키보다 좁은 간격으로 놓인다(글자 키의 약 3/4)
 const BAR_BUTTON: u8 = 3;
 
-/// 글자 배열. 지금 입력 소스를 따른다(한글이면 2벌식, 나머지는 QWERTY)
+/// 글자 배열. 지금 입력 소스를 따른다(한글이면 두벌식, 나머지는 QWERTY)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Script {
     Hangul,
@@ -214,8 +214,8 @@ impl Slot {
     }
 }
 
-/// 2벌식(KS X 5002): 라틴 글자 자리와 자모. Shift로 바뀌는 자모(ㅃ ㅉ ㄸ ㄲ ㅆ ㅒ ㅖ)는 대문자 자리에 있다.
-/// fcitx5-hangul(libhangul)의 2벌식과 같다
+/// 두벌식(KS X 5002): 라틴 글자 자리와 자모. Shift로 바뀌는 자모(ㅃ ㅉ ㄸ ㄲ ㅆ ㅒ ㅖ)는 대문자 자리에 있다.
+/// fcitx5-hangul(libhangul)의 두벌식과 같다
 const DUBEOLSIK: [(char, char); 33] = [
     ('q', 'ㅂ'),
     ('w', 'ㅈ'),
@@ -252,7 +252,7 @@ const DUBEOLSIK: [(char, char); 33] = [
     ('P', 'ㅖ'),
 ];
 
-/// 그 라틴 글자 자리의 2벌식 자모
+/// 그 라틴 글자 자리의 두벌식 자모
 pub fn jamo(latin: char) -> Option<char> {
     DUBEOLSIK
         .iter()
@@ -277,7 +277,7 @@ fn letter(script: Script, latin: char, shifted: bool) -> Key {
     };
     let label = match script {
         Script::Latin => send,
-        // 2벌식 표에 없는 자리는 없다 (LETTER_ROWS는 모두 표에 있다)
+        // 두벌식 표에 없는 자리는 없다 (LETTER_ROWS는 모두 표에 있다)
         Script::Hangul => jamo(send).unwrap_or(send),
     };
     char_key(send, label.to_string(), None, 4)
@@ -612,10 +612,10 @@ mod tests {
         assert_eq!(sent(&third), "ZXCVBNM!?");
     }
 
-    /// 모든 쪽의 글자 키가 us 배열의 맞는 키(키 코드와 Shift)를 낸다. 한글 자모는 2벌식 자리의 키다
+    /// 모든 쪽의 글자 키가 us 배열의 맞는 키(키 코드와 Shift)를 낸다. 한글 자모는 두벌식 자리의 키다
     #[test]
     fn every_key_is_on_the_us_layout() {
-        // 2벌식 자모 → 키 코드: ㅂ은 Q 키(16), ㅃ은 Shift+Q, ㅁ은 A 키(30), ㅡ는 M 키(50)
+        // 두벌식 자모 → 키 코드: ㅂ은 Q 키(16), ㅃ은 Shift+Q, ㅁ은 A 키(30), ㅡ는 M 키(50)
         let key_of = |jamo_char: char| {
             DUBEOLSIK
                 .iter()

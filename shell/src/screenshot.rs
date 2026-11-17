@@ -254,6 +254,7 @@ impl Toolbar {
             .always_show_arrow(true)
             .css_classes(["screenshot-options"])
             .build();
+        crate::popups::guard(&options);
         bar.append(&options);
         let shoot = gtk::Button::builder()
             .label(tr.get("screenshot-capture"))

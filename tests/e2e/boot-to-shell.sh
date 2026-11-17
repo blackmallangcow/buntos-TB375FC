@@ -440,7 +440,7 @@ fi
 
 # e2e 4번: 한글 입력. 키는 QMP로 넣어 libinput → 컴포지터 → fcitx5(input-method-v2, fcitx5-hangul) → 앱
 # (text-input-v3)의 실제 길로 조합하게 하고, 결과는 게스트 쪽 도우미(tests/e2e/hangul.sh)가 에이전트(앱의 글)와
-# 입력기 상태로 읽는다. 기대값은 macOS 한국어 2벌식과 fcitx5-hangul의 기본 동작이다. e2e 5·6번이 연 텍스트
+# 입력기 상태로 읽는다. 기대값은 macOS 한국어 두벌식과 fcitx5-hangul의 기본 동작이다. e2e 5·6번이 연 텍스트
 # 편집기와 시스템 설정을 그대로 쓰고, 터미널(foot)과 Firefox는 새로 띄운다
 if [[ "$agent_refs" != NONE ]]; then
 	push tests/e2e/hangul.sh /tmp/e2e-hangul.sh
@@ -469,7 +469,7 @@ if [[ "$agent_refs" != NONE ]]; then
 	guest state
 	check "글 입력 칸 밖에서도 한/영 키로 바뀐다" "$answer" "hangul 한"
 
-	# 텍스트 편집기에서 2벌식으로 조합한다. 칸마다 문서를 비우고 한글로 둔 뒤 QMP 동작($3…)을 넣는다
+	# 텍스트 편집기에서 두벌식으로 조합한다. 칸마다 문서를 비우고 한글로 둔 뒤 QMP 동작($3…)을 넣는다
 	compose() {
 		local name=$1 want=$2
 		shift 2
@@ -543,7 +543,9 @@ if [[ "$agent_refs" != NONE ]]; then
 		"ec9588eb8595ed9598ec84b8ec9a940a 0"
 
 	# Firefox(GTK3, text-input-v3)의 글 칸: 조합 중 Tab으로 다음 칸에 가면 조합하던 글자는 앞 칸에 남고, 같은
-	# 창의 다른 칸을 눌러도 남는다
+	# 창의 다른 칸을 눌러도 남는다. 방금 터미널에 친 키에서 yield-ms(1.5초)가 지난 뒤에 띄운다: 그 안에 뜬 새 창은
+	# 사람이 치는 중이라 뒤에 뜨고 키보드를 받지 않는다(R3). Firefox가 0.7초 만에 뜨면 걸렸다
+	keys sleep:1.6
 	guest firefox-prepare
 	check "Firefox에서 칸 둘인 페이지를 열고 첫 칸에 포커스를 준다" "$answer" ready
 	if [[ "$answer" == ready ]]; then

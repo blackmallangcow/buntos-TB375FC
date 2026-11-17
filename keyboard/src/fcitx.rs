@@ -19,7 +19,7 @@ const CONTROLLER: &str = "org.fcitx.Fcitx.Controller1";
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
 const CALL_TIMEOUT: i32 = 1000;
 
-/// 입력기 이름의 글자 배열: 한글 입력기면 2벌식, 그 밖은 QWERTY
+/// 입력기 이름의 글자 배열: 한글 입력기면 두벌식, 그 밖은 QWERTY
 pub fn script_of(input_method: &str) -> Script {
     match input_method {
         "hangul" => Script::Hangul,

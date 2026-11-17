@@ -14,6 +14,8 @@ mod clipboard_history;
 mod clipboard_panel;
 mod compositor;
 mod config;
+// 단축 메뉴: 메뉴를 연 누르기의 떼기로 항목을 누르지 않는다(macOS)
+mod context_menu;
 mod control_center;
 mod dbus;
 // 데스크탑 폴더의 파일과 폴더(배경화면 위 층)
@@ -30,6 +32,8 @@ mod network;
 mod notification_center;
 mod notifications;
 mod polkit_agent;
+// 팝오버를 겹쳐 띄우지 않게 한다 (GTK가 누르기를 가로챈 채 남는다)
+mod popups;
 mod power;
 mod recording;
 mod screenshot;

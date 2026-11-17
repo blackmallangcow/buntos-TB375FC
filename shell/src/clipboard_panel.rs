@@ -440,6 +440,7 @@ impl ClipboardPanel {
             .css_classes(["launcher-mode"])
             .build();
         more_button.update_property(&[gtk::accessible::Property::Label(&tr.get("clipboard-more"))]);
+        crate::popups::guard(&more_button);
         let (history, popover) = (inner.history.clone(), more.clone());
         clear.connect_clicked(move |_| {
             popover.popdown();
