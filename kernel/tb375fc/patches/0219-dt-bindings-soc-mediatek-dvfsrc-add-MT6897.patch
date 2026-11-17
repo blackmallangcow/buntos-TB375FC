@@ -1,0 +1,21 @@
+dt-bindings: soc: mediatek: dvfsrc: add MT6897
+
+The MT6897 has the same block, at 0x1c00f000. Its registers sit where
+those of the MT8196 do; the fields the kernel writes are those of the
+MT8195.
+---
+ .../devicetree/bindings/soc/mediatek/mediatek,mt8183-dvfsrc.yaml         | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt8183-dvfsrc.yaml b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt8183-dvfsrc.yaml
+index 27cce748e..dc4aff200 100644
+--- a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt8183-dvfsrc.yaml
++++ b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt8183-dvfsrc.yaml
+@@ -24,6 +24,7 @@ properties:
+     oneOf:
+       - enum:
+           - mediatek,mt6893-dvfsrc
++          - mediatek,mt6897-dvfsrc
+           - mediatek,mt8183-dvfsrc
+           - mediatek,mt8195-dvfsrc
+       - items:

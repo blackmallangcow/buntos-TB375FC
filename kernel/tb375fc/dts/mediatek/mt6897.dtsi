@@ -2308,6 +2308,20 @@
 			status = "disabled";
 		};
 
+		/*
+		 * Collects the requests for core voltage and memory clock. The
+		 * stock video firmware asks it for a voltage level before it
+		 * decodes a frame. The secure monitor turns it on when the
+		 * driver asks; until then voltage and memory clock stay where
+		 * the bootloader left them.
+		 */
+		dvfsrc: system-controller@1c00f000 {
+			compatible = "mediatek,mt6897-dvfsrc";
+			reg = <0 0x1c00f000 0 0x1000>;
+			clocks = <&vlpckgen CLK_VLP_DVFSRC>;
+			status = "disabled";
+		};
+
 		vlpckgen: clock-controller@1c013000 {
 			compatible = "mediatek,mt6897-vlpckgen", "syscon";
 			reg = <0 0x1c013000 0 0x1000>;

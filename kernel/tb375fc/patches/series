@@ -304,3 +304,8 @@
 #      debugfs의 mt6897-vcp/hold로 켠다. 복구, 덤프, 잠자기 투표는 넣지 않았다
 0217-dt-bindings-soc-mediatek-add-the-MT6897-video-coprocessor.patch
 0218-soc-mediatek-add-the-MT6897-video-coprocessor.patch
+# 0219~0220 DVFSRC(코어 전압과 메모리 클럭 요청을 모으는 블록)의 MT6897 지원. 순정 비디오 펌웨어가 프레임을 풀기 전에 이 블록에
+#      전압 단계를 요청하므로 디코더에 필요하다. 틀은 업스트림 mtk-dvfsrc이고 데이터만 더한다(레지스터 자리는 MT8196, 요청 필드는
+#      MT8195, 단계 표는 벤더). 초기화 호출만 하고 풀어 주기 호출은 하지 않는다: 요청하는 드라이버가 없어 풀면 바닥으로 내려간다
+0219-dt-bindings-soc-mediatek-dvfsrc-add-MT6897.patch
+0220-soc-mediatek-mtk-dvfsrc-add-MT6897.patch
