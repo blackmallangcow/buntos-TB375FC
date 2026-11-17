@@ -35,22 +35,49 @@ MT6895. What was learned on a Lenovo TB375FC:
 - The VP9 part answers the message with the frame size and the rate with
   an error. As in the vendor kernel the answer is not looked at.
 - AV1 asks for more than 48 pieces of working memory.
+- The firmware runs in the mode where the kernel puts frame buffers to
+  it with messages of their own (input_driven 2, output_async 1). In
+  that mode the frame buffer fields of the shared structure must be left
+  alone at a start, as the vendor kernel does. Clearing them there made
+  the firmware refuse frame buffers that arrived at that moment ("input
+  handle NULL", "PA can't use") and decode wrong pictures up to the next
+  key frame. It only showed with real video and an application that
+  takes frames more slowly than the decoder makes them.
+- A start can wait inside the firmware for a frame buffer, so frames out
+  and stream in run on two work queues.
+- The lists of frames in the shared structure are read only in the
+  firmware's "frames are out" message, while it waits for the answer,
+  and after a reset; the list of read stream buffers after a start. A
+  frame buffer listed as free that was not shown since it went to the
+  firmware stays with the firmware, except in a drain.
+- A frame buffer the firmware does not take (status in its answer) is
+  given again a little later.
+- Before the headers are found, a buffer the firmware cannot read comes
+  back without the error flag: GStreamer sends the codec data of an AV1
+  stream ahead under the number of the first frame and drops that frame
+  when the buffer comes back as faulty.
 
 H.264, HEVC, VP9 and AV1, 8 bit. One session at a time, and a change of
 the picture size in the middle of a stream is not handled yet. Power and
 clocks stay on for the whole session.
 
-Tested on a TB375FC against the output of FFmpeg, byte for byte: H.264
-640x360, 1920x1080 and 3840x2160, HEVC 1920x1080, VP9 1920x1080 and
-3840x2160, AV1 1920x1080.
+Tested on a TB375FC against the output of FFmpeg, byte for byte, with a
+small V4L2 program: test patterns (H.264 640x360, 1920x1080, 3840x2160,
+HEVC 1920x1080, VP9 1920x1080, 3840x2160, AV1 1920x1080) and 20 s of
+Big Buck Bunny at 60 frames a second (H.264 1920x1080 and 3840x2160,
+HEVC 3840x2160, VP9 1920x1080, 2560x1440 and 3840x2160, AV1 1920x1080
+and 3840x2160).
+The same Big Buck Bunny clips in MP4 and WebM decode to the same frames
+through GStreamer 1.28 (v4l2h264dec, v4l2h265dec, v4l2vp9dec,
+v4l2av1dec).
 ---
  drivers/media/platform/mediatek/Kconfig            |    1 +
  drivers/media/platform/mediatek/Makefile           |    1 +
  .../media/platform/mediatek/mt6897-vdec/Kconfig    |   18 +
  .../media/platform/mediatek/mt6897-vdec/Makefile   |    2 +
  .../platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h |  231 +++
- .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 1829 ++++++++++++++++++++
- 6 files changed, 2082 insertions(+)
+ .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 1916 ++++++++++++++++++++
+ 6 files changed, 2169 insertions(+)
 
 diff --git a/drivers/media/platform/mediatek/Kconfig b/drivers/media/platform/mediatek/Kconfig
 index 84104e2cd..b05570e8b 100644
@@ -341,10 +368,10 @@ index 000000000..28cec4000
 +#endif
 diff --git a/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
 new file mode 100644
-index 000000000..a5f605940
+index 000000000..2356976df
 --- /dev/null
 +++ b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
-@@ -0,0 +1,1829 @@
+@@ -0,0 +1,1916 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * MediaTek MT6897 video decoder: a V4L2 stateful decoder on the stock video
@@ -461,6 +488,7 @@ index 000000000..a5f605940
 +	struct vdec_mem mem;
 +	unsigned int state;
 +	u64 timestamp;
++	bool shown_once;		/* shown since it went to the firmware */
 +};
 +
 +struct mt6897_vdec_ctx;
@@ -477,7 +505,8 @@ index 000000000..a5f605940
 +	struct v4l2_device v4l2_dev;
 +	struct video_device vfd;
 +	struct v4l2_m2m_dev *m2m;
-+	struct workqueue_struct *wq;
++	struct workqueue_struct *wq;		/* stream in, drain: in order */
++	struct workqueue_struct *frame_wq;	/* frames out: a start may wait for them */
 +	struct mutex lock;		/* the video device and its queues */
 +	struct mt6897_vdec_ctx *ctx;	/* the one open session */
 +};
@@ -492,7 +521,7 @@ index 000000000..a5f605940
 +	struct mutex ring_lock;		/* the lists of the shared structure, src_busy, fb state */
 +	struct mt6897_vcp_mem shm, prop, loginfo, mmd;
 +	struct completion done, res_done;
-+	s32 status;
++	s32 status, res_status;
 +	u32 expected;
 +	u64 inst_addr;
 +	struct vdec_vsi *vsi;
@@ -507,6 +536,7 @@ index 000000000..a5f605940
 +	struct vb2_v4l2_buffer *src_cur;	/* in a start command right now */
 +	bool src_cur_read;
 +	bool need_fb;			/* the firmware had no frame buffer for src_cur */
++	bool give_again;
 +	unsigned int fb_gen;		/* counts what may have changed that */
 +	unsigned int resent;
 +	bool vcp_on, powered, fw_open, fw_has_fbs, dead;
@@ -658,54 +688,101 @@ index 000000000..a5f605940
 +/* The firmware does not say when to try again: do not wait for it for ever */
 +static void vdec_retry_work(struct work_struct *work)
 +{
-+	vdec_kick(container_of(to_delayed_work(work), struct mt6897_vdec_ctx, retry_work));
++	struct mt6897_vdec_ctx *ctx = container_of(to_delayed_work(work), struct mt6897_vdec_ctx,
++						   retry_work);
++
++	if (xchg(&ctx->give_again, false))
++		queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
++	vdec_kick(ctx);
 +}
 +
-+static void vdec_collect(struct mt6897_vdec_ctx *ctx)
++/*
++ * The lists of the shared structure have no lock: both sides count entries
++ * in the same word. As in the vendor kernel the lists of frames are read
++ * only while the firmware waits for the answer to its "frames are out"
++ * message, or after a reset; the list of bitstream buffers after a start.
++ */
++/*
++ * How many entries wait in a list. The count is written by both sides without
++ * a lock; the two positions have one writer each, so they say it.
++ */
++static unsigned int vdec_ring_avail(u32 read_idx, u32 write_idx, u32 count)
++{
++	unsigned int avail;
++
++	if (read_idx >= VDEC_MAX_FRAMES || write_idx >= VDEC_MAX_FRAMES)
++		return 0;
++	avail = (write_idx + VDEC_MAX_FRAMES - read_idx) % VDEC_MAX_FRAMES;
++	if (!avail && count == VDEC_MAX_FRAMES)
++		avail = VDEC_MAX_FRAMES;
++	return avail;
++}
++
++static void vdec_collect_frames(struct mt6897_vdec_ctx *ctx)
 +{
 +	struct vdec_vsi *vsi = ctx->vsi;
 +	struct vdec_ring_fb *r;
-+	struct vdec_ring_bs *b;
-+	bool work = false, kick;
++	unsigned int n;
++	bool work = false;
 +
 +	if (!vsi)
 +		return;
 +	mutex_lock(&ctx->ring_lock);
-+	kick = vsi->list_disp.count || vsi->list_free.count;
 +
 +	/* Frames to show, in display order */
 +	r = &vsi->list_disp;
-+	while (r->count && r->count <= VDEC_MAX_FRAMES && r->read_idx < VDEC_MAX_FRAMES) {
++	for (n = vdec_ring_avail(r->read_idx, r->write_idx, r->count); n; n--) {
 +		struct vdec_fb_entry *e = &r->fb_list[r->read_idx];
 +		u64 idx = e->vdec_fb_va - VDEC_FB_TAG;
 +
 +		if (idx < ctx->fb_count && ctx->shown_count < VDEC_MAX_FB &&
 +		    !(ctx->fb[idx].state & VDEC_FB_SHOWN)) {
 +			ctx->fb[idx].state |= VDEC_FB_SHOWN;
++			ctx->fb[idx].shown_once = true;
 +			ctx->fb[idx].timestamp = e->timestamp;
 +			ctx->shown[ctx->shown_count++] = idx;
 +			work = true;
 +		}
 +		r->read_idx = (r->read_idx + 1) % VDEC_MAX_FRAMES;
-+		r->count--;
++		if (r->count)
++			r->count--;
 +	}
 +
 +	/* Frame buffers the firmware no longer refers to */
 +	r = &vsi->list_free;
-+	while (r->count && r->count <= VDEC_MAX_FRAMES && r->read_idx < VDEC_MAX_FRAMES) {
++	for (n = vdec_ring_avail(r->read_idx, r->write_idx, r->count); n; n--) {
 +		u64 idx = r->fb_list[r->read_idx].vdec_fb_va - VDEC_FB_TAG;
 +
-+		if (idx < ctx->fb_count) {
++		/*
++		 * As in the vendor kernel: outside a drain, a frame buffer
++		 * that was not shown since it went to the firmware stays there.
++		 */
++		if (idx < ctx->fb_count && (ctx->fb[idx].shown_once || ctx->draining)) {
 +			ctx->fb[idx].state &= ~VDEC_FB_FW;
 +			work = true;
 +		}
 +		r->read_idx = (r->read_idx + 1) % VDEC_MAX_FRAMES;
-+		r->count--;
++		if (r->count)
++			r->count--;
 +	}
++	mutex_unlock(&ctx->ring_lock);
 +
-+	/* Bitstream buffers it has read */
++	if (work)
++		queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
++}
++
++/* Bitstream buffers the firmware has read */
++static void vdec_collect_bs(struct mt6897_vdec_ctx *ctx)
++{
++	struct vdec_vsi *vsi = ctx->vsi;
++	struct vdec_ring_bs *b;
++	unsigned int n;
++
++	if (!vsi)
++		return;
++	mutex_lock(&ctx->ring_lock);
 +	b = &vsi->list_free_bs;
-+	while (b->count && b->count <= VDEC_MAX_FRAMES && b->read_idx < VDEC_MAX_FRAMES) {
++	for (n = vdec_ring_avail(b->read_idx, b->write_idx, b->count); n; n--) {
 +		u64 idx = b->vdec_bs_va_list[b->read_idx] - VDEC_BS_TAG;
 +
 +		if (idx < ARRAY_SIZE(ctx->src_busy) && ctx->src_busy[idx]) {
@@ -715,14 +792,10 @@ index 000000000..a5f605940
 +			ctx->src_cur_read = true;	/* the start command decides */
 +		}
 +		b->read_idx = (b->read_idx + 1) % VDEC_MAX_FRAMES;
-+		b->count--;
++		if (b->count)
++			b->count--;
 +	}
 +	mutex_unlock(&ctx->ring_lock);
-+
-+	if (work)
-+		queue_work(ctx->vdec->wq, &ctx->frame_work);
-+	if (kick)
-+		vdec_kick(ctx);
 +}
 +
 +/* Called from the thread of the coprocessor driver */
@@ -745,6 +818,7 @@ index 000000000..a5f605940
 +		if (id == VCU_IPIMSG_DEC_INIT_DONE)
 +			ctx->inst_addr = ((struct vdec_init_ack *)buf)->vcu_inst_addr;
 +		if (id == VCU_IPIMSG_DEC_DONE) {
++			ctx->res_status = p->status;
 +			complete(&ctx->res_done);
 +		} else {
 +			ctx->status = p->status;
@@ -785,7 +859,9 @@ index 000000000..a5f605940
 +		id = AP_IPIMSG_DEC_CHECK_CODEC_ID_DONE - 0x1000;
 +		break;
 +	case VCU_IPIMSG_DEC_PUT_FRAME_BUFFER:
-+		vdec_collect(ctx);
++		if (!ack->no_need_put)
++			vdec_collect_frames(ctx);
++		vdec_kick(ctx);
 +		break;
 +	case VCU_IPIMSG_DEC_WAITISR:
 +		/* With the coprocessor the vendor leaves the interrupts to the firmware */
@@ -980,7 +1056,8 @@ index 000000000..a5f605940
 +	int ret;
 +
 +	ret = vdec_fw_command(ctx, VDEC_SRV_COMMON, &cmd, sizeof(cmd), AP_IPIMSG_DEC_RESET + 0x1000);
-+	vdec_collect(ctx);
++	vdec_collect_frames(ctx);
++	vdec_collect_bs(ctx);
 +	return ret;
 +}
 +
@@ -1016,6 +1093,10 @@ index 000000000..a5f605940
 +	ret = vdec_fw_command(ctx, VDEC_SRV_RESOURCE, &msg, sizeof(msg), 0);
 +	if (!ret)
 +		ctx->fw_has_fbs = true;
++	if (!ret && ctx->res_status) {
++		dev_dbg(ctx->vdec->dev, "frame buffer %u was not taken: %d\n", idx, ctx->res_status);
++		ret = 1;
++	}
 +	mutex_unlock(&ctx->res_lock);
 +	return ret;
 +}
@@ -1031,12 +1112,24 @@ index 000000000..a5f605940
 +
 +		mutex_lock(&ctx->ring_lock);
 +		give = !ctx->fb[i].state;
-+		if (give)
++		if (give) {
 +			ctx->fb[i].state = VDEC_FB_FW;
++			ctx->fb[i].shown_once = false;
++		}
 +		mutex_unlock(&ctx->ring_lock);
 +		if (!give)
 +			continue;
 +		ret = vdec_fw_give_fb(ctx, i);
++		if (ret > 0) {
++			/* Refused: the frame buffer is ours again, try a little later */
++			mutex_lock(&ctx->ring_lock);
++			ctx->fb[i].state &= ~VDEC_FB_FW;
++			mutex_unlock(&ctx->ring_lock);
++			ctx->give_again = true;
++			schedule_delayed_work(&ctx->retry_work, msecs_to_jiffies(2));
++			ret = 0;
++			continue;
++		}
 +
 +		vdec_kick(ctx);
 +	}
@@ -1191,9 +1284,13 @@ index 000000000..a5f605940
 +		memset(cpu + len, 0, min_t(size_t, size - len, 64));
 +	vsi->dec.vdec_bs_va = VDEC_BS_TAG + vb->index;
 +	vsi->dec.bs_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
-+	memset(vsi->dec.fb_dma, 0, sizeof(vsi->dec.fb_dma));
-+	vsi->dec.vdec_fb_va = 0;
-+	vsi->dec.index = 0xff;
++	/*
++	 * Nothing about frame buffers here: in this mode of the firmware they
++	 * travel in messages of their own, and the vendor kernel leaves the
++	 * frame buffer fields of the shared structure alone. Clearing them at
++	 * every start made the firmware refuse frame buffers that arrived at
++	 * that moment, and decode wrong pictures.
++	 */
 +	vsi->dec.queued_frame_buf_count = ctx->fb_count;
 +	vsi->dec.timestamp = vb->timestamp;
 +	msg.data[0] = len;	/* what is in the buffer */
@@ -1378,7 +1475,7 @@ index 000000000..a5f605940
 +		vdec_fw_reset(ctx, VDEC_RESET_DRAIN);
 +	ctx->drained = true;
 +	mutex_unlock(&ctx->cmd_lock);
-+	queue_work(ctx->vdec->wq, &ctx->frame_work);
++	queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
 +}
 +
 +/* Bitstream in */
@@ -1418,6 +1515,15 @@ index 000000000..a5f605940
 +			ret = 1;	/* no headers in this buffer */
 +		else if (!ret)
 +			ret = -EINVAL;
++		else if (!ctx->dead)
++			/*
++			 * Something the firmware cannot read before it has the
++			 * headers, such as the codec data GStreamer sends ahead
++			 * of an AV1 stream: no headers in it, but no error
++			 * either. GStreamer drops the first frame when this
++			 * buffer comes back as faulty.
++			 */
++			ret = 1;
 +		mutex_unlock(&ctx->cmd_lock);
 +		if (!ret) {
 +			ctx->out_sequence--;
@@ -1442,7 +1548,7 @@ index 000000000..a5f605940
 +	mutex_unlock(&ctx->ring_lock);
 +	ret = vdec_fw_start(ctx, src);
 +	changed = ret ? 0 : ctx->vsi->dec.vdec_changed_info;
-+	vdec_collect(ctx);
++	vdec_collect_bs(ctx);
 +	if (changed & VDEC_RES_CHANGE) {
 +		dev_err(vdec->dev, "the picture changed in the middle of the stream: not handled\n");
 +		ret = -EINVAL;
@@ -1679,7 +1785,7 @@ index 000000000..a5f605940
 +		ctx->drained = false;
 +		ctx->last_sent = false;
 +		vb2_clear_last_buffer_dequeued(cap);
-+		queue_work(ctx->vdec->wq, &ctx->frame_work);
++		queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
 +		v4l2_m2m_try_schedule(ctx->fh.m2m_ctx);
 +	}
 +	return 0;
@@ -1749,7 +1855,7 @@ index 000000000..a5f605940
 +	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, to_vb2_v4l2_buffer(vb));
 +	/* A frame may be waiting for this buffer */
 +	if (!V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type))
-+		queue_work(ctx->vdec->wq, &ctx->frame_work);
++		queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
 +}
 +
 +static void vdec_return_buffers(struct mt6897_vdec_ctx *ctx, struct vb2_queue *vq)
@@ -2097,6 +2203,11 @@ index 000000000..a5f605940
 +	vdec->wq = alloc_ordered_workqueue(VDEC_NAME, 0);
 +	if (!vdec->wq)
 +		return -ENOMEM;
++	vdec->frame_wq = alloc_ordered_workqueue(VDEC_NAME "-frame", 0);
++	if (!vdec->frame_wq) {
++		ret = -ENOMEM;
++		goto free_wq;
++	}
 +	ret = v4l2_device_register(dev, &vdec->v4l2_dev);
 +	if (ret)
 +		goto free_wq;
@@ -2126,6 +2237,8 @@ index 000000000..a5f605940
 +unregister_v4l2:
 +	v4l2_device_unregister(&vdec->v4l2_dev);
 +free_wq:
++	if (vdec->frame_wq)
++		destroy_workqueue(vdec->frame_wq);
 +	destroy_workqueue(vdec->wq);
 +	return ret;
 +}
@@ -2137,6 +2250,7 @@ index 000000000..a5f605940
 +	video_unregister_device(&vdec->vfd);
 +	v4l2_m2m_release(vdec->m2m);
 +	v4l2_device_unregister(&vdec->v4l2_dev);
++	destroy_workqueue(vdec->frame_wq);
 +	destroy_workqueue(vdec->wq);
 +}
 +
