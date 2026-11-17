@@ -1,0 +1,154 @@
+dt-bindings: media: mediatek: add the MT6897 video decoder
+
+The decoder has a front end and a core, each in a power domain of its
+own and behind a different IOMMU, so the front end is a child node with
+its own IOMMU ports. The stock video firmware on the video coprocessor
+programs the hardware; the node names that coprocessor.
+---
+ .../bindings/media/mediatek,mt6897-vcodec-dec.yaml | 138 +++++++++++++++++++++
+ 1 file changed, 138 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/media/mediatek,mt6897-vcodec-dec.yaml b/Documentation/devicetree/bindings/media/mediatek,mt6897-vcodec-dec.yaml
+new file mode 100644
+index 000000000..12ba81d9c
+--- /dev/null
++++ b/Documentation/devicetree/bindings/media/mediatek,mt6897-vcodec-dec.yaml
+@@ -0,0 +1,138 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/media/mediatek,mt6897-vcodec-dec.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6897 video decoder
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++description:
++  The video decoder of the MT6897 has a front end (LAT) and a core, each in a
++  power domain of its own and behind a different IOMMU. The stock video
++  firmware on the video coprocessor programs the hardware; the kernel keeps
++  power and clocks on and hands the firmware its memory.
++
++properties:
++  compatible:
++    const: mediatek,mt6897-vcodec-dec
++
++  reg:
++    maxItems: 13
++
++  reg-names:
++    items:
++      - const: base
++      - const: sys
++      - const: vld
++      - const: mc
++      - const: mv
++      - const: misc
++      - const: lat-misc
++      - const: lat-vld
++      - const: soc-gcon
++      - const: racing-ctrl
++      - const: lat-avc-vld
++      - const: avc-vld
++      - const: av1-vld
++
++  interrupts:
++    maxItems: 2
++
++  interrupt-names:
++    items:
++      - const: core
++      - const: lat
++
++  clocks:
++    maxItems: 4
++
++  clock-names:
++    items:
++      - const: soc
++      - const: lat
++      - const: core
++      - const: sel
++
++  power-domains:
++    maxItems: 2
++
++  power-domain-names:
++    items:
++      - const: lat
++      - const: core
++
++  iommus:
++    minItems: 1
++    maxItems: 16
++    description: The ports of the core, on the MDP-side IOMMU.
++
++  mediatek,vcp:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: The video coprocessor that runs the decoder firmware.
++
++  lat:
++    type: object
++    additionalProperties: false
++    description: The front end, whose ports are on the display-side IOMMU.
++
++    properties:
++      compatible:
++        const: mediatek,mt6897-vcodec-dec-lat
++
++      iommus:
++        minItems: 1
++        maxItems: 16
++
++    required:
++      - compatible
++      - iommus
++
++required:
++  - compatible
++  - reg
++  - reg-names
++  - clocks
++  - clock-names
++  - power-domains
++  - power-domain-names
++  - iommus
++  - mediatek,vcp
++  - lat
++
++additionalProperties: false
++
++examples:
++  - |
++    soc {
++        #address-cells = <2>;
++        #size-cells = <2>;
++
++        video-codec@16000000 {
++            compatible = "mediatek,mt6897-vcodec-dec";
++            reg = <0 0x16000000 0 0x1000>, <0 0x1602f000 0 0x1000>,
++                  <0 0x16020000 0 0x1000>, <0 0x16021000 0 0x1000>,
++                  <0 0x16023000 0 0x1000>, <0 0x16025000 0 0x4000>,
++                  <0 0x16010000 0 0x1000>, <0 0x16011000 0 0x400>,
++                  <0 0x1600f000 0 0x1000>, <0 0x16004000 0 0x1000>,
++                  <0 0x16012000 0 0x1000>, <0 0x16022000 0 0x1000>,
++                  <0 0x16015800 0 0x1000>;
++            reg-names = "base", "sys", "vld", "mc", "mv", "misc", "lat-misc",
++                        "lat-vld", "soc-gcon", "racing-ctrl", "lat-avc-vld",
++                        "avc-vld", "av1-vld";
++            clocks = <&vdecsys_soc 0>, <&vdecsys_soc 1>, <&vdecsys 0>,
++                     <&topckgen 0>;
++            clock-names = "soc", "lat", "core", "sel";
++            power-domains = <&scpsys 0>, <&scpsys 1>;
++            power-domain-names = "lat", "core";
++            iommus = <&mdp_iommu 0>;
++            mediatek,vcp = <&vcp>;
++
++            lat {
++                compatible = "mediatek,mt6897-vcodec-dec-lat";
++                iommus = <&disp_iommu 0>;
++            };
++        };
++    };

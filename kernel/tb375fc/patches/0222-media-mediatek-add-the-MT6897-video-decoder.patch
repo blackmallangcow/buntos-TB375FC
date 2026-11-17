@@ -1,0 +1,2057 @@
+media: mediatek: add the MT6897 video decoder
+
+A V4L2 stateful decoder on the stock video firmware of the MT6897. The
+firmware runs on the video coprocessor (mt6897-vcp) and drives the
+decoder hardware itself. The kernel opens a session with it, hands it
+bitstream and frame buffers, gives it the working memory it asks for and
+keeps power and clocks of the hardware on while a session is open.
+
+Messages and structures follow the vendor kernel for this SoC
+(vdec_ipi_msg.h, vcodec_ipi_msg.h), which differ from those of the
+MT6895. What was learned on a Lenovo TB375FC:
+
+- The bitstream and the working memory the firmware reads itself come
+  from the coprocessor's side of the IOMMU; frame buffers and the
+  hardware's working memory from the decoder device.
+- The firmware raises the decoder clock for every frame by switching the
+  mux itself. It has to be told that the kernel uses the mux (the clock
+  scaling message the vendor clock driver sends on prepare), the gate of
+  the mux is opened through the hardware voter, and the PLL of the fast
+  source is kept running. Which of the three it cannot do without was
+  not separated. All three are done here until the clock driver models
+  this mux as the vendor does.
+- The firmware asks the voltage request block (DVFSRC) for a voltage
+  level before a frame and waits without end if that block is off, so
+  the driver does not probe before it.
+- By default the firmware writes compressed frames (HyFBC). With two
+  entries in its property table it writes uncompressed 16x32 blocks
+  (MM21). They are copied to the application as NV12.
+- A session that still holds frame buffers cannot be closed: a frame
+  buffer message without a buffer empties the firmware's queue first.
+
+One session at a time, H.264 only, and a change of the picture size in
+the middle of a stream is not handled yet. Power and clocks stay on for
+the whole session.
+
+Tested on a TB375FC: a 640x360 H.264 file of eight frames decodes to the
+same bytes as with FFmpeg.
+---
+ drivers/media/platform/mediatek/Kconfig            |    1 +
+ drivers/media/platform/mediatek/Makefile           |    1 +
+ .../media/platform/mediatek/mt6897-vdec/Kconfig    |   18 +
+ .../media/platform/mediatek/mt6897-vdec/Makefile   |    2 +
+ .../platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h |  232 +++
+ .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 1717 ++++++++++++++++++++
+ 6 files changed, 1971 insertions(+)
+
+diff --git a/drivers/media/platform/mediatek/Kconfig b/drivers/media/platform/mediatek/Kconfig
+index 84104e2cd..b05570e8b 100644
+--- a/drivers/media/platform/mediatek/Kconfig
++++ b/drivers/media/platform/mediatek/Kconfig
+@@ -7,3 +7,4 @@ source "drivers/media/platform/mediatek/mdp/Kconfig"
+ source "drivers/media/platform/mediatek/vcodec/Kconfig"
+ source "drivers/media/platform/mediatek/vpu/Kconfig"
+ source "drivers/media/platform/mediatek/mdp3/Kconfig"
++source "drivers/media/platform/mediatek/mt6897-vdec/Kconfig"
+diff --git a/drivers/media/platform/mediatek/Makefile b/drivers/media/platform/mediatek/Makefile
+index 38e6ba917..e2e8b5412 100644
+--- a/drivers/media/platform/mediatek/Makefile
++++ b/drivers/media/platform/mediatek/Makefile
+@@ -4,3 +4,4 @@ obj-y += mdp/
+ obj-y += vcodec/
+ obj-y += vpu/
+ obj-y += mdp3/
++obj-y += mt6897-vdec/
+diff --git a/drivers/media/platform/mediatek/mt6897-vdec/Kconfig b/drivers/media/platform/mediatek/mt6897-vdec/Kconfig
+new file mode 100644
+index 000000000..d6f13b8bb
+--- /dev/null
++++ b/drivers/media/platform/mediatek/mt6897-vdec/Kconfig
+@@ -0,0 +1,18 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config VIDEO_MEDIATEK_MT6897_VDEC
++	tristate "MediaTek MT6897 video decoder"
++	depends on V4L_MEM2MEM_DRIVERS
++	depends on VIDEO_DEV
++	depends on MTK_MT6897_VCP
++	depends on COMMON_CLK && OF
++	select VIDEOBUF2_DMA_CONTIG
++	select V4L2_MEM2MEM_DEV
++	select MFD_SYSCON
++	help
++	  Say y or m here for the hardware video decoder of the MT6897 as a
++	  V4L2 stateful decoder. The stock video firmware on the video
++	  coprocessor does the decoding; this driver carries bitstream and
++	  frames between it and the application.
++
++	  The voltage request block (MTK_DVFSRC) must be on as well: the
++	  firmware asks it for a voltage level before every frame.
+diff --git a/drivers/media/platform/mediatek/mt6897-vdec/Makefile b/drivers/media/platform/mediatek/mt6897-vdec/Makefile
+new file mode 100644
+index 000000000..4bac9b79e
+--- /dev/null
++++ b/drivers/media/platform/mediatek/mt6897-vdec/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_VIDEO_MEDIATEK_MT6897_VDEC) += mt6897-vdec.o
+diff --git a/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h
+new file mode 100644
+index 000000000..90ffa7084
+--- /dev/null
++++ b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h
+@@ -0,0 +1,232 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * What the kernel and the video firmware of the MT6897 exchange for decoding.
++ * Messages and structures follow vdec_ipi_msg.h and vcodec_ipi_msg.h of the
++ * vendor kernel for this SoC; the sizes are checked below.
++ */
++#ifndef __MT6897_VDEC_FW_H
++#define __MT6897_VDEC_FW_H
++
++#include <linux/build_bug.h>
++#include <linux/stddef.h>
++#include <linux/types.h>
++#include <linux/videodev2.h>
++
++/* The two services of the decoder behind one mailbox slot */
++#define VDEC_SRV_COMMON			1
++#define VDEC_SRV_RESOURCE		2
++#define VDEC_SHARE_BUF_SIZE		64
++
++/* Kernel to firmware, and the answer of the firmware at +0x1000 */
++#define AP_IPIMSG_DEC_INIT		0xa000
++#define AP_IPIMSG_DEC_START		0xa001
++#define AP_IPIMSG_DEC_DEINIT		0xa002
++#define AP_IPIMSG_DEC_RESET		0xa003
++#define AP_IPIMSG_DEC_SET_PARAM		0xa004
++#define AP_IPIMSG_DEC_FRAME_BUFFER	0xa006
++#define VCU_IPIMSG_DEC_INIT_DONE	0xb000
++#define VCU_IPIMSG_DEC_DONE		0xb006
++
++/* Firmware to kernel, and the answer of the kernel at +0x1000 */
++#define VCU_IPIMSG_DEC_PUT_FRAME_BUFFER	0xc000
++#define VCU_IPIMSG_DEC_LOCK_CORE	0xc001
++#define VCU_IPIMSG_DEC_UNLOCK_LAT	0xc004
++#define VCU_IPIMSG_DEC_MEM_ALLOC	0xc005
++#define VCU_IPIMSG_DEC_MEM_FREE		0xc006
++#define VCU_IPIMSG_DEC_WAITISR		0xc007
++#define VCU_IPIMSG_DEC_CHECK_CODEC_ID	0xc009
++#define AP_IPIMSG_DEC_CHECK_CODEC_ID_DONE 0xd008
++
++/* Working memory the firmware asks for */
++#define VDEC_MEM_SW			0	/* read by the firmware itself */
++#define VDEC_MEM_HW			1	/* read by the decoder hardware */
++#define VDEC_MEM_UBE_HW			2
++#define VDEC_MEM_SHM			6	/* the shared memory of the session */
++
++#define VDEC_RESET_FLUSH		0
++#define VDEC_RESET_DRAIN		1
++
++#define VDEC_CODEC_H264			1
++
++/* vdec_changed_info after a start */
++#define VDEC_RES_CHANGE			BIT(0)
++#define VDEC_HW_NOT_SUPPORT		BIT(2)
++#define VDEC_NEED_SEQ_HEADER		BIT(3)
++
++#define VDEC_SET_PARAM_DEC_PARAMS	22
++#define VDEC_SET_PARAM_MMDVFS		23
++#define VDEC_MMDVFS_START		0
++#define VDEC_MMDVFS_END			4
++#define VDEC_PARAM_FRAME_SIZE		BIT(1)
++#define VDEC_PARAM_OPERATING_RATE	BIT(7)
++
++#define VDEC_MAX_FRAMES			64
++#define VDEC_MAX_PLANES			8
++#define VDEC_MAX_CAPS			128
++
++struct vdec_share_obj {
++	s32 id;
++	u32 len;
++	u8 share_buf[VDEC_SHARE_BUF_SIZE];
++};
++
++struct vdec_msg_prefix {
++	u32 msg_id, ctx_id;
++	s32 status;
++	u32 reserved;
++	u64 ap_inst_addr;
++};
++
++struct vdec_ap_cmd {
++	u32 msg_id, ctx_id;
++	u64 vcu_inst_addr;
++	u32 drain_type, reserved;
++};
++
++struct vdec_ap_start {
++	u32 msg_id, ctx_id;
++	u64 vcu_inst_addr;
++	u32 data[6];	/* bytes in the buffer, size of the buffer, flags */
++};
++
++struct vdec_ap_set_param {
++	u32 msg_id, ctx_id;
++	u64 vcu_inst_addr;
++	u32 id, reserved;
++	u32 data[10];
++};
++
++struct vdec_ack {
++	struct vdec_msg_prefix p;
++	s32 codec_id;
++	u32 no_need_put;
++	u64 payload;
++};
++
++struct vdec_init_ack {
++	struct vdec_msg_prefix p;
++	u64 vcu_inst_addr;
++};
++
++struct vdec_mem_obj {
++	u32 type, len;
++	u64 iova, pa, va;
++};
++
++struct vdec_mem_op {
++	struct vdec_msg_prefix p;
++	struct vdec_mem_obj mem;
++	u32 vcp_addr[2];
++};
++
++struct vdec_ipi_fb {
++	u64 vdec_fb_va, y_fb_dma, c_fb_dma, dma_general_addr;
++	s32 general_size;
++	u32 reserved;
++};
++
++struct vdec_fb_entry {
++	u64 vdec_fb_va, timestamp;
++	u16 field, frame_type;
++	u32 reserved;
++};
++
++struct vdec_ring_bs {
++	u64 vdec_bs_va_list[VDEC_MAX_FRAMES];
++	u32 read_idx, write_idx, count, reserved;
++};
++
++struct vdec_ring_fb {
++	struct vdec_fb_entry fb_list[VDEC_MAX_FRAMES];
++	u32 read_idx, write_idx, count, reserved;
++};
++
++struct vdec_dec_params {
++	u32 dec_param_change, decode_mode, frame_size_width, frame_size_height;
++	u32 fixed_max_frame_size_width, fixed_max_frame_size_height;
++	u32 fixed_max_frame_buffer_mode;
++	u64 crc_path, golden_path;
++	u32 wait_key_frame, nal_size_length, svp_mode, operating_rate;
++	u32 decode_error_handle_mode, queued_frame_buf_count;
++	s32 priority, slice_count;
++	u32 vpeek;
++};
++
++struct vdec_dec_info {
++	u32 dpb_sz, vdec_changed_info;
++	u64 bs_dma, bs_fd, fb_dma[VDEC_MAX_PLANES], fb_fd[VDEC_MAX_PLANES];
++	u64 vdec_bs_va, vdec_fb_va;
++	u32 fb_num_planes, index, error_map;
++	u64 timestamp;
++	u32 queued_frame_buf_count;
++};
++
++struct vdec_pic_info {
++	u32 pic_w, pic_h, buf_w, buf_h;
++	u32 fb_sz[VDEC_MAX_PLANES];
++	u32 bitdepth, layout_mode, fourcc, field;
++};
++
++/* The shared structure of a session */
++struct vdec_vsi {
++	struct vdec_ring_bs list_free_bs;
++	struct vdec_ring_fb list_free;
++	struct vdec_ring_fb list_disp;
++	struct vdec_dec_params dec_params;
++	struct vdec_dec_info dec;
++	struct vdec_pic_info pic;
++	u32 color_desc[18];
++	struct v4l2_rect crop;
++	struct v4l2_fract time_per_frame;
++	u32 video_formats[VDEC_MAX_CAPS][4];
++	u32 vdec_framesizes[VDEC_MAX_CAPS][10];
++	u32 aspect_ratio, fix_buffers, fix_buffers_svp, interlacing, codec_type;
++	u8 input_driven, output_async, low_pw_mode, in_group, cpu_hint;
++	s8 crc_path[256], golden_path[256];
++	u64 general_buf_dma;
++	s32 general_buf_fd;
++	u32 general_buf_size;
++	u64 meta_buf_dma;
++	s32 meta_buf_fd;
++	u32 meta_buf_size;
++	u32 ipi_blocked, interlacing_fieldseq;
++	u8 tail[224];	/* HDR data, trick mode, clock hints: not used */
++};
++
++static_assert(sizeof(struct vdec_share_obj) == 72);
++static_assert(sizeof(struct vdec_ack) == 40);
++static_assert(sizeof(struct vdec_mem_op) == VDEC_SHARE_BUF_SIZE);
++static_assert(sizeof(struct vdec_ap_set_param) == VDEC_SHARE_BUF_SIZE);
++static_assert(sizeof(struct vdec_ipi_fb) == 40);
++static_assert(offsetof(struct vdec_vsi, dec_params) == 3632);
++static_assert(offsetof(struct vdec_vsi, dec) == 3720);
++static_assert(offsetof(struct vdec_vsi, pic) == 3920);
++static_assert(offsetof(struct vdec_vsi, crop) == 4056);
++static_assert(offsetof(struct vdec_vsi, aspect_ratio) == 11248);
++static_assert(offsetof(struct vdec_vsi, input_driven) == 11268);
++static_assert(offsetof(struct vdec_vsi, general_buf_dma) == 11792);
++static_assert(offsetof(struct vdec_vsi, ipi_blocked) == 11824);
++static_assert(sizeof(struct vdec_vsi) == 12056);
++
++/*
++ * The clock scaling part of the firmware (MMDVFS): one 8-byte message, the
++ * answer is a bit in the shared memory. Offsets as in the vendor's
++ * mtk-mmdvfs-v3-memory.h.
++ */
++#define MMDVFS_FUNC_INIT		0
++#define MMDVFS_FUNC_CLKMUX_ENABLE	1
++#define MMDVFS_MAX_OPP			8
++#define MMDVFS_MUX_VDEC			0
++#define MMDVFS_MEM_LOG_FLAG		0x0
++#define MMDVFS_MEM_FREERUN		0x4
++#define MMDVFS_MEM_SYNC_FUNC		0xc
++#define MMDVFS_MEM_SYNC_DATA		0x10
++#define MMDVFS_MEM_VMRC_LOG_FLAG	0x14
++#define MMDVFS_MEM_CLKMUX_ENABLE	0x90
++
++struct mmdvfs_ipi {
++	u8 func, idx, opp, ack;
++	u32 base;
++};
++
++#endif
+diff --git a/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
+new file mode 100644
+index 000000000..52ee6c6ff
+--- /dev/null
++++ b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
+@@ -0,0 +1,1717 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek MT6897 video decoder: a V4L2 stateful decoder on the stock video
++ * firmware, which runs on the video coprocessor (mt6897-vcp) and drives the
++ * decoder hardware itself.
++ *
++ * The kernel's part: it opens a session with the firmware, hands it the
++ * bitstream and frame buffers, gives it the working memory it asks for, and
++ * keeps power and clocks of the hardware on while a session is open.
++ *
++ * The firmware writes frames in 16x32 blocks (MM21). They are copied into the
++ * buffers of the application as plain NV12.
++ *
++ * One session at a time. H.264 only so far.
++ */
++#include <linux/clk.h>
++#include <linux/clk-provider.h>
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/iommu.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/soc/mediatek/mt6897-vcp.h>
++#include <linux/workqueue.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-event.h>
++#include <media/v4l2-ioctl.h>
++#include <media/v4l2-mem2mem.h>
++#include <media/videobuf2-dma-contig.h>
++
++#include "mt6897-vdec-fw.h"
++
++#define VDEC_NAME		"mt6897-vdec"
++#define VDEC_MAX_WORK		48
++#define VDEC_MAX_FB		32
++#define VDEC_EXTRA_FB		4	/* frame buffers beyond what the stream needs */
++#define VDEC_CMD_TIMEOUT_MS	3000
++#define VDEC_BS_TAG		0x6275746f62730000ULL
++#define VDEC_FB_TAG		0x6275746f66620000ULL
++#define VDEC_INST_TAG		0x6275746f73000001ULL
++#define VDEC_VCP_CACHE_LINE	128
++#define VDEC_MIN_BS_SIZE	SZ_1M
++#define VDEC_MAX_BS_SIZE	SZ_8M
++#define VDEC_MIN_W		64
++#define VDEC_MAX_W		4096
++#define VDEC_MAX_H		2176
++/* The firmware picks its clock from the rate it is told */
++#define VDEC_OPERATING_RATE	30
++
++/* The decoder clock mux and the hardware voter that gates it (vendor clk-mt6897.c) */
++#define TOP_CLK_CFG_UPDATE1	0x008
++#define TOP_CLK_CFG_13		0x0e0
++#define TOP_CLK_CFG_13_SET	0x0e4
++#define TOP_CLK_CFG_13_CLR	0x0e8
++#define VDEC_MUX_MASK		0xf
++#define VDEC_MUX_PDN		BIT(7)
++#define VDEC_MUX_UPD		BIT(21)
++#define VDEC_MUX_MAINPLL_D5_D2	4
++#define VDEC_MUX_IMGPLL_D2	14
++#define HWV_CG_23_SET		0x00b8
++#define HWV_CG_23_DONE		0x1c5c
++
++/* Uncompressed blocks instead of the compressed layout the firmware prefers */
++static const char vdec_properties[] =
++	"vendor.mtk.vdec.frame.layout.debug 1 vendor.mtk.vdec.frame.layout.mode 0";
++
++struct vdec_mem {
++	void *cpu;
++	dma_addr_t iova;
++	size_t size;
++	struct device *dev;
++};
++
++/* A frame buffer of the firmware */
++#define VDEC_FB_FW	BIT(0)	/* the firmware has it */
++#define VDEC_FB_SHOWN	BIT(1)	/* holds a frame that waits for a buffer of the application */
++
++struct vdec_fb {
++	struct vdec_mem mem;
++	unsigned int state;
++	u64 timestamp;
++};
++
++struct mt6897_vdec_ctx;
++
++struct mt6897_vdec_dev {
++	struct device *dev;		/* the decoder: core side, MDP IOMMU */
++	struct device *lat;		/* the front-end child: larb5 */
++	struct device *pd_lat, *pd_core;
++	struct clk_bulk_data clks[4];	/* soc, lat, core, sel */
++	struct clk *pll;		/* the source of the 660 MHz the firmware switches to */
++	struct regmap *hwv, *topckgen;
++	struct mt6897_vcp *vcp;
++
++	struct v4l2_device v4l2_dev;
++	struct video_device vfd;
++	struct v4l2_m2m_dev *m2m;
++	struct workqueue_struct *wq;
++	struct mutex lock;		/* the video device and its queues */
++	struct mt6897_vdec_ctx *ctx;	/* the one open session */
++};
++
++struct mt6897_vdec_ctx {
++	struct v4l2_fh fh;
++	struct mt6897_vdec_dev *vdec;
++
++	/* The session with the firmware */
++	struct mutex cmd_lock;		/* one command to the decoder service at a time */
++	struct mutex res_lock;		/* one frame buffer message at a time */
++	struct mutex ring_lock;		/* the lists of the shared structure, src_busy, fb state */
++	struct mt6897_vcp_mem shm, prop, loginfo, mmd;
++	struct completion done, res_done;
++	s32 status;
++	u32 expected;
++	u64 inst_addr;
++	struct vdec_vsi *vsi;
++	struct vdec_mem work[VDEC_MAX_WORK];
++	struct vdec_fb fb[VDEC_MAX_FB];
++	unsigned int fb_count;
++	size_t fb_luma, fb_size;
++	u8 shown[VDEC_MAX_FB];		/* frame buffers with a frame, oldest first */
++	unsigned int shown_count;
++	struct vb2_v4l2_buffer *src_busy[VB2_MAX_FRAME];
++	bool vcp_on, powered, fw_open, fw_has_fbs, dead;
++
++	/* The stream */
++	bool header, fbs_ready, draining, drained, last_sent;
++	struct v4l2_pix_format_mplane out_fmt, cap_fmt;
++	struct v4l2_rect crop;
++	unsigned int dpb;
++	u32 cap_sequence, out_sequence;
++
++	struct work_struct decode_work, frame_work, drain_work;
++};
++
++static inline struct mt6897_vdec_ctx *file_to_ctx(struct file *file)
++{
++	return container_of(file_to_v4l2_fh(file), struct mt6897_vdec_ctx, fh);
++}
++
++/* Memory the firmware or the hardware reads */
++
++static int vdec_mem_alloc(struct mt6897_vdec_dev *vdec, struct vdec_mem *m, u32 type, size_t size)
++{
++	/* What the firmware reads itself comes from the coprocessor's side of the IOMMU */
++	if (type == VDEC_MEM_SW) {
++		m->dev = mt6897_vcp_dma_device(vdec->vcp);
++		m->size = ALIGN(size, VDEC_VCP_CACHE_LINE) + VDEC_VCP_CACHE_LINE;
++	} else {
++		m->dev = vdec->dev;
++		m->size = size;
++	}
++	m->cpu = dma_alloc_coherent(m->dev, m->size, &m->iova, GFP_KERNEL);
++	return m->cpu ? 0 : -ENOMEM;
++}
++
++static void vdec_mem_free(struct vdec_mem *m)
++{
++	if (m->cpu)
++		dma_free_coherent(m->dev, m->size, m->cpu, m->iova);
++	m->cpu = NULL;
++}
++
++static int vdec_work_alloc(struct mt6897_vdec_ctx *ctx, struct vdec_mem_obj *mem)
++{
++	int i, ret;
++
++	if (mem->type > VDEC_MEM_UBE_HW || !mem->len || mem->len > SZ_64M)
++		return -EINVAL;
++	for (i = 0; i < ARRAY_SIZE(ctx->work); i++) {
++		if (ctx->work[i].cpu)
++			continue;
++		ret = vdec_mem_alloc(ctx->vdec, &ctx->work[i], mem->type, mem->len);
++		if (ret)
++			return ret;
++		/* The vendor passes a kernel address here: the firmware only hands it back */
++		mem->va = 0x6275746f73770000ULL + i;
++		mem->pa = ctx->work[i].iova;
++		mem->iova = ctx->work[i].iova;
++		return 0;
++	}
++	return -ENOSPC;
++}
++
++/* @iova 0 frees everything that is left */
++static int vdec_work_free(struct mt6897_vdec_ctx *ctx, u64 iova)
++{
++	int i, n = 0;
++
++	for (i = 0; i < ARRAY_SIZE(ctx->work); i++) {
++		if (!ctx->work[i].cpu || (iova && ctx->work[i].iova != iova))
++			continue;
++		vdec_mem_free(&ctx->work[i]);
++		n++;
++	}
++	return n;
++}
++
++/* Messages */
++
++static int vdec_fw_send(struct mt6897_vdec_ctx *ctx, int service, const void *msg, size_t len)
++{
++	struct vdec_share_obj obj = { .id = service, .len = len };
++
++	memcpy(obj.share_buf, msg, len);
++	return mt6897_vcp_ipi_send(ctx->vdec->vcp, MT6897_VCP_IPI_OUT_VDEC_1, &obj,
++				   ALIGN(2 * sizeof(u32) + len, 4));
++}
++
++/*
++ * Send a command and wait for the firmware's answer. The frame buffer
++ * messages go to a service of their own (@ack 0), which answers while the
++ * decoder service is busy with a start: a start may wait for a frame buffer.
++ */
++static int vdec_fw_command(struct mt6897_vdec_ctx *ctx, int service, const void *msg, size_t len,
++			   u32 ack)
++{
++	struct completion *c = service == VDEC_SRV_RESOURCE ? &ctx->res_done : &ctx->done;
++	int ret;
++
++	if (service == VDEC_SRV_RESOURCE)
++		lockdep_assert_held(&ctx->res_lock);
++	else
++		lockdep_assert_held(&ctx->cmd_lock);
++	if (ctx->dead)
++		return -EIO;
++	reinit_completion(c);
++	if (service != VDEC_SRV_RESOURCE)
++		ctx->expected = ack;
++	ret = vdec_fw_send(ctx, service, msg, len);
++	if (!ret && !wait_for_completion_timeout(c, msecs_to_jiffies(VDEC_CMD_TIMEOUT_MS)))
++		ret = -ETIMEDOUT;
++	if (ret) {
++		dev_err(ctx->vdec->dev, "command %#x: %d\n", *(const u32 *)msg, ret);
++		ctx->dead = true;
++		return ret;
++	}
++	return service == VDEC_SRV_RESOURCE ? 0 : ctx->status;
++}
++
++/* What the firmware left in the lists of the shared structure */
++static void vdec_collect(struct mt6897_vdec_ctx *ctx)
++{
++	struct vdec_vsi *vsi = ctx->vsi;
++	struct vdec_ring_fb *r;
++	struct vdec_ring_bs *b;
++	bool work = false;
++
++	if (!vsi)
++		return;
++	mutex_lock(&ctx->ring_lock);
++
++	/* Frames to show, in display order */
++	r = &vsi->list_disp;
++	while (r->count && r->count <= VDEC_MAX_FRAMES && r->read_idx < VDEC_MAX_FRAMES) {
++		struct vdec_fb_entry *e = &r->fb_list[r->read_idx];
++		u64 idx = e->vdec_fb_va - VDEC_FB_TAG;
++
++		if (idx < ctx->fb_count && ctx->shown_count < VDEC_MAX_FB &&
++		    !(ctx->fb[idx].state & VDEC_FB_SHOWN)) {
++			ctx->fb[idx].state |= VDEC_FB_SHOWN;
++			ctx->fb[idx].timestamp = e->timestamp;
++			ctx->shown[ctx->shown_count++] = idx;
++			work = true;
++		}
++		r->read_idx = (r->read_idx + 1) % VDEC_MAX_FRAMES;
++		r->count--;
++	}
++
++	/* Frame buffers the firmware no longer refers to */
++	r = &vsi->list_free;
++	while (r->count && r->count <= VDEC_MAX_FRAMES && r->read_idx < VDEC_MAX_FRAMES) {
++		u64 idx = r->fb_list[r->read_idx].vdec_fb_va - VDEC_FB_TAG;
++
++		if (idx < ctx->fb_count) {
++			ctx->fb[idx].state &= ~VDEC_FB_FW;
++			work = true;
++		}
++		r->read_idx = (r->read_idx + 1) % VDEC_MAX_FRAMES;
++		r->count--;
++	}
++
++	/* Bitstream buffers it has read */
++	b = &vsi->list_free_bs;
++	while (b->count && b->count <= VDEC_MAX_FRAMES && b->read_idx < VDEC_MAX_FRAMES) {
++		u64 idx = b->vdec_bs_va_list[b->read_idx] - VDEC_BS_TAG;
++
++		if (idx < ARRAY_SIZE(ctx->src_busy) && ctx->src_busy[idx]) {
++			v4l2_m2m_buf_done(ctx->src_busy[idx], VB2_BUF_STATE_DONE);
++			ctx->src_busy[idx] = NULL;
++		}
++		b->read_idx = (b->read_idx + 1) % VDEC_MAX_FRAMES;
++		b->count--;
++	}
++	mutex_unlock(&ctx->ring_lock);
++
++	if (work)
++		queue_work(ctx->vdec->wq, &ctx->frame_work);
++}
++
++/* Called from the thread of the coprocessor driver */
++static void vdec_fw_receive(void *priv, const void *data, size_t len)
++{
++	struct mt6897_vdec_ctx *ctx = priv;
++	const struct vdec_share_obj *obj = data;
++	u8 buf[VDEC_SHARE_BUF_SIZE];
++	struct vdec_msg_prefix *p = (void *)buf;
++	struct vdec_mem_op *op = (void *)buf;
++	struct vdec_ack *ack = (void *)buf;
++	u32 id, size = min_t(u32, obj->len, VDEC_SHARE_BUF_SIZE);
++	int ret = 0;
++
++	memcpy(buf, obj->share_buf, sizeof(buf));
++	id = p->msg_id;
++
++	/* Answers to our commands */
++	if ((id & 0xf000) == 0xb000) {
++		if (id == VCU_IPIMSG_DEC_INIT_DONE)
++			ctx->inst_addr = ((struct vdec_init_ack *)buf)->vcu_inst_addr;
++		if (id == VCU_IPIMSG_DEC_DONE) {
++			complete(&ctx->res_done);
++		} else {
++			ctx->status = p->status;
++			if (id != ctx->expected)
++				dev_warn(ctx->vdec->dev, "answer %#x while waiting for %#x\n", id,
++					 ctx->expected);
++			complete(&ctx->done);
++		}
++		return;
++	}
++
++	/* Requests of the firmware */
++	switch (id) {
++	case VCU_IPIMSG_DEC_MEM_ALLOC:
++		if (op->mem.type == VDEC_MEM_SHM) {
++			op->mem.va = VDEC_INST_TAG;
++			op->mem.pa = ctx->shm.iova;
++			op->mem.iova = ctx->shm.iova;
++			op->mem.len = ctx->shm.size;
++			op->vcp_addr[0] = mt6897_vcp_pack_iova(ctx->prop.iova);
++			op->vcp_addr[1] = mt6897_vcp_pack_iova(ctx->loginfo.iova);
++		} else {
++			ret = vdec_work_alloc(ctx, &op->mem);
++			if (ret) {
++				dev_err(ctx->vdec->dev, "working memory type %u len %#x: %d\n",
++					op->mem.type, op->mem.len, ret);
++				op->mem.pa = 0;
++				op->mem.iova = 0;
++			}
++		}
++		break;
++	case VCU_IPIMSG_DEC_MEM_FREE:
++		ret = vdec_work_free(ctx, op->mem.iova) ? 0 : -1;
++		break;
++	case VCU_IPIMSG_DEC_CHECK_CODEC_ID:
++		/* The firmware tries its codecs one by one until the kernel agrees */
++		ret = (ack->codec_id == VDEC_CODEC_H264 && !p->status) ? 0 : -1;
++		id = AP_IPIMSG_DEC_CHECK_CODEC_ID_DONE - 0x1000;
++		break;
++	case VCU_IPIMSG_DEC_PUT_FRAME_BUFFER:
++		vdec_collect(ctx);
++		break;
++	case VCU_IPIMSG_DEC_WAITISR:
++		/* With the coprocessor the vendor leaves the interrupts to the firmware */
++		dev_warn(ctx->vdec->dev, "the firmware waits for an interrupt\n");
++		ret = -1;
++		break;
++	default:
++		/*
++		 * Lock and unlock of the two parts of the hardware: power and
++		 * clocks of both stay on for the whole session.
++		 */
++		if (id < VCU_IPIMSG_DEC_LOCK_CORE || id > VCU_IPIMSG_DEC_UNLOCK_LAT) {
++			dev_warn(ctx->vdec->dev, "message %#x is not known\n", id);
++			return;
++		}
++		break;
++	}
++	p->msg_id = id + 0x1000;
++	p->ctx_id = 1;
++	p->status = ret;
++	ret = vdec_fw_send(ctx, obj->id, buf, size);
++	if (ret)
++		dev_err(ctx->vdec->dev, "answer %#x was not taken: %d\n", p->msg_id, ret);
++}
++
++/* The clock scaling part of the firmware */
++
++static u32 mmd_read(struct mt6897_vdec_ctx *ctx, unsigned int offset)
++{
++	return READ_ONCE(*(u32 *)(ctx->mmd.cpu + offset));
++}
++
++static void mmd_write(struct mt6897_vdec_ctx *ctx, unsigned int offset, u32 value)
++{
++	WRITE_ONCE(*(u32 *)(ctx->mmd.cpu + offset), value);
++}
++
++static int mmd_send(struct mt6897_vdec_ctx *ctx, u8 func, u8 idx, u8 opp)
++{
++	struct mmdvfs_ipi slot = { func, idx, opp, upper_32_bits(ctx->mmd.iova),
++				   lower_32_bits(ctx->mmd.iova) };
++	unsigned int tries;
++	int ret;
++
++	mmd_write(ctx, MMDVFS_MEM_SYNC_DATA, 0);
++	mmd_write(ctx, MMDVFS_MEM_SYNC_FUNC, mmd_read(ctx, MMDVFS_MEM_SYNC_FUNC) | BIT(func));
++	ret = mt6897_vcp_ipi_send(ctx->vdec->vcp, MT6897_VCP_IPI_OUT_MMDVFS, &slot, sizeof(slot));
++	for (tries = 0; !ret && !(mmd_read(ctx, MMDVFS_MEM_SYNC_DATA) & BIT(func)); tries++) {
++		if (tries > 2000)
++			ret = -ETIMEDOUT;
++		usleep_range(500, 1000);
++	}
++	if (!ret)
++		mmd_write(ctx, MMDVFS_MEM_SYNC_FUNC,
++			  mmd_read(ctx, MMDVFS_MEM_SYNC_FUNC) & ~mmd_read(ctx, MMDVFS_MEM_SYNC_DATA));
++	else
++		dev_err(ctx->vdec->dev, "clock scaling request %u: %d\n", func, ret);
++	return ret;
++}
++
++/*
++ * What the vendor writes before its init message (nobody has asked for
++ * anything), then the kernel's use of the decoder clock mux, as the vendor
++ * clock driver tells the firmware when that clock is prepared.
++ */
++static int mmd_init(struct mt6897_vdec_ctx *ctx)
++{
++	unsigned int i;
++	int ret;
++
++	ret = mt6897_vcp_mem(ctx->vdec->vcp, MT6897_VCP_MEM_MMDVFS, &ctx->mmd);
++	if (ret)
++		return ret;
++	memset(ctx->mmd.cpu, 0, ctx->mmd.size);
++	for (i = 0; i < 4; i++) {
++		mmd_write(ctx, 0x30 + i * 4, MMDVFS_MAX_OPP);	/* forced level of a rail */
++		mmd_write(ctx, 0x40 + i * 4, MMDVFS_MAX_OPP);	/* voted level of a rail */
++		mmd_write(ctx, 0x450 + i * 4, MMDVFS_MAX_OPP);
++		mmd_write(ctx, 0x460 + i * 4, MMDVFS_MAX_OPP);
++		mmd_write(ctx, 0x470 + i * 4, MMDVFS_MAX_OPP);
++	}
++	for (i = 0; i < 14; i++)
++		mmd_write(ctx, 0x50 + i * 4, MMDVFS_MAX_OPP);	/* voted level of a user */
++	for (i = 0; i < 16; i++) {
++		mmd_write(ctx, 0x370 + i * 4, MMDVFS_MAX_OPP);	/* level of a mux */
++		mmd_write(ctx, 0x3b0 + i * 4, MMDVFS_MAX_OPP);
++		mmd_write(ctx, 0x3f0 + i * 4, MMDVFS_MAX_OPP);
++	}
++	for (i = 0; i < 32; i++)
++		mmd_write(ctx, 0x1f0 + i * 4, MMDVFS_MAX_OPP);	/* level of a user */
++	ret = mmd_send(ctx, MMDVFS_FUNC_INIT, MMDVFS_MAX_OPP, MMDVFS_MAX_OPP);
++	if (ret)
++		return ret;
++	mmd_write(ctx, MMDVFS_MEM_CLKMUX_ENABLE,
++		  mmd_read(ctx, MMDVFS_MEM_CLKMUX_ENABLE) | BIT(MMDVFS_MUX_VDEC));
++	return mmd_send(ctx, MMDVFS_FUNC_CLKMUX_ENABLE, MMDVFS_MUX_VDEC, 1);
++}
++
++/* Power and clocks of the hardware */
++
++/* The vendor's enable of a mux behind the hardware voter (clk-mux.c) */
++static int vdec_clock_vote(struct mt6897_vdec_dev *vdec)
++{
++	unsigned int i;
++	u32 set, done, cfg;
++
++	regmap_write(vdec->hwv, HWV_CG_23_SET, VDEC_MUX_PDN);
++	for (i = 0; i < 20000; i++) {
++		regmap_read(vdec->hwv, HWV_CG_23_SET, &set);
++		regmap_read(vdec->hwv, HWV_CG_23_DONE, &done);
++		regmap_read(vdec->topckgen, TOP_CLK_CFG_13, &cfg);
++		if ((set & VDEC_MUX_PDN) && (done & VDEC_MUX_PDN) && !(cfg & VDEC_MUX_PDN))
++			return 0;
++		udelay(5);
++	}
++	return -ETIMEDOUT;
++}
++
++/*
++ * The firmware changes the source of the decoder clock behind the kernel. If
++ * it stops halfway, the larbs lose their clock and the next write to them is
++ * a bus error. Before power is let go: the gate is open and the mux is back
++ * on the source the kernel believes in. The PLL the firmware switches to is
++ * still on at this point.
++ */
++static void vdec_clock_restore(struct mt6897_vdec_dev *vdec)
++{
++	if (vdec_clock_vote(vdec))
++		dev_warn(vdec->dev, "the voter did not open the gate of the decoder clock\n");
++	regmap_write(vdec->topckgen, TOP_CLK_CFG_13_CLR, VDEC_MUX_PDN | VDEC_MUX_MASK);
++	regmap_write(vdec->topckgen, TOP_CLK_CFG_13_SET, VDEC_MUX_MAINPLL_D5_D2);
++	regmap_write(vdec->topckgen, TOP_CLK_CFG_UPDATE1, VDEC_MUX_UPD);
++	usleep_range(200, 400);
++}
++
++static int vdec_power_on(struct mt6897_vdec_dev *vdec)
++{
++	int ret;
++
++	/* The decoder device brings larb4 up, the front-end child larb5 */
++	if (!vdec->lat)
++		return -ENODEV;
++	ret = pm_runtime_resume_and_get(vdec->dev);
++	if (ret)
++		return ret;
++	ret = pm_runtime_resume_and_get(vdec->lat);
++	if (ret)
++		goto put_dev;
++	ret = pm_runtime_resume_and_get(vdec->pd_lat);
++	if (ret)
++		goto put_child;
++	ret = pm_runtime_resume_and_get(vdec->pd_core);
++	if (ret)
++		goto put_lat;
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(vdec->clks), vdec->clks);
++	if (ret)
++		goto put_core;
++	ret = clk_prepare_enable(vdec->pll);
++	if (!ret)
++		return 0;
++	clk_bulk_disable_unprepare(ARRAY_SIZE(vdec->clks), vdec->clks);
++put_core:
++	pm_runtime_put_sync(vdec->pd_core);
++put_lat:
++	pm_runtime_put_sync(vdec->pd_lat);
++put_child:
++	pm_runtime_put_sync(vdec->lat);
++put_dev:
++	pm_runtime_put_sync(vdec->dev);
++	return ret;
++}
++
++static void vdec_power_off(struct mt6897_vdec_dev *vdec)
++{
++	vdec_clock_restore(vdec);
++	clk_bulk_disable_unprepare(ARRAY_SIZE(vdec->clks), vdec->clks);
++	pm_runtime_put_sync(vdec->pd_core);
++	pm_runtime_put_sync(vdec->pd_lat);
++	pm_runtime_put_sync(vdec->lat);
++	pm_runtime_put_sync(vdec->dev);
++	clk_disable_unprepare(vdec->pll);
++}
++
++/* The session */
++
++static int vdec_fw_reset(struct mt6897_vdec_ctx *ctx, u32 type)
++{
++	struct vdec_ap_cmd cmd = {
++		.msg_id = AP_IPIMSG_DEC_RESET, .ctx_id = 1, .vcu_inst_addr = ctx->inst_addr,
++		.drain_type = type,
++	};
++	int ret;
++
++	ret = vdec_fw_command(ctx, VDEC_SRV_COMMON, &cmd, sizeof(cmd), AP_IPIMSG_DEC_RESET + 0x1000);
++	vdec_collect(ctx);
++	return ret;
++}
++
++static int vdec_fw_set_param(struct mt6897_vdec_ctx *ctx, u32 id, u32 value)
++{
++	struct vdec_ap_set_param msg = {
++		.msg_id = AP_IPIMSG_DEC_SET_PARAM, .ctx_id = 1, .vcu_inst_addr = ctx->inst_addr,
++		.id = id,
++	};
++
++	msg.data[0] = value;
++	return vdec_fw_command(ctx, VDEC_SRV_COMMON, &msg, sizeof(msg),
++			       AP_IPIMSG_DEC_SET_PARAM + 0x1000);
++}
++
++static int vdec_fw_give_fb(struct mt6897_vdec_ctx *ctx, unsigned int idx)
++{
++	struct vdec_ap_set_param msg = {
++		.msg_id = AP_IPIMSG_DEC_FRAME_BUFFER, .ctx_id = 1, .vcu_inst_addr = ctx->inst_addr,
++	};
++	struct vdec_ipi_fb fb = {
++		.vdec_fb_va = VDEC_FB_TAG + idx,
++		.y_fb_dma = ctx->fb[idx].mem.iova,
++		.c_fb_dma = ctx->fb[idx].mem.iova + ctx->fb_luma,
++		.dma_general_addr = -1,
++		.reserved = idx,
++	};
++
++	int ret;
++
++	memcpy(msg.data, &fb, sizeof(fb));
++	mutex_lock(&ctx->res_lock);
++	ret = vdec_fw_command(ctx, VDEC_SRV_RESOURCE, &msg, sizeof(msg), 0);
++	if (!ret)
++		ctx->fw_has_fbs = true;
++	mutex_unlock(&ctx->res_lock);
++	return ret;
++}
++
++/* Every frame buffer that is neither with the firmware nor waiting to be copied */
++static int vdec_fw_give_free(struct mt6897_vdec_ctx *ctx)
++{
++	unsigned int i;
++	int ret = 0;
++
++	for (i = 0; i < ctx->fb_count && !ret; i++) {
++		bool give;
++
++		mutex_lock(&ctx->ring_lock);
++		give = !ctx->fb[i].state;
++		if (give)
++			ctx->fb[i].state = VDEC_FB_FW;
++		mutex_unlock(&ctx->ring_lock);
++		if (give)
++			ret = vdec_fw_give_fb(ctx, i);
++	}
++	return ret;
++}
++
++/*
++ * Take every frame buffer back: the vendor empties the firmware's queue with
++ * a frame buffer message that carries no buffer, then flushes. A session
++ * that still holds frame buffers cannot be closed.
++ */
++static void vdec_fw_flush(struct mt6897_vdec_ctx *ctx)
++{
++	struct vdec_ap_set_param none = {
++		.msg_id = AP_IPIMSG_DEC_FRAME_BUFFER, .ctx_id = 1, .vcu_inst_addr = ctx->inst_addr,
++	};
++	unsigned int i;
++
++	lockdep_assert_held(&ctx->cmd_lock);
++	mutex_lock(&ctx->res_lock);
++	if (ctx->fw_has_fbs)
++		vdec_fw_command(ctx, VDEC_SRV_RESOURCE, &none, sizeof(none), 0);
++	ctx->fw_has_fbs = false;
++	mutex_unlock(&ctx->res_lock);
++	vdec_fw_reset(ctx, VDEC_RESET_FLUSH);
++	mutex_lock(&ctx->ring_lock);
++	for (i = 0; i < ctx->fb_count; i++)
++		ctx->fb[i].state = 0;
++	ctx->shown_count = 0;
++	for (i = 0; i < ARRAY_SIZE(ctx->src_busy); i++) {
++		if (ctx->src_busy[i])
++			v4l2_m2m_buf_done(ctx->src_busy[i], VB2_BUF_STATE_ERROR);
++		ctx->src_busy[i] = NULL;
++	}
++	mutex_unlock(&ctx->ring_lock);
++}
++
++static void vdec_fw_close(struct mt6897_vdec_ctx *ctx)
++{
++	struct mt6897_vdec_dev *vdec = ctx->vdec;
++	struct vdec_ap_cmd cmd = {
++		.msg_id = AP_IPIMSG_DEC_DEINIT, .ctx_id = 1, .vcu_inst_addr = ctx->inst_addr,
++	};
++	unsigned int i;
++
++	mutex_lock(&ctx->cmd_lock);
++	if (ctx->fw_open) {
++		if (ctx->header)
++			vdec_fw_flush(ctx);
++		vdec_fw_command(ctx, VDEC_SRV_COMMON, &cmd, sizeof(cmd), AP_IPIMSG_DEC_DEINIT + 0x1000);
++		ctx->fw_open = false;
++	}
++	if (ctx->powered)
++		vdec_power_off(vdec);
++	ctx->powered = false;
++	if (ctx->vcp_on) {
++		mt6897_vcp_stop(vdec->vcp);
++		mt6897_vcp_ipi_unregister(vdec->vcp, MT6897_VCP_IPI_IN_VDEC_1);
++	}
++	ctx->vcp_on = false;
++	ctx->vsi = NULL;
++	for (i = 0; i < ARRAY_SIZE(ctx->fb); i++)
++		vdec_mem_free(&ctx->fb[i].mem);
++	ctx->fb_count = 0;
++	vdec_work_free(ctx, 0);
++	mutex_unlock(&ctx->cmd_lock);
++}
++
++static int vdec_fw_open(struct mt6897_vdec_ctx *ctx)
++{
++	struct mt6897_vdec_dev *vdec = ctx->vdec;
++	struct vdec_msg_prefix init = {
++		.msg_id = AP_IPIMSG_DEC_INIT, .ctx_id = 1, .ap_inst_addr = VDEC_INST_TAG,
++	};
++	u64 offset;
++	int ret;
++
++	mutex_lock(&ctx->cmd_lock);
++	ctx->dead = false;
++	ret = mt6897_vcp_ipi_register(vdec->vcp, MT6897_VCP_IPI_IN_VDEC_1, vdec_fw_receive, ctx);
++	if (ret)
++		goto unlock;
++	ret = mt6897_vcp_start(vdec->vcp);
++	if (ret) {
++		mt6897_vcp_ipi_unregister(vdec->vcp, MT6897_VCP_IPI_IN_VDEC_1);
++		goto unlock;
++	}
++	ctx->vcp_on = true;
++	ret = mt6897_vcp_mem(vdec->vcp, MT6897_VCP_MEM_VDEC, &ctx->shm);
++	if (!ret)
++		ret = mt6897_vcp_mem(vdec->vcp, MT6897_VCP_MEM_VDEC_PROP, &ctx->prop);
++	if (!ret)
++		ret = mt6897_vcp_mem(vdec->vcp, MT6897_VCP_MEM_VDEC_LOG, &ctx->loginfo);
++	if (ret)
++		goto fail;
++	ret = vdec_power_on(vdec);
++	if (ret)
++		goto fail;
++	ctx->powered = true;
++
++	/* The firmware switches the decoder clock itself: tell it the mux is in use and open its gate */
++	ret = mmd_init(ctx);
++	if (!ret)
++		ret = vdec_clock_vote(vdec);
++	if (ret)
++		goto fail;
++
++	if (ctx->prop.size <= sizeof(vdec_properties)) {
++		ret = -ENOSPC;
++		goto fail;
++	}
++	memset(ctx->prop.cpu, 0, min_t(size_t, ctx->prop.size, SZ_4K));
++	memcpy(ctx->prop.cpu, vdec_properties, sizeof(vdec_properties));
++
++	ret = vdec_fw_command(ctx, VDEC_SRV_COMMON, &init, sizeof(init), VCU_IPIMSG_DEC_INIT_DONE);
++	if (ret)
++		goto fail;
++	ctx->fw_open = true;
++	offset = (ctx->inst_addr & 0x0fffffff) - (ctx->shm.iova & 0x0fffffff);
++	if (offset > ctx->shm.size - sizeof(*ctx->vsi)) {
++		ret = -ERANGE;
++		goto fail;
++	}
++	ctx->vsi = ctx->shm.cpu + offset;
++	/* Luma and chroma in two planes: the uncompressed block layout comes as MM21 */
++	ctx->vsi->dec.fb_num_planes = 2;
++unlock:
++	mutex_unlock(&ctx->cmd_lock);
++	return ret;
++fail:
++	mutex_unlock(&ctx->cmd_lock);
++	dev_err(vdec->dev, "the session with the firmware did not open: %d\n", ret);
++	vdec_fw_close(ctx);
++	return ret;
++}
++
++/* Hand one buffer of bitstream to the firmware */
++static int vdec_fw_start(struct mt6897_vdec_ctx *ctx, struct vb2_v4l2_buffer *src)
++{
++	struct vdec_vsi *vsi = ctx->vsi;
++	struct vdec_ap_start msg = {
++		.msg_id = AP_IPIMSG_DEC_START, .ctx_id = 1, .vcu_inst_addr = ctx->inst_addr,
++	};
++	struct vb2_buffer *vb = &src->vb2_buf;
++	size_t len = vb2_get_plane_payload(vb, 0), size = vb2_plane_size(vb, 0);
++	u8 *cpu = vb2_plane_vaddr(vb, 0);
++
++	/* The firmware looks a little past the end for the next start code */
++	if (cpu && len < size)
++		memset(cpu + len, 0, min_t(size_t, size - len, 64));
++	vsi->dec.vdec_bs_va = VDEC_BS_TAG + vb->index;
++	vsi->dec.bs_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
++	memset(vsi->dec.fb_dma, 0, sizeof(vsi->dec.fb_dma));
++	vsi->dec.vdec_fb_va = 0;
++	vsi->dec.index = 0xff;
++	vsi->dec.queued_frame_buf_count = ctx->fb_count;
++	vsi->dec.timestamp = vb->timestamp;
++	msg.data[0] = len;	/* what is in the buffer */
++	msg.data[1] = size;	/* the buffer: must not change between calls */
++	return vdec_fw_command(ctx, VDEC_SRV_COMMON, &msg, sizeof(msg), AP_IPIMSG_DEC_START + 0x1000);
++}
++
++/* The picture the firmware found in the stream's headers */
++static int vdec_read_picture(struct mt6897_vdec_ctx *ctx)
++{
++	struct vdec_vsi *vsi = ctx->vsi;
++	struct v4l2_pix_format_mplane *f = &ctx->cap_fmt;
++	u32 w = vsi->pic.buf_w, h = vsi->pic.buf_h;
++
++	if (vsi->pic.fourcc != V4L2_PIX_FMT_MM21 || vsi->pic.layout_mode || vsi->pic.bitdepth != 8 ||
++	    vsi->dec.fb_num_planes != 2 || !w || !h || (w & 15) || (h & 31) ||
++	    w > VDEC_MAX_W || h > VDEC_MAX_H ||
++	    vsi->pic.fb_sz[0] != w * h || vsi->pic.fb_sz[1] != w * h / 2) {
++		dev_err(ctx->vdec->dev,
++			"picture %ux%u in %ux%u, %u bits, layout %u, format %p4cc, sizes %u %u: not handled\n",
++			vsi->pic.pic_w, vsi->pic.pic_h, w, h, vsi->pic.bitdepth,
++			vsi->pic.layout_mode, &vsi->pic.fourcc, vsi->pic.fb_sz[0], vsi->pic.fb_sz[1]);
++		return -EINVAL;
++	}
++	f->width = w;
++	f->height = h;
++	f->pixelformat = V4L2_PIX_FMT_NV12;
++	f->field = V4L2_FIELD_NONE;
++	f->num_planes = 1;
++	f->plane_fmt[0].bytesperline = w;
++	f->plane_fmt[0].sizeimage = w * h * 3 / 2;
++	ctx->crop = vsi->crop;
++	if (!ctx->crop.width || !ctx->crop.height ||
++	    ctx->crop.left + ctx->crop.width > w || ctx->crop.top + ctx->crop.height > h) {
++		ctx->crop = (struct v4l2_rect){ 0, 0, vsi->pic.pic_w, vsi->pic.pic_h };
++		ctx->crop.width = min(ctx->crop.width, w);
++		ctx->crop.height = min(ctx->crop.height, h);
++	}
++	ctx->dpb = vsi->dec.dpb_sz;
++	ctx->fb_luma = PAGE_ALIGN(vsi->pic.fb_sz[0]);
++	ctx->fb_size = ctx->fb_luma + PAGE_ALIGN(vsi->pic.fb_sz[1]);
++	return 0;
++}
++
++/* Frame buffers for the firmware, and what it needs to know before the first frame */
++static int vdec_fw_prepare_frames(struct mt6897_vdec_ctx *ctx)
++{
++	struct vdec_vsi *vsi = ctx->vsi;
++	struct vdec_ap_set_param msg = {
++		.msg_id = AP_IPIMSG_DEC_SET_PARAM, .ctx_id = 1, .vcu_inst_addr = ctx->inst_addr,
++		.id = VDEC_SET_PARAM_DEC_PARAMS,
++	};
++	unsigned int i, want = min_t(unsigned int, ctx->dpb + VDEC_EXTRA_FB, VDEC_MAX_FB);
++	int ret = 0;
++
++	lockdep_assert_held(&ctx->cmd_lock);
++	if (ctx->fb_count != want || ctx->fb[0].mem.size != ctx->fb_size) {
++		for (i = 0; i < ARRAY_SIZE(ctx->fb); i++)
++			vdec_mem_free(&ctx->fb[i].mem);
++		ctx->fb_count = 0;
++		for (i = 0; i < want; i++) {
++			ret = vdec_mem_alloc(ctx->vdec, &ctx->fb[i].mem, VDEC_MEM_HW, ctx->fb_size);
++			if (ret)
++				return ret;
++			ctx->fb[i].state = 0;
++			ctx->fb_count = i + 1;
++		}
++	}
++	ret = vdec_fw_give_free(ctx);
++	if (ret)
++		return ret;
++
++	vsi->dec_params.frame_size_width = vsi->pic.pic_w;
++	vsi->dec_params.frame_size_height = vsi->pic.pic_h;
++	vsi->dec_params.operating_rate = VDEC_OPERATING_RATE;
++	vsi->dec_params.dec_param_change |= VDEC_PARAM_FRAME_SIZE | VDEC_PARAM_OPERATING_RATE;
++	ret = vdec_fw_command(ctx, VDEC_SRV_COMMON, &msg, sizeof(msg), AP_IPIMSG_DEC_SET_PARAM + 0x1000);
++	if (!ret)
++		ret = vdec_fw_set_param(ctx, VDEC_SET_PARAM_MMDVFS, VDEC_MMDVFS_START);
++	return ret;
++}
++
++/* Frames out */
++
++/* Blocks of 16 pixels by @block lines, in raster order, to lines */
++static void vdec_detile(u8 *dst, const u8 *src, u32 stride, u32 lines, u32 block)
++{
++	u32 cols = stride / 16, x, y;
++
++	for (y = 0; y < lines; y++) {
++		const u8 *row = src + (size_t)(y / block) * cols * block * 16 + (y % block) * 16;
++
++		for (x = 0; x < cols; x++)
++			memcpy(dst + (size_t)y * stride + x * 16, row + (size_t)x * block * 16, 16);
++	}
++}
++
++static void vdec_send_last(struct mt6897_vdec_ctx *ctx, struct vb2_v4l2_buffer *dst)
++{
++	static const struct v4l2_event eos = { .type = V4L2_EVENT_EOS };
++
++	vb2_set_plane_payload(&dst->vb2_buf, 0, 0);
++	dst->flags |= V4L2_BUF_FLAG_LAST;
++	dst->sequence = ctx->cap_sequence++;
++	v4l2_m2m_buf_done(dst, VB2_BUF_STATE_DONE);
++	v4l2_event_queue_fh(&ctx->fh, &eos);
++	ctx->last_sent = true;
++}
++
++/* Copy shown frames to the application and hand used frame buffers back to the firmware */
++static void vdec_frame_work(struct work_struct *work)
++{
++	struct mt6897_vdec_ctx *ctx = container_of(work, struct mt6897_vdec_ctx, frame_work);
++	struct v4l2_m2m_ctx *m2m = ctx->fh.m2m_ctx;
++	u32 w = ctx->cap_fmt.width, h = ctx->cap_fmt.height;
++	struct vb2_v4l2_buffer *dst;
++	unsigned int i;
++
++	for (;;) {
++		struct vdec_fb *fb;
++		u64 timestamp;
++		u8 *out;
++
++		mutex_lock(&ctx->ring_lock);
++		if (!ctx->shown_count || !ctx->fbs_ready) {
++			mutex_unlock(&ctx->ring_lock);
++			break;
++		}
++		fb = &ctx->fb[ctx->shown[0]];
++		timestamp = fb->timestamp;
++		mutex_unlock(&ctx->ring_lock);
++
++		dst = v4l2_m2m_dst_buf_remove(m2m);
++		if (!dst)
++			break;		/* comes back when the application queues a buffer */
++		out = vb2_plane_vaddr(&dst->vb2_buf, 0);
++		if (out && vb2_plane_size(&dst->vb2_buf, 0) >= w * h * 3 / 2) {
++			vdec_detile(out, fb->mem.cpu, w, h, 32);
++			vdec_detile(out + w * h, fb->mem.cpu + ctx->fb_luma, w, h / 2, 16);
++			vb2_set_plane_payload(&dst->vb2_buf, 0, w * h * 3 / 2);
++		}
++		dst->vb2_buf.timestamp = timestamp;
++		dst->field = V4L2_FIELD_NONE;
++		dst->flags &= ~V4L2_BUF_FLAG_LAST;
++		dst->sequence = ctx->cap_sequence++;
++		v4l2_m2m_buf_done(dst, out ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
++
++		mutex_lock(&ctx->ring_lock);
++		fb->state &= ~VDEC_FB_SHOWN;
++		memmove(ctx->shown, ctx->shown + 1, --ctx->shown_count);
++		mutex_unlock(&ctx->ring_lock);
++	}
++
++	/* A frame buffer that is copied and that the firmware let go of goes back to it */
++	if (ctx->fbs_ready && !ctx->drained && !ctx->dead)
++		vdec_fw_give_free(ctx);
++
++	/* After a drain and its last frame, the buffer that says so */
++	mutex_lock(&ctx->ring_lock);
++	i = ctx->shown_count;
++	mutex_unlock(&ctx->ring_lock);
++	if (ctx->drained && !ctx->last_sent && ctx->fbs_ready && !i) {
++		dst = v4l2_m2m_dst_buf_remove(m2m);
++		if (dst)
++			vdec_send_last(ctx, dst);
++	}
++}
++
++/* Have the firmware put out every frame it still holds */
++static void vdec_drain_work(struct work_struct *work)
++{
++	struct mt6897_vdec_ctx *ctx = container_of(work, struct mt6897_vdec_ctx, drain_work);
++
++	if (!ctx->draining || ctx->drained || v4l2_m2m_num_src_bufs_ready(ctx->fh.m2m_ctx))
++		return;
++	mutex_lock(&ctx->cmd_lock);
++	if (ctx->fw_open && ctx->header && ctx->fbs_ready)
++		vdec_fw_reset(ctx, VDEC_RESET_DRAIN);
++	ctx->drained = true;
++	mutex_unlock(&ctx->cmd_lock);
++	queue_work(ctx->vdec->wq, &ctx->frame_work);
++}
++
++/* Bitstream in */
++
++static void vdec_decode_work(struct work_struct *work)
++{
++	static const struct v4l2_event change = {
++		.type = V4L2_EVENT_SOURCE_CHANGE,
++		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
++	};
++	struct mt6897_vdec_ctx *ctx = container_of(work, struct mt6897_vdec_ctx, decode_work);
++	struct mt6897_vdec_dev *vdec = ctx->vdec;
++	struct v4l2_m2m_ctx *m2m = ctx->fh.m2m_ctx;
++	struct vb2_v4l2_buffer *src;
++	u32 changed;
++	int ret;
++
++	src = v4l2_m2m_next_src_buf(m2m);
++	if (!src)
++		goto finish;
++	src->sequence = ctx->out_sequence++;
++	mutex_lock(&ctx->cmd_lock);
++
++	if (!ctx->header) {
++		/*
++		 * The headers come first. The firmware answers with the
++		 * picture and wants the same buffer again once it has frame
++		 * buffers, so the buffer stays queued.
++		 */
++		ret = vdec_fw_start(ctx, src);
++		changed = ctx->vsi->dec.vdec_changed_info;
++		if (!ret && (changed & VDEC_RES_CHANGE) &&
++		    !(changed & (VDEC_HW_NOT_SUPPORT | VDEC_NEED_SEQ_HEADER)))
++			ret = vdec_read_picture(ctx);
++		else if (!ret && !(changed & VDEC_HW_NOT_SUPPORT))
++			ret = 1;	/* no headers in this buffer */
++		else if (!ret)
++			ret = -EINVAL;
++		mutex_unlock(&ctx->cmd_lock);
++		if (!ret) {
++			ctx->out_sequence--;
++			ctx->header = true;
++			v4l2_event_queue_fh(&ctx->fh, &change);
++		} else {
++			v4l2_m2m_src_buf_remove(m2m);
++			v4l2_m2m_buf_done(src, ret < 0 ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
++		}
++		goto finish;
++	}
++
++	/* From here the firmware owns the buffer until it lists it as read */
++	v4l2_m2m_src_buf_remove(m2m);
++	mutex_lock(&ctx->ring_lock);
++	ctx->src_busy[src->vb2_buf.index] = src;
++	mutex_unlock(&ctx->ring_lock);
++	ret = vdec_fw_start(ctx, src);
++	vdec_collect(ctx);
++	if (!ret && (ctx->vsi->dec.vdec_changed_info & VDEC_RES_CHANGE)) {
++		dev_err(vdec->dev, "the picture changed in the middle of the stream: not handled\n");
++		ret = -EINVAL;
++	}
++	mutex_unlock(&ctx->cmd_lock);
++	if (ret) {
++		mutex_lock(&ctx->ring_lock);
++		if (ctx->src_busy[src->vb2_buf.index] == src) {
++			ctx->src_busy[src->vb2_buf.index] = NULL;
++			v4l2_m2m_buf_done(src, VB2_BUF_STATE_ERROR);
++		}
++		mutex_unlock(&ctx->ring_lock);
++	}
++finish:
++	v4l2_m2m_job_finish(vdec->m2m, m2m);
++	if (ctx->draining)
++		queue_work(vdec->wq, &ctx->drain_work);
++}
++
++static void vdec_device_run(void *priv)
++{
++	struct mt6897_vdec_ctx *ctx = priv;
++
++	queue_work(ctx->vdec->wq, &ctx->decode_work);
++}
++
++static int vdec_job_ready(void *priv)
++{
++	struct mt6897_vdec_ctx *ctx = priv;
++
++	if (!ctx->fw_open || ctx->dead || ctx->drained)
++		return 0;
++	/* After the headers, frames need the firmware's frame buffers */
++	return !ctx->header || ctx->fbs_ready;
++}
++
++static const struct v4l2_m2m_ops vdec_m2m_ops = {
++	.device_run = vdec_device_run,
++	.job_ready = vdec_job_ready,
++};
++
++/* Formats */
++
++static void vdec_default_formats(struct mt6897_vdec_ctx *ctx)
++{
++	struct v4l2_pix_format_mplane *f = &ctx->out_fmt;
++
++	f->width = 640;
++	f->height = 480;
++	f->pixelformat = V4L2_PIX_FMT_H264;
++	f->field = V4L2_FIELD_NONE;
++	f->colorspace = V4L2_COLORSPACE_REC709;
++	f->num_planes = 1;
++	f->plane_fmt[0].sizeimage = VDEC_MIN_BS_SIZE;
++
++	ctx->cap_fmt = *f;
++	f = &ctx->cap_fmt;
++	f->pixelformat = V4L2_PIX_FMT_NV12;
++	f->plane_fmt[0].bytesperline = f->width;
++	f->plane_fmt[0].sizeimage = f->width * f->height * 3 / 2;
++	ctx->crop = (struct v4l2_rect){ 0, 0, f->width, f->height };
++}
++
++static int vdec_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
++{
++	strscpy(cap->driver, VDEC_NAME, sizeof(cap->driver));
++	strscpy(cap->card, "MT6897 video decoder", sizeof(cap->card));
++	return 0;
++}
++
++static int vdec_enum_fmt_out(struct file *file, void *priv, struct v4l2_fmtdesc *f)
++{
++	if (f->index)
++		return -EINVAL;
++	f->pixelformat = V4L2_PIX_FMT_H264;
++	f->flags = V4L2_FMT_FLAG_DYN_RESOLUTION;
++	return 0;
++}
++
++static int vdec_enum_fmt_cap(struct file *file, void *priv, struct v4l2_fmtdesc *f)
++{
++	if (f->index)
++		return -EINVAL;
++	f->pixelformat = V4L2_PIX_FMT_NV12;
++	return 0;
++}
++
++static int vdec_g_fmt_out(struct file *file, void *priv, struct v4l2_format *f)
++{
++	f->fmt.pix_mp = file_to_ctx(file)->out_fmt;
++	return 0;
++}
++
++static int vdec_g_fmt_cap(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct mt6897_vdec_ctx *ctx = file_to_ctx(file);
++
++	f->fmt.pix_mp = ctx->cap_fmt;
++	f->fmt.pix_mp.colorspace = ctx->out_fmt.colorspace;
++	f->fmt.pix_mp.xfer_func = ctx->out_fmt.xfer_func;
++	f->fmt.pix_mp.ycbcr_enc = ctx->out_fmt.ycbcr_enc;
++	f->fmt.pix_mp.quantization = ctx->out_fmt.quantization;
++	return 0;
++}
++
++static int vdec_try_fmt_out(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct v4l2_pix_format_mplane *p = &f->fmt.pix_mp;
++
++	p->pixelformat = V4L2_PIX_FMT_H264;
++	p->width = clamp_t(u32, p->width, VDEC_MIN_W, VDEC_MAX_W);
++	p->height = clamp_t(u32, p->height, VDEC_MIN_W, VDEC_MAX_H);
++	p->field = V4L2_FIELD_NONE;
++	p->num_planes = 1;
++	p->plane_fmt[0].bytesperline = 0;
++	p->plane_fmt[0].sizeimage = clamp_t(u32, p->plane_fmt[0].sizeimage, VDEC_MIN_BS_SIZE,
++					    VDEC_MAX_BS_SIZE);
++	return 0;
++}
++
++static int vdec_s_fmt_out(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct mt6897_vdec_ctx *ctx = file_to_ctx(file);
++	struct v4l2_pix_format_mplane *c = &ctx->cap_fmt;
++
++	if (vb2_is_busy(v4l2_m2m_get_vq(ctx->fh.m2m_ctx, f->type)))
++		return -EBUSY;
++	vdec_try_fmt_out(file, priv, f);
++	ctx->out_fmt = f->fmt.pix_mp;
++	if (!ctx->header) {
++		/* A guess until the firmware has read the headers */
++		c->width = ALIGN(ctx->out_fmt.width, 64);
++		c->height = ALIGN(ctx->out_fmt.height, 64);
++		c->plane_fmt[0].bytesperline = c->width;
++		c->plane_fmt[0].sizeimage = c->width * c->height * 3 / 2;
++		ctx->crop = (struct v4l2_rect){ 0, 0, ctx->out_fmt.width, ctx->out_fmt.height };
++	}
++	return 0;
++}
++
++/* The firmware decides the picture: the application takes what the headers said */
++static int vdec_try_fmt_cap(struct file *file, void *priv, struct v4l2_format *f)
++{
++	return vdec_g_fmt_cap(file, priv, f);
++}
++
++static int vdec_g_selection(struct file *file, void *priv, struct v4l2_selection *s)
++{
++	struct mt6897_vdec_ctx *ctx = file_to_ctx(file);
++
++	if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
++		return -EINVAL;
++	switch (s->target) {
++	case V4L2_SEL_TGT_COMPOSE:
++	case V4L2_SEL_TGT_COMPOSE_DEFAULT:
++		s->r = ctx->crop;
++		return 0;
++	case V4L2_SEL_TGT_COMPOSE_BOUNDS:
++	case V4L2_SEL_TGT_COMPOSE_PADDED:
++		s->r = (struct v4l2_rect){ 0, 0, ctx->cap_fmt.width, ctx->cap_fmt.height };
++		return 0;
++	}
++	return -EINVAL;
++}
++
++static int vdec_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
++{
++	if (fsize->index || fsize->pixel_format != V4L2_PIX_FMT_H264)
++		return -EINVAL;
++	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
++	fsize->stepwise = (struct v4l2_frmsize_stepwise){
++		VDEC_MIN_W, VDEC_MAX_W, 2, VDEC_MIN_W, VDEC_MAX_H, 2,
++	};
++	return 0;
++}
++
++static int vdec_subscribe_event(struct v4l2_fh *fh, const struct v4l2_event_subscription *sub)
++{
++	switch (sub->type) {
++	case V4L2_EVENT_EOS:
++		return v4l2_event_subscribe(fh, sub, 2, NULL);
++	case V4L2_EVENT_SOURCE_CHANGE:
++		return v4l2_src_change_event_subscribe(fh, sub);
++	}
++	return -EINVAL;
++}
++
++static int vdec_try_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd *cmd)
++{
++	if (cmd->cmd != V4L2_DEC_CMD_STOP && cmd->cmd != V4L2_DEC_CMD_START)
++		return -EINVAL;
++	cmd->flags = 0;
++	if (cmd->cmd == V4L2_DEC_CMD_STOP)
++		cmd->stop.pts = 0;
++	else
++		cmd->start.speed = 0;
++	return 0;
++}
++
++static int vdec_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd *cmd)
++{
++	struct mt6897_vdec_ctx *ctx = file_to_ctx(file);
++	struct vb2_queue *out = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
++	struct vb2_queue *cap = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
++	int ret = vdec_try_decoder_cmd(file, priv, cmd);
++
++	if (ret)
++		return ret;
++	if (!vb2_is_streaming(out))
++		return 0;
++	if (cmd->cmd == V4L2_DEC_CMD_STOP) {
++		ctx->draining = true;
++		queue_work(ctx->vdec->wq, &ctx->drain_work);
++	} else {
++		ctx->draining = false;
++		ctx->drained = false;
++		ctx->last_sent = false;
++		vb2_clear_last_buffer_dequeued(cap);
++		queue_work(ctx->vdec->wq, &ctx->frame_work);
++		v4l2_m2m_try_schedule(ctx->fh.m2m_ctx);
++	}
++	return 0;
++}
++
++static const struct v4l2_ioctl_ops vdec_ioctl_ops = {
++	.vidioc_querycap = vdec_querycap,
++	.vidioc_enum_fmt_vid_out = vdec_enum_fmt_out,
++	.vidioc_enum_fmt_vid_cap = vdec_enum_fmt_cap,
++	.vidioc_g_fmt_vid_out_mplane = vdec_g_fmt_out,
++	.vidioc_g_fmt_vid_cap_mplane = vdec_g_fmt_cap,
++	.vidioc_try_fmt_vid_out_mplane = vdec_try_fmt_out,
++	.vidioc_try_fmt_vid_cap_mplane = vdec_try_fmt_cap,
++	.vidioc_s_fmt_vid_out_mplane = vdec_s_fmt_out,
++	.vidioc_s_fmt_vid_cap_mplane = vdec_try_fmt_cap,
++	.vidioc_g_selection = vdec_g_selection,
++	.vidioc_enum_framesizes = vdec_enum_framesizes,
++	.vidioc_reqbufs = v4l2_m2m_ioctl_reqbufs,
++	.vidioc_querybuf = v4l2_m2m_ioctl_querybuf,
++	.vidioc_create_bufs = v4l2_m2m_ioctl_create_bufs,
++	.vidioc_prepare_buf = v4l2_m2m_ioctl_prepare_buf,
++	.vidioc_qbuf = v4l2_m2m_ioctl_qbuf,
++	.vidioc_dqbuf = v4l2_m2m_ioctl_dqbuf,
++	.vidioc_expbuf = v4l2_m2m_ioctl_expbuf,
++	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
++	.vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
++	.vidioc_decoder_cmd = vdec_decoder_cmd,
++	.vidioc_try_decoder_cmd = vdec_try_decoder_cmd,
++	.vidioc_subscribe_event = vdec_subscribe_event,
++	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
++};
++
++/* Buffer queues */
++
++static int vdec_queue_setup(struct vb2_queue *vq, unsigned int *nbuffers, unsigned int *nplanes,
++			    unsigned int sizes[], struct device *alloc_devs[])
++{
++	struct mt6897_vdec_ctx *ctx = vb2_get_drv_priv(vq);
++	u32 size = V4L2_TYPE_IS_OUTPUT(vq->type) ? ctx->out_fmt.plane_fmt[0].sizeimage :
++						   ctx->cap_fmt.plane_fmt[0].sizeimage;
++
++	if (*nplanes)
++		return (*nplanes != 1 || sizes[0] < size) ? -EINVAL : 0;
++	*nplanes = 1;
++	sizes[0] = size;
++	return 0;
++}
++
++static int vdec_buf_prepare(struct vb2_buffer *vb)
++{
++	struct mt6897_vdec_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
++	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
++
++	if (V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type)) {
++		vbuf->field = V4L2_FIELD_NONE;
++		if (!vb2_get_plane_payload(vb, 0) || vb2_get_plane_payload(vb, 0) > vb2_plane_size(vb, 0))
++			return -EINVAL;
++		return 0;
++	}
++	return vb2_plane_size(vb, 0) < ctx->cap_fmt.plane_fmt[0].sizeimage ? -EINVAL : 0;
++}
++
++static void vdec_buf_queue(struct vb2_buffer *vb)
++{
++	struct mt6897_vdec_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
++
++	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, to_vb2_v4l2_buffer(vb));
++	/* A frame may be waiting for this buffer */
++	if (!V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type))
++		queue_work(ctx->vdec->wq, &ctx->frame_work);
++}
++
++static void vdec_return_buffers(struct mt6897_vdec_ctx *ctx, struct vb2_queue *vq)
++{
++	struct vb2_v4l2_buffer *vbuf;
++
++	for (;;) {
++		vbuf = V4L2_TYPE_IS_OUTPUT(vq->type) ? v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx) :
++						       v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
++		if (!vbuf)
++			return;
++		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
++	}
++}
++
++static int vdec_start_streaming(struct vb2_queue *vq, unsigned int count)
++{
++	struct mt6897_vdec_ctx *ctx = vb2_get_drv_priv(vq);
++	int ret = 0;
++
++	if (V4L2_TYPE_IS_OUTPUT(vq->type)) {
++		ctx->out_sequence = 0;
++		ctx->draining = false;
++		ctx->drained = false;
++		ctx->last_sent = false;
++		if (!ctx->fw_open)
++			ret = vdec_fw_open(ctx);
++	} else {
++		ctx->cap_sequence = 0;
++		if (!ctx->header) {
++			ret = -EINVAL;	/* nothing is known about the picture yet */
++		} else {
++			mutex_lock(&ctx->cmd_lock);
++			ret = vdec_fw_prepare_frames(ctx);
++			if (!ret)
++				ctx->fbs_ready = true;
++			else if (ctx->fw_open && !ctx->dead)
++				vdec_fw_flush(ctx);
++			mutex_unlock(&ctx->cmd_lock);
++		}
++	}
++	if (ret)
++		vdec_return_buffers(ctx, vq);
++	return ret;
++}
++
++static void vdec_stop_streaming(struct vb2_queue *vq)
++{
++	struct mt6897_vdec_ctx *ctx = vb2_get_drv_priv(vq);
++	bool was_ready = ctx->fbs_ready;
++
++	cancel_work_sync(&ctx->drain_work);
++	if (!V4L2_TYPE_IS_OUTPUT(vq->type))
++		ctx->fbs_ready = false;
++	cancel_work_sync(&ctx->frame_work);
++
++	mutex_lock(&ctx->cmd_lock);
++	if (ctx->fw_open && ctx->header && ctx->fw_has_fbs && !ctx->dead) {
++		/* Everything in flight is dropped; the firmware lets go of every buffer */
++		vdec_fw_flush(ctx);
++		if (!V4L2_TYPE_IS_OUTPUT(vq->type))
++			vdec_fw_set_param(ctx, VDEC_SET_PARAM_MMDVFS, VDEC_MMDVFS_END);
++		else if (was_ready)
++			vdec_fw_give_free(ctx);	/* a seek: go on with the same frame buffers */
++	}
++	mutex_unlock(&ctx->cmd_lock);
++
++	mutex_lock(&ctx->ring_lock);
++	if (V4L2_TYPE_IS_OUTPUT(vq->type)) {
++		unsigned int i;
++
++		for (i = 0; i < ARRAY_SIZE(ctx->src_busy); i++) {
++			if (ctx->src_busy[i])
++				v4l2_m2m_buf_done(ctx->src_busy[i], VB2_BUF_STATE_ERROR);
++			ctx->src_busy[i] = NULL;
++		}
++	}
++	ctx->shown_count = 0;
++	mutex_unlock(&ctx->ring_lock);
++	ctx->draining = false;
++	ctx->drained = false;
++	ctx->last_sent = false;
++	vdec_return_buffers(ctx, vq);
++}
++
++static const struct vb2_ops vdec_qops = {
++	.queue_setup = vdec_queue_setup,
++	.buf_prepare = vdec_buf_prepare,
++	.buf_queue = vdec_buf_queue,
++	.start_streaming = vdec_start_streaming,
++	.stop_streaming = vdec_stop_streaming,
++};
++
++static int vdec_queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue *dst_vq)
++{
++	struct mt6897_vdec_ctx *ctx = priv;
++	struct mt6897_vdec_dev *vdec = ctx->vdec;
++	int ret;
++
++	src_vq->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
++	src_vq->io_modes = VB2_MMAP | VB2_DMABUF;
++	src_vq->drv_priv = ctx;
++	src_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
++	src_vq->ops = &vdec_qops;
++	src_vq->mem_ops = &vb2_dma_contig_memops;
++	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
++	src_vq->lock = &vdec->lock;
++	/* The firmware reads the bitstream itself, through the coprocessor's side of the IOMMU */
++	src_vq->dev = mt6897_vcp_dma_device(vdec->vcp);
++	ret = vb2_queue_init(src_vq);
++	if (ret)
++		return ret;
++
++	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
++	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
++	dst_vq->drv_priv = ctx;
++	dst_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
++	dst_vq->ops = &vdec_qops;
++	dst_vq->mem_ops = &vb2_dma_contig_memops;
++	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
++	dst_vq->lock = &vdec->lock;
++	dst_vq->dev = vdec->dev;
++	return vb2_queue_init(dst_vq);
++}
++
++/* The device node */
++
++static int vdec_open(struct file *file)
++{
++	struct mt6897_vdec_dev *vdec = video_drvdata(file);
++	struct mt6897_vdec_ctx *ctx;
++	int ret = 0;
++
++	if (mutex_lock_interruptible(&vdec->lock))
++		return -ERESTARTSYS;
++	if (vdec->ctx) {
++		ret = -EBUSY;	/* one session at a time */
++		goto unlock;
++	}
++	ctx = kzalloc_obj(*ctx);
++	if (!ctx) {
++		ret = -ENOMEM;
++		goto unlock;
++	}
++	ctx->vdec = vdec;
++	mutex_init(&ctx->cmd_lock);
++	mutex_init(&ctx->res_lock);
++	mutex_init(&ctx->ring_lock);
++	init_completion(&ctx->done);
++	init_completion(&ctx->res_done);
++	INIT_WORK(&ctx->decode_work, vdec_decode_work);
++	INIT_WORK(&ctx->frame_work, vdec_frame_work);
++	INIT_WORK(&ctx->drain_work, vdec_drain_work);
++	vdec_default_formats(ctx);
++	v4l2_fh_init(&ctx->fh, video_devdata(file));
++	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(vdec->m2m, ctx, vdec_queue_init);
++	if (IS_ERR(ctx->fh.m2m_ctx)) {
++		ret = PTR_ERR(ctx->fh.m2m_ctx);
++		v4l2_fh_exit(&ctx->fh);
++		kfree(ctx);
++		goto unlock;
++	}
++	/* The headers are read before the application sets up its side, and frames wait for no buffer of it */
++	ctx->fh.m2m_ctx->ignore_cap_streaming = true;
++	v4l2_m2m_set_dst_buffered(ctx->fh.m2m_ctx, true);
++	v4l2_fh_add(&ctx->fh, file);
++	vdec->ctx = ctx;
++unlock:
++	mutex_unlock(&vdec->lock);
++	return ret;
++}
++
++static int vdec_release(struct file *file)
++{
++	struct mt6897_vdec_dev *vdec = video_drvdata(file);
++	struct mt6897_vdec_ctx *ctx = file_to_ctx(file);
++
++	mutex_lock(&vdec->lock);
++	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
++	cancel_work_sync(&ctx->drain_work);
++	cancel_work_sync(&ctx->frame_work);
++	vdec_fw_close(ctx);
++	/* The firmware is gone now: nothing queues work any more */
++	cancel_work_sync(&ctx->drain_work);
++	cancel_work_sync(&ctx->frame_work);
++	cancel_work_sync(&ctx->decode_work);
++	vdec->ctx = NULL;
++	mutex_unlock(&vdec->lock);
++	v4l2_fh_del(&ctx->fh, file);
++	v4l2_fh_exit(&ctx->fh);
++	kfree(ctx);
++	return 0;
++}
++
++static const struct v4l2_file_operations vdec_fops = {
++	.owner = THIS_MODULE,
++	.open = vdec_open,
++	.release = vdec_release,
++	.poll = v4l2_m2m_fop_poll,
++	.unlocked_ioctl = video_ioctl2,
++	.mmap = v4l2_m2m_fop_mmap,
++};
++
++/* The front end: larb5, behind the display-side IOMMU */
++static int vdec_lat_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6897_vdec_dev *vdec = dev_get_drvdata(dev->parent);
++	int ret;
++
++	if (!iommu_get_domain_for_dev(dev))
++		return dev_err_probe(dev, -EPROBE_DEFER, "no IOMMU domain yet\n");
++	ret = devm_pm_runtime_enable(dev);
++	if (!ret && vdec)
++		vdec->lat = dev;
++	return ret;
++}
++
++static void vdec_lat_remove(struct platform_device *pdev)
++{
++	struct mt6897_vdec_dev *vdec = dev_get_drvdata(pdev->dev.parent);
++
++	if (vdec)
++		vdec->lat = NULL;
++}
++
++static const struct of_device_id vdec_lat_match[] = {
++	{ .compatible = "mediatek,mt6897-vcodec-dec-lat" },
++	{}
++};
++
++static struct platform_driver vdec_lat_driver = {
++	.probe = vdec_lat_probe,
++	.remove = vdec_lat_remove,
++	.driver = { .name = VDEC_NAME "-lat", .of_match_table = vdec_lat_match },
++};
++
++/*
++ * The firmware asks the voltage request block (DVFSRC) for a voltage level
++ * before a frame and waits for it without end if nobody turned that block on.
++ */
++static int vdec_check_dvfsrc(struct device *dev)
++{
++	struct device_node *node = of_find_compatible_node(NULL, NULL, "mediatek,mt6897-dvfsrc");
++	struct platform_device *pdev;
++	int ret = 0;
++
++	if (!node || !of_device_is_available(node)) {
++		of_node_put(node);
++		return dev_err_probe(dev, -ENODEV, "the voltage request block is not enabled\n");
++	}
++	pdev = of_find_device_by_node(node);
++	of_node_put(node);
++	if (!pdev)
++		return -EPROBE_DEFER;
++	if (!platform_get_drvdata(pdev))
++		ret = -EPROBE_DEFER;
++	else if (!device_link_add(dev, &pdev->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
++		ret = -ENODEV;
++	put_device(&pdev->dev);
++	return ret;
++}
++
++static void vdec_detach_domains(void *data)
++{
++	struct mt6897_vdec_dev *vdec = data;
++
++	dev_pm_domain_detach(vdec->pd_core, true);
++	dev_pm_domain_detach(vdec->pd_lat, true);
++}
++
++static int vdec_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6897_vdec_dev *vdec;
++	struct video_device *vfd;
++	struct clk_hw *source;
++	int ret;
++
++	if (!iommu_get_domain_for_dev(dev))
++		return dev_err_probe(dev, -EPROBE_DEFER, "no IOMMU domain yet\n");
++	ret = vdec_check_dvfsrc(dev);
++	if (ret)
++		return ret;
++	vdec = devm_kzalloc(dev, sizeof(*vdec), GFP_KERNEL);
++	if (!vdec)
++		return -ENOMEM;
++	vdec->dev = dev;
++	mutex_init(&vdec->lock);
++	platform_set_drvdata(pdev, vdec);
++
++	vdec->vcp = mt6897_vcp_get(dev);
++	if (IS_ERR(vdec->vcp))
++		return dev_err_probe(dev, PTR_ERR(vdec->vcp), "the coprocessor\n");
++	vdec->hwv = syscon_regmap_lookup_by_compatible("mediatek,mt6897-hwv");
++	if (IS_ERR(vdec->hwv))
++		return dev_err_probe(dev, PTR_ERR(vdec->hwv), "the hardware voter\n");
++	vdec->topckgen = syscon_regmap_lookup_by_compatible("mediatek,mt6897-topckgen");
++	if (IS_ERR(vdec->topckgen))
++		return dev_err_probe(dev, PTR_ERR(vdec->topckgen), "the clock controller\n");
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(34));
++	if (ret)
++		return ret;
++	vdec->clks[0].id = "soc";
++	vdec->clks[1].id = "lat";
++	vdec->clks[2].id = "core";
++	vdec->clks[3].id = "sel";
++	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(vdec->clks), vdec->clks);
++	if (ret)
++		return dev_err_probe(dev, ret, "clocks\n");
++	/*
++	 * The firmware raises the decoder clock to 660 MHz for every frame by
++	 * switching the mux to this source. Until the clock driver knows that
++	 * the mux has a second master, the source is kept running from here.
++	 */
++	source = clk_hw_get_parent_by_index(__clk_get_hw(vdec->clks[3].clk), VDEC_MUX_IMGPLL_D2);
++	if (!source)
++		return dev_err_probe(dev, -ENODEV, "the fast source of the decoder clock\n");
++	vdec->pll = source->clk;
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	/* Two domains: the core does not attach them by itself */
++	vdec->pd_lat = dev_pm_domain_attach_by_name(dev, "lat");
++	if (IS_ERR_OR_NULL(vdec->pd_lat))
++		return dev_err_probe(dev, -ENODEV, "power domain of the front end\n");
++	vdec->pd_core = dev_pm_domain_attach_by_name(dev, "core");
++	if (IS_ERR_OR_NULL(vdec->pd_core)) {
++		dev_pm_domain_detach(vdec->pd_lat, true);
++		return dev_err_probe(dev, -ENODEV, "power domain of the core\n");
++	}
++	ret = devm_add_action_or_reset(dev, vdec_detach_domains, vdec);
++	if (ret)
++		return ret;
++	ret = devm_of_platform_populate(dev);
++	if (ret)
++		return ret;
++
++	vdec->wq = alloc_ordered_workqueue(VDEC_NAME, 0);
++	if (!vdec->wq)
++		return -ENOMEM;
++	ret = v4l2_device_register(dev, &vdec->v4l2_dev);
++	if (ret)
++		goto free_wq;
++	vdec->m2m = v4l2_m2m_init(&vdec_m2m_ops);
++	if (IS_ERR(vdec->m2m)) {
++		ret = PTR_ERR(vdec->m2m);
++		goto unregister_v4l2;
++	}
++	vfd = &vdec->vfd;
++	strscpy(vfd->name, VDEC_NAME, sizeof(vfd->name));
++	vfd->fops = &vdec_fops;
++	vfd->ioctl_ops = &vdec_ioctl_ops;
++	vfd->release = video_device_release_empty;
++	vfd->lock = &vdec->lock;
++	vfd->v4l2_dev = &vdec->v4l2_dev;
++	vfd->vfl_dir = VFL_DIR_M2M;
++	vfd->device_caps = V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING;
++	video_set_drvdata(vfd, vdec);
++	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
++	if (ret)
++		goto release_m2m;
++	dev_info(dev, "decoder at %s\n", video_device_node_name(vfd));
++	return 0;
++
++release_m2m:
++	v4l2_m2m_release(vdec->m2m);
++unregister_v4l2:
++	v4l2_device_unregister(&vdec->v4l2_dev);
++free_wq:
++	destroy_workqueue(vdec->wq);
++	return ret;
++}
++
++static void vdec_remove(struct platform_device *pdev)
++{
++	struct mt6897_vdec_dev *vdec = platform_get_drvdata(pdev);
++
++	video_unregister_device(&vdec->vfd);
++	v4l2_m2m_release(vdec->m2m);
++	v4l2_device_unregister(&vdec->v4l2_dev);
++	destroy_workqueue(vdec->wq);
++}
++
++static const struct of_device_id vdec_match[] = {
++	{ .compatible = "mediatek,mt6897-vcodec-dec" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, vdec_match);
++
++static struct platform_driver vdec_driver = {
++	.probe = vdec_probe,
++	.remove = vdec_remove,
++	.driver = { .name = VDEC_NAME, .of_match_table = vdec_match },
++};
++
++static int __init vdec_init(void)
++{
++	int ret = platform_driver_register(&vdec_lat_driver);
++
++	if (ret)
++		return ret;
++	ret = platform_driver_register(&vdec_driver);
++	if (ret)
++		platform_driver_unregister(&vdec_lat_driver);
++	return ret;
++}
++module_init(vdec_init);
++
++static void __exit vdec_exit(void)
++{
++	platform_driver_unregister(&vdec_driver);
++	platform_driver_unregister(&vdec_lat_driver);
++}
++module_exit(vdec_exit);
++
++MODULE_DESCRIPTION("MediaTek MT6897 video decoder");
++MODULE_LICENSE("GPL");
