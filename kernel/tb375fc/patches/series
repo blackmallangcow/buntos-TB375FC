@@ -294,3 +294,7 @@
 0213-iommu-mediatek-tell-the-MT6897-hypervisor-about-changed-mappings.patch
 0214-dt-bindings-memory-mediatek-add-the-MT6897-video-coprocessor-port.patch
 0215-iommu-mediatek-let-an-MT6897-master-without-a-larb-attach.patch
+# 0216 VCP가 타는 보호 뱅크. VCP의 읽기는 MDP IOMMU의 뱅크 1로 번역된다(기기에서 오류 기록으로 확인). 그 뱅크는 커널 밖에서
+#      준비되며, 보안 모니터에 초기화를 부른 뒤에 뱅크 0의 표 주소를 써야 표가 걸린다. 벤더처럼 초기화 때 부르고,
+#      런타임 잠자기 앞뒤에 저장과 복원을 부른다. 없으면 VCP의 로더가 펌웨어 대신 0을 읽는다
+0216-iommu-mediatek-have-the-MT6897-protected-banks-set-up.patch

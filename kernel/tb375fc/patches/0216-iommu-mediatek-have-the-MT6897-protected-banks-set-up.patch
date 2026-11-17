@@ -1,0 +1,145 @@
+From: buntOS contributors
+Subject: [PATCH] iommu/mediatek: have the MT6897 protected banks set up
+
+Each multimedia IOMMU of the MT6897 has five banks. The kernel owns bank 0.
+A master that the firmware marks as protected is translated by another
+bank: the video coprocessor fetches its firmware through bank 1 of the MDP
+IOMMU, with a table that the hypervisor keeps and the bootloader filled.
+
+Those banks are set up outside the kernel. The MediaTek driver in the
+OnePlus MT6897 kernel asks the secure monitor for it while it sets up bank
+0, before it writes the table address, and asks it to keep and bring back
+the state around a runtime suspend. This adds the same three calls.
+
+On a Lenovo TB375FC without the first call, the loader of the coprocessor
+reads zeros for its firmware and nothing reports a fault. After the call
+the monitor's fault record names bank 1 and the address of the firmware,
+and once the table address of bank 0 has been written again the firmware
+comes up.
+---
+ drivers/iommu/mtk_iommu.c | 49 +++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 47 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/iommu/mtk_iommu.c b/drivers/iommu/mtk_iommu.c
+index 379ce31a0..e032eafca 100644
+--- a/drivers/iommu/mtk_iommu.c
++++ b/drivers/iommu/mtk_iommu.c
+@@ -125,6 +125,16 @@
+ #define MTK_HYP_PMM_HYPMMU_TYPE2_INV		0xbb00ffa7
+ #define MTK_IOMMU_BANK_SZ			0x1000
+ 
++/*
++ * Commands to the secure monitor for the banks it owns. Next to the command
++ * the argument names the IOMMU and the bank: type[31:24], id[23:16], bank[15:8].
++ * The multimedia IOMMUs are type 0 and the call is made for bank 4.
++ */
++#define MTK_IOMMU_SEC_CMD(id, cmd)		(((id) << 16) | (4 << 8) | (cmd))
++#define MTK_IOMMU_SEC_BANK_INIT			0
++#define MTK_IOMMU_SEC_BANK_BACKUP		2
++#define MTK_IOMMU_SEC_BANK_RESTORE		3
++
+ #define PERICFG_IOMMU_1				0x714
+ 
+ #define HAS_4GB_MODE			BIT(0)
+@@ -158,6 +168,8 @@
+ #define TLB_SYNC_EN			BIT(22)
+ /* A hypervisor may keep its own copy of the page table for the hardware */
+ #define HYP_SHADOW_PGTABLE		BIT(23)
++/* The secure monitor sets up the banks that the kernel does not own */
++#define SEC_BANK_IN_ATF			BIT(24)
+ 
+ #define MTK_IOMMU_HAS_FLAG_MASK(pdata, _x, mask)	\
+ 				((((pdata)->flags) & (mask)) == (_x))
+@@ -254,6 +266,9 @@ struct mtk_iommu_plat_data {
+ 
+ 	/* Larb IDs of masters that reach the IOMMU without an SMI larb */
+ 	u32		    nolarb_msk;
++
++	/* The number the secure monitor knows this IOMMU by */
++	u32		    sec_id;
+ };
+ 
+ struct mtk_iommu_bank_data {
+@@ -1126,6 +1141,28 @@ static const struct iommu_ops mtk_iommu_ops = {
+ 	}
+ };
+ 
++/*
++ * The kernel owns bank 0. A master the firmware marks as protected, such as
++ * the video coprocessor of the MT6897, is translated by another bank, and
++ * those are set up outside the kernel. They take their table only when the
++ * table address of bank 0 is written after this call.
++ */
++static void mtk_iommu_sec_bank(const struct mtk_iommu_data *data, unsigned int cmd)
++{
++	struct arm_smccc_res res;
++
++	if (!MTK_IOMMU_HAS_FLAG(data->plat_data, SEC_BANK_IN_ATF))
++		return;
++
++	arm_smccc_smc(MTK_SIP_KERNEL_IOMMU_CONTROL,
++		      MTK_IOMMU_SEC_CMD(data->plat_data->sec_id, cmd),
++		      0, 0, 0, 0, 0, 0, &res);
++	/* Not every firmware keeps a copy for a power cycle: that is no error */
++	if (res.a0 && (cmd == MTK_IOMMU_SEC_BANK_INIT || (long)res.a0 != -1))
++		dev_err(data->dev, "secure bank command %u failed: %ld\n", cmd,
++			(long)res.a0);
++}
++
+ static int mtk_iommu_hw_init(const struct mtk_iommu_data *data, unsigned int bankid)
+ {
+ 	const struct mtk_iommu_bank_data *bankx = &data->bank[bankid];
+@@ -1206,6 +1243,9 @@ static int mtk_iommu_hw_init(const struct mtk_iommu_data *data, unsigned int ban
+ 			 upper_32_bits(data->protect_base);
+ 	writel_relaxed(regval, bankx->base + REG_MMU_IVRP_PADDR);
+ 
++	if (!bankid)
++		mtk_iommu_sec_bank(data, MTK_IOMMU_SEC_BANK_INIT);
++
+ 	if (devm_request_irq(bankx->parent_dev, bankx->irq, mtk_iommu_isr, 0,
+ 			     dev_name(bankx->parent_dev), (void *)bankx)) {
+ 		writel_relaxed(0, bankx->base + REG_MMU_PT_BASE_ADDR);
+@@ -1570,6 +1610,8 @@ static int __maybe_unused mtk_iommu_runtime_suspend(struct device *dev)
+ 		reg->int_main_control[i] = readl_relaxed(base + REG_MMU_INT_MAIN_CONTROL);
+ 		reg->ivrp_paddr[i] = readl_relaxed(base + REG_MMU_IVRP_PADDR);
+ 	} while (++i < data->plat_data->banks_num);
++	if (data->bank[0].m4u_dom)
++		mtk_iommu_sec_bank(data, MTK_IOMMU_SEC_BANK_BACKUP);
+ 	clk_disable_unprepare(data->bclk);
+ 	return 0;
+ }
+@@ -1611,6 +1653,8 @@ static int __maybe_unused mtk_iommu_runtime_resume(struct device *dev)
+ 		writel_relaxed(reg->ivrp_paddr[i], base + REG_MMU_IVRP_PADDR);
+ 		writel(m4u_dom->cfg.arm_v7s_cfg.ttbr, base + REG_MMU_PT_BASE_ADDR);
+ 	} while (++i < data->plat_data->banks_num);
++	if (data->bank[0].m4u_dom)
++		mtk_iommu_sec_bank(data, MTK_IOMMU_SEC_BANK_RESTORE);
+ 
+ 	/*
+ 	 * Users may allocate dma buffer before they call pm_runtime_get,
+@@ -1721,7 +1765,7 @@ static const struct mtk_iommu_plat_data mt6897_data_disp = {
+ 	.m4u_plat	= M4U_MT6897,
+ 	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
+ 			  PGTABLE_PA_35_EN | TLB_SYNC_EN | HYP_SHADOW_PGTABLE |
+-			  MTK_IOMMU_TYPE_MM,
++			  SEC_BANK_IN_ATF | MTK_IOMMU_TYPE_MM,
+ 	.hw_list	= &m4ulist,
+ 	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
+ 	.banks_num	= 1,
+@@ -1736,7 +1780,7 @@ static const struct mtk_iommu_plat_data mt6897_data_mdp = {
+ 	.m4u_plat	= M4U_MT6897,
+ 	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
+ 			  PGTABLE_PA_35_EN | TLB_SYNC_EN | HYP_SHADOW_PGTABLE |
+-			  MTK_IOMMU_TYPE_MM,
++			  SEC_BANK_IN_ATF | MTK_IOMMU_TYPE_MM,
+ 	.hw_list	= &m4ulist,
+ 	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
+ 	.banks_num	= 1,
+@@ -1745,6 +1789,7 @@ static const struct mtk_iommu_plat_data mt6897_data_mdp = {
+ 	.iova_region_nr	= ARRAY_SIZE(mt6897_multi_dom),
+ 	.iova_region_larb_msk = mt6897_larb_region_msk,
+ 	.nolarb_msk	= MT6897_NOLARB_MSK,
++	.sec_id		= 1,
+ };
+ 
+ static const struct mtk_iommu_plat_data mt8167_data = {
