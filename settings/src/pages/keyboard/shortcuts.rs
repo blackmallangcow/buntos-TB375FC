@@ -46,6 +46,8 @@ const TEXT_CATEGORY: &str = "text";
 const INPUT_CATEGORY: &str = "input";
 /// 입력 소스 전환. 키보드 페이지의 "입력 소스 바꾸기" 행이 이 단축키를 보인다
 pub(super) const SWITCH_SOURCE: &str = "input.switch-source";
+/// Caps Lock 키로 입력 소스 전환 (켜고 끄기만 한다)
+pub(super) const CAPS_LOCK: &str = "input.caps-lock";
 
 /// 분류: ID, 배지 기호, 배지 색. 사이드바는 이 순서이고, 모르는 분류(새 컴포지터)는 맨 뒤에 회색
 /// 키보드 배지로 붙인다
@@ -1203,7 +1205,7 @@ mod tests {
     use super::*;
 
     /// 컴포지터가 처음 내놓는 단축키 (분류마다 보이는 순서)
-    const KNOWN: [&str; 59] = [
+    const KNOWN: [&str; 60] = [
         "launcher.show",
         "launcher.dock-autohide",
         "windows.next-app",
@@ -1218,6 +1220,7 @@ mod tests {
         "windows.close",
         "windows.terminal",
         "input.switch-source",
+        "input.caps-lock",
         "screenshot.screen",
         "screenshot.screen-clipboard",
         "screenshot.area",

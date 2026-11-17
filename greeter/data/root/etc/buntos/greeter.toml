@@ -11,7 +11,7 @@ bottom = "#3b3550"
 
 [keyboard]
 layout = "us"
-repeat-delay = 200
+repeat-delay = 400
 repeat-rate = 25
 
 [effects]

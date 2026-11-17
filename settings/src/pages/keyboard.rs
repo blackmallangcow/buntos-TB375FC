@@ -250,14 +250,19 @@ impl KeyboardPage {
         self.refresh_sources(&fcitx).await;
     }
 
-    /// 입력 소스 바꾸기 행: 컴포지터의 지금 단축키와 한/영 키. 단축키 API가 없는 컴포지터는 정해진
-    /// 키(Ctrl+Space, 한/영)를 쓰므로 원래 글을 둔다
+    /// 입력 소스 바꾸기 행: 컴포지터의 지금 단축키와 한/영 키. Caps Lock 키로 바꾸도록 켜져 있으면 맨 앞에
+    /// Caps Lock을 적는다. 단축키 API가 없는 컴포지터는 정해진 키(Ctrl+Space, 한/영)를 쓰므로 원래 글을 둔다
     async fn refresh_switch_keys(&self, compositor: &Remote) {
         let Some(label) = &self.switch_keys else {
             return;
         };
         let tr = &self.context.tr;
-        let switch = shortcuts::fetch(compositor).await.ok().and_then(|list| {
+        let list = shortcuts::fetch(compositor).await.ok();
+        let caps_lock = list.as_ref().is_some_and(|list| {
+            list.iter()
+                .any(|shortcut| shortcut.id == shortcuts::CAPS_LOCK && shortcut.enabled)
+        });
+        let switch = list.and_then(|list| {
             list.into_iter()
                 .find(|shortcut| shortcut.id == shortcuts::SWITCH_SOURCE)
         });
@@ -272,6 +277,12 @@ impl KeyboardPage {
             }
             Some(_) => tr.get("keyboard-switch-keys-hangul"),
             None => tr.get("keyboard-switch-keys"),
+        };
+        // 키의 이름은 어느 언어에서나 Caps Lock이다 (macOS도 옮기지 않는다)
+        let text = if caps_lock {
+            format!("Caps Lock, {text}")
+        } else {
+            text
         };
         label.set_text(&text);
     }

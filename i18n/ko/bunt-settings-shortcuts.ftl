@@ -41,7 +41,7 @@ shortcut-category-screenshots = 스크린샷
 shortcut-category-text = 텍스트 편집
 shortcut-category-app = 앱 단축키
 # 분류 목록 아래 설명
-shortcuts-note-input = ⌃⇧처럼 조합 키만 눌렀다 떼거나 ⇧스페이스로도 정할 수 있습니다. 한/영 키로도 입력 소스를 바꾸며, 한/영 키는 바꿀 수 없습니다.
+shortcuts-note-input = ⌃⇧처럼 조합 키만 눌렀다 떼거나 ⇧스페이스로도 정할 수 있습니다. 한/영 키로도 입력 소스를 바꾸며, 한/영 키는 바꿀 수 없습니다. Caps Lock 키로 전환을 켜면 짧게 누를 때 입력 소스를 바꾸고, 길게 누르면 Caps Lock이 켜집니다.
 shortcuts-note-text = 글 입력 칸에 입력하는 동안 동작합니다. ⇧를 함께 누르면 선택 영역을 넓힙니다.
 shortcuts-note-app = 앞에 있는 앱에 그 앱의 Ctrl 단축키로 보냅니다. 터미널에는 복사하기, 붙여넣기 등을 터미널의 단축키(Ctrl+Shift+C…)로 보냅니다.
 
@@ -60,6 +60,7 @@ shortcut-windows-fullscreen = 전체 화면 전환
 shortcut-windows-close = 윈도우 닫기
 shortcut-windows-terminal = 터미널 열기
 shortcut-input-switch-source = 입력 소스 전환
+shortcut-input-caps-lock = Caps Lock 키로 입력 소스 전환
 shortcut-screenshot-screen = 화면을 파일로 저장
 shortcut-screenshot-screen-clipboard = 화면 사진을 클립보드에 복사
 shortcut-screenshot-area = 선택한 영역을 파일로 저장

@@ -27,6 +27,7 @@ use smithay::{
 };
 
 use crate::{
+    caps_lock::{self, Step},
     dbus::Command,
     prefs::KeyRepeat,
     screenshot::AreaSelection,
@@ -184,6 +185,13 @@ impl BuntState {
         // 사람이 앱에 글을 치는지 (agent_guard.rs의 R3): 포커스가 앱의 표면이고 단축키로 가로채지 않은 키다
         let to_app = self.keyboard_focus().is_some() && !self.focus_on_shell();
         let code = event.key_code();
+        // Caps Lock 키는 짧게 누른 것인지 뗄 때에야 알므로 키보드 상태와 앱에 보내지 않고 따로 받는다
+        if self.caps_lock_key(code, pressed) {
+            self.agent_guard
+                .human
+                .key(code.raw(), pressed, false, std::time::Instant::now());
+            return;
+        }
         let hit = keyboard.input::<Option<(Hit, Keycode)>, _>(
             self,
             event.key_code(),
@@ -264,6 +272,80 @@ impl BuntState {
         // 수정 키만으로 된 단축키는 마지막으로 뗀 수정 키를 앱에 보낸 뒤에 한다
         if let Some(builtin) = self.chord_hit.take() {
             self.run(builtin);
+        }
+    }
+
+    /// Caps Lock 키로 입력 소스를 바꾸도록 켜져 있으면 그 키를 여기서 받는다 (caps_lock.rs): 짧게 누르면 입력
+    /// 소스 전환, 길게 누르면 Caps Lock, Caps Lock이 켜져 있으면 누르는 순간 끈다. 받았으면 true. 단축키를
+    /// 막은 앱(키를 받아 적는 시스템 설정, 원격 데스크탑)에는 다른 단축키처럼 그대로 보낸다
+    fn caps_lock_key(&mut self, code: Keycode, pressed: bool) -> bool {
+        // 받은 누름의 뗌은 그사이 설정이나 포커스가 바뀌어도 여기서 받는다
+        let takes = self.caps_key.is_held()
+            || (self.shortcuts.caps_lock_switches() && !self.shortcuts_inhibited());
+        if !takes || self.keycode_for(Keysym::Caps_Lock) != Some(code) {
+            return false;
+        }
+        let step = if pressed {
+            let locked = self
+                .seat
+                .get_keyboard()
+                .is_some_and(|keyboard| keyboard.modifier_state().caps_lock);
+            self.caps_key.pressed(locked)
+        } else {
+            self.caps_key.released()
+        };
+        self.caps_lock_step(step);
+        true
+    }
+
+    fn caps_lock_step(&mut self, step: Step) {
+        if step != Step::Nothing
+            && let Some(token) = self.caps_timer.take()
+        {
+            self.loop_handle.remove(token);
+        }
+        match step {
+            Step::Nothing => {}
+            Step::Wait => {
+                let timer = Timer::from_duration(caps_lock::HOLD);
+                let source = self.loop_handle.insert_source(timer, |_, _, state| {
+                    // 타이머는 이 함수가 끝나면 사라진다. 지우려 하지 않게 먼저 잊는다
+                    state.caps_timer = None;
+                    let step = state.caps_key.held_long();
+                    state.caps_lock_step(step);
+                    TimeoutAction::Drop
+                });
+                match source {
+                    Ok(token) => self.caps_timer = Some(token),
+                    Err(err) => tracing::warn!("failed to time the Caps Lock key: {err}"),
+                }
+            }
+            Step::Lock => self.toggle_caps_lock(),
+            // 입력 소스가 하나뿐이면 D-Bus 스레드가 Caps Lock을 켜고 끄라고 되돌려 보낸다 (dbus.rs)
+            Step::Switch => self.dbus.send(Command::CapsLockTapped),
+        }
+    }
+
+    /// Caps Lock을 켜거나 끈다: 그 키를 눌렀다 뗀 것으로 키보드 상태와 포커스를 가진 앱에 넣는다.
+    /// 키보드의 불은 키보드 상태가 바뀌며 따라 바뀐다 (SeatHandler::led_state_changed)
+    pub(crate) fn toggle_caps_lock(&mut self) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let Some(code) = self.keycode_for(Keysym::Caps_Lock) else {
+            tracing::warn!("no Caps Lock key in the keymap");
+            return;
+        };
+        let time = self.start_time.elapsed().as_millis() as u32;
+        for key_state in [KeyState::Pressed, KeyState::Released] {
+            keyboard.input::<(), _>(
+                self,
+                code,
+                key_state,
+                SERIAL_COUNTER.next_serial(),
+                time,
+                |_, _, _| FilterResult::Forward,
+            );
         }
     }
 

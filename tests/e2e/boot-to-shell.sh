@@ -434,6 +434,20 @@ if [[ "$agent_refs" != NONE ]]; then
 	guest input-method
 	check "⌃⇧ 사이에 다른 키를 누르면 바뀌지 않는다" "$answer" hangul
 	guest chord-reset
+	# Caps Lock 키(comp/src/caps_lock.rs): 짧게 누르면 입력 소스를 바꾸고, 0.4초보다 길게 누르면 Caps Lock을
+	# 켜며(키보드의 불), 켜져 있을 때 누르면 끈다. 불은 게스트의 /sys/class/leds로 읽는다
+	keys down:caps_lock sleep:0.08 up:caps_lock sleep:1
+	guest caps-lock
+	check "Caps Lock을 짧게 누르면 입력 소스가 바뀌고 불은 꺼져 있다" "$answer" "hangul 0"
+	keys down:caps_lock sleep:1 up:caps_lock sleep:1
+	guest caps-lock
+	check "Caps Lock을 길게 누르면 불이 켜지고 입력 소스는 그대로다" "$answer" "hangul 1"
+	keys down:caps_lock sleep:0.08 up:caps_lock sleep:1
+	guest caps-lock
+	check "Caps Lock이 켜져 있을 때 누르면 불이 꺼지고 입력 소스는 그대로다" "$answer" "hangul 0"
+	keys down:caps_lock sleep:0.08 up:caps_lock sleep:1
+	guest caps-lock
+	check "Caps Lock을 다시 짧게 누르면 영문으로 돌아온다" "$answer" "keyboard-us 0"
 	((failed == 0)) || fail "e2e 6번(키보드 단축키): ${failed}개 실패"
 	echo "e2e 6번(키보드 단축키): ${SECONDS}초, ${passed}개 통과"
 fi
