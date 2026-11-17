@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# LK가 expdb에 남긴 덤프를 보관하고 비운다. 남아 있으면 LK가 부팅마다 그 사본을 pstore 자리에 덮어, 직전 부팅의
+# 커널 기록이 넘어오지 않는다(libexec/buntos/kedump-clear). systemd-pstore가 이번 부팅의 pstore 기록을
+# /var/lib/systemd/pstore에 옮긴 뒤에 한다.
+
+[Unit]
+Description=Keep and clear the dump the bootloader left in expdb
+Requires=dev-disk-by\x2dpartlabel-expdb.device
+After=dev-disk-by\x2dpartlabel-expdb.device systemd-pstore.service local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/buntos/kedump-clear
+
+[Install]
+WantedBy=multi-user.target

@@ -9,6 +9,7 @@ enable buntos-usb-gadget.service
 enable buntos-usb-shell.service
 enable buntos-usb-sshd.service
 enable buntos-slot-keep.service
+enable buntos-kedump-clear.service
 enable buntos-display.service
 enable buntos-gpu.service
 enable buntos-wifi.service

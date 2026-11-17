@@ -36,6 +36,8 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 
 Wi-Fi, 소리, 충전은 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
 
+LK의 덤프: 순정 LK는 패닉이나 워치독 뒤에 pstore 자리와 하드웨어 상태를 `expdb` 파티션 앞에 적고, 그 뒤의 모든 부팅에서 그 사본을 pstore 자리에 덮는다. 남겨 두면 직전 부팅의 커널 기록(`console-ramoops-0`)이 넘어오지 않으므로, `buntos-kedump-clear.service`(`libexec/buntos/kedump-clear`)가 부팅 때 덤프를 `/var/lib/buntos/kedump`에 gzip으로 보관하고(새것 둘, root만 읽는다) 머리를 0으로 한다. 덤프에는 장치 트리와 메모리 조각이 들어 있으니 밖에 올리지 않는다.
+
 GPU의 클럭은 평소 542 MHz까지만 쓴다(`mkosi.extra/usr/lib/modprobe.d/90-buntos-tb375fc-gpu.conf`, 그 위에서는 전원부 소리가 난다). 스크롤처럼 다음 프레임을 곧바로 그리는 일은 프레임이 떨어져도 드라이버가 이 상한을 풀지 않으므로, 컴포지터의 프레임 바닥이 GPU의 최소 클럭을 올린다: 사람이 화면을 움직이는 동안 프레임이 초당 60 아래로 떨어지면 올리고, 지켜지거나 움직임이 멈추면 푼다(buntOS 설계안 8.2절). `mkosi.extra/usr/lib/udev/rules.d/90-buntos-tb375fc-gpu.rules`가 그 파일(devfreq `min_freq`)을 render 그룹에 연다. 올릴 수 있는 클럭을 묶으려면 `/etc/buntos/comp.toml`의 `[gpu] min-fps-max-mhz`를 쓴다.
 
 GPU에는 Mesa 26.3이 있어야 한다(G615는 26.3부터 돈다. 이미지의 Debian 스냅숏은 26.1이다). `mesa/build.sh`가 꾸러미 `buntos-mesa`로 만들어 `/opt/mesa`에 넣고 `/etc/ld.so.conf.d/00-opt-mesa.conf`로 Debian의 Mesa보다 먼저 찾게 한다. GPU 펌웨어(`arm/mali/arch11.8/mali_csffw.bin`)는 Debian의 `firmware-misc-nonfree`에 있다.

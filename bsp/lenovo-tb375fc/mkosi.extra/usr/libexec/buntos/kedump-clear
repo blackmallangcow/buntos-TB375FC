@@ -1,0 +1,88 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# LK가 expdb 파티션에 남긴 덤프(kedump)를 보관하고 비운다.
+#
+# 순정 LK는 예외로 본 부팅(커널 패닉, 워치독)에서 pstore 자리(0x48090000, 0xe0000)와 여러 하드웨어 상태를 expdb
+# 맨 앞에 적는다. 그리고 그 뒤의 모든 부팅에서 "kedump: found content in expdb"로 그 사본을 pstore 자리에 다시
+# 덮는다. 그래서 덤프가 남아 있는 동안에는 직전 부팅의 커널 기록(console-ramoops-0)이 다음 부팅에 넘어오지 않고
+# 옛 패닉만 되풀이해 보인다(2026-11-04의 패닉이 11-17까지 그랬다. docs/hw/lenovo-tb375fc.md 7절).
+#
+# 덤프가 있으면 항목 표를 읽어 그 끝까지를 /var/lib/buntos/kedump에 gzip으로 두고(새것 둘만 남긴다), 머리 12KiB를
+# 0으로 한다. LK는 머리가 0이면 되살리지 않고, 다음 예외 때 새로 적는다. 덤프에는 장치 트리와 메모리 조각이 들어
+# 있어 기기를 식별하는 값이 있을 수 있으므로 root만 읽게 둔다. 저장소에 올리지 않는다.
+# 사용법: kedump-clear [expdb 장치] [보관할 폴더]
+set -euo pipefail
+
+dev=${1:-/dev/disk/by-partlabel/expdb}
+keep=${2:-/var/lib/buntos/kedump}
+# 머리: 매직(aee0dead), 판, 머리 크기. 0x30부터 0x40바이트짜리 항목이 이어진다
+magic=aee0dead
+head_clear=$((0x3000))
+entries_at=$((0x30))
+entry_size=$((0x40))
+# 항목 표가 깨졌을 때를 위한 한계: 가장 작게는 pstore 사본의 끝(0xe4008), 가장 크게는 64MiB
+least=$((0xe4008))
+most=$((64 * 1024 * 1024))
+
+say() { echo "kedump-clear: $*"; }
+
+# 장치의 offset에서 리틀 엔디언 u32를 count개 읽어 한 줄로 낸다 (read가 줄 끝을 봐야 성공한다)
+u32() {
+	dd if="$dev" bs=1 skip="$1" count=$(($2 * 4)) 2>/dev/null | od -An -v -tu4 | tr -s ' \n' ' '
+	echo
+}
+
+[[ -b "$dev" || -f "$dev" ]] || {
+	say "no expdb at $dev"
+	exit 0
+}
+read -r found version head_size < <(u32 0 3)
+if [[ "$(printf %08x "${found:-0}")" != "$magic" ]]; then
+	say "no dump in expdb"
+	exit 0
+fi
+
+# 항목: [0] 종류, [1] 쓰는 항목인지, [2] 자리, [3] 크기, [4] 쓴 크기, 0x20부터 이름
+end=0
+count=0
+offset=$entries_at
+limit=$((head_size > 0 && head_size <= head_clear ? head_size : head_clear))
+while ((offset + entry_size <= limit)); do
+	name=$(dd if="$dev" bs=1 skip=$((offset + 0x20)) count=32 2>/dev/null | tr -d '\0' | tr -c 'A-Za-z0-9_.' '?')
+	[[ -n "$name" ]] || break
+	read -r _ used at size _ < <(u32 "$offset" 5)
+	if ((used != 0 && size != 0 && at + size > end)); then
+		end=$((at + size))
+	fi
+	count=$((count + 1))
+	offset=$((offset + entry_size))
+done
+((end >= least)) || end=$least
+((end <= most)) || end=$most
+say "dump found: version $version, $count entries, $((end / 1024)) KiB"
+
+install -d -m 0700 "$keep"
+name="kedump-$(date +%Y%m%d-%H%M%S).bin.gz"
+(
+	umask 077
+	head -c "$end" "$dev" | gzip -1 >"$keep/$name.part"
+)
+mv "$keep/$name.part" "$keep/$name"
+say "kept $keep/$name ($(($(stat -c %s "$keep/$name") / 1024)) KiB)"
+# 새것 둘만 남긴다
+find "$keep" -maxdepth 1 -name 'kedump-*.bin.gz' -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2- |
+	while IFS= read -r old; do
+		rm -f -- "$old"
+		say "removed $old"
+	done
+
+dd if=/dev/zero of="$dev" bs="$head_clear" count=1 conv=notrunc,fsync 2>/dev/null
+read -r found _ < <(u32 0 2)
+if [[ "${found:-1}" == 0 ]]; then
+	say "cleared the dump header; LK will not restore it at the next boot"
+else
+	say "the header is still there after clearing"
+	exit 1
+fi
