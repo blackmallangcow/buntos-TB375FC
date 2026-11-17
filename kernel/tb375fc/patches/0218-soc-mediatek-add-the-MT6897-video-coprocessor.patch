@@ -18,11 +18,11 @@ votes of the vendor driver are left out.
 Until a decoder uses it, debugfs has a switch to start the coprocessor
 (mt6897-vcp/hold), its state and the log of the firmware.
 ---
- drivers/soc/mediatek/Kconfig            |  11 +
- drivers/soc/mediatek/Makefile           |   1 +
- drivers/soc/mediatek/mt6897-vcp.c       | 989 ++++++++++++++++++++++++++++++++
- include/linux/soc/mediatek/mt6897-vcp.h |  85 +++
- 4 files changed, 1086 insertions(+)
+ drivers/soc/mediatek/Kconfig            |   11 +
+ drivers/soc/mediatek/Makefile           |    1 +
+ drivers/soc/mediatek/mt6897-vcp.c       | 1002 +++++++++++++++++++++++++++++++
+ include/linux/soc/mediatek/mt6897-vcp.h |   86 +++
+ 4 files changed, 1100 insertions(+)
 
 diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
 index ee64834b5..7289a9c56 100644
@@ -60,10 +60,10 @@ index 31c625860..cae099609 100644
  obj-$(CONFIG_MTK_SVS) += mtk-svs.o
 diff --git a/drivers/soc/mediatek/mt6897-vcp.c b/drivers/soc/mediatek/mt6897-vcp.c
 new file mode 100644
-index 000000000..c85596bd4
+index 000000000..511cbb26a
 --- /dev/null
 +++ b/drivers/soc/mediatek/mt6897-vcp.c
-@@ -0,0 +1,989 @@
+@@ -0,0 +1,1002 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * MT6897 video coprocessor (VCP): power, secure reset, mailboxes and the log
@@ -350,6 +350,19 @@ index 000000000..c85596bd4
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(mt6897_vcp_mem);
++
++/**
++ * mt6897_vcp_dma_device() - the device whose mappings the coprocessor can reach
++ * @vcp: the coprocessor
++ *
++ * The firmware asks its users for working memory of its own. Memory allocated
++ * for this device lies in the window of the coprocessor.
++ */
++struct device *mt6897_vcp_dma_device(struct mt6897_vcp *vcp)
++{
++	return vcp->dev;
++}
++EXPORT_SYMBOL_GPL(mt6897_vcp_dma_device);
 +
 +static void vcp_free_memory(struct mt6897_vcp *vcp)
 +{
@@ -1055,10 +1068,10 @@ index 000000000..c85596bd4
 +MODULE_LICENSE("GPL");
 diff --git a/include/linux/soc/mediatek/mt6897-vcp.h b/include/linux/soc/mediatek/mt6897-vcp.h
 new file mode 100644
-index 000000000..46aba3e7c
+index 000000000..f1dc871ff
 --- /dev/null
 +++ b/include/linux/soc/mediatek/mt6897-vcp.h
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,86 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * MT6897 video coprocessor (VCP): what a user of the firmware needs.
@@ -1142,5 +1155,6 @@ index 000000000..46aba3e7c
 +int mt6897_vcp_mem(struct mt6897_vcp *vcp, unsigned int id,
 +		   struct mt6897_vcp_mem *mem);
 +u32 mt6897_vcp_pack_iova(dma_addr_t iova);
++struct device *mt6897_vcp_dma_device(struct mt6897_vcp *vcp);
 +
 +#endif

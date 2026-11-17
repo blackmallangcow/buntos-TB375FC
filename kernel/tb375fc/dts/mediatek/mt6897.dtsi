@@ -1983,6 +1983,88 @@
 			status = "disabled";
 		};
 
+		/*
+		 * Video decoder: a front end (LAT) behind larb5 and the display-side
+		 * IOMMU, and a core behind larb4 and the MDP IOMMU. The firmware of
+		 * the video coprocessor parses the bitstream and drives the
+		 * registers. The kernel gives power, clocks, memory and interrupts.
+		 * The two IOMMUs share one page table; the child node only makes
+		 * the display-side one aware of the front end.
+		 */
+		vdec: video-codec@16000000 {
+			compatible = "mediatek,mt6897-vcodec-dec";
+			reg = <0 0x16000000 0 0x1000>,
+			      <0 0x1602f000 0 0x1000>,
+			      <0 0x16020000 0 0x1000>,
+			      <0 0x16021000 0 0x1000>,
+			      <0 0x16023000 0 0x1000>,
+			      <0 0x16025000 0 0x4000>,
+			      <0 0x16010000 0 0x1000>,
+			      <0 0x16011000 0 0x400>,
+			      <0 0x1600f000 0 0x1000>,
+			      <0 0x16004000 0 0x1000>,
+			      <0 0x16012000 0 0x1000>,
+			      <0 0x16022000 0 0x1000>,
+			      <0 0x16015800 0 0x1000>;
+			reg-names = "base", "sys", "vld", "mc", "mv", "misc",
+				    "lat-misc", "lat-vld", "soc-gcon",
+				    "racing-ctrl", "lat-avc-vld", "avc-vld",
+				    "av1-vld";
+			interrupts = <GIC_SPI 701 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 704 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "core", "lat";
+			clocks = <&vdecsys_soc CLK_VDE1_VDEC_CKEN>,
+				 <&vdecsys_soc CLK_VDE1_LAT_CKEN>,
+				 <&vdecsys CLK_VDE2_VDEC_CKEN>,
+				 <&topckgen CLK_TOP_VDEC>;
+			clock-names = "soc", "lat", "core", "sel";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_VDE0>,
+					<&scpsys MT6897_POWER_DOMAIN_VDE1>;
+			power-domain-names = "lat", "core";
+			iommus = <&mdp_iommu M4U_PORT_L4_HW_VDEC_MC_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_UFO_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_PP_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_UFO_ENC_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_PRED_RD_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_PRED_WR_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_PPWRAP_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_TILE_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_VLD_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_VLD2_EXT>,
+				 <&mdp_iommu M4U_PORT_L4_HW_VDEC_AVC_MV_EXT>;
+			mediatek,vcp = <&vcp>;
+			status = "disabled";
+
+			lat {
+				compatible = "mediatek,mt6897-vcodec-dec-lat";
+				iommus = <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_VLD_EXT>,
+					 <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_VLD2_EXT>,
+					 <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_AVC_MV_EXT>,
+					 <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_MC_EXT>,
+					 <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_PRED_RD_EXT>,
+					 <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_TILE_EXT>,
+					 <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_WDMA_EXT>,
+					 <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_UFO_ENC_EXT>,
+					 <&disp_iommu M4U_PORT_L5_HW_VDEC_LAT0_UFO_ENC_C_EXT>;
+			};
+		};
+
+		/*
+		 * Video decoder front end. The larb answers only while the VDE0
+		 * domain is on; its clocks are the gates of the front end.
+		 */
+		larb5: larb@1600d000 {
+			compatible = "mediatek,mt6897-smi-larb";
+			reg = <0 0x1600d000 0 0x1000>;
+			mediatek,larb-id = <5>;
+			mediatek,smi = <&smi_disp_common>;
+			clocks = <&vdecsys_soc CLK_VDE1_VDEC_CKEN>,
+				 <&vdecsys_soc CLK_VDE1_LAT_CKEN>;
+			clock-names = "apb", "smi";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_VDE0>;
+			status = "disabled";
+		};
+
 		vdecsys_soc: clock-controller@1600f000 {
 			compatible = "mediatek,mt6897-vdecsys-soc", "syscon";
 			reg = <0 0x1600f000 0 0x1000>;
@@ -2290,6 +2372,37 @@
 			reg = <0 0x1e800000 0 0x1000>;
 			mediatek,hardware-voter = <&hwv>;
 			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		/*
+		 * The display-side common and IOMMU. Most of the display runs
+		 * through them from the bootloader on, with the MMU bits of its
+		 * larb ports cleared. The only master named here is the front
+		 * end of the video decoder (larb5), and neither driver writes
+		 * anything before it attaches.
+		 */
+		smi_disp_common: smi@1e801000 {
+			compatible = "mediatek,mt6897-smi-common";
+			reg = <0 0x1e801000 0 0x1000>;
+			clocks = <&mminfra CLK_MMINFRA_GCE_D>,
+				 <&mminfra CLK_MMINFRA_GCE_M>,
+				 <&mminfra CLK_MMINFRA_SMI>,
+				 <&mminfra CLK_MMINFRA_GCE_26M>;
+			clock-names = "apb", "smi", "gals0", "gals1";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_MM_INFRA>;
+			status = "disabled";
+		};
+
+		disp_iommu: iommu@1e802000 {
+			compatible = "mediatek,mt6897-iommu-disp";
+			reg = <0 0x1e802000 0 0x1000>;
+			interrupts = <GIC_SPI 442 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mminfra CLK_MMINFRA_SMI>;
+			clock-names = "bclk";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_MM_INFRA>;
+			mediatek,larbs = <&larb5>;
+			#iommu-cells = <1>;
 			status = "disabled";
 		};
 
