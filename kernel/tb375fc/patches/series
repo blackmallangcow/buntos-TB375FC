@@ -282,3 +282,9 @@
 0206-dt-bindings-mfd-mediatek-mt6685-add-the-interrupt-controller.patch
 0207-mfd-mtk-spmi-pmic-take-the-interrupt-of-the-MT6685-RTC.patch
 0208-rtc-mt6685-add-the-alarm.patch
+# 0210~0212 비디오 디코더 1단계: MT6897의 멀티미디어 IOMMU 둘(화면 쪽, MDP 쪽)과 SMI. 틀은 업스트림 mtk_iommu·mtk-smi이고
+#      데이터만 더한다. TLB 무효화는 벤더처럼 동기 비트를 쓴다(0211). SMI common의 버스 선택은 부트로더가 둔 대로 둔다(0212):
+#      화면이 같은 common을 지나고 있다. 계획과 위험은 docs/tb375fc/video-decode.md
+0210-dt-bindings-iommu-memory-mediatek-add-MT6897.patch
+0211-iommu-mediatek-add-the-MT6897-multimedia-IOMMUs.patch
+0212-memory-mtk-smi-add-MT6897.patch

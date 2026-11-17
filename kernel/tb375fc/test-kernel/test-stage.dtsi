@@ -282,6 +282,23 @@
 			};
 		};
 
+		// 비디오 디코더(docs/tb375fc/video-decode.md 1단계). 소비자는 larb4뿐이고, 부팅 때는 꺼진 채로 둔다
+		power-domain@MT6897_POWER_DOMAIN_VDE0 {
+			reg = <MT6897_POWER_DOMAIN_VDE0>;
+			clocks = <&topckgen CLK_TOP_VDEC>;
+			clock-names = "vde";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#power-domain-cells = <1>;
+
+			power-domain@MT6897_POWER_DOMAIN_VDE1 {
+				reg = <MT6897_POWER_DOMAIN_VDE1>;
+				clocks = <&topckgen CLK_TOP_VDEC>;
+				clock-names = "vde1";
+				#power-domain-cells = <0>;
+			};
+		};
+
 		power-domain@MT6897_POWER_DOMAIN_DIS1_SHUTDOWN {
 			reg = <MT6897_POWER_DOMAIN_DIS1_SHUTDOWN>;
 			clocks = <&topckgen CLK_TOP_DISP1>;
@@ -431,4 +448,22 @@
 
 &i2c6 {
 	status = "okay";
+};
+
+// 비디오 디코더 1단계: MDP 쪽 IOMMU와 SMI, 디코더 코어의 larb(docs/tb375fc/video-decode.md 7.1절).
+// 클럭 게이트만 켠다(레지스터를 건드리지 않고 등록만 한다). smi_mdp_common, larb4, mdp_iommu는 꺼 둔 채 부팅한다:
+// larb가 붙으면 genpd가 VDE0·VDE1을 켰다 끄고, 화면이 같은 IOMMU를 우회로 지나고 있다.
+&vdecsys {
+	status = "okay";
+};
+
+/ {
+	// 1단계 시험용. 꺼 둔 노드라 부팅 때 장치가 생기지 않는다. 시험 모듈(.handoff의 mt6897-iommu-selftest)을 손으로 올리면
+	// 모듈이 위 세 노드를 켜고 이 노드로 장치를 만든다. 그때 IOMMU가 초기화되고 VDE0·VDE1 전원이 켜진다. 1단계가 끝나면 뺀다
+	iommu-selftest {
+		compatible = "buntos,mt6897-iommu-selftest";
+		iommus = <&mdp_iommu M4U_PORT_L4_HW_VDEC_MC_EXT>,
+			 <&mdp_iommu M4U_PORT_L4_HW_VDEC_PP_EXT>;
+		status = "disabled";
+	};
 };

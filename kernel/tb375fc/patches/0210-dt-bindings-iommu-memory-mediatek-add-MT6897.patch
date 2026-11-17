@@ -1,0 +1,130 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: iommu, memory: mediatek: add MT6897
+
+The MT6897 has two multimedia IOMMUs of the second generation, one for the
+display side and one for the MDP side. They walk one page table, as the two
+of the MT8195 do. Each larb hangs on one of them through its SMI common.
+
+Add the compatibles of the IOMMUs, the SMI common and the SMI larb, and the
+port numbers of the video decoder, which is the first user: larb4 (core) is
+on the MDP IOMMU and larb5 (front end) on the display IOMMU. The numbers
+are those of the MediaTek header in the OnePlus MT6897 kernel
+(include/dt-bindings/memory/mt6897-larb-port.h), without its page table and
+domain fields.
+---
+ .../devicetree/bindings/iommu/mediatek,iommu.yaml  |  7 ++++
+ .../memory-controllers/mediatek,smi-common.yaml    |  1 +
+ .../memory-controllers/mediatek,smi-larb.yaml      |  1 +
+ .../memory/mediatek,mt6897-memory-port.h           | 41 ++++++++++++++++++++++
+ 4 files changed, 50 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/iommu/mediatek,iommu.yaml b/Documentation/devicetree/bindings/iommu/mediatek,iommu.yaml
+index 79c573c47..2e144fb91 100644
+--- a/Documentation/devicetree/bindings/iommu/mediatek,iommu.yaml
++++ b/Documentation/devicetree/bindings/iommu/mediatek,iommu.yaml
+@@ -75,6 +75,8 @@ properties:
+           - mediatek,mt6779-m4u  # generation two
+           - mediatek,mt6795-m4u  # generation two
+           - mediatek,mt6893-iommu-mm         # generation two
++          - mediatek,mt6897-iommu-disp       # generation two
++          - mediatek,mt6897-iommu-mdp        # generation two
+           - mediatek,mt8167-m4u  # generation two
+           - mediatek,mt8173-m4u  # generation two
+           - mediatek,mt8183-m4u  # generation two
+@@ -137,6 +139,7 @@ properties:
+       dt-binding/memory/mt6779-larb-port.h for mt6779,
+       dt-binding/memory/mt6795-larb-port.h for mt6795,
+       dt-binding/memory/mediatek,mt6893-memory-port.h for mt6893,
++      dt-binding/memory/mediatek,mt6897-memory-port.h for mt6897,
+       dt-binding/memory/mt8167-larb-port.h for mt8167,
+       dt-binding/memory/mt8173-larb-port.h for mt8173,
+       dt-binding/memory/mt8183-larb-port.h for mt8183,
+@@ -164,6 +167,8 @@ allOf:
+               - mediatek,mt2712-m4u
+               - mediatek,mt6795-m4u
+               - mediatek,mt6893-iommu-mm
++              - mediatek,mt6897-iommu-disp
++              - mediatek,mt6897-iommu-mdp
+               - mediatek,mt8173-m4u
+               - mediatek,mt8186-iommu-mm
+               - mediatek,mt8188-iommu-vdo
+@@ -182,6 +187,8 @@ allOf:
+         compatible:
+           enum:
+             - mediatek,mt6893-iommu-mm
++            - mediatek,mt6897-iommu-disp
++            - mediatek,mt6897-iommu-mdp
+             - mediatek,mt8186-iommu-mm
+             - mediatek,mt8188-iommu-vdo
+             - mediatek,mt8188-iommu-vpp
+diff --git a/Documentation/devicetree/bindings/memory-controllers/mediatek,smi-common.yaml b/Documentation/devicetree/bindings/memory-controllers/mediatek,smi-common.yaml
+index 0762e0ff6..32cdd0870 100644
+--- a/Documentation/devicetree/bindings/memory-controllers/mediatek,smi-common.yaml
++++ b/Documentation/devicetree/bindings/memory-controllers/mediatek,smi-common.yaml
+@@ -34,6 +34,7 @@ properties:
+           - mediatek,mt6779-smi-common
+           - mediatek,mt6795-smi-common
+           - mediatek,mt6893-smi-common
++          - mediatek,mt6897-smi-common
+           - mediatek,mt8167-smi-common
+           - mediatek,mt8173-smi-common
+           - mediatek,mt8183-smi-common
+diff --git a/Documentation/devicetree/bindings/memory-controllers/mediatek,smi-larb.yaml b/Documentation/devicetree/bindings/memory-controllers/mediatek,smi-larb.yaml
+index 2e7fac4b5..1b28d31e0 100644
+--- a/Documentation/devicetree/bindings/memory-controllers/mediatek,smi-larb.yaml
++++ b/Documentation/devicetree/bindings/memory-controllers/mediatek,smi-larb.yaml
+@@ -22,6 +22,7 @@ properties:
+           - mediatek,mt6779-smi-larb
+           - mediatek,mt6795-smi-larb
+           - mediatek,mt6893-smi-larb
++          - mediatek,mt6897-smi-larb
+           - mediatek,mt8167-smi-larb
+           - mediatek,mt8173-smi-larb
+           - mediatek,mt8183-smi-larb
+diff --git a/include/dt-bindings/memory/mediatek,mt6897-memory-port.h b/include/dt-bindings/memory/mediatek,mt6897-memory-port.h
+new file mode 100644
+index 000000000..31902bdbb
+--- /dev/null
++++ b/include/dt-bindings/memory/mediatek,mt6897-memory-port.h
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++/*
++ * MediaTek MT6897 multimedia IOMMU ports
++ *
++ * The SoC has two multimedia IOMMUs that walk one page table, and each larb
++ * hangs on one of them:
++ * iommu-disp: larb0/2/5/7/11/12/13/14/16/19/21/25/28/29/33/37/38
++ * iommu-mdp:  larb1/3/4/8/9/11/13/14/15/17/18/20/22/26/27/29/30/32/35/36
++ *
++ * Only the ports of the video decoder are listed so far.
++ */
++#ifndef _DT_BINDINGS_MEMORY_MEDIATEK_MT6897_MEMORY_PORT_H_
++#define _DT_BINDINGS_MEMORY_MEDIATEK_MT6897_MEMORY_PORT_H_
++
++#include <dt-bindings/memory/mtk-memory-port.h>
++
++/* larb4: video decoder core, on iommu-mdp */
++#define M4U_PORT_L4_HW_VDEC_MC_EXT		MTK_M4U_ID(4, 0)
++#define M4U_PORT_L4_HW_VDEC_UFO_EXT		MTK_M4U_ID(4, 1)
++#define M4U_PORT_L4_HW_VDEC_PP_EXT		MTK_M4U_ID(4, 2)
++#define M4U_PORT_L4_HW_VDEC_UFO_ENC_EXT		MTK_M4U_ID(4, 3)
++#define M4U_PORT_L4_HW_VDEC_PRED_RD_EXT		MTK_M4U_ID(4, 4)
++#define M4U_PORT_L4_HW_VDEC_PRED_WR_EXT		MTK_M4U_ID(4, 5)
++#define M4U_PORT_L4_HW_VDEC_PPWRAP_EXT		MTK_M4U_ID(4, 6)
++#define M4U_PORT_L4_HW_VDEC_TILE_EXT		MTK_M4U_ID(4, 7)
++#define M4U_PORT_L4_HW_VDEC_VLD_EXT		MTK_M4U_ID(4, 8)
++#define M4U_PORT_L4_HW_VDEC_VLD2_EXT		MTK_M4U_ID(4, 9)
++#define M4U_PORT_L4_HW_VDEC_AVC_MV_EXT		MTK_M4U_ID(4, 10)
++
++/* larb5: video decoder front end (LAT), on iommu-disp */
++#define M4U_PORT_L5_HW_VDEC_LAT0_VLD_EXT	MTK_M4U_ID(5, 0)
++#define M4U_PORT_L5_HW_VDEC_LAT0_VLD2_EXT	MTK_M4U_ID(5, 1)
++#define M4U_PORT_L5_HW_VDEC_LAT0_AVC_MV_EXT	MTK_M4U_ID(5, 2)
++#define M4U_PORT_L5_HW_VDEC_LAT0_MC_EXT		MTK_M4U_ID(5, 3)
++#define M4U_PORT_L5_HW_VDEC_LAT0_PRED_RD_EXT	MTK_M4U_ID(5, 4)
++#define M4U_PORT_L5_HW_VDEC_LAT0_TILE_EXT	MTK_M4U_ID(5, 5)
++#define M4U_PORT_L5_HW_VDEC_LAT0_WDMA_EXT	MTK_M4U_ID(5, 6)
++#define M4U_PORT_L5_HW_VDEC_LAT0_UFO_ENC_EXT	MTK_M4U_ID(5, 7)
++#define M4U_PORT_L5_HW_VDEC_LAT0_UFO_ENC_C_EXT	MTK_M4U_ID(5, 8)
++
++#endif

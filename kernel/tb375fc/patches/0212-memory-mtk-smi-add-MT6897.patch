@@ -1,0 +1,79 @@
+From: buntOS contributors
+Subject: [PATCH] memory: mtk-smi: add MT6897
+
+Add the SMI common and the SMI larb of the MT6897. A larb only gets its MMU
+enable and bank bits written. The bandwidth limits, the command grouping
+and the sleep control of the MediaTek driver in the OnePlus MT6897 kernel
+are left out.
+
+The display of a board may be running through the same common since the
+bootloader, without this driver knowing. So the bus selection of the common
+is left as it is: add a flag for that.
+---
+ drivers/memory/mtk-smi.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/memory/mtk-smi.c b/drivers/memory/mtk-smi.c
+index aaeba8ab2..3ec8baf49 100644
+--- a/drivers/memory/mtk-smi.c
++++ b/drivers/memory/mtk-smi.c
+@@ -124,6 +124,7 @@ struct mtk_smi_common_plat {
+ 	enum mtk_smi_type	type;
+ 	bool			has_gals;
+ 	u32			bus_sel; /* Balance some larbs to enter mmu0 or mmu1 */
++	bool			skip_bus_sel; /* Leave the selection as it is */
+ 
+ 	const struct mtk_smi_reg_pair	*init;
+ };
+@@ -504,6 +505,11 @@ static const struct mtk_smi_larb_gen mtk_smi_larb_mt6893 = {
+ 	.ostd		            = mtk_smi_larb_mt6893_ostd,
+ };
+ 
++static const struct mtk_smi_larb_gen mtk_smi_larb_mt6897 = {
++	.config_port                = mtk_smi_larb_config_port_gen2_general,
++	.larb_direct_to_common_mask = BIT(6) | BIT(10) | BIT(24) | BIT(31),
++};
++
+ static const struct mtk_smi_larb_gen mtk_smi_larb_mt8167 = {
+ 	/* mt8167 do not need the port in larb */
+ 	.config_port = mtk_smi_larb_config_port_mt8167,
+@@ -551,6 +557,7 @@ static const struct of_device_id mtk_smi_larb_of_ids[] = {
+ 	{.compatible = "mediatek,mt6779-smi-larb", .data = &mtk_smi_larb_mt6779},
+ 	{.compatible = "mediatek,mt6795-smi-larb", .data = &mtk_smi_larb_mt8173},
+ 	{.compatible = "mediatek,mt6893-smi-larb", .data = &mtk_smi_larb_mt6893},
++	{.compatible = "mediatek,mt6897-smi-larb", .data = &mtk_smi_larb_mt6897},
+ 	{.compatible = "mediatek,mt8167-smi-larb", .data = &mtk_smi_larb_mt8167},
+ 	{.compatible = "mediatek,mt8173-smi-larb", .data = &mtk_smi_larb_mt8173},
+ 	{.compatible = "mediatek,mt8183-smi-larb", .data = &mtk_smi_larb_mt8183},
+@@ -783,6 +790,13 @@ static const struct mtk_smi_common_plat mtk_smi_common_mt6893 = {
+ 		    F_MMU1_LARB(5) | F_MMU1_LARB(7),
+ };
+ 
++/* The bus selection and the bandwidth limits stay as the bootloader left them */
++static const struct mtk_smi_common_plat mtk_smi_common_mt6897 = {
++	.type     = MTK_SMI_GEN2,
++	.has_gals = true,
++	.skip_bus_sel = true,
++};
++
+ static const struct mtk_smi_common_plat mtk_smi_common_mt8183 = {
+ 	.type     = MTK_SMI_GEN2,
+ 	.has_gals = true,
+@@ -846,6 +860,7 @@ static const struct of_device_id mtk_smi_common_of_ids[] = {
+ 	{.compatible = "mediatek,mt6779-smi-common", .data = &mtk_smi_common_mt6779},
+ 	{.compatible = "mediatek,mt6795-smi-common", .data = &mtk_smi_common_mt6795},
+ 	{.compatible = "mediatek,mt6893-smi-common", .data = &mtk_smi_common_mt6893},
++	{.compatible = "mediatek,mt6897-smi-common", .data = &mtk_smi_common_mt6897},
+ 	{.compatible = "mediatek,mt8167-smi-common", .data = &mtk_smi_common_gen2},
+ 	{.compatible = "mediatek,mt8173-smi-common", .data = &mtk_smi_common_gen2},
+ 	{.compatible = "mediatek,mt8183-smi-common", .data = &mtk_smi_common_mt8183},
+@@ -942,7 +957,8 @@ static int __maybe_unused mtk_smi_common_resume(struct device *dev)
+ 	for (i = 0; i < SMI_COMMON_INIT_REGS_NR && init && init[i].offset; i++)
+ 		writel_relaxed(init[i].value, common->base + init[i].offset);
+ 
+-	writel(bus_sel, common->base + SMI_BUS_SEL);
++	if (!common->plat->skip_bus_sel)
++		writel(bus_sel, common->base + SMI_BUS_SEL);
+ 	return 0;
+ }
+ 

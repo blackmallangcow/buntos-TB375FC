@@ -1,0 +1,126 @@
+From: buntOS contributors
+Subject: [PATCH] iommu/mediatek: add the MT6897 multimedia IOMMUs
+
+Add the display and MDP IOMMUs of the MT6897. Both walk one page table with
+34-bit addresses in and 35-bit addresses out. Only the first bank is used.
+
+The MediaTek driver in the OnePlus MT6897 kernel sets the synchronous TLB
+invalidation bit of the control register on this SoC instead of redirecting
+a faulting access to the protect buffer, so add a flag for that. It does
+not enable write throttling here, and neither does this.
+
+The masters of this SoC emit 34-bit addresses, so the first region is the
+whole space. The ranges the vendor keeps for the bootloader, the camera
+control unit and the video coprocessor are listed as regions of their own,
+which keeps them out of the first one. No port is assigned to them yet.
+
+A fault is reported with larb 0, because the table from the fault ID to the
+larb is not filled in.
+---
+ drivers/iommu/mtk_iommu.c | 58 ++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/iommu/mtk_iommu.c b/drivers/iommu/mtk_iommu.c
+index 2be990c10..3d93c0243 100644
+--- a/drivers/iommu/mtk_iommu.c
++++ b/drivers/iommu/mtk_iommu.c
+@@ -60,6 +60,7 @@
+ #define F_MMU_WR_THROT_DIS_MASK			(BIT(5) | BIT(21))
+ 
+ #define REG_MMU_CTRL_REG			0x110
++#define F_MMU_SYNC_INVLDT_EN			BIT(3)
+ #define F_MMU_TF_PROT_TO_PROGRAM_ADDR		(2 << 4)
+ #define F_MMU_PREFETCH_RT_REPLACE_MOD		BIT(4)
+ #define F_MMU_TF_PROT_TO_PROGRAM_ADDR_MT8173	(2 << 5)
+@@ -149,6 +150,8 @@
+ #define INT_ID_PORT_WIDTH_6		BIT(19)
+ #define CFG_IFA_MASTER_IN_ATF		BIT(20)
+ #define DL_WITH_MULTI_LARB		BIT(21)
++/* A TLB invalidation waits for the walks in flight; no fault redirect. */
++#define TLB_SYNC_EN			BIT(22)
+ 
+ #define MTK_IOMMU_HAS_FLAG_MASK(pdata, _x, mask)	\
+ 				((((pdata)->flags) & (mask)) == (_x))
+@@ -169,6 +172,7 @@ enum mtk_iommu_plat {
+ 	M4U_MT2712,
+ 	M4U_MT6779,
+ 	M4U_MT6795,
++	M4U_MT6897,
+ 	M4U_MT8167,
+ 	M4U_MT8173,
+ 	M4U_MT8183,
+@@ -1090,7 +1094,10 @@ static int mtk_iommu_hw_init(const struct mtk_iommu_data *data, unsigned int ban
+ 			 F_MMU_TF_PROT_TO_PROGRAM_ADDR_MT8173;
+ 	} else {
+ 		regval = readl_relaxed(bank0->base + REG_MMU_CTRL_REG);
+-		regval |= F_MMU_TF_PROT_TO_PROGRAM_ADDR;
++		if (MTK_IOMMU_HAS_FLAG(data->plat_data, TLB_SYNC_EN))
++			regval |= F_MMU_SYNC_INVLDT_EN;
++		else
++			regval |= F_MMU_TF_PROT_TO_PROGRAM_ADDR;
+ 	}
+ 	writel_relaxed(regval, bank0->base + REG_MMU_CTRL_REG);
+ 
+@@ -1627,6 +1634,53 @@ static const struct mtk_iommu_plat_data mt6893_data = {
+ 			    {0, 14, 16}, {0, 13, 18, 17}},
+ };
+ 
++/*
++ * MT6897: the display and MDP IOMMUs walk one page table. The masters emit
++ * 34-bit addresses themselves, so the first region is the whole space and the
++ * special ranges inside it are kept out of it as reserved regions. VCP is the
++ * video coprocessor.
++ */
++static const struct mtk_iommu_iova_region mt6897_multi_dom[] = {
++	{ .iova_base = SZ_4K,		.size = SZ_4G * 4ULL - SZ_4K},	/* normal */
++#if IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT)
++	{ .iova_base = 0x106000000ULL,	.size = SZ_32M},	/* bootloader */
++	{ .iova_base = 0x108000000ULL,	.size = SZ_64M},	/* CCU0 */
++	{ .iova_base = 0x10c000000ULL,	.size = SZ_64M},	/* CCU1 */
++	{ .iova_base = 0x110000000ULL,	.size = SZ_256M * 3ULL},	/* VCP, protected */
++	{ .iova_base = 0x140000000ULL,	.size = 0x60000000},	/* VCP */
++#endif
++};
++
++static const unsigned int mt6897_larb_region_msk[ARRAY_SIZE(mt6897_multi_dom)][MTK_LARB_NR_MAX] = {
++	[0] = {[0 ... MTK_LARB_NR_MAX - 1] = ~0},	/* every larb port */
++};
++
++static const struct mtk_iommu_plat_data mt6897_data_disp = {
++	.m4u_plat	= M4U_MT6897,
++	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
++			  PGTABLE_PA_35_EN | TLB_SYNC_EN | MTK_IOMMU_TYPE_MM,
++	.hw_list	= &m4ulist,
++	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
++	.banks_num	= 1,
++	.banks_enable	= {true},
++	.iova_region	= mt6897_multi_dom,
++	.iova_region_nr	= ARRAY_SIZE(mt6897_multi_dom),
++	.iova_region_larb_msk = mt6897_larb_region_msk,
++};
++
++static const struct mtk_iommu_plat_data mt6897_data_mdp = {
++	.m4u_plat	= M4U_MT6897,
++	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
++			  PGTABLE_PA_35_EN | TLB_SYNC_EN | MTK_IOMMU_TYPE_MM,
++	.hw_list	= &m4ulist,
++	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
++	.banks_num	= 1,
++	.banks_enable	= {true},
++	.iova_region	= mt6897_multi_dom,
++	.iova_region_nr	= ARRAY_SIZE(mt6897_multi_dom),
++	.iova_region_larb_msk = mt6897_larb_region_msk,
++};
++
+ static const struct mtk_iommu_plat_data mt8167_data = {
+ 	.m4u_plat     = M4U_MT8167,
+ 	.flags        = RESET_AXI | HAS_LEGACY_IVRP_PADDR | MTK_IOMMU_TYPE_MM,
+@@ -1904,6 +1958,8 @@ static const struct of_device_id mtk_iommu_of_ids[] = {
+ 	{ .compatible = "mediatek,mt6779-m4u", .data = &mt6779_data},
+ 	{ .compatible = "mediatek,mt6795-m4u", .data = &mt6795_data},
+ 	{ .compatible = "mediatek,mt6893-iommu-mm", .data = &mt6893_data},
++	{ .compatible = "mediatek,mt6897-iommu-disp", .data = &mt6897_data_disp},
++	{ .compatible = "mediatek,mt6897-iommu-mdp", .data = &mt6897_data_mdp},
+ 	{ .compatible = "mediatek,mt8167-m4u", .data = &mt8167_data},
+ 	{ .compatible = "mediatek,mt8173-m4u", .data = &mt8173_data},
+ 	{ .compatible = "mediatek,mt8183-m4u", .data = &mt8183_data},

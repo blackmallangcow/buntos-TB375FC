@@ -15,6 +15,7 @@
 #include <dt-bindings/clock/mediatek,mt6897-clock.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/memory/mediatek,mt6897-memory-port.h>
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/power/mediatek,mt6897-power.h>
 #include <dt-bindings/reset/mediatek,mt6897-resets.h>
@@ -1989,6 +1990,22 @@
 			status = "disabled";
 		};
 
+		/*
+		 * Video decoder core. The larb answers only while the VDE1
+		 * domain is on, and its clock is the gate of the core.
+		 */
+		larb4: larb@1602e000 {
+			compatible = "mediatek,mt6897-smi-larb";
+			reg = <0 0x1602e000 0 0x1000>;
+			mediatek,larb-id = <4>;
+			mediatek,smi = <&smi_mdp_common>;
+			clocks = <&vdecsys CLK_VDE2_VDEC_CKEN>,
+				 <&vdecsys CLK_VDE2_VDEC_CKEN>;
+			clock-names = "apb", "smi";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_VDE1>;
+			status = "disabled";
+		};
+
 		vdecsys: clock-controller@1602f000 {
 			compatible = "mediatek,mt6897-vdecsys", "syscon";
 			reg = <0 0x1602f000 0 0x1000>;
@@ -2273,6 +2290,36 @@
 			reg = <0 0x1e800000 0 0x1000>;
 			mediatek,hardware-voter = <&hwv>;
 			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		/*
+		 * The display runs through this common and this IOMMU from the
+		 * bootloader on, with the MMU bits of its larb ports cleared
+		 * (larb1, larb20 and larb32 are on this side). Neither driver
+		 * writes anything before a master attaches.
+		 */
+		smi_mdp_common: smi@1e80f000 {
+			compatible = "mediatek,mt6897-smi-common";
+			reg = <0 0x1e80f000 0 0x1000>;
+			clocks = <&mminfra CLK_MMINFRA_GCE_D>,
+				 <&mminfra CLK_MMINFRA_GCE_M>,
+				 <&mminfra CLK_MMINFRA_SMI>,
+				 <&mminfra CLK_MMINFRA_GCE_26M>;
+			clock-names = "apb", "smi", "gals0", "gals1";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_MM_INFRA>;
+			status = "disabled";
+		};
+
+		mdp_iommu: iommu@1e810000 {
+			compatible = "mediatek,mt6897-iommu-mdp";
+			reg = <0 0x1e810000 0 0x1000>;
+			interrupts = <GIC_SPI 447 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&mminfra CLK_MMINFRA_SMI>;
+			clock-names = "bclk";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_MM_INFRA>;
+			mediatek,larbs = <&larb4>;
+			#iommu-cells = <1>;
 			status = "disabled";
 		};
 
