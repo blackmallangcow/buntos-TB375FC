@@ -14,6 +14,8 @@ mod clipboard_history;
 mod clipboard_panel;
 mod compositor;
 mod config;
+// 단축 메뉴: 메뉴를 연 누르기의 떼기로 항목을 누르지 않는다(macOS)
+mod context_menu;
 mod control_center;
 mod dbus;
 // 데스크탑 폴더의 파일과 폴더(배경화면 위 층)

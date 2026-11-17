@@ -25,7 +25,7 @@ use bunt_i18n::Translations;
 use gtk4::{self as gtk, gdk, gio, glib, graphene, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use crate::{menu_names, menubar, shell_settings};
+use crate::{context_menu, menu_names, menubar, shell_settings};
 
 const NAMESPACE: &str = "bunt-desktop";
 /// 아이콘 크기 (macOS 데스크탑의 기본 64pt)
@@ -78,6 +78,8 @@ struct Inner {
     dragging_items: RefCell<Option<(String, Vec<String>)>>,
     /// 이미 골라 둔 항목을 눌렀다. 끌지 않고 떼면 그 항목만 고른다(macOS)
     pressed_selected: RefCell<Option<String>>,
+    /// 떠 있는 단축 메뉴를 연 누르기. 그 떼기를 이 창이 받으면 알린다(context_menu.rs)
+    menu_press: RefCell<Option<context_menu::OpeningPress>>,
     renaming: RefCell<Option<(String, gtk::Entry)>>,
     refresh_pending: Cell<bool>,
     monitor: RefCell<Option<gio::FileMonitor>>,
@@ -144,6 +146,7 @@ pub fn build(app: &gtk::Application, tr: &Rc<Translations>) -> Option<Desktop> {
         dragging_marquee: RefCell::new(None),
         dragging_items: RefCell::new(None),
         pressed_selected: RefCell::new(None),
+        menu_press: RefCell::new(None),
         renaming: RefCell::new(None),
         refresh_pending: Cell::new(false),
         monitor: RefCell::new(None),
@@ -509,8 +512,16 @@ impl Desktop {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
+            Desktop(inner.clone()).menu_press_ended();
             if let Some(name) = inner.pressed_selected.take() {
                 Desktop(inner).select([name]);
+            }
+        });
+        // 단축 메뉴가 입력을 잡으면 이 누르기는 짝을 잃고, 메뉴 밖에서 뗀 것은 여기로 온다
+        let weak = Rc::downgrade(&self.0);
+        click.connect_unpaired_release(move |_, _, _, _, _| {
+            if let Some(inner) = weak.upgrade() {
+                Desktop(inner).menu_press_ended();
             }
         });
         area.add_controller(click);
@@ -880,6 +891,13 @@ impl Desktop {
         self.refresh_soon();
     }
 
+    /// 단축 메뉴를 연 누르기의 떼기를 이 창이 받았다(메뉴 밖에서 뗐다). 메뉴는 이제 보통처럼 눌린다
+    fn menu_press_ended(&self) {
+        if let Some(press) = self.0.menu_press.borrow().as_ref() {
+            press.ended();
+        }
+    }
+
     /// 그 자리의 단축 메뉴를 연다(오른쪽 단추, 길게 누르기). 고르지 않은 항목이면 그 항목만 고르고, 빈 곳이면 고른
     /// 것을 푼다
     fn open_menu_at(&self, x: f64, y: f64) {
@@ -941,8 +959,10 @@ impl Desktop {
             let popover = popover.clone();
             glib::idle_add_local_once(move || popover.unparent());
         });
-        crate::popups::close_others(popover.upcast_ref());
-        popover.popup();
+        // 누르는 순간 포인터 옆에 뜬다. 그 누르기의 떼기가 항목을 누르지 않게 띄운다(전에는 오른쪽 단추를 한 번 눌렀다
+        // 떼는 사이 포인터가 조금 흐르면 첫 항목인 새로운 폴더가 눌려 빈 폴더가 생겼다)
+        let press = context_menu::popup(&popover);
+        self.0.menu_press.replace(Some(press));
     }
 
     fn actions(&self) -> gio::SimpleActionGroup {
