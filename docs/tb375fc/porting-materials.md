@@ -59,7 +59,7 @@
 | Wi-Fi·Bluetooth | mt76 `mt7921`(칩 ID 0x7961, PCIe), `mt7915/soc.c`(SoC Wi-Fi + SPI A-die) | soc7_0: OnePlus Pad A16·Motorola gen4m·OPPO Pad 3 갈래, Xiaomi rodin(MT6899). 커뮤니티 포트의 soc7_0 플랫폼. **펌웨어는 LK가 싣고, 보정값은 nvdata에 있다** | [Wi-Fi 설계](wifi-soc7_0.md) | 큼 | 2d | ✔ |
 | 열 | `lvts_thermal.c` | OEM `soc_temp_lvts.c`: 도메인 넷(AP `0x10315000`, MCU `0x10316000`, APU `0x19004000`, GPU `0x13ff0000`), 컨트롤러 아홉, 센서 32개. 펌웨어가 하드웨어를 켜 두고 커널은 읽기만 한다(하드웨어 리셋이 켜져 있는지는 미확인). 온도식은 센서별 계수(`(a << 14) / raw + golden*500 - a`), MCU만 고온 보정일 수 있다. 보정 퓨즈는 LK가 `/chosen`의 `atag,devinfo`로 넘긴다(efuse 블록과 오프셋이 다르다) | 패치 0075~0078 | 중간 | 2e | ✔ |
 | GenieZone | `drivers/virt/geniezone`은 미병합이다. v13(2024-11)이 아직 최신이고 마지막 활동은 2025-08이다. ACK(android14-6.1~android16-6.12)에는 있다. crosvm에 geniezone 백엔드가 있다 | `MT6895-Mainline/mtk-mod-tee-nogz`(ATF를 고쳐 EL2로 넘기는 실험, 서명 우회 필요, 권하지 않음) | 2a에서 EL 판정 뒤 결정 | 중간~큼 | 2a 뒤 | ○ |
-| 비디오 코덱 | `mtk-vcodec`(MT8195까지), MT8196 v8 진행 중(VCP) | 벤더도 VCP | 나중 | 큼 | 범위 밖 | ○ |
+| 비디오 코덱 | `mtk-vcodec`(MT8188까지, stateless). MT8196 디코더 v9와 VCP v4는 미병합(2026-11-17) | 벤더는 VCP 펌웨어가 푸는 stateful. OEM 공식 `drivers/media/platform/mtk-vcodec`, `drivers/misc/mediatek/vcp`. 형제 칩 MT6895의 커뮤니티 트리에 mainline용 VCP·디코더·VA-API 드라이버가 있다 | [하드웨어 비디오 디코딩](video-decode.md)의 단계 | 큼 | 3 뒤 | ✔ 벤더 소스, ○ 업스트림 시리즈 |
 
 ## 3. 벤더 소스 목록
 
