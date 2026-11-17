@@ -311,6 +311,6 @@
 0220-soc-mediatek-mtk-dvfsrc-add-MT6897.patch
 # 0221~0222 비디오 디코더. 순정 비디오 펌웨어(VCP 위)가 하드웨어를 직접 돌리고, 이 드라이버는 V4L2 stateful 디코더로서 세션을
 #      열고 비트스트림과 프레임 버퍼를 나른다. 규약은 MT6897 벤더 헤더를 따른다. 펌웨어가 내는 블록 형식(MM21)을 NV12로 펴서 준다.
-#      세션 하나, H.264만. 디코더 클럭 먹스를 펌웨어와 함께 쓰는 절차(먹스 켜기 알림, 하드웨어 투표, 빠른 소스의 PLL)도 여기서 한다
+#      세션 하나, H.264·HEVC·VP9·AV1(8비트). 디코더 클럭 먹스를 펌웨어와 함께 쓰는 절차(먹스 켜기 알림, 하드웨어 투표, 빠른 소스의 PLL)도 여기서 한다
 0221-dt-bindings-media-mediatek-add-the-MT6897-video-decoder.patch
 0222-media-mediatek-add-the-MT6897-video-decoder.patch

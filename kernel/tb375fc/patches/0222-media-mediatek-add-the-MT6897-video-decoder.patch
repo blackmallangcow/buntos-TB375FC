@@ -28,21 +28,29 @@ MT6895. What was learned on a Lenovo TB375FC:
   (MM21). They are copied to the application as NV12.
 - A session that still holds frame buffers cannot be closed: a frame
   buffer message without a buffer empties the firmware's queue first.
+- Without a free frame buffer the firmware does not take a buffer of the
+  stream and wants the same one again (VDEC_NEED_MORE_OUTPUT_BUF). It
+  does not say when: the buffer goes again when a frame buffer was given
+  or a frame came out, and after 5 ms at the latest. Seen with AV1.
+- The VP9 part answers the message with the frame size and the rate with
+  an error. As in the vendor kernel the answer is not looked at.
+- AV1 asks for more than 48 pieces of working memory.
 
-One session at a time, H.264 only, and a change of the picture size in
-the middle of a stream is not handled yet. Power and clocks stay on for
-the whole session.
+H.264, HEVC, VP9 and AV1, 8 bit. One session at a time, and a change of
+the picture size in the middle of a stream is not handled yet. Power and
+clocks stay on for the whole session.
 
-Tested on a TB375FC: a 640x360 H.264 file of eight frames decodes to the
-same bytes as with FFmpeg.
+Tested on a TB375FC against the output of FFmpeg, byte for byte: H.264
+640x360, 1920x1080 and 3840x2160, HEVC 1920x1080, VP9 1920x1080 and
+3840x2160, AV1 1920x1080.
 ---
  drivers/media/platform/mediatek/Kconfig            |    1 +
  drivers/media/platform/mediatek/Makefile           |    1 +
  .../media/platform/mediatek/mt6897-vdec/Kconfig    |   18 +
  .../media/platform/mediatek/mt6897-vdec/Makefile   |    2 +
- .../platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h |  232 +++
- .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 1717 ++++++++++++++++++++
- 6 files changed, 1971 insertions(+)
+ .../platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h |  231 +++
+ .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 1829 ++++++++++++++++++++
+ 6 files changed, 2082 insertions(+)
 
 diff --git a/drivers/media/platform/mediatek/Kconfig b/drivers/media/platform/mediatek/Kconfig
 index 84104e2cd..b05570e8b 100644
@@ -96,10 +104,10 @@ index 000000000..4bac9b79e
 +obj-$(CONFIG_VIDEO_MEDIATEK_MT6897_VDEC) += mt6897-vdec.o
 diff --git a/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h
 new file mode 100644
-index 000000000..90ffa7084
+index 000000000..28cec4000
 --- /dev/null
 +++ b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,231 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * What the kernel and the video firmware of the MT6897 exchange for decoding.
@@ -148,12 +156,11 @@ index 000000000..90ffa7084
 +#define VDEC_RESET_FLUSH		0
 +#define VDEC_RESET_DRAIN		1
 +
-+#define VDEC_CODEC_H264			1
-+
 +/* vdec_changed_info after a start */
 +#define VDEC_RES_CHANGE			BIT(0)
 +#define VDEC_HW_NOT_SUPPORT		BIT(2)
 +#define VDEC_NEED_SEQ_HEADER		BIT(3)
++#define VDEC_NEED_MORE_OUTPUT_BUF	BIT(4)	/* the same buffer again, after a frame buffer */
 +
 +#define VDEC_SET_PARAM_DEC_PARAMS	22
 +#define VDEC_SET_PARAM_MMDVFS		23
@@ -334,10 +341,10 @@ index 000000000..90ffa7084
 +#endif
 diff --git a/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
 new file mode 100644
-index 000000000..52ee6c6ff
+index 000000000..a5f605940
 --- /dev/null
 +++ b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
-@@ -0,0 +1,1717 @@
+@@ -0,0 +1,1829 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * MediaTek MT6897 video decoder: a V4L2 stateful decoder on the stock video
@@ -351,7 +358,7 @@ index 000000000..52ee6c6ff
 + * The firmware writes frames in 16x32 blocks (MM21). They are copied into the
 + * buffers of the application as plain NV12.
 + *
-+ * One session at a time. H.264 only so far.
++ * One session at a time.
 + */
 +#include <linux/clk.h>
 +#include <linux/clk-provider.h>
@@ -378,8 +385,9 @@ index 000000000..52ee6c6ff
 +#include "mt6897-vdec-fw.h"
 +
 +#define VDEC_NAME		"mt6897-vdec"
-+#define VDEC_MAX_WORK		48
++#define VDEC_MAX_WORK		1024	/* AV1 asks for more than 48 pieces */
 +#define VDEC_MAX_FB		32
++#define VDEC_RETRY_MS		5
 +#define VDEC_EXTRA_FB		4	/* frame buffers beyond what the stream needs */
 +#define VDEC_CMD_TIMEOUT_MS	3000
 +#define VDEC_BS_TAG		0x6275746f62730000ULL
@@ -407,6 +415,27 @@ index 000000000..52ee6c6ff
 +#define HWV_CG_23_SET		0x00b8
 +#define HWV_CG_23_DONE		0x1c5c
 +
++/* The codecs, with the numbers the firmware knows them by */
++static const struct vdec_codec {
++	u32 fourcc;
++	s32 id;
++} vdec_codecs[] = {
++	{ V4L2_PIX_FMT_H264, 1 },
++	{ V4L2_PIX_FMT_HEVC, 2 },
++	{ V4L2_PIX_FMT_VP9, 5 },
++	{ V4L2_PIX_FMT_AV1, 12 },
++};
++
++static const struct vdec_codec *vdec_find_codec(u32 fourcc)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(vdec_codecs); i++)
++		if (vdec_codecs[i].fourcc == fourcc)
++			return &vdec_codecs[i];
++	return NULL;
++}
++
 +/* Uncompressed blocks instead of the compressed layout the firmware prefers */
 +static const char vdec_properties[] =
 +	"vendor.mtk.vdec.frame.layout.debug 1 vendor.mtk.vdec.frame.layout.mode 0";
@@ -416,6 +445,12 @@ index 000000000..52ee6c6ff
 +	dma_addr_t iova;
 +	size_t size;
 +	struct device *dev;
++};
++
++/* A piece of working memory of the firmware */
++struct vdec_work {
++	struct list_head node;
++	struct vdec_mem mem;
 +};
 +
 +/* A frame buffer of the firmware */
@@ -461,16 +496,23 @@ index 000000000..52ee6c6ff
 +	u32 expected;
 +	u64 inst_addr;
 +	struct vdec_vsi *vsi;
-+	struct vdec_mem work[VDEC_MAX_WORK];
++	struct list_head work;
++	unsigned int num_work;
 +	struct vdec_fb fb[VDEC_MAX_FB];
 +	unsigned int fb_count;
 +	size_t fb_luma, fb_size;
 +	u8 shown[VDEC_MAX_FB];		/* frame buffers with a frame, oldest first */
 +	unsigned int shown_count;
 +	struct vb2_v4l2_buffer *src_busy[VB2_MAX_FRAME];
++	struct vb2_v4l2_buffer *src_cur;	/* in a start command right now */
++	bool src_cur_read;
++	bool need_fb;			/* the firmware had no frame buffer for src_cur */
++	unsigned int fb_gen;		/* counts what may have changed that */
++	unsigned int resent;
 +	bool vcp_on, powered, fw_open, fw_has_fbs, dead;
 +
 +	/* The stream */
++	const struct vdec_codec *codec;
 +	bool header, fbs_ready, draining, drained, last_sent;
 +	struct v4l2_pix_format_mplane out_fmt, cap_fmt;
 +	struct v4l2_rect crop;
@@ -478,6 +520,7 @@ index 000000000..52ee6c6ff
 +	u32 cap_sequence, out_sequence;
 +
 +	struct work_struct decode_work, frame_work, drain_work;
++	struct delayed_work retry_work;
 +};
 +
 +static inline struct mt6897_vdec_ctx *file_to_ctx(struct file *file)
@@ -510,34 +553,43 @@ index 000000000..52ee6c6ff
 +
 +static int vdec_work_alloc(struct mt6897_vdec_ctx *ctx, struct vdec_mem_obj *mem)
 +{
-+	int i, ret;
++	struct vdec_work *work;
++	int ret;
 +
 +	if (mem->type > VDEC_MEM_UBE_HW || !mem->len || mem->len > SZ_64M)
 +		return -EINVAL;
-+	for (i = 0; i < ARRAY_SIZE(ctx->work); i++) {
-+		if (ctx->work[i].cpu)
-+			continue;
-+		ret = vdec_mem_alloc(ctx->vdec, &ctx->work[i], mem->type, mem->len);
-+		if (ret)
-+			return ret;
-+		/* The vendor passes a kernel address here: the firmware only hands it back */
-+		mem->va = 0x6275746f73770000ULL + i;
-+		mem->pa = ctx->work[i].iova;
-+		mem->iova = ctx->work[i].iova;
-+		return 0;
++	if (ctx->num_work >= VDEC_MAX_WORK)
++		return -ENOSPC;
++	work = kzalloc_obj(*work);
++	if (!work)
++		return -ENOMEM;
++	ret = vdec_mem_alloc(ctx->vdec, &work->mem, mem->type, mem->len);
++	if (ret) {
++		kfree(work);
++		return ret;
 +	}
-+	return -ENOSPC;
++	list_add_tail(&work->node, &ctx->work);
++	ctx->num_work++;
++	/* The vendor passes a kernel address here: the firmware only hands it back */
++	mem->va = 0x6275746f73770000ULL + ctx->num_work;
++	mem->pa = work->mem.iova;
++	mem->iova = work->mem.iova;
++	return 0;
 +}
 +
 +/* @iova 0 frees everything that is left */
 +static int vdec_work_free(struct mt6897_vdec_ctx *ctx, u64 iova)
 +{
-+	int i, n = 0;
++	struct vdec_work *work, *tmp;
++	int n = 0;
 +
-+	for (i = 0; i < ARRAY_SIZE(ctx->work); i++) {
-+		if (!ctx->work[i].cpu || (iova && ctx->work[i].iova != iova))
++	list_for_each_entry_safe(work, tmp, &ctx->work, node) {
++		if (iova && work->mem.iova != iova)
 +			continue;
-+		vdec_mem_free(&ctx->work[i]);
++		list_del(&work->node);
++		vdec_mem_free(&work->mem);
++		kfree(work);
++		ctx->num_work--;
 +		n++;
 +	}
 +	return n;
@@ -586,16 +638,40 @@ index 000000000..52ee6c6ff
 +}
 +
 +/* What the firmware left in the lists of the shared structure */
++/*
++ * A buffer of the stream that found no free frame buffer goes to the firmware
++ * again when something changed: a frame buffer given, a frame put out.
++ */
++static void vdec_kick(struct mt6897_vdec_ctx *ctx)
++{
++	bool wake;
++
++	mutex_lock(&ctx->ring_lock);
++	ctx->fb_gen++;
++	wake = ctx->need_fb;
++	ctx->need_fb = false;
++	mutex_unlock(&ctx->ring_lock);
++	if (wake)
++		v4l2_m2m_try_schedule(ctx->fh.m2m_ctx);
++}
++
++/* The firmware does not say when to try again: do not wait for it for ever */
++static void vdec_retry_work(struct work_struct *work)
++{
++	vdec_kick(container_of(to_delayed_work(work), struct mt6897_vdec_ctx, retry_work));
++}
++
 +static void vdec_collect(struct mt6897_vdec_ctx *ctx)
 +{
 +	struct vdec_vsi *vsi = ctx->vsi;
 +	struct vdec_ring_fb *r;
 +	struct vdec_ring_bs *b;
-+	bool work = false;
++	bool work = false, kick;
 +
 +	if (!vsi)
 +		return;
 +	mutex_lock(&ctx->ring_lock);
++	kick = vsi->list_disp.count || vsi->list_free.count;
 +
 +	/* Frames to show, in display order */
 +	r = &vsi->list_disp;
@@ -635,6 +711,8 @@ index 000000000..52ee6c6ff
 +		if (idx < ARRAY_SIZE(ctx->src_busy) && ctx->src_busy[idx]) {
 +			v4l2_m2m_buf_done(ctx->src_busy[idx], VB2_BUF_STATE_DONE);
 +			ctx->src_busy[idx] = NULL;
++		} else if (ctx->src_cur && idx == ctx->src_cur->vb2_buf.index) {
++			ctx->src_cur_read = true;	/* the start command decides */
 +		}
 +		b->read_idx = (b->read_idx + 1) % VDEC_MAX_FRAMES;
 +		b->count--;
@@ -643,6 +721,8 @@ index 000000000..52ee6c6ff
 +
 +	if (work)
 +		queue_work(ctx->vdec->wq, &ctx->frame_work);
++	if (kick)
++		vdec_kick(ctx);
 +}
 +
 +/* Called from the thread of the coprocessor driver */
@@ -701,7 +781,7 @@ index 000000000..52ee6c6ff
 +		break;
 +	case VCU_IPIMSG_DEC_CHECK_CODEC_ID:
 +		/* The firmware tries its codecs one by one until the kernel agrees */
-+		ret = (ack->codec_id == VDEC_CODEC_H264 && !p->status) ? 0 : -1;
++		ret = (ack->codec_id == ctx->codec->id && !p->status) ? 0 : -1;
 +		id = AP_IPIMSG_DEC_CHECK_CODEC_ID_DONE - 0x1000;
 +		break;
 +	case VCU_IPIMSG_DEC_PUT_FRAME_BUFFER:
@@ -954,8 +1034,11 @@ index 000000000..52ee6c6ff
 +		if (give)
 +			ctx->fb[i].state = VDEC_FB_FW;
 +		mutex_unlock(&ctx->ring_lock);
-+		if (give)
-+			ret = vdec_fw_give_fb(ctx, i);
++		if (!give)
++			continue;
++		ret = vdec_fw_give_fb(ctx, i);
++
++		vdec_kick(ctx);
 +	}
 +	return ret;
 +}
@@ -983,6 +1066,7 @@ index 000000000..52ee6c6ff
 +	for (i = 0; i < ctx->fb_count; i++)
 +		ctx->fb[i].state = 0;
 +	ctx->shown_count = 0;
++	ctx->need_fb = false;
 +	for (i = 0; i < ARRAY_SIZE(ctx->src_busy); i++) {
 +		if (ctx->src_busy[i])
 +			v4l2_m2m_buf_done(ctx->src_busy[i], VB2_BUF_STATE_ERROR);
@@ -1003,6 +1087,7 @@ index 000000000..52ee6c6ff
 +	if (ctx->fw_open) {
 +		if (ctx->header)
 +			vdec_fw_flush(ctx);
++		dev_dbg(vdec->dev, "%u buffers sent again for lack of a frame buffer\n", ctx->resent);
 +		vdec_fw_command(ctx, VDEC_SRV_COMMON, &cmd, sizeof(cmd), AP_IPIMSG_DEC_DEINIT + 0x1000);
 +		ctx->fw_open = false;
 +	}
@@ -1185,10 +1270,14 @@ index 000000000..52ee6c6ff
 +	vsi->dec_params.frame_size_height = vsi->pic.pic_h;
 +	vsi->dec_params.operating_rate = VDEC_OPERATING_RATE;
 +	vsi->dec_params.dec_param_change |= VDEC_PARAM_FRAME_SIZE | VDEC_PARAM_OPERATING_RATE;
-+	ret = vdec_fw_command(ctx, VDEC_SRV_COMMON, &msg, sizeof(msg), AP_IPIMSG_DEC_SET_PARAM + 0x1000);
-+	if (!ret)
-+		ret = vdec_fw_set_param(ctx, VDEC_SET_PARAM_MMDVFS, VDEC_MMDVFS_START);
-+	return ret;
++	/*
++	 * Not every codec of the firmware takes the size and the rate (VP9
++	 * answers with an error); the vendor does not look at the answer.
++	 */
++	vdec_fw_command(ctx, VDEC_SRV_COMMON, &msg, sizeof(msg), AP_IPIMSG_DEC_SET_PARAM + 0x1000);
++	if (ctx->dead)
++		return -EIO;
++	return vdec_fw_set_param(ctx, VDEC_SET_PARAM_MMDVFS, VDEC_MMDVFS_START);
 +}
 +
 +/* Frames out */
@@ -1304,6 +1393,7 @@ index 000000000..52ee6c6ff
 +	struct mt6897_vdec_dev *vdec = ctx->vdec;
 +	struct v4l2_m2m_ctx *m2m = ctx->fh.m2m_ctx;
 +	struct vb2_v4l2_buffer *src;
++	unsigned int gen;
 +	u32 changed;
 +	int ret;
 +
@@ -1340,26 +1430,45 @@ index 000000000..52ee6c6ff
 +		goto finish;
 +	}
 +
-+	/* From here the firmware owns the buffer until it lists it as read */
-+	v4l2_m2m_src_buf_remove(m2m);
++	/*
++	 * The buffer stays at the head of the queue during the command: without
++	 * a free frame buffer the firmware wants the same buffer again. Once it
++	 * has taken the buffer, it owns it until it lists it as read.
++	 */
 +	mutex_lock(&ctx->ring_lock);
-+	ctx->src_busy[src->vb2_buf.index] = src;
++	ctx->src_cur = src;
++	ctx->src_cur_read = false;
++	gen = ctx->fb_gen;
 +	mutex_unlock(&ctx->ring_lock);
 +	ret = vdec_fw_start(ctx, src);
++	changed = ret ? 0 : ctx->vsi->dec.vdec_changed_info;
 +	vdec_collect(ctx);
-+	if (!ret && (ctx->vsi->dec.vdec_changed_info & VDEC_RES_CHANGE)) {
++	if (changed & VDEC_RES_CHANGE) {
 +		dev_err(vdec->dev, "the picture changed in the middle of the stream: not handled\n");
 +		ret = -EINVAL;
 +	}
 +	mutex_unlock(&ctx->cmd_lock);
-+	if (ret) {
-+		mutex_lock(&ctx->ring_lock);
-+		if (ctx->src_busy[src->vb2_buf.index] == src) {
-+			ctx->src_busy[src->vb2_buf.index] = NULL;
-+			v4l2_m2m_buf_done(src, VB2_BUF_STATE_ERROR);
++
++	mutex_lock(&ctx->ring_lock);
++	ctx->src_cur = NULL;
++	if (!ret && (changed & VDEC_NEED_MORE_OUTPUT_BUF)) {
++		/* Wait, unless something changed during the command */
++		if (ctx->fb_gen == gen) {
++			ctx->need_fb = true;
++			schedule_delayed_work(&ctx->retry_work, msecs_to_jiffies(VDEC_RETRY_MS));
 +		}
-+		mutex_unlock(&ctx->ring_lock);
++		ctx->out_sequence--;
++		ctx->resent++;
++	} else {
++		v4l2_m2m_src_buf_remove_by_buf(m2m, src);
++		if (ret)
++			v4l2_m2m_buf_done(src, VB2_BUF_STATE_ERROR);
++		else if (ctx->src_cur_read)
++			v4l2_m2m_buf_done(src, VB2_BUF_STATE_DONE);
++		else
++			ctx->src_busy[src->vb2_buf.index] = src;
 +	}
++	mutex_unlock(&ctx->ring_lock);
 +finish:
 +	v4l2_m2m_job_finish(vdec->m2m, m2m);
 +	if (ctx->draining)
@@ -1380,7 +1489,7 @@ index 000000000..52ee6c6ff
 +	if (!ctx->fw_open || ctx->dead || ctx->drained)
 +		return 0;
 +	/* After the headers, frames need the firmware's frame buffers */
-+	return !ctx->header || ctx->fbs_ready;
++	return !ctx->header || (ctx->fbs_ready && !ctx->need_fb);
 +}
 +
 +static const struct v4l2_m2m_ops vdec_m2m_ops = {
@@ -1394,9 +1503,10 @@ index 000000000..52ee6c6ff
 +{
 +	struct v4l2_pix_format_mplane *f = &ctx->out_fmt;
 +
++	ctx->codec = &vdec_codecs[0];
 +	f->width = 640;
 +	f->height = 480;
-+	f->pixelformat = V4L2_PIX_FMT_H264;
++	f->pixelformat = ctx->codec->fourcc;
 +	f->field = V4L2_FIELD_NONE;
 +	f->colorspace = V4L2_COLORSPACE_REC709;
 +	f->num_planes = 1;
@@ -1419,9 +1529,9 @@ index 000000000..52ee6c6ff
 +
 +static int vdec_enum_fmt_out(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 +{
-+	if (f->index)
++	if (f->index >= ARRAY_SIZE(vdec_codecs))
 +		return -EINVAL;
-+	f->pixelformat = V4L2_PIX_FMT_H264;
++	f->pixelformat = vdec_codecs[f->index].fourcc;
 +	f->flags = V4L2_FMT_FLAG_DYN_RESOLUTION;
 +	return 0;
 +}
@@ -1456,7 +1566,8 @@ index 000000000..52ee6c6ff
 +{
 +	struct v4l2_pix_format_mplane *p = &f->fmt.pix_mp;
 +
-+	p->pixelformat = V4L2_PIX_FMT_H264;
++	if (!vdec_find_codec(p->pixelformat))
++		p->pixelformat = vdec_codecs[0].fourcc;
 +	p->width = clamp_t(u32, p->width, VDEC_MIN_W, VDEC_MAX_W);
 +	p->height = clamp_t(u32, p->height, VDEC_MIN_W, VDEC_MAX_H);
 +	p->field = V4L2_FIELD_NONE;
@@ -1474,8 +1585,11 @@ index 000000000..52ee6c6ff
 +
 +	if (vb2_is_busy(v4l2_m2m_get_vq(ctx->fh.m2m_ctx, f->type)))
 +		return -EBUSY;
++	if (ctx->fw_open)
++		return -EBUSY;	/* the firmware was told the codec when the session opened */
 +	vdec_try_fmt_out(file, priv, f);
 +	ctx->out_fmt = f->fmt.pix_mp;
++	ctx->codec = vdec_find_codec(ctx->out_fmt.pixelformat);
 +	if (!ctx->header) {
 +		/* A guess until the firmware has read the headers */
 +		c->width = ALIGN(ctx->out_fmt.width, 64);
@@ -1514,7 +1628,7 @@ index 000000000..52ee6c6ff
 +
 +static int vdec_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
 +{
-+	if (fsize->index || fsize->pixel_format != V4L2_PIX_FMT_H264)
++	if (fsize->index || !vdec_find_codec(fsize->pixel_format))
 +		return -EINVAL;
 +	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
 +	fsize->stepwise = (struct v4l2_frmsize_stepwise){
@@ -1688,6 +1802,7 @@ index 000000000..52ee6c6ff
 +	bool was_ready = ctx->fbs_ready;
 +
 +	cancel_work_sync(&ctx->drain_work);
++	cancel_delayed_work_sync(&ctx->retry_work);
 +	if (!V4L2_TYPE_IS_OUTPUT(vq->type))
 +		ctx->fbs_ready = false;
 +	cancel_work_sync(&ctx->frame_work);
@@ -1714,6 +1829,7 @@ index 000000000..52ee6c6ff
 +		}
 +	}
 +	ctx->shown_count = 0;
++	ctx->need_fb = false;
 +	mutex_unlock(&ctx->ring_lock);
 +	ctx->draining = false;
 +	ctx->drained = false;
@@ -1780,6 +1896,7 @@ index 000000000..52ee6c6ff
 +		ret = -ENOMEM;
 +		goto unlock;
 +	}
++	INIT_LIST_HEAD(&ctx->work);
 +	ctx->vdec = vdec;
 +	mutex_init(&ctx->cmd_lock);
 +	mutex_init(&ctx->res_lock);
@@ -1789,6 +1906,7 @@ index 000000000..52ee6c6ff
 +	INIT_WORK(&ctx->decode_work, vdec_decode_work);
 +	INIT_WORK(&ctx->frame_work, vdec_frame_work);
 +	INIT_WORK(&ctx->drain_work, vdec_drain_work);
++	INIT_DELAYED_WORK(&ctx->retry_work, vdec_retry_work);
 +	vdec_default_formats(ctx);
 +	v4l2_fh_init(&ctx->fh, video_devdata(file));
 +	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(vdec->m2m, ctx, vdec_queue_init);
@@ -1822,6 +1940,7 @@ index 000000000..52ee6c6ff
 +	cancel_work_sync(&ctx->drain_work);
 +	cancel_work_sync(&ctx->frame_work);
 +	cancel_work_sync(&ctx->decode_work);
++	cancel_delayed_work_sync(&ctx->retry_work);
 +	vdec->ctx = NULL;
 +	mutex_unlock(&vdec->lock);
 +	v4l2_fh_del(&ctx->fh, file);
