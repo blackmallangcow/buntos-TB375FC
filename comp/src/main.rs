@@ -10,6 +10,7 @@ mod agent_guard;
 mod agent_target;
 mod background_effect;
 mod blur;
+mod caps_lock;
 mod clipboard;
 mod config;
 mod cursor;

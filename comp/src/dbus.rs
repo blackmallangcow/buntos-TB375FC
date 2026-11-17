@@ -530,6 +530,8 @@ pub enum Request {
         name: String,
         scale: f64,
     },
+    /// Caps Lock을 켜거나 끈다: 입력 소스가 하나뿐일 때 Caps Lock 키를 짧게 누른 것 (caps_lock.rs)
+    ToggleCapsLock,
     KeyboardRepeat {
         delay: u32,
         rate: u32,
@@ -593,6 +595,9 @@ pub enum Command {
     PointerDevicesChanged,
     /// 입력 소스를 바꾼다 (한/영 전환)
     ToggleInputMethod,
+    /// Caps Lock 키를 짧게 눌렀다 (caps_lock.rs). 바꿀 입력 소스가 있으면 바꾸고, 없으면 컴포지터에
+    /// Caps Lock을 켜고 끄라고 되돌려 보낸다
+    CapsLockTapped,
     /// ShortcutsChanged 신호를 보낸다
     ShortcutsChanged,
     /// ShortcutActivated 신호를 보낸다: 셸이 하는 단축키를 눌렀다
@@ -656,6 +661,7 @@ impl Service {
 }
 
 fn run(api: Api, commands: mpsc::Receiver<Command>) {
+    let requests = api.requests.lock().unwrap().clone();
     let connection = blocking::connection::Builder::session()
         .and_then(|builder| builder.name(BUS_NAME))
         .and_then(|builder| builder.serve_at(OBJECT_PATH, api))
@@ -673,6 +679,14 @@ fn run(api: Api, commands: mpsc::Receiver<Command>) {
             Command::OutputsChanged => emit(&connection, "OutputsChanged", &()),
             Command::PointerDevicesChanged => emit(&connection, "PointerDevicesChanged", &()),
             Command::ToggleInputMethod => toggle_input_method(&connection),
+            Command::CapsLockTapped => {
+                if input_methods(&connection).1.len() >= 2 {
+                    toggle_input_method(&connection);
+                } else {
+                    // 컴포지터가 끝나는 중이면 받을 곳이 없다
+                    let _ = requests.send(Request::ToggleCapsLock);
+                }
+            }
             Command::ShortcutsChanged => emit(&connection, "ShortcutsChanged", &()),
             Command::ShortcutActivated(id) => emit(&connection, "ShortcutActivated", &(id,)),
             Command::Notify { title, body } => notify(&connection, &title, &body),
@@ -746,6 +760,23 @@ fn emit<B: serde::Serialize + DynamicType>(
 /// 입력 소스를 바꾼다. 입력기가 아직 입력 칸을 만난 적이 없으면 fcitx5의 Toggle이 아무 일도
 /// 하지 않으므로, 현재 그룹의 다음 입력기를 직접 고른다
 fn toggle_input_method(connection: &blocking::Connection) {
+    let (current, items) = input_methods(connection);
+    let next = current
+        .as_ref()
+        .and_then(|current| items.iter().position(|item| item == current))
+        .map(|index| items[(index + 1) % items.len()].clone())
+        .or_else(|| items.get(1).cloned());
+    let result = match next {
+        Some(next) => fcitx(connection, "SetCurrentIM", &(next,)),
+        None => fcitx(connection, "Toggle", &()),
+    };
+    if let Err(err) = result {
+        tracing::warn!("failed to switch the input method: {err}");
+    }
+}
+
+/// 지금 입력 소스와 지금 그룹의 입력 소스들. 입력기(fcitx5)가 없으면 둘 다 비어 있다
+fn input_methods(connection: &blocking::Connection) -> (Option<String>, Vec<String>) {
     let current: Option<String> = fcitx(connection, "CurrentInputMethod", &())
         .ok()
         .and_then(|reply| reply.body().deserialize::<String>().ok());
@@ -762,18 +793,7 @@ fn toggle_input_method(connection: &blocking::Connection) {
         })
         .map(|(_layout, items)| items.into_iter().map(|(name, _)| name).collect())
         .unwrap_or_default();
-    let next = current
-        .as_ref()
-        .and_then(|current| items.iter().position(|item| item == current))
-        .map(|index| items[(index + 1) % items.len()].clone())
-        .or_else(|| items.get(1).cloned());
-    let result = match next {
-        Some(next) => fcitx(connection, "SetCurrentIM", &(next,)),
-        None => fcitx(connection, "Toggle", &()),
-    };
-    if let Err(err) = result {
-        tracing::warn!("failed to switch the input method: {err}");
-    }
+    (current, items)
 }
 
 fn fcitx<B: serde::Serialize + DynamicType>(

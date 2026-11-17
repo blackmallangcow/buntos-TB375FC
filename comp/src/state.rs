@@ -31,7 +31,7 @@ use smithay::{
     },
     input::{
         Seat, SeatHandler, SeatState,
-        keyboard::XkbConfig,
+        keyboard::{LedState, XkbConfig},
         pointer::{CursorImageStatus, Focus, GrabStartData as PointerGrabStartData},
     },
     output::{Output, Scale as OutputScale},
@@ -178,6 +178,9 @@ pub struct BuntState {
     pub shortcuts: Shortcuts,
     /// 앱에 옮겨 보낸 단축키를 누르고 있는 동안 되풀이하는 타이머
     pub key_repeat: Option<RegistrationToken>,
+    /// Caps Lock 키로 입력 소스를 바꿀 때 그 키를 누르고 있는 상태와, 길게 누른 것을 아는 타이머 (caps_lock.rs)
+    pub caps_key: crate::caps_lock::CapsKey,
+    pub caps_timer: Option<RegistrationToken>,
     /// 수정 키만 누르는 중 (⌃⇧ 같은 조합 단축키)
     pub modifier_chord: Option<ModifierChord>,
     /// 키 처리가 끝난 뒤 할 수정 키 조합 단축키
@@ -384,6 +387,8 @@ impl BuntState {
             suppressed_keys: Vec::new(),
             shortcuts,
             key_repeat: None,
+            caps_key: crate::caps_lock::CapsKey::default(),
+            caps_timer: None,
             modifier_chord: None,
             chord_hit: None,
             keyboard_shortcuts_inhibit_state,
@@ -1829,6 +1834,11 @@ impl SeatHandler for BuntState {
         self.cursor_status = image;
     }
 
+    /// Caps Lock, Num Lock, Scroll Lock이 바뀌었다. 키보드의 불을 맞춘다 (udev.rs)
+    fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: LedState) {
+        self.set_keyboard_leds(led_state);
+    }
+
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client);
@@ -2251,6 +2261,7 @@ impl BuntState {
             } => self.set_output_mode(&name, width, height, refresh),
             Request::OutputScale { name, scale } => self.set_output_scale(&name, scale),
             Request::KeyboardRepeat { delay, rate } => self.set_keyboard_repeat(delay, rate),
+            Request::ToggleCapsLock => self.toggle_caps_lock(),
             Request::Panels(panels) => self.set_panels(panels),
             Request::Pointer(pointer) => self.set_pointer_prefs(pointer),
             Request::Touchpad {

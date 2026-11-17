@@ -6,7 +6,7 @@
 # 넣고(boot-to-shell.sh), 이 스크립트는 준비와 확인만 한다. 그래서 키가 실제 입력과 같은 길(libinput →
 # 컴포지터 단축키 → 앱)을 거친다. 직렬 콘솔의 root로 실행하며 마지막 줄이 답이다.
 # 사용법: shortcuts.sh prepare | value | focus | screenshots | dbus | terminal-prepare | terminal |
-#         chord-prepare | input-method | chord-reset | minimize-button | restore-dock | switcher |
+#         chord-prepare | input-method | caps-lock | chord-reset | minimize-button | restore-dock | switcher |
 #         preview | toolbar | volume-prepare | volume
 set -u
 
@@ -77,6 +77,10 @@ chord-prepare)
 input-method)
 	# 지금 입력기 (keyboard-us, hangul)
 	im -n
+	;;
+caps-lock)
+	# 지금 입력기와 키보드의 Caps Lock 불 (0, 1)
+	echo "$(im -n) $(cat /sys/class/leds/input*::capslock/brightness | head -1)"
 	;;
 chord-reset)
 	compositor ResetShortcuts s input >/dev/null
@@ -156,7 +160,7 @@ volume)
 	echo "$(audio wpctl get-volume @DEFAULT_AUDIO_SINK@) $(shell_window bunt-volume-hud)"
 	;;
 *)
-	echo "사용법: $0 prepare | value | focus | screenshots | dbus | terminal-prepare | terminal | chord-prepare | input-method | chord-reset | minimize-button | restore-dock | switcher | preview | toolbar | volume-prepare | volume" >&2
+	echo "사용법: $0 prepare | value | focus | screenshots | dbus | terminal-prepare | terminal | chord-prepare | input-method | caps-lock | chord-reset | minimize-button | restore-dock | switcher | preview | toolbar | volume-prepare | volume" >&2
 	exit 2
 	;;
 esac

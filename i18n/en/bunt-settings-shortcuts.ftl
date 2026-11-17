@@ -41,7 +41,7 @@ shortcut-category-screenshots = Screenshots
 shortcut-category-text = Text Editing
 shortcut-category-app = App Shortcuts
 # Notes below the list
-shortcuts-note-input = You can also use modifier keys alone, like ⌃⇧ (press and release), or ⇧Space. The Hangul (한/영) key also switches input sources and can’t be changed.
+shortcuts-note-input = You can also use modifier keys alone, like ⌃⇧ (press and release), or ⇧Space. The Hangul (한/영) key also switches input sources and can’t be changed. With Caps Lock switching on, a short press switches input sources and a long press turns Caps Lock on.
 shortcuts-note-text = These work while you type in a text field. Adding ⇧ extends the selection.
 shortcuts-note-app = Sent to the app in front as its Ctrl shortcut. Terminals get Copy, Paste and the like as their own shortcuts (Ctrl+Shift+C…).
 
@@ -60,6 +60,7 @@ shortcut-windows-fullscreen = Toggle full screen
 shortcut-windows-close = Close window
 shortcut-windows-terminal = Open Terminal
 shortcut-input-switch-source = Switch input source
+shortcut-input-caps-lock = Use the Caps Lock key to switch input sources
 shortcut-screenshot-screen = Save picture of screen as a file
 shortcut-screenshot-screen-clipboard = Copy picture of screen to the clipboard
 shortcut-screenshot-area = Save picture of selected area as a file

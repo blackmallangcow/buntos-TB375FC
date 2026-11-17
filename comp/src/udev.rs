@@ -53,7 +53,10 @@ use smithay::{
             update_surface_primary_scanout_output, with_surfaces_surface_tree,
         },
     },
-    input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
+    input::{
+        keyboard::LedState,
+        pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
+    },
     output::{Mode as WlMode, Output, PhysicalProperties, Scale as OutputScale},
     reexports::{
         calloop::{
@@ -161,6 +164,8 @@ pub struct UdevData {
     cursor_key: Option<(CursorIcon, i32, u32)>,
     /// 연결된 포인터 장치(마우스, 터치패드). 시스템 설정의 마우스 설정을 쓴다
     pointer_devices: Vec<InputDevice>,
+    /// 연결된 키보드. Caps Lock 같은 불을 키보드 상태에 맞춘다
+    keyboard_devices: Vec<InputDevice>,
     /// 셸 유리 뒤 흐림 (blur.rs)
     blur: Blur,
     /// 렌더러로 정한 그리기 방식 (gpu.rs). 전에는 CPU로 그리는지만 적었다(software)
@@ -514,6 +519,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         cursor_hotspot,
         cursor_key: None,
         pointer_devices: Vec::new(),
+        keyboard_devices: Vec::new(),
         blur: Blur::default(),
         rendering,
         client_env,
@@ -573,8 +579,14 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             // 장치가 붙고 떨어지면 입력 모드를 다시 정한다 (input_mode.rs)
             state.track_input_device(&event);
             match &event {
-                InputEvent::DeviceAdded { device } => state.pointer_device_added(device),
-                InputEvent::DeviceRemoved { device } => state.pointer_device_removed(device),
+                InputEvent::DeviceAdded { device } => {
+                    state.pointer_device_added(device);
+                    state.keyboard_device_added(device);
+                }
+                InputEvent::DeviceRemoved { device } => {
+                    state.pointer_device_removed(device);
+                    state.keyboard_device_removed(device);
+                }
                 _ => {}
             }
             state.process_input_event(event);
@@ -591,6 +603,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 state.backend.drm.pause();
                 // 다른 가상 터미널로 가면 누르고 있던 키와 단추를 떼는 이벤트가 오지 않는다 (agent_guard.rs)
                 state.agent_guard.human.release_all();
+                state.caps_key.forget();
                 if let Some(floor) = &mut state.backend.frame_floor {
                     floor.release(Instant::now());
                 }
@@ -1211,6 +1224,33 @@ impl BuntState {
         tracing::info!("pointer device: {}", device.name());
         self.backend.pointer_devices.push(device);
         self.publish_pointer_devices();
+    }
+
+    /// 키보드가 연결됐다. 지금 키보드 상태대로 불을 켠다: Caps Lock을 켠 채 붙인 키보드와, 다른 가상
+    /// 터미널에 갔다 돌아와 다시 붙은 키보드에도 불이 맞는다. 전원 단추처럼 불이 없는 장치는 커널이 무시한다
+    fn keyboard_device_added(&mut self, device: &InputDevice) {
+        if !device.has_capability(DeviceCapability::Keyboard) {
+            return;
+        }
+        let mut device = device.clone();
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            device.led_update(keyboard.led_state().into());
+        }
+        self.backend.keyboard_devices.push(device);
+    }
+
+    fn keyboard_device_removed(&mut self, device: &InputDevice) {
+        self.backend
+            .keyboard_devices
+            .retain(|known| known != device);
+    }
+
+    /// 키보드의 불(Caps Lock, Num Lock, Scroll Lock)을 키보드 상태에 맞춘다. 컴포지터가 하지 않으면 아무도
+    /// 하지 않는다: 커널의 kbd-capslock은 가상 터미널이 글자 모드일 때만 불을 바꾼다
+    pub(crate) fn set_keyboard_leds(&mut self, leds: LedState) {
+        for device in &mut self.backend.keyboard_devices {
+            device.led_update(leds.into());
+        }
     }
 
     fn pointer_device_removed(&mut self, device: &InputDevice) {

@@ -307,6 +307,16 @@ pub enum Action {
     },
     /// 켜고 끄기만 한다: 표에 없는 ⌘ 단축키를 앱의 Ctrl 단축키로 보낸다 (⌘B → Ctrl+B)
     OtherCommandKeys,
+    /// 켜고 끄기만 한다: Caps Lock 키를 짧게 누르면 입력 소스를 바꾸고 길게 누르면 Caps Lock을 켠다
+    /// (caps_lock.rs). 끄면 Caps Lock 키는 누르는 대로 Caps Lock을 켜고 끈다
+    CapsLockSwitch,
+}
+
+impl Action {
+    /// 키가 없고 켜고 끄기만 하는 항목인지
+    pub fn is_switch(self) -> bool {
+        matches!(self, Action::OtherCommandKeys | Action::CapsLockSwitch)
+    }
 }
 
 /// 시스템 설정의 키보드 단축키 시트가 나누어 보이는 묶음
@@ -497,6 +507,14 @@ pub const DEFS: &[Def] = &[
         "<Control>space",
         Builtin::SwitchInputSource,
     ),
+    // macOS의 "Caps Lock 키로 ABC 입력 소스 전환"
+    Def {
+        id: "input.caps-lock",
+        category: Category::Input,
+        default: "",
+        action: Action::CapsLockSwitch,
+        repeat: false,
+    },
     run(
         "screenshot.screen",
         Category::Screenshots,
@@ -915,9 +933,10 @@ impl Shortcuts {
             .map(|(def, entry)| ShortcutInfo {
                 id: def.id.into(),
                 category: def.category.id().into(),
-                kind: match def.action {
-                    Action::OtherCommandKeys => "switch",
-                    _ => "key",
+                kind: if def.action.is_switch() {
+                    "switch"
+                } else {
+                    "key"
                 }
                 .into(),
                 accelerator: entry.accel.map(|accel| accel.name()).unwrap_or_default(),
@@ -944,6 +963,13 @@ impl Shortcuts {
                 Action::Run(builtin) => Some(builtin),
                 _ => None,
             })
+    }
+
+    /// Caps Lock 키로 입력 소스를 바꾸는지 (짧게 누르면 전환, 길게 누르면 Caps Lock)
+    pub fn caps_lock_switches(&self) -> bool {
+        DEFS.iter()
+            .zip(&self.entries)
+            .any(|(def, entry)| def.action == Action::CapsLockSwitch && entry.enabled)
     }
 
     fn other_command_keys(&self) -> bool {
@@ -1042,7 +1068,7 @@ fn hit(def: &Def, place: Place, shifted: bool) -> Option<Hit> {
         Action::App { keys, .. } => Some(send(keys)),
         Action::Text { terminal, .. } if place.terminal => in_terminal(terminal),
         Action::Text { keys, .. } if place.typing => Some(send(keys)),
-        Action::Text { .. } | Action::OtherCommandKeys => None,
+        Action::Text { .. } | Action::OtherCommandKeys | Action::CapsLockSwitch => None,
     }
 }
 
@@ -1208,7 +1234,7 @@ mod tests {
     fn every_default_parses_and_no_two_share_a_key() {
         let mut seen = Vec::new();
         for def in DEFS {
-            if def.action == Action::OtherCommandKeys {
+            if def.action.is_switch() {
                 assert!(def.default.is_empty());
                 continue;
             }
@@ -1420,6 +1446,16 @@ mod tests {
             .find(|info| info.id == "app.other-command-keys")
             .unwrap();
         assert_eq!((other.kind.as_str(), other.enabled), ("switch", false));
+        // Caps Lock 키로 입력 소스를 바꾸는 것은 켜고 끄기만 하고, 기본으로 켜져 있다
+        let caps = info
+            .iter()
+            .find(|info| info.id == "input.caps-lock")
+            .unwrap();
+        assert_eq!((caps.kind.as_str(), caps.enabled), ("switch", true));
+        assert!(shortcuts.caps_lock_switches());
+        let mut off = BTreeMap::new();
+        remember(&mut off, "input.caps-lock", String::new(), false);
+        assert!(!Shortcuts::new(&off).caps_lock_switches());
 
         reset(&mut prefs, "launcher");
         assert_eq!(prefs.len(), 3);
