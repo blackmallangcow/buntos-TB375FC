@@ -30,6 +30,8 @@ mod network;
 mod notification_center;
 mod notifications;
 mod polkit_agent;
+// 팝오버를 겹쳐 띄우지 않게 한다 (GTK가 누르기를 가로챈 채 남는다)
+mod popups;
 mod power;
 mod recording;
 mod screenshot;

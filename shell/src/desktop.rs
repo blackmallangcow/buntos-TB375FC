@@ -941,6 +941,7 @@ impl Desktop {
             let popover = popover.clone();
             glib::idle_add_local_once(move || popover.unparent());
         });
+        crate::popups::close_others(popover.upcast_ref());
         popover.popup();
     }
 
