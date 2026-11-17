@@ -110,7 +110,7 @@ const CURSOR_LEFT: i32 = 44;
 /// 단추(메뉴 단추 993px)는 칸이 아니다
 const CURSOR_RIGHT: i32 = 800;
 
-/// 화면 키보드의 키 하나. 글자는 지금 키 배열(us)에 있는 것만 친다. 한글 자모는 셸이 2벌식 자리의 라틴 글자로
+/// 화면 키보드의 키 하나. 글자는 지금 키 배열(us)에 있는 것만 친다. 한글 자모는 셸이 두벌식 자리의 라틴 글자로
 /// 보내고(ㅂ은 q, ㅃ은 Q) 입력기가 조합한다
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OskKey {
@@ -933,7 +933,7 @@ mod tests {
         assert_eq!(parse_key("~"), Ok(OskKey::Char('~')));
         assert_eq!(parse_key("BackSpace"), Ok(OskKey::BackSpace));
         assert_eq!(parse_key("Return"), Ok(OskKey::Return));
-        // 한글은 셸이 2벌식 자리의 라틴 글자로 보낸다. 조합은 입력기가 한다
+        // 한글은 셸이 두벌식 자리의 라틴 글자로 보낸다. 조합은 입력기가 한다
         for refused in [
             "ㅂ",
             "€",

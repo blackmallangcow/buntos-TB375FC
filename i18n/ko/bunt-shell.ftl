@@ -126,7 +126,7 @@ bluetooth-connected = 연결됨
 bluetooth-settings = Bluetooth 설정…
 input-source-title = 입력 소스
 input-source-abc = ABC
-input-source-hangul = 2벌식
+input-source-hangul = 두벌식
 input-source-shortcut = Ctrl+Space 또는 한/영 키로 전환
 input-source-settings = 키보드 설정…
 

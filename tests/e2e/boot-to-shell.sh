@@ -440,7 +440,7 @@ fi
 
 # e2e 4번: 한글 입력. 키는 QMP로 넣어 libinput → 컴포지터 → fcitx5(input-method-v2, fcitx5-hangul) → 앱
 # (text-input-v3)의 실제 길로 조합하게 하고, 결과는 게스트 쪽 도우미(tests/e2e/hangul.sh)가 에이전트(앱의 글)와
-# 입력기 상태로 읽는다. 기대값은 macOS 한국어 2벌식과 fcitx5-hangul의 기본 동작이다. e2e 5·6번이 연 텍스트
+# 입력기 상태로 읽는다. 기대값은 macOS 한국어 두벌식과 fcitx5-hangul의 기본 동작이다. e2e 5·6번이 연 텍스트
 # 편집기와 시스템 설정을 그대로 쓰고, 터미널(foot)과 Firefox는 새로 띄운다
 if [[ "$agent_refs" != NONE ]]; then
 	push tests/e2e/hangul.sh /tmp/e2e-hangul.sh
@@ -469,7 +469,7 @@ if [[ "$agent_refs" != NONE ]]; then
 	guest state
 	check "글 입력 칸 밖에서도 한/영 키로 바뀐다" "$answer" "hangul 한"
 
-	# 텍스트 편집기에서 2벌식으로 조합한다. 칸마다 문서를 비우고 한글로 둔 뒤 QMP 동작($3…)을 넣는다
+	# 텍스트 편집기에서 두벌식으로 조합한다. 칸마다 문서를 비우고 한글로 둔 뒤 QMP 동작($3…)을 넣는다
 	compose() {
 		local name=$1 want=$2
 		shift 2

@@ -263,7 +263,7 @@ impl Keyboard {
         }
     }
 
-    /// 입력 소스가 바뀌었다 (한글이면 2벌식, 그 밖은 QWERTY)
+    /// 입력 소스가 바뀌었다 (한글이면 두벌식, 그 밖은 QWERTY)
     pub fn set_script(&self, script: Script) {
         if self.0.board.borrow_mut().set_script(script) {
             self.0.rebuild();
@@ -1067,7 +1067,7 @@ mod tests {
             take(),
             [Output::Char('1'), Output::Char(' '), Output::Char('q')]
         );
-        // 한글 배열에서 같은 자리는 2벌식 자모의 라틴 글자다 (ㅂ → q, Shift ㅃ → Q)
+        // 한글 배열에서 같은 자리는 두벌식 자모의 라틴 글자다 (ㅂ → q, Shift ㅃ → Q)
         keyboard.set_script(Script::Hangul);
         tap((2, 0));
         tap((0, 0));
