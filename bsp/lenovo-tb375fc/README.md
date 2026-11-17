@@ -36,6 +36,8 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 
 Wi-Fi, 소리, 충전은 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
 
+GPU의 클럭은 평소 542 MHz까지만 쓴다(`mkosi.extra/usr/lib/modprobe.d/90-buntos-tb375fc-gpu.conf`, 그 위에서는 전원부 소리가 난다). 스크롤처럼 다음 프레임을 곧바로 그리는 일은 프레임이 떨어져도 드라이버가 이 상한을 풀지 않으므로, 컴포지터의 프레임 바닥이 GPU의 최소 클럭을 올린다: 사람이 화면을 움직이는 동안 프레임이 초당 60 아래로 떨어지면 올리고, 지켜지거나 움직임이 멈추면 푼다(buntOS 설계안 8.2절). `mkosi.extra/usr/lib/udev/rules.d/90-buntos-tb375fc-gpu.rules`가 그 파일(devfreq `min_freq`)을 render 그룹에 연다. 올릴 수 있는 클럭을 묶으려면 `/etc/buntos/comp.toml`의 `[gpu] min-fps-max-mhz`를 쓴다.
+
 GPU에는 Mesa 26.3이 있어야 한다(G615는 26.3부터 돈다. 이미지의 Debian 스냅숏은 26.1이다). `mesa/build.sh`가 꾸러미 `buntos-mesa`로 만들어 `/opt/mesa`에 넣고 `/etc/ld.so.conf.d/00-opt-mesa.conf`로 Debian의 Mesa보다 먼저 찾게 한다. GPU 펌웨어(`arm/mali/arch11.8/mali_csffw.bin`)는 Debian의 `firmware-misc-nonfree`에 있다.
 
 UPower 1.91.5는 PPS 충전기를 쓰는 동안 USB 포트의 `online` 값 2를 받지 못해 충전 속도를 0으로 둔다. 그래서 직충전 중에는 남은 시간이 나오지 않는다. `upower/build.sh`가 고친 데몬을 꾸러미 `buntos-upower`로 만들어 `/opt/upower`에 넣고, systemd drop-in이 그 데몬을 띄운다. Debian의 `upower`는 그대로 둔다. 꾸러미를 지우면 Debian의 데몬으로 돌아가고, UPower에 이 고침이 들어오면 폴더와 `mkosi.conf`의 항목을 지운다.

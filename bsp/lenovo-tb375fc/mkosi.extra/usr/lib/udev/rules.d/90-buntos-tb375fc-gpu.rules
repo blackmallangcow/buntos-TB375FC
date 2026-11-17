@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# TB375FC: GPU의 최소 클럭(devfreq min_freq)을 render 그룹이 쓸 수 있게 연다. 컴포지터(bunt-comp)의 프레임 바닥이
+# 쓴다: 사람이 화면을 움직이는 동안 프레임이 초당 60 아래로 떨어지면 이 값을 올리고, 지켜지거나 움직임이 멈추면
+# 푼다(buntOS 설계안 8.2절, comp/src/frame_floor.rs). GPU 드라이버의 클럭 조절은 사용률만 보아서, 스크롤처럼 다음
+# 프레임을 곧바로 그리는 일은 프레임이 떨어져도 상한(542 MHz, 패치 0203)을 넘지 못한다. 상한은 최소 클럭이 더
+# 높으면 그 값을 따른다.
+#
+# - 첫 계정은 render 그룹에 든다(buntd-setup). 로그인 화면의 컴포지터(_greetd)는 들지 않아 쓰지 않는다.
+# - 이 규칙이 없으면 프레임 바닥은 꺼진 채다. 끄려면 /etc/buntos/comp.toml의 [gpu] min-fps를 0으로 둔다.
+# - devfreq 장치는 panthor가 붙을 때 생긴다. 부모(GPU 플랫폼 장치)의 드라이버로 고른다.
+ACTION=="add", SUBSYSTEM=="devfreq", DRIVERS=="panthor", RUN+="/usr/bin/chgrp render %S%p/min_freq", RUN+="/usr/bin/chmod 0664 %S%p/min_freq"
