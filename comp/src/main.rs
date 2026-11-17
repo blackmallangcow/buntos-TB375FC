@@ -15,6 +15,8 @@ mod config;
 mod cursor;
 mod dbus;
 mod dmabuf;
+// 프레임이 떨어지면 GPU의 최소 클럭을 올린다
+mod frame_floor;
 mod gpu;
 mod grabs;
 // 컴포지터끼리 화면을 끄지 않고 넘겨주고 넘겨받기

@@ -85,6 +85,7 @@ use crate::{
     cursor::Cursor,
     dbus::{Command, OutputInfo, PointerDevice},
     dmabuf::{self, Dmabufs},
+    frame_floor::{GpuFloor, IDLE_RELEASE, INTERACTIVE_FOR},
     gpu::{GSK_RENDERER, Rendering, renderer_name},
     handover::{self, Wanted},
     prefs::{ModePref, PointerPrefs, SecondaryClick, TouchpadPrefs},
@@ -170,6 +171,10 @@ pub struct UdevData {
     pub dmabufs: Dmabufs,
     /// 앱 창 뒤 흐림 요청 (background_effect.rs)
     pub background_effects: BackgroundEffectState,
+    /// 프레임이 떨어지면 GPU의 최소 클럭을 올린다 (frame_floor.rs). GPU가 받지 않으면 None
+    frame_floor: Option<GpuFloor>,
+    /// 최소 클럭을 건 동안 움직임이 멈추는 것을 보는 타이머
+    frame_floor_timer: Option<RegistrationToken>,
 }
 
 impl UdevData {
@@ -467,6 +472,22 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     }
     let background_effects =
         BackgroundEffectState::new::<BuntState>(&display.handle(), config.effects.blur);
+    // 프레임 바닥: 컴포지터가 그리는 GPU가 최소 클럭을 받을 때만 (frame_floor.rs)
+    let frame_floor = render_node.and_then(|node| {
+        GpuFloor::open(
+            node.major(),
+            node.minor(),
+            config.gpu.min_fps,
+            config.gpu.min_fps_max_mhz,
+        )
+    });
+    if let Some(floor) = &frame_floor {
+        tracing::info!(
+            "frame floor: {} frames a second while the person moves the screen, GPU up to {} MHz",
+            config.gpu.min_fps,
+            floor.top_mhz()
+        );
+    }
 
     let allocator = GbmAllocator::new(
         gbm.clone(),
@@ -498,6 +519,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         client_env,
         dmabufs,
         background_effects,
+        frame_floor,
+        frame_floor_timer: None,
     };
     let mut state = BuntState::new(
         display,
@@ -568,6 +591,9 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 state.backend.drm.pause();
                 // 다른 가상 터미널로 가면 누르고 있던 키와 단추를 떼는 이벤트가 오지 않는다 (agent_guard.rs)
                 state.agent_guard.human.release_all();
+                if let Some(floor) = &mut state.backend.frame_floor {
+                    floor.release(Instant::now());
+                }
             }
             SessionEvent::ActivateSession => {
                 if libinput.resume().is_err() {
@@ -1075,6 +1101,7 @@ impl BuntState {
     }
 
     fn frame_finish(&mut self, crtc: crtc::Handle) {
+        self.frame_floor_frame(crtc);
         let Some(surface) = self.backend.outputs.get_mut(&crtc) else {
             return;
         };
@@ -1093,6 +1120,53 @@ impl BuntState {
             return;
         }
         self.render_output(crtc);
+    }
+
+    /// 프레임이 화면에 나갔다: 프레임 바닥에 알린다. 사람이 방금 입력했거나 컴포지터 애니메이션이 도는 동안만
+    /// 프레임을 지킨다 (frame_floor.rs)
+    fn frame_floor_frame(&mut self, crtc: crtc::Handle) {
+        if self.backend.frame_floor.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let interactive =
+            self.agent_guard.human.active_within(INTERACTIVE_FOR, now) || self.is_animating();
+        let Some(refresh) = self
+            .backend
+            .outputs
+            .get(&crtc)
+            .map(|surface| surface.frame_interval(false))
+        else {
+            return;
+        };
+        let Some(floor) = &mut self.backend.frame_floor else {
+            return;
+        };
+        let held = floor.frame(u64::from(u32::from(crtc)), refresh, now, interactive);
+        if !held || self.backend.frame_floor_timer.is_some() {
+            return;
+        }
+        // 최소 클럭을 건 채 움직임이 멈추면 프레임이 더 오지 않는다. 타이머로 보고 푼다
+        let token =
+            self.loop_handle
+                .insert_source(Timer::from_duration(IDLE_RELEASE), |_, _, state| {
+                    let left = state
+                        .backend
+                        .frame_floor
+                        .as_mut()
+                        .and_then(|floor| floor.idle(Instant::now()));
+                    match left {
+                        Some(left) => TimeoutAction::ToDuration(left),
+                        None => {
+                            state.backend.frame_floor_timer = None;
+                            TimeoutAction::Drop
+                        }
+                    }
+                });
+        match token {
+            Ok(token) => self.backend.frame_floor_timer = Some(token),
+            Err(err) => tracing::warn!("failed to watch the frame floor: {}", err.error),
+        }
     }
 
     /// `delay` 뒤에 그 화면을 그린다. 그보다 이르게 잡아 둔 다시 그리기가 있으면 그것을 쓰고, 늦게 잡아 둔

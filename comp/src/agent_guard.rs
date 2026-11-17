@@ -96,6 +96,16 @@ impl HumanInput {
         self.last_click = Some(now);
     }
 
+    /// 사람이 `window` 안에 키·포인터·터치를 썼거나 키나 단추를 누르고 있다 (프레임 바닥, frame_floor.rs)
+    pub fn active_within(&self, window: Duration, now: Instant) -> bool {
+        !self.keys.is_empty()
+            || !self.buttons.is_empty()
+            || [self.last_key, self.last_pointer, self.last_click]
+                .into_iter()
+                .flatten()
+                .any(|at| now.saturating_duration_since(at) <= window)
+    }
+
     /// 세션을 잃으면(가상 터미널 전환) 누르고 있던 키와 단추를 떼는 이벤트가 오지 않는다
     pub fn release_all(&mut self) {
         self.keys.clear();
@@ -628,6 +638,25 @@ mod tests {
         guard.human.release_all();
         let late = after(start, 2000);
         assert_eq!(guard.admit(Touches::FOCUS, IDLE, late), Ok(()));
+    }
+
+    #[test]
+    fn activity_covers_recent_input_and_held_keys() {
+        let mut human = HumanInput::default();
+        let start = Instant::now();
+        let window = Duration::from_secs(3);
+        assert!(!human.active_within(window, start));
+        // 손가락이 닿고 움직인 뒤 3초까지
+        human.touch_down(start);
+        human.pointer(after(start, 500));
+        assert!(human.active_within(window, after(start, 3400)));
+        assert!(!human.active_within(window, after(start, 3600)));
+        // 키를 누르고 있는 동안은 계속이다 (화살표 키로 넘기기)
+        human.key(116, true, false, after(start, 4000));
+        assert!(human.active_within(window, after(start, 60_000)));
+        human.key(116, false, false, after(start, 60_000));
+        assert!(human.active_within(window, after(start, 62_000)));
+        assert!(!human.active_within(window, after(start, 64_000)));
     }
 
     #[test]
