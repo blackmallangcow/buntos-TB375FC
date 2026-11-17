@@ -129,6 +129,7 @@ pub fn build(app: &gtk::Application, tr: &Rc<Translations>) -> Option<Desktop> {
         .build();
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&area));
+    overlay.add_overlay(&backing());
     overlay.add_overlay(&marquee);
     window.set_child(Some(&overlay));
 
@@ -168,6 +169,26 @@ pub fn build(app: &gtk::Application, tr: &Rc<Translations>) -> Option<Desktop> {
         let _ = &keep_alive;
     });
     Some(desktop)
+}
+
+/// 창 전체에 까는 보이지 않는 그림. 항목이 하나도 없으면 GTK는 그릴 것이 없어 프레임을 내지 않는다. 그러면 창에
+/// 그림(버퍼)이 붙지 않아 컴포지터가 이 창에 누르기를 주지 못하고(빈 데스크탑으로 로그인하면 단축 메뉴가 뜨지
+/// 않았다), 마지막 항목을 지워도 앞 프레임의 아이콘이 화면에 남았다. 색은 투명하면 GTK가 빼 버리므로 텍스처로 둔다
+fn backing() -> gtk::Picture {
+    let pixel = gdk::MemoryTexture::new(
+        1,
+        1,
+        gdk::MemoryFormat::R8g8b8a8Premultiplied,
+        &glib::Bytes::from_static(&[0, 0, 0, 0]),
+        4,
+    );
+    gtk::Picture::builder()
+        .paintable(&pixel)
+        .content_fit(gtk::ContentFit::Fill)
+        .can_shrink(true)
+        .can_target(false)
+        .accessible_role(gtk::AccessibleRole::Presentation)
+        .build()
 }
 
 impl Desktop {
