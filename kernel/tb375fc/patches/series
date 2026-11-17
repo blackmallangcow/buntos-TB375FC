@@ -298,3 +298,9 @@
 #      준비되며, 보안 모니터에 초기화를 부른 뒤에 뱅크 0의 표 주소를 써야 표가 걸린다. 벤더처럼 초기화 때 부르고,
 #      런타임 잠자기 앞뒤에 저장과 복원을 부른다. 없으면 VCP의 로더가 펌웨어 대신 0을 읽는다
 0216-iommu-mediatek-have-the-MT6897-protected-banks-set-up.patch
+# 0217~0218 비디오 코프로세서(VCP) 드라이버. LK가 올린 순정 펌웨어를 띄운다: 전원과 클럭, 공유 메모리 창, 보안 모니터의
+#      접근 열기와 리셋 풀기, 준비 메시지. 메일박스 다섯의 자리 배치와 메시지 보내기·받기, 펌웨어 기록(debugfs)도 한다.
+#      차례와 레지스터는 벤더 드라이버(vcp/rv), 꼴은 MT6895 커뮤니티 드라이버를 따랐다. 쓰는 쪽(디코더)이 생기기 전에는
+#      debugfs의 mt6897-vcp/hold로 켠다. 복구, 덤프, 잠자기 투표는 넣지 않았다
+0217-dt-bindings-soc-mediatek-add-the-MT6897-video-coprocessor.patch
+0218-soc-mediatek-add-the-MT6897-video-coprocessor.patch

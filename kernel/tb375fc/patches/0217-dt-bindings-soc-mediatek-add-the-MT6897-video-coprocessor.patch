@@ -1,0 +1,148 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: soc: mediatek: add the MT6897 video coprocessor
+
+The VCP of the MT6897 is a RISC-V core that runs the video codec firmware.
+The bootloader loads the firmware and the secure monitor releases the
+reset. The kernel powers the core, gives it shared memory and exchanges
+messages with the firmware through five mailboxes.
+
+The registers and interrupts are those of the vcp node in the device tree
+of the OnePlus MT6897 kernel, without the ones only its dumps use.
+---
+ .../bindings/soc/mediatek/mediatek,mt6897-vcp.yaml | 128 +++++++++++++++++++++
+ 1 file changed, 128 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-vcp.yaml b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-vcp.yaml
+new file mode 100644
+index 000000000..f7abf57c3
+--- /dev/null
++++ b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mt6897-vcp.yaml
+@@ -0,0 +1,128 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6897-vcp.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6897 video coprocessor (VCP)
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++description:
++  The VCP is a RISC-V core that runs the video codec firmware. The bootloader
++  loads the firmware and the secure monitor releases the reset. The kernel
++  powers the core, gives it shared memory and exchanges messages with the
++  firmware through five mailboxes. Its memory accesses go through the MDP
++  IOMMU without an SMI larb.
++
++properties:
++  compatible:
++    const: mediatek,mt6897-vcp
++
++  reg:
++    items:
++      - description: SRAM of the core
++      - description: configuration
++      - description: configuration of core 0
++      - description: mailbox 0, with its set and clear registers
++      - description: mailbox 1
++      - description: mailbox 2
++      - description: mailbox 3
++      - description: mailbox 4
++
++  reg-names:
++    items:
++      - const: sram
++      - const: cfg
++      - const: core0
++      - const: mbox0
++      - const: mbox1
++      - const: mbox2
++      - const: mbox3
++      - const: mbox4
++
++  interrupts:
++    items:
++      - description: watchdog of the firmware
++      - description: mailbox 0
++      - description: mailbox 1
++      - description: mailbox 2
++      - description: mailbox 3
++      - description: mailbox 4
++
++  interrupt-names:
++    items:
++      - const: wdt
++      - const: mbox0
++      - const: mbox1
++      - const: mbox2
++      - const: mbox3
++      - const: mbox4
++
++  clocks:
++    items:
++      - description: clock mux of the core
++      - description: the PLL output the mux runs from
++      - description: 26 MHz, selected while the PLL output is switched in
++
++  clock-names:
++    items:
++      - const: mmup-sel
++      - const: mmup-clk
++      - const: mmup-26m
++
++  power-domains:
++    maxItems: 1
++
++  iommus:
++    maxItems: 1
++
++required:
++  - compatible
++  - reg
++  - reg-names
++  - interrupts
++  - interrupt-names
++  - clocks
++  - clock-names
++  - power-domains
++  - iommus
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/interrupt-controller/arm-gic.h>
++    #include <dt-bindings/memory/mediatek,mt6897-memory-port.h>
++
++    soc {
++        #address-cells = <2>;
++        #size-cells = <2>;
++
++        vcp@1ea00000 {
++            compatible = "mediatek,mt6897-vcp";
++            reg = <0 0x1ea00000 0 0x40000>,
++                  <0 0x1ec24000 0 0x1000>,
++                  <0 0x1ec30000 0 0x1000>,
++                  <0 0x1ecfb000 0 0x110>,
++                  <0 0x1ecfc000 0 0x110>,
++                  <0 0x1ecfd000 0 0x110>,
++                  <0 0x1ecfe000 0 0x110>,
++                  <0 0x1ecff000 0 0x110>;
++            reg-names = "sram", "cfg", "core0",
++                        "mbox0", "mbox1", "mbox2", "mbox3", "mbox4";
++            interrupts = <GIC_SPI 857 IRQ_TYPE_LEVEL_HIGH 0>,
++                         <GIC_SPI 859 IRQ_TYPE_LEVEL_HIGH 0>,
++                         <GIC_SPI 860 IRQ_TYPE_LEVEL_HIGH 0>,
++                         <GIC_SPI 861 IRQ_TYPE_LEVEL_HIGH 0>,
++                         <GIC_SPI 862 IRQ_TYPE_LEVEL_HIGH 0>,
++                         <GIC_SPI 863 IRQ_TYPE_LEVEL_HIGH 0>;
++            interrupt-names = "wdt", "mbox0", "mbox1", "mbox2",
++                              "mbox3", "mbox4";
++            clocks = <&topckgen 78>, <&topckgen 112>, <&clk26m>;
++            clock-names = "mmup-sel", "mmup-clk", "mmup-26m";
++            power-domains = <&scpsys 8>;
++            iommus = <&mdp_iommu M4U_PORT_L31_VIDEO_UP>;
++        };
++    };
