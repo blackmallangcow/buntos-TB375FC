@@ -161,7 +161,7 @@ impl Switcher {
         let size = icon_size_for(self.screen_width(), apps.len() as i32);
         let mut names = Vec::new();
         for (index, app_id) in apps.iter().enumerate() {
-            let info = gio_unix::DesktopAppInfo::new(&format!("{app_id}.desktop"));
+            let info = crate::apps::for_window(app_id);
             let image = match info.as_ref().and_then(|info| info.icon()) {
                 Some(icon) => gtk::Image::from_gicon(&icon),
                 None => gtk::Image::from_icon_name("application-x-executable"),

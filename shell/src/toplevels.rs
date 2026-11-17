@@ -141,10 +141,6 @@ impl Toplevels {
         self.list().into_iter().find(|toplevel| toplevel.activated)
     }
 
-    pub fn is_running(&self, app_id: &str) -> bool {
-        self.list().iter().any(|toplevel| toplevel.app_id == app_id)
-    }
-
     /// 앱의 창 가운데 가장 최근에 쓴 것을 앞으로 가져온다. 창이 없으면 false
     pub fn activate_app(&self, app_id: &str) -> bool {
         let target = {

@@ -123,9 +123,7 @@ fn object_path(app_id: &str) -> String {
 
 /// .desktop 파일의 (지역화된) 이름. 없으면 앱 ID를 쓴다
 pub fn app_name(app_id: &str) -> String {
-    gio_unix::DesktopAppInfo::new(&format!("{app_id}.desktop"))
-        .map(|info| info.name().to_string())
-        .unwrap_or_else(|| app_id.to_owned())
+    crate::apps::name(app_id)
 }
 
 fn rebuild(state: &AppMenuState, active: Option<Toplevel>) {

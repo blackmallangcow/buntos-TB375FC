@@ -19,7 +19,7 @@ use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
 use gtk4_layer_shell::{Edge, LayerShell};
 
 use crate::{
-    clip_input_to_child,
+    apps, clip_input_to_child,
     config::{Builtin, Config, DockItem},
     launcher::{self, Launcher},
     layer_window,
@@ -53,10 +53,7 @@ pub fn activate_or_launch(
     toplevels: Option<&Toplevels>,
     widget: &impl IsA<gtk::Widget>,
 ) {
-    let app_id = info.as_ref().id().map(|id| app_id_of(&id).to_owned());
-    let raised = toplevels
-        .zip(app_id)
-        .is_some_and(|(toplevels, app_id)| toplevels.activate_app(&app_id));
+    let raised = toplevels.is_some_and(|toplevels| apps::activate(toplevels, info));
     if raised {
         launcher::remember(info);
     } else {
@@ -97,7 +94,8 @@ const MIN_ICON_SIZE: i32 = 24;
 const SLOT_FRAMES: u32 = 60;
 
 struct AppItem {
-    app_id: String,
+    /// 이 앱의 창이 알리는 앱 ID들(apps.rs). 설치된 앱이 아니면 그 창의 앱 ID 하나다
+    ids: Vec<String>,
     dot: gtk::Box,
 }
 
@@ -115,6 +113,10 @@ fn app_button(
         .tooltip_text(name)
         .css_classes(["dock-item"])
         .build();
+    let ids = match &info {
+        Some(info) => apps::window_ids(info),
+        None => vec![app_id.to_owned()],
+    };
     let (target, toplevels) = (app_id.to_owned(), toplevels.cloned());
     button.connect_clicked(move |button| match &info {
         Some(info) => activate_or_launch(info, toplevels.as_ref(), button),
@@ -125,10 +127,7 @@ fn app_button(
             }
         }
     });
-    let item = AppItem {
-        app_id: app_id.to_owned(),
-        dot,
-    };
+    let item = AppItem { ids, dot };
     (button, item)
 }
 
@@ -137,7 +136,7 @@ fn app_button(
 /// 그림이 없으면(컴포지터가 그리지 못했으면) 앱 아이콘만 그린다. 칸의 자리를 잴 그림(창 그림이나 앱
 /// 아이콘)도 돌려준다
 fn minimized_button(window: &Minimized, icon_size: i32) -> (gtk::Button, gtk::Image) {
-    let info = gio_unix::DesktopAppInfo::new(&format!("{}.desktop", window.app_id));
+    let info = apps::for_window(&window.app_id);
     let overlay = gtk::Overlay::new();
     let picture = match &window.thumbnail {
         Some(texture) => {
@@ -293,11 +292,6 @@ fn app_image(info: Option<&gio_unix::DesktopAppInfo>, icon_size: i32) -> gtk::Im
     image
 }
 
-/// .desktop 파일 ID에서 앱 ID를 얻는다 (Wayland의 app_id와 같다)
-fn app_id_of(desktop_id: &str) -> &str {
-    desktop_id.strip_suffix(".desktop").unwrap_or(desktop_id)
-}
-
 pub fn build(
     app: &gtk::Application,
     config: &Config,
@@ -352,7 +346,7 @@ pub fn build(
                 };
                 let image = app_image(Some(&info), icon_size.get());
                 let (button, item) =
-                    app_button(image, &name, app_id_of(app), Some(info), toplevels);
+                    app_button(image, &name, apps::stem(app), Some(info), toplevels);
                 dock.append(&button);
                 pinned.push(item);
             }
@@ -411,15 +405,18 @@ pub fn build(
         // 지금 구분선 뒤에 놓인 앱. 창 제목만 바뀌는 것처럼 목록이 같으면 단추를 다시 만들지 않는다
         let shown: RefCell<Vec<String>> = RefCell::default();
         toplevels.subscribe(move |toplevels| {
+            let open = toplevels.list();
             for item in pinned.iter() {
-                let on = toplevels.is_running(&item.app_id);
+                let on = open
+                    .iter()
+                    .any(|toplevel| apps::same_app(&item.ids, &toplevel.app_id));
                 item.dot.set_opacity(if on { 1.0 } else { 0.0 });
             }
             let mut extra: Vec<String> = Vec::new();
-            for toplevel in toplevels.list() {
+            for toplevel in open {
                 let id = toplevel.app_id;
                 if !id.is_empty()
-                    && !pinned.iter().any(|item| item.app_id == id)
+                    && !pinned.iter().any(|item| apps::same_app(&item.ids, &id))
                     && !extra.contains(&id)
                 {
                     extra.push(id);
@@ -433,7 +430,7 @@ pub fn build(
                 running.remove(&child);
             }
             for app_id in &extra {
-                let info = gio_unix::DesktopAppInfo::new(&format!("{app_id}.desktop"));
+                let info = apps::for_window(app_id);
                 let name = info
                     .as_ref()
                     .map(|info| info.name().to_string())
@@ -656,14 +653,5 @@ mod tests {
         );
         assert!(glass_css(0.0).contains("1.00"));
         assert!(glass_css(2.0).contains("0.00"));
-    }
-
-    #[test]
-    fn app_ids_come_from_desktop_ids() {
-        assert_eq!(
-            app_id_of("org.gnome.TextEditor.desktop"),
-            "org.gnome.TextEditor"
-        );
-        assert_eq!(app_id_of("foot.desktop"), "foot");
     }
 }
