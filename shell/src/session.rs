@@ -829,10 +829,10 @@ impl ForceQuit {
     }
 }
 
-/// 앱의 이름과 아이콘: 데스크톱 항목(앱 ID.desktop), 없으면 창 제목이나 앱 ID
+/// 앱의 이름과 아이콘: 설치된 앱(apps.rs), 없으면 창 제목이나 앱 ID
 fn app_name_and_icon(app: &App) -> (String, Option<gio::Icon>) {
     let info = (!app.app_id.is_empty())
-        .then(|| gio_unix::DesktopAppInfo::new(&format!("{}.desktop", app.app_id)))
+        .then(|| crate::apps::for_window(&app.app_id))
         .flatten();
     match info {
         Some(info) => (info.name().to_string(), info.icon()),

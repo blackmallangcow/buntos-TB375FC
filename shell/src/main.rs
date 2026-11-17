@@ -7,6 +7,8 @@ mod agent_access;
 // 메뉴 막대의 AI 표시와 사람만 누르는 AI 제어 창 (AI가 제어하는 동안 보이고, 멈추고 다시 허용한다)
 mod agent_control;
 mod appmenu;
+// 창의 앱 ID로 설치된 앱(.desktop)을 찾는다
+mod apps;
 mod bluetooth;
 // 클립보드 기록: 복사를 받아 메모리에 남기고(clipboard, clipboard_history) 모든 앱 패널에서 다시 고른다(clipboard_panel)
 mod clipboard;

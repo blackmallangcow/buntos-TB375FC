@@ -828,7 +828,7 @@ impl AgentControl {
 /// 다룬 앱 줄: 앱 아이콘, 이름, 창 제목. 누를 수 없다
 fn target_row(state: &AgentState, tr: &Translations) -> gtk::Box {
     let info = (!state.app_id.is_empty())
-        .then(|| gio_unix::DesktopAppInfo::new(&format!("{}.desktop", state.app_id)))
+        .then(|| crate::apps::for_window(&state.app_id))
         .flatten();
     let icon = match info.as_ref().and_then(|info| info.icon()) {
         Some(icon) => {
