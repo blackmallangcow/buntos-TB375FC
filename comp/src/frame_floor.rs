@@ -17,7 +17,7 @@
 //!   데까지만 남기고 한동안 다시 올리지 않는다.
 //! - 내리기: 3초 지켜지면 한 단계 내려 본다. 그 뒤 3초 안에 프레임이 깨지면 내린 탓으로 보고 바로 되돌리며, 다음에는
 //!   더 늦게 내려 본다. 움직임이 멈추거나 사람이 손을 떼고 3초가 지나면 최소 클럭을 푼다. 지켜지던 값은 10초
-//!   기억해, 다시 느려지면 한 번에 그 값으로 간다.
+//!   기억해, 드라이버가 그때 머물던 클럭까지 돌아왔는데도 느리면 한 번에 그 값으로 간다.
 //!
 //! 최소 클럭 파일을 이 사용자가 쓸 수 없으면(기기 BSP의 udev 규칙이 연다) 아무것도 하지 않는다. x86 PC의 GPU는
 //! devfreq가 없어 해당하지 않는다. 판단([`FrameFloor`])은 파일을 읽고 쓰지 않아 모형으로 시험한다.
@@ -110,8 +110,10 @@ pub struct FrameFloor {
     probe: Option<(usize, Instant)>,
     lower_backoff: Duration,
     lower_blocked: Option<Instant>,
-    /// 풀기 전에 지켜지던 칸과 푼 때
-    hint: Option<(usize, Instant)>,
+    /// 바닥을 올리기 시작할 때 드라이버가 스스로 머물던 칸
+    raised_from: Option<usize>,
+    /// 풀기 전에 지켜지던 칸, 그 바닥을 올리기 시작할 때 드라이버가 머물던 칸, 푼 때
+    hint: Option<(usize, usize, Instant)>,
 }
 
 impl FrameFloor {
@@ -149,6 +151,7 @@ impl FrameFloor {
             probe: None,
             lower_backoff: LOWER_BACKOFF,
             lower_blocked: None,
+            raised_from: None,
             hint: None,
         })
     }
@@ -230,9 +233,10 @@ impl FrameFloor {
         self.stable = false;
         // 내려 보던 중이면 지켜지던 것은 내리기 전의 값이다
         let probed = self.probe.take().map(|(from, _)| from);
+        let raised_from = self.raised_from.take();
         let floor = self.floor.take()?;
         if self.held {
-            self.hint = Some((probed.unwrap_or(floor), now));
+            self.hint = Some((probed.unwrap_or(floor), raised_from.unwrap_or(0), now));
         }
         self.held = false;
         Some(0)
@@ -302,20 +306,30 @@ impl FrameFloor {
             self.raise_backoff = (self.raise_backoff * 2).min(RAISE_BACKOFF_MAX);
             return self.set(streak.floor);
         }
-        let base = self.at_least(sample).max(self.floor.unwrap_or(0));
+        // 드라이버가 스스로 고른 칸과, 바닥까지 넣은 지금의 칸
+        let own = self.at_least(sample);
+        let base = own.max(self.floor.unwrap_or(0));
         let mut next = self.step_up(base);
-        // 방금 지켜지던 값이 있으면 한 번에 그 값으로 간다
-        if let Some((hint, at)) = self.hint.take()
-            && now.saturating_duration_since(at) <= HINT_FOR
-        {
-            next = next.max(hint);
+        // 방금 지켜지던 값이 있으면 한 번에 그 값으로 간다. 드라이버가 그때 머물던 클럭까지 돌아온 뒤에만: 그
+        // 아래에서 느린 것은 드라이버가 아직 오르는 중이어서일 수 있다(가벼운 화면이면 거기서 지켜진다)
+        match self.hint {
+            Some((_, _, at)) if now.saturating_duration_since(at) > HINT_FOR => self.hint = None,
+            Some((hint, from, _)) if base >= from => {
+                next = next.max(hint);
+                self.hint = None;
+            }
+            _ => {}
         }
         let next = next.min(self.top);
-        if next > base {
-            self.set(Some(next))
-        } else {
-            None
+        if next <= base {
+            return None;
         }
+        // 드라이버가 바닥 없이 머물던 가장 높은 칸을 적어 둔다. 오르는 도중에 한 칸 밀어 준 것은 그 뒤 드라이버가
+        // 더 오르면 덮어쓴다
+        if self.floor.is_none_or(|floor| own > floor) {
+            self.raised_from = Some(own);
+        }
+        self.set(Some(next))
     }
 
     fn kept(&mut self, now: Instant) -> Option<u64> {
@@ -354,6 +368,9 @@ impl FrameFloor {
             return None;
         }
         self.floor = floor;
+        if floor.is_none() {
+            self.raised_from = None;
+        }
         self.sample = None;
         self.stable = false;
         for stream in &mut self.streams {
@@ -1001,6 +1018,24 @@ mod tests {
         assert_eq!(again.len(), 1, "{:?}", &run.changes[before..]);
         assert_eq!(again[0].1, 1013);
         assert!(again[0].0 - from <= ms(450), "{again:?}");
+    }
+
+    #[test]
+    fn a_light_page_after_a_heavy_one_is_not_pushed_to_the_remembered_clock() {
+        let mut run = Run::with_driver();
+        run.play(&heavy_page(), ms(2000), true);
+        assert_eq!(run.min_mhz(), 1013);
+        run.rest(ms(1000));
+        // 드라이버가 다시 오르는 동안 프레임이 잠깐 느리다. 기억한 1013 MHz로 뛰지 않고, 상한 아래에서만 민다
+        let before = run.changes.len();
+        run.play(&light_scroll(), ms(3000), true);
+        assert!(
+            run.changes[before..].iter().all(|(_, mhz)| *mhz <= 542),
+            "{:?}",
+            &run.changes[before..]
+        );
+        assert_eq!(run.floor.floor_hz(), None);
+        assert_eq!(run.gpu.own, 542 * MHZ);
     }
 
     #[test]
