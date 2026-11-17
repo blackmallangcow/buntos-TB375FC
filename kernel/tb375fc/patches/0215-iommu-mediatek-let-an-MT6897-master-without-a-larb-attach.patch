@@ -1,0 +1,109 @@
+From: buntOS contributors
+Subject: [PATCH] iommu/mediatek: let an MT6897 master without a larb attach
+
+The video coprocessor of the MT6897 is a master of the MDP IOMMU that has
+no SMI larb: there is no port to enable and no larb device to link to. Let
+the platform data name such masters by a larb ID. They are linked to the
+SMI common of the IOMMU instead, which keeps the IOMMU powered while they
+run.
+
+Give the coprocessor the range the vendor gives it, 1.5 GiB from
+0x1_4000_0000. Its firmware expects its shared memory there.
+---
+ drivers/iommu/mtk_iommu.c | 32 ++++++++++++++++++++++++++++----
+ 1 file changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/iommu/mtk_iommu.c b/drivers/iommu/mtk_iommu.c
+index 60b400760..379ce31a0 100644
+--- a/drivers/iommu/mtk_iommu.c
++++ b/drivers/iommu/mtk_iommu.c
+@@ -251,6 +251,9 @@ struct mtk_iommu_plat_data {
+ 	};
+ 
+ 	unsigned char       larbid_remap[MTK_LARB_COM_MAX][MTK_LARB_SUBCOM_MAX];
++
++	/* Larb IDs of masters that reach the IOMMU without an SMI larb */
++	u32		    nolarb_msk;
+ };
+ 
+ struct mtk_iommu_bank_data {
+@@ -621,6 +624,9 @@ static int mtk_iommu_config(struct mtk_iommu_data *data, struct device *dev,
+ 	if (MTK_IOMMU_IS_TYPE(data->plat_data, MTK_IOMMU_TYPE_MM)) {
+ 		/* All ports should be in the same larb. just use 0 here */
+ 		larbid = MTK_M4U_TO_LARB(fwspec->ids[0]);
++		/* No larb, so no port to set up */
++		if (data->plat_data->nolarb_msk & BIT(larbid))
++			return 0;
+ 		larb_mmu = &data->larb_imu[larbid];
+ 		region = data->plat_data->iova_region + regionid;
+ 
+@@ -945,7 +951,11 @@ static struct iommu_device *mtk_iommu_probe_device(struct device *dev)
+ 	}
+ 
+ 	for_each_set_bit(larbid, &larbid_msk, 32) {
+-		larbdev = data->larb_imu[larbid].dev;
++		/* Without a larb the master hangs on the SMI common itself */
++		if (data->plat_data->nolarb_msk & BIT(larbid))
++			larbdev = data->smicomm_dev;
++		else
++			larbdev = data->larb_imu[larbid].dev;
+ 		if (!larbdev)
+ 			return ERR_PTR(-EINVAL);
+ 
+@@ -961,7 +971,10 @@ static struct iommu_device *mtk_iommu_probe_device(struct device *dev)
+ 
+ link_remove:
+ 	for_each_set_bit(i, &larbid_msk, larbid) {
+-		larbdev = data->larb_imu[i].dev;
++		if (data->plat_data->nolarb_msk & BIT(i))
++			larbdev = data->smicomm_dev;
++		else
++			larbdev = data->larb_imu[i].dev;
+ 		device_link_remove(dev, larbdev);
+ 	}
+ 
+@@ -986,7 +999,10 @@ static void mtk_iommu_release_device(struct device *dev)
+ 	}
+ 
+ 	for_each_set_bit(larbid, &larbid_msk, 32) {
+-		larbdev = data->larb_imu[larbid].dev;
++		if (data->plat_data->nolarb_msk & BIT(larbid))
++			larbdev = data->smicomm_dev;
++		else
++			larbdev = data->larb_imu[larbid].dev;
+ 		device_link_remove(dev, larbdev);
+ 	}
+ }
+@@ -1692,9 +1708,15 @@ static const struct mtk_iommu_iova_region mt6897_multi_dom[] = {
+ };
+ 
+ static const unsigned int mt6897_larb_region_msk[ARRAY_SIZE(mt6897_multi_dom)][MTK_LARB_NR_MAX] = {
+-	[0] = {[0 ... MTK_LARB_NR_MAX - 1] = ~0},	/* every larb port */
++	[0] = {[0 ... MTK_LARB_NR_MAX - 2] = ~0},	/* every larb port */
++#if IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT)
++	[5] = {[31] = BIT(0)},				/* the VCP */
++#endif
+ };
+ 
++/* larb31 stands for the masters without a larb: see the binding header */
++#define MT6897_NOLARB_MSK	BIT(31)
++
+ static const struct mtk_iommu_plat_data mt6897_data_disp = {
+ 	.m4u_plat	= M4U_MT6897,
+ 	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
+@@ -1707,6 +1729,7 @@ static const struct mtk_iommu_plat_data mt6897_data_disp = {
+ 	.iova_region	= mt6897_multi_dom,
+ 	.iova_region_nr	= ARRAY_SIZE(mt6897_multi_dom),
+ 	.iova_region_larb_msk = mt6897_larb_region_msk,
++	.nolarb_msk	= MT6897_NOLARB_MSK,
+ };
+ 
+ static const struct mtk_iommu_plat_data mt6897_data_mdp = {
+@@ -1721,6 +1744,7 @@ static const struct mtk_iommu_plat_data mt6897_data_mdp = {
+ 	.iova_region	= mt6897_multi_dom,
+ 	.iova_region_nr	= ARRAY_SIZE(mt6897_multi_dom),
+ 	.iova_region_larb_msk = mt6897_larb_region_msk,
++	.nolarb_msk	= MT6897_NOLARB_MSK,
+ };
+ 
+ static const struct mtk_iommu_plat_data mt8167_data = {

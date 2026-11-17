@@ -2323,6 +2323,42 @@
 			status = "disabled";
 		};
 
+		/*
+		 * Video coprocessor (VCP): a RISC-V core that runs the video
+		 * codec firmware. The bootloader loads the firmware and the
+		 * secure monitor releases the reset. Its power domain and its
+		 * clock are left on by the bootloader. Its memory accesses go
+		 * through the MDP IOMMU without an SMI larb.
+		 */
+		vcp: vcp@1ea00000 {
+			compatible = "mediatek,mt6897-vcp";
+			reg = <0 0x1ea00000 0 0x40000>,
+			      <0 0x1ec24000 0 0x1000>,
+			      <0 0x1ec30000 0 0x1000>,
+			      <0 0x1ecfb000 0 0x110>,
+			      <0 0x1ecfc000 0 0x110>,
+			      <0 0x1ecfd000 0 0x110>,
+			      <0 0x1ecfe000 0 0x110>,
+			      <0 0x1ecff000 0 0x110>;
+			reg-names = "sram", "cfg", "core0",
+				    "mbox0", "mbox1", "mbox2", "mbox3", "mbox4";
+			interrupts = <GIC_SPI 857 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 859 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 860 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 861 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 862 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 863 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "wdt", "mbox0", "mbox1", "mbox2",
+					  "mbox3", "mbox4";
+			clocks = <&topckgen CLK_TOP_MMUP>,
+				 <&topckgen CLK_TOP_MAINPLL_D3>,
+				 <&clk26m>;
+			clock-names = "mmup-sel", "mmup-clk", "mmup-26m";
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_MM_PROC_DORMANT>;
+			iommus = <&mdp_iommu M4U_PORT_L31_VIDEO_UP>;
+			status = "disabled";
+		};
+
 		mdpsys0: clock-controller@1f000000 {
 			compatible = "mediatek,mt6897-mdpsys0", "syscon";
 			reg = <0 0x1f000000 0 0x1000>;

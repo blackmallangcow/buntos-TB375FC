@@ -299,6 +299,14 @@
 			};
 		};
 
+		// VCP의 도메인(2단계). LK가 켜 둔 채 넘기지만 꺼진 도메인으로 등록하고, 소비자(vcp 노드)는 꺼 둔 채 부팅한다
+		power-domain@MT6897_POWER_DOMAIN_MM_PROC_DORMANT {
+			reg = <MT6897_POWER_DOMAIN_MM_PROC_DORMANT>;
+			clocks = <&topckgen CLK_TOP_MMUP>;
+			clock-names = "mmup";
+			#power-domain-cells = <0>;
+		};
+
 		power-domain@MT6897_POWER_DOMAIN_DIS1_SHUTDOWN {
 			reg = <MT6897_POWER_DOMAIN_DIS1_SHUTDOWN>;
 			clocks = <&topckgen CLK_TOP_DISP1>;
@@ -451,7 +459,7 @@
 };
 
 // 비디오 디코더 1단계: MDP 쪽 IOMMU와 SMI, 디코더 코어의 larb(docs/tb375fc/video-decode.md 7.1절).
-// 클럭 게이트만 켠다(레지스터를 건드리지 않고 등록만 한다). smi_mdp_common, larb4, mdp_iommu는 꺼 둔 채 부팅한다:
+// 클럭 게이트만 켠다(레지스터를 건드리지 않고 등록만 한다). smi_mdp_common, larb4, mdp_iommu, vcp는 꺼 둔 채 부팅한다:
 // larb가 붙으면 genpd가 VDE0·VDE1을 켰다 끄고, 화면이 같은 IOMMU를 우회로 지나고 있다.
 &vdecsys {
 	status = "okay";

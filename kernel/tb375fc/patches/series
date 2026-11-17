@@ -288,3 +288,9 @@
 0210-dt-bindings-iommu-memory-mediatek-add-MT6897.patch
 0211-iommu-mediatek-add-the-MT6897-multimedia-IOMMUs.patch
 0212-memory-mtk-smi-add-MT6897.patch
+# 0213~0215 비디오 디코더 2단계의 IOMMU 쪽. 0213: 이 기기는 하이퍼바이저가 IOMMU 표를 그림자 표로 관리한다(hyp-mmu type 2).
+#      매핑과 해제 뒤에 범위를 알려야 그림자 표에 반영된다(벤더와 같은 호출). 없으면 마스터의 번역이 안 된다(기기에서 확인).
+#      0214·0215: VCP는 larb 없이 MDP IOMMU에 닿는 마스터다. 가짜 larb 31로 적고, 벤더가 주는 영역(0x1_4000_0000부터 1.5 GiB)을 준다
+0213-iommu-mediatek-tell-the-MT6897-hypervisor-about-changed-mappings.patch
+0214-dt-bindings-memory-mediatek-add-the-MT6897-video-coprocessor-port.patch
+0215-iommu-mediatek-let-an-MT6897-master-without-a-larb-attach.patch

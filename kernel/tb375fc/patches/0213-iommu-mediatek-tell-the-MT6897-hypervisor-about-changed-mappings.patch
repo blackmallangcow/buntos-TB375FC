@@ -1,0 +1,134 @@
+From: buntOS contributors
+Subject: [PATCH] iommu/mediatek: tell the MT6897 hypervisor about changed mappings
+
+On boards with the MediaTek hypervisor, the multimedia IOMMUs of the MT6897
+do not walk the page table of the kernel. The hypervisor takes the write of
+the table address and gives the hardware a table of its own. That copy
+takes a new mapping, or drops an old one, only when the kernel says that a
+range has changed. The MediaTek driver in the OnePlus MT6897 kernel does
+so after every map and unmap when the hypervisor reports this mode
+("hyp-mmu type 2"), and this adds the same two calls.
+
+On a Lenovo TB375FC the table address register reads back an address in a
+block the bootloader reserves for the hypervisor, the hypervisor reports
+the mode as on, and its lookup call finds a buffer the kernel has mapped
+only after the call for its range.
+
+Without the hypervisor the query fails and nothing changes.
+---
+ drivers/iommu/mtk_iommu.c | 46 ++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/iommu/mtk_iommu.c b/drivers/iommu/mtk_iommu.c
+index 3d93c0243..60b400760 100644
+--- a/drivers/iommu/mtk_iommu.c
++++ b/drivers/iommu/mtk_iommu.c
+@@ -119,6 +119,10 @@
+ #define F_MMU_INT_ID_PORT_ID_WID_6(a)		(((a) >> 2) & 0x3f)
+ 
+ #define MTK_PROTECT_PA_ALIGN			256
++
++/* Calls to a hypervisor that walks its own copy of the page table */
++#define MTK_HYP_PMM_GET_HYPMMU_TYPE2_EN		0xbb00ffa4
++#define MTK_HYP_PMM_HYPMMU_TYPE2_INV		0xbb00ffa7
+ #define MTK_IOMMU_BANK_SZ			0x1000
+ 
+ #define PERICFG_IOMMU_1				0x714
+@@ -152,6 +156,8 @@
+ #define DL_WITH_MULTI_LARB		BIT(21)
+ /* A TLB invalidation waits for the walks in flight; no fault redirect. */
+ #define TLB_SYNC_EN			BIT(22)
++/* A hypervisor may keep its own copy of the page table for the hardware */
++#define HYP_SHADOW_PGTABLE		BIT(23)
+ 
+ #define MTK_IOMMU_HAS_FLAG_MASK(pdata, _x, mask)	\
+ 				((((pdata)->flags) & (mask)) == (_x))
+@@ -274,6 +280,7 @@ struct mtk_iommu_data {
+ 
+ 	struct regmap			*pericfg;
+ 	struct mutex			mutex; /* Protect m4u_group/m4u_dom above */
++	bool				hyp_shadow; /* tell the hypervisor about changes */
+ 
+ 	/*
+ 	 * In the sharing pgtable case, list data->list to the global list like m4ulist.
+@@ -836,6 +843,28 @@ static size_t mtk_iommu_unmap(struct iommu_domain *domain,
+ 	return dom->iop->unmap_pages(dom->iop, iova, pgsize, pgcount, gather);
+ }
+ 
++/*
++ * The hardware walks a copy of the page table that the hypervisor keeps. The
++ * copy takes a mapping, or drops one, only when it is told that the range has
++ * changed.
++ */
++static void mtk_iommu_hyp_sync(struct mtk_iommu_domain *dom, unsigned long iova,
++			       size_t size)
++{
++	struct mtk_iommu_data *data = dom->bank->parent_data;
++	struct arm_smccc_res res;
++
++	if (!data->hyp_shadow)
++		return;
++
++	arm_smccc_smc(MTK_HYP_PMM_HYPMMU_TYPE2_INV, MTK_IOMMU_TLB_ADDR(iova),
++		      MTK_IOMMU_TLB_ADDR(iova + size - 1), 0, 0, 0, 0, 0, &res);
++	if (res.a0)
++		dev_err_ratelimited(data->dev,
++				    "hypervisor did not take iova 0x%lx+0x%zx: %ld\n",
++				    iova, size, (long)res.a0);
++}
++
+ static void mtk_iommu_flush_iotlb_all(struct iommu_domain *domain)
+ {
+ 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
+@@ -850,6 +879,7 @@ static void mtk_iommu_iotlb_sync(struct iommu_domain *domain,
+ 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
+ 	size_t length = gather->end - gather->start + 1;
+ 
++	mtk_iommu_hyp_sync(dom, gather->start, length);
+ 	mtk_iommu_tlb_flush_range_sync(gather->start, length, dom->bank);
+ }
+ 
+@@ -858,6 +888,7 @@ static int mtk_iommu_sync_map(struct iommu_domain *domain, unsigned long iova,
+ {
+ 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
+ 
++	mtk_iommu_hyp_sync(dom, iova, size);
+ 	mtk_iommu_tlb_flush_range_sync(iova, size, dom->bank);
+ 	return 0;
+ }
+@@ -1395,6 +1426,15 @@ static int mtk_iommu_probe(struct platform_device *pdev)
+ 			return PTR_ERR(data->bclk);
+ 	}
+ 
++	if (MTK_IOMMU_HAS_FLAG(data->plat_data, HYP_SHADOW_PGTABLE)) {
++		struct arm_smccc_res res;
++
++		arm_smccc_smc(MTK_HYP_PMM_GET_HYPMMU_TYPE2_EN, 0, 0, 0, 0, 0, 0, 0, &res);
++		data->hyp_shadow = res.a0 == 1;
++		dev_info(dev, "hypervisor page table copy: %s\n",
++			 str_on_off(data->hyp_shadow));
++	}
++
+ 	if (MTK_IOMMU_HAS_FLAG(data->plat_data, PGTABLE_PA_35_EN)) {
+ 		ret = dma_set_mask(dev, DMA_BIT_MASK(35));
+ 		if (ret) {
+@@ -1658,7 +1698,8 @@ static const unsigned int mt6897_larb_region_msk[ARRAY_SIZE(mt6897_multi_dom)][M
+ static const struct mtk_iommu_plat_data mt6897_data_disp = {
+ 	.m4u_plat	= M4U_MT6897,
+ 	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
+-			  PGTABLE_PA_35_EN | TLB_SYNC_EN | MTK_IOMMU_TYPE_MM,
++			  PGTABLE_PA_35_EN | TLB_SYNC_EN | HYP_SHADOW_PGTABLE |
++			  MTK_IOMMU_TYPE_MM,
+ 	.hw_list	= &m4ulist,
+ 	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
+ 	.banks_num	= 1,
+@@ -1671,7 +1712,8 @@ static const struct mtk_iommu_plat_data mt6897_data_disp = {
+ static const struct mtk_iommu_plat_data mt6897_data_mdp = {
+ 	.m4u_plat	= M4U_MT6897,
+ 	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
+-			  PGTABLE_PA_35_EN | TLB_SYNC_EN | MTK_IOMMU_TYPE_MM,
++			  PGTABLE_PA_35_EN | TLB_SYNC_EN | HYP_SHADOW_PGTABLE |
++			  MTK_IOMMU_TYPE_MM,
+ 	.hw_list	= &m4ulist,
+ 	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
+ 	.banks_num	= 1,
