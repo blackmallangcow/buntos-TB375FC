@@ -28,6 +28,34 @@ pub struct Config {
     /// AI 에이전트 입력의 사람 우선 규칙 (agent_guard.rs). 없으면 기본값이다
     #[serde(default)]
     pub agent: Agent,
+    /// GPU의 프레임 바닥 (frame_floor.rs). 없으면 기본값이다
+    #[serde(default)]
+    pub gpu: Gpu,
+}
+
+/// GPU (frame_floor.rs)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Gpu {
+    /// 사람이 화면을 움직이는 동안 지킬 초당 프레임. 그 아래로 떨어지면 GPU의 최소 클럭을 올린다. 0이면 끈다
+    #[serde(default = "default_min_fps")]
+    pub min_fps: u32,
+    /// 프레임 바닥이 올릴 수 있는 가장 높은 GPU 클럭 (MHz). 0이면 GPU의 최고 클럭까지
+    #[serde(default)]
+    pub min_fps_max_mhz: u32,
+}
+
+impl Default for Gpu {
+    fn default() -> Self {
+        Self {
+            min_fps: default_min_fps(),
+            min_fps_max_mhz: 0,
+        }
+    }
+}
+
+fn default_min_fps() -> u32 {
+    60
 }
 
 /// AI 에이전트 (agent_guard.rs)
@@ -169,6 +197,12 @@ mod tests {
         assert!(!config.session.exit_with_shell);
         // 입력 모드는 장치로 정한다
         assert_eq!(config.input.mode, ModeSetting::Auto);
+        // 사람이 화면을 움직이는 동안 60프레임을 지키고, GPU의 최고 클럭까지 올린다
+        assert_eq!(config.gpu.min_fps, 60);
+        assert_eq!(config.gpu.min_fps_max_mhz, 0);
+        // [gpu]가 없는 옛 설정 파일도 같은 값이다
+        let old: Config = toml::from_str(&DEFAULT.replace("[gpu]", "[gpu-unknown]")).unwrap();
+        assert_eq!(old.gpu.min_fps, 60);
         // 사람 입력 뒤 AI는 1.5초 기다린다
         assert_eq!(config.agent.yield_ms, 1500);
     }
