@@ -543,7 +543,9 @@ if [[ "$agent_refs" != NONE ]]; then
 		"ec9588eb8595ed9598ec84b8ec9a940a 0"
 
 	# Firefox(GTK3, text-input-v3)의 글 칸: 조합 중 Tab으로 다음 칸에 가면 조합하던 글자는 앞 칸에 남고, 같은
-	# 창의 다른 칸을 눌러도 남는다
+	# 창의 다른 칸을 눌러도 남는다. 방금 터미널에 친 키에서 yield-ms(1.5초)가 지난 뒤에 띄운다: 그 안에 뜬 새 창은
+	# 사람이 치는 중이라 뒤에 뜨고 키보드를 받지 않는다(R3). Firefox가 0.7초 만에 뜨면 걸렸다
+	keys sleep:1.6
 	guest firefox-prepare
 	check "Firefox에서 칸 둘인 페이지를 열고 첫 칸에 포커스를 준다" "$answer" ready
 	if [[ "$answer" == ready ]]; then
