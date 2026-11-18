@@ -21,6 +21,17 @@ MT6895. What was learned on a Lenovo TB375FC:
   source is kept running. Which of the three it cannot do without was
   not separated. All three are done here until the clock driver models
   this mux as the vendor does.
+- The firmware plans the clock of the decoder from what the kernel
+  writes at the end of the shared structure before it starts that
+  planning (rate, priority, codec, active), as the vendor kernel does.
+  Left empty, the firmware decodes about a hundred frames at 660 MHz and
+  then stays at 218 MHz: sent one at a time, a 3840x2160 VP9 frame then
+  takes 22 ms instead of 13. Nothing tells the driver the rate of the
+  stream, so it asks for 480 frames a second, which the firmware answers
+  with the highest clock and holds while it plans. A session it is only
+  told is at rest keeps that clock until its next frame, so after 2 s
+  without a frame the driver ends the planning, which lowers the clock
+  at once, and starts it again at the next frame.
 - The firmware asks the voltage request block (DVFSRC) for a voltage
   level before a frame and waits without end if that block is off, so
   the driver does not probe before it.
@@ -95,15 +106,16 @@ through GStreamer 1.28 (v4l2h264dec, v4l2h265dec, v4l2vp9dec,
 v4l2av1dec).
 Stops of the stream queue while frames come out (120 of them, at
 different points), clients killed in the middle and refused starts
-leave no warning.
+leave no warning. Neither do a stream that pauses for 4 s, and stops and
+closes during such a rest.
 ---
  drivers/media/platform/mediatek/Kconfig            |    1 +
  drivers/media/platform/mediatek/Makefile           |    1 +
  .../media/platform/mediatek/mt6897-vdec/Kconfig    |   19 +
  .../media/platform/mediatek/mt6897-vdec/Makefile   |    2 +
- .../platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h |  231 +++
- .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 2033 ++++++++++++++++++++
- 6 files changed, 2287 insertions(+)
+ .../platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h |  240 +++
+ .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 2094 ++++++++++++++++++++
+ 6 files changed, 2357 insertions(+)
 
 diff --git a/drivers/media/platform/mediatek/Kconfig b/drivers/media/platform/mediatek/Kconfig
 index 84104e2cd..b05570e8b 100644
@@ -158,10 +170,10 @@ index 000000000..4bac9b79e
 +obj-$(CONFIG_VIDEO_MEDIATEK_MT6897_VDEC) += mt6897-vdec.o
 diff --git a/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h
 new file mode 100644
-index 000000000..28cec4000
+index 000000000..221d2008a
 --- /dev/null
 +++ b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,240 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * What the kernel and the video firmware of the MT6897 exchange for decoding.
@@ -353,7 +365,14 @@ index 000000000..28cec4000
 +	s32 meta_buf_fd;
 +	u32 meta_buf_size;
 +	u32 ipi_blocked, interlacing_fieldseq;
-+	u8 tail[224];	/* HDR data, trick mode, clock hints: not used */
++	u8 hdr[176];	/* HDR data, trick mode: not used */
++	/* What the firmware picks the clock of the decoder by */
++	u32 ctx_id;
++	s32 op_rate, op_rate_adaptive, priority;
++	u32 codec_fmt;
++	s32 target_freq;	/* its answer */
++	u32 is_active;
++	u64 vp_mode_src_buf[2];
 +};
 +
 +static_assert(sizeof(struct vdec_share_obj) == 72);
@@ -369,6 +388,8 @@ index 000000000..28cec4000
 +static_assert(offsetof(struct vdec_vsi, input_driven) == 11268);
 +static_assert(offsetof(struct vdec_vsi, general_buf_dma) == 11792);
 +static_assert(offsetof(struct vdec_vsi, ipi_blocked) == 11824);
++static_assert(offsetof(struct vdec_vsi, ctx_id) == 12008);
++static_assert(offsetof(struct vdec_vsi, is_active) == 12032);
 +static_assert(sizeof(struct vdec_vsi) == 12056);
 +
 +/*
@@ -395,10 +416,10 @@ index 000000000..28cec4000
 +#endif
 diff --git a/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
 new file mode 100644
-index 000000000..c2079b0aa
+index 000000000..df70d85dd
 --- /dev/null
 +++ b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
-@@ -0,0 +1,2033 @@
+@@ -0,0 +1,2094 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * MediaTek MT6897 video decoder: a V4L2 stateful decoder on the stock video
@@ -460,8 +481,17 @@ index 000000000..c2079b0aa
 +#define VDEC_MIN_W		64
 +#define VDEC_MAX_W		4096
 +#define VDEC_MAX_H		2176
-+/* The firmware picks its clock from the rate it is told */
 +#define VDEC_OPERATING_RATE	30
++/*
++ * The frames a second the firmware plans the clock of the decoder for. Nothing
++ * tells the driver the rate of the stream, and an application that waits for
++ * each frame before it sends the next needs the highest clock for 3840x2160 at
++ * 60 frames a second. Left at 0, the firmware falls to the lowest clock after
++ * about a hundred frames.
++ */
++#define VDEC_CLOCK_RATE		480
++/* No frame for this long: the clock goes back to the lowest */
++#define VDEC_REST_MS		2000
 +
 +/* The decoder clock mux and the hardware voter that gates it (vendor clk-mt6897.c) */
 +#define TOP_CLK_CFG_UPDATE1	0x008
@@ -576,6 +606,8 @@ index 000000000..c2079b0aa
 +	unsigned int fb_gen;		/* counts what may have changed that */
 +	unsigned int resent;
 +	bool vcp_on, powered, fw_open, fw_has_fbs, dead;
++	bool clock_on;			/* the firmware plans the clock of the decoder */
++	unsigned long last_frame;
 +
 +	/* The stream */
 +	const struct vdec_codec *codec;
@@ -589,7 +621,7 @@ index 000000000..c2079b0aa
 +	struct kthread_work frame_work;
 +	struct delayed_work retry_work;
 +	struct pm_qos_request qos;
-+	struct delayed_work idle_work;
++	struct delayed_work idle_work, rest_work;
 +};
 +
 +static inline struct mt6897_vdec_ctx *file_to_ctx(struct file *file)
@@ -1141,6 +1173,36 @@ index 000000000..c2079b0aa
 +			       AP_IPIMSG_DEC_SET_PARAM + 0x1000);
 +}
 +
++/*
++ * Start or end the clock planning of the firmware. Started, the firmware holds
++ * the clock the rate needs; ended, the clock is at its lowest at once. The
++ * firmware lowers the clock of a session it was only told is at rest no
++ * earlier than at the next frame.
++ */
++static int vdec_fw_clock(struct mt6897_vdec_ctx *ctx, bool on)
++{
++	struct vdec_vsi *vsi = ctx->vsi;
++	int ret;
++
++	lockdep_assert_held(&ctx->cmd_lock);
++	if (ctx->clock_on == on || ctx->dead)
++		return 0;
++	if (on) {
++		/* The vendor fills these in before the start */
++		vsi->ctx_id = 1;
++		vsi->op_rate = VDEC_CLOCK_RATE;
++		vsi->op_rate_adaptive = VDEC_CLOCK_RATE;
++		vsi->priority = -1;
++		vsi->codec_fmt = ctx->codec->fourcc;
++		vsi->is_active = 1;
++	}
++	ret = vdec_fw_set_param(ctx, VDEC_SET_PARAM_MMDVFS,
++				on ? VDEC_MMDVFS_START : VDEC_MMDVFS_END);
++	if (!ctx->dead)
++		ctx->clock_on = on;
++	return ret;
++}
++
 +static int vdec_fw_give_fb(struct mt6897_vdec_ctx *ctx, unsigned int idx)
 +{
 +	struct vdec_ap_set_param msg = {
@@ -1253,6 +1315,7 @@ index 000000000..c2079b0aa
 +		vdec_fw_command(ctx, VDEC_SRV_COMMON, &cmd, sizeof(cmd), AP_IPIMSG_DEC_DEINIT + 0x1000);
 +		ctx->fw_open = false;
 +	}
++	ctx->clock_on = false;
 +	if (ctx->powered)
 +		vdec_power_off(vdec);
 +	ctx->powered = false;
@@ -1443,7 +1506,9 @@ index 000000000..c2079b0aa
 +	vdec_fw_command(ctx, VDEC_SRV_COMMON, &msg, sizeof(msg), AP_IPIMSG_DEC_SET_PARAM + 0x1000);
 +	if (ctx->dead)
 +		return -EIO;
-+	return vdec_fw_set_param(ctx, VDEC_SET_PARAM_MMDVFS, VDEC_MMDVFS_START);
++	ctx->last_frame = jiffies;
++	mod_delayed_work(system_wq, &ctx->rest_work, msecs_to_jiffies(VDEC_REST_MS));
++	return vdec_fw_clock(ctx, true);
 +}
 +
 +/* Frames out */
@@ -1650,6 +1715,9 @@ index 000000000..c2079b0aa
 +	 * a free frame buffer the firmware wants the same buffer again. Once it
 +	 * has taken the buffer, it owns it until it lists it as read.
 +	 */
++	ctx->last_frame = jiffies;
++	mod_delayed_work(system_wq, &ctx->rest_work, msecs_to_jiffies(VDEC_REST_MS));
++	vdec_fw_clock(ctx, true);	/* after a rest */
 +	mutex_lock(&ctx->ring_lock);
 +	ctx->src_cur = src;
 +	ctx->src_cur_read = false;
@@ -1697,6 +1765,18 @@ index 000000000..c2079b0aa
 +						   idle_work);
 +
 +	cpu_latency_qos_update_request(&ctx->qos, PM_QOS_DEFAULT_VALUE);
++}
++
++/* No frame for longer: a paused stream does not hold the highest clock */
++static void vdec_rest_work(struct work_struct *work)
++{
++	struct mt6897_vdec_ctx *ctx = container_of(to_delayed_work(work), struct mt6897_vdec_ctx,
++						   rest_work);
++
++	mutex_lock(&ctx->cmd_lock);
++	if (time_is_before_eq_jiffies(ctx->last_frame + msecs_to_jiffies(VDEC_REST_MS)))
++		vdec_fw_clock(ctx, false);
++	mutex_unlock(&ctx->cmd_lock);
 +}
 +
 +static void vdec_device_run(void *priv)
@@ -2041,7 +2121,7 @@ index 000000000..c2079b0aa
 +		/* Everything in flight is dropped; the firmware lets go of every buffer */
 +		vdec_fw_flush(ctx);
 +		if (!V4L2_TYPE_IS_OUTPUT(vq->type))
-+			vdec_fw_set_param(ctx, VDEC_SET_PARAM_MMDVFS, VDEC_MMDVFS_END);
++			vdec_fw_clock(ctx, false);
 +		else if (was_ready)
 +			vdec_fw_give_free(ctx);	/* a seek: go on with the same frame buffers */
 +	}
@@ -2145,6 +2225,7 @@ index 000000000..c2079b0aa
 +	INIT_WORK(&ctx->drain_work, vdec_drain_work);
 +	INIT_DELAYED_WORK(&ctx->retry_work, vdec_retry_work);
 +	INIT_DELAYED_WORK(&ctx->idle_work, vdec_idle_work);
++	INIT_DELAYED_WORK(&ctx->rest_work, vdec_rest_work);
 +	cpu_latency_qos_add_request(&ctx->qos, PM_QOS_DEFAULT_VALUE);
 +	vdec_default_formats(ctx);
 +	v4l2_fh_init(&ctx->fh, video_devdata(file));
@@ -2182,6 +2263,7 @@ index 000000000..c2079b0aa
 +	cancel_work_sync(&ctx->decode_work);
 +	cancel_delayed_work_sync(&ctx->retry_work);
 +	cancel_delayed_work_sync(&ctx->idle_work);
++	cancel_delayed_work_sync(&ctx->rest_work);
 +	cpu_latency_qos_remove_request(&ctx->qos);
 +	vdec->ctx = NULL;
 +	mutex_unlock(&vdec->lock);
