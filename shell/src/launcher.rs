@@ -7,7 +7,11 @@
 //! 패널 바깥을 누르거나 Esc를 누르면 닫힌다(검색어가 있으면 Esc는 먼저 검색어를 지운다).
 //! 검색 칸 오른쪽의 단추나 ⌘4는 클립보드 기록(clipboard_panel.rs)으로 넘어간다. Spotlight의 클립보드 단추와 같다.
 
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
 
 use bunt_i18n::Translations;
 use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
@@ -35,6 +39,10 @@ const PANEL_WIDTH: i32 = 860;
 const PANEL_HEIGHT: i32 = 620;
 /// 닫힐 때 사라지는 시간 (style.css의 launcher-panel transition과 같다)
 pub const CLOSE_DELAY: Duration = Duration::from_millis(140);
+/// 셸이 뜬 뒤 패널을 미리 만들어 두기까지. 로그인 직후의 바쁜 때를 피한다
+const PREBUILD_AFTER: Duration = Duration::from_secs(3);
+/// 앱이 설치·삭제된 뒤 패널을 다시 만들기까지. 꾸러미 하나가 .desktop 파일을 여럿 건드리는 동안 기다린다
+const REBUILD_AFTER: Duration = Duration::from_secs(1);
 /// org.buntos.shell 키: 최근에 실행한 앱의 .desktop ID, 최근 것이 먼저
 const RECENT_KEY: &str = "recent-apps";
 
@@ -193,10 +201,44 @@ struct Inner {
     panel: gtk::Box,
     tr: Rc<Translations>,
     toplevels: Option<Toplevels>,
-    /// 지금 패널의 검색 칸 (열 때마다 새로 만든다)
+    /// 지금 패널의 검색 칸 (패널을 만들 때마다 새로 만든다)
     search: RefCell<Option<gtk::SearchEntry>>,
+    /// 만들어 둔 패널. 열 때마다 만들면 누른 뒤 한참 있다가 뜨고 첫 프레임이 무겁다(TB375FC에서 손을 뗀 뒤 약
+    /// 0.3초). 그래서 한 번 만들어 두고, 열 때는 고르던 것만 처음으로 되돌린다
+    built: RefCell<Option<Built>>,
+    /// 설치된 앱이 바뀐 횟수. 패널을 만든 때와 다르면 다시 만든다
+    apps_version: Rc<Cell<u64>>,
+    /// 앱이 설치·삭제되는 것을 알리는 감시. 쥐고 있어야 신호가 온다
+    _monitor: gio::AppInfoMonitor,
     /// 클립보드 기록 창
     clipboard: ClipboardPanel,
+}
+
+/// 만들어 둔 패널에서 열 때마다 되돌릴 것
+struct Built {
+    /// 만들 때의 것. 달라지면 다시 만든다: 설치된 앱, 입력 모드(검색 칸이 키를 받는 법이 다르다, `prepare_search`)
+    apps_version: u64,
+    touch: bool,
+    apps: Rc<Vec<App>>,
+    search: gtk::SearchEntry,
+    query: Rc<RefCell<String>>,
+    chips: Vec<gtk::ToggleButton>,
+    /// 분류 칩 줄과 앱 격자의 스크롤
+    scrollers: [gtk::ScrolledWindow; 2],
+    recent_grid: gtk::FlowBox,
+    /// 최근에 쓴 앱 줄에 놓은 앱 (apps의 자리)
+    recent: Rc<RefCell<Vec<usize>>>,
+    /// 거른 결과를 다시 보인다
+    refresh: Rc<dyn Fn()>,
+}
+
+/// 최근에 쓴 앱 줄에 놓을 앱 (apps의 자리)
+fn recent_apps(apps: &[App]) -> Vec<usize> {
+    recent_ids()
+        .iter()
+        .filter_map(|id| apps.iter().position(|app| &app.id == id))
+        .take(RECENT_COUNT)
+        .collect()
 }
 
 impl Launcher {
@@ -216,14 +258,44 @@ impl Launcher {
             .build();
         window.set_child(Some(&panel));
 
+        let monitor = gio::AppInfoMonitor::get();
         let launcher = Self(Rc::new(Inner {
             window,
             panel,
             tr: tr.clone(),
             toplevels: toplevels.cloned(),
             search: RefCell::new(None),
+            built: RefCell::new(None),
+            apps_version: Rc::default(),
+            _monitor: monitor.clone(),
             clipboard: ClipboardPanel::new(app, tr, history),
         }));
+
+        // 패널을 미리 만들어 둔다: 셸이 뜬 뒤 한 번, 그리고 앱이 설치·삭제될 때마다. 패널이 떠 있는 동안에는 고르던
+        // 것을 잃지 않게 그대로 두고 다음에 열 때 만든다 (`prepare`)
+        let weak = Rc::downgrade(&launcher.0);
+        let prebuild = move || {
+            if let Some(inner) = weak.upgrade() {
+                Launcher(inner).prebuild();
+            }
+        };
+        glib::timeout_add_local_once(PREBUILD_AFTER, prebuild.clone());
+        let version = launcher.0.apps_version.clone();
+        let pending: Rc<Cell<Option<glib::SourceId>>> = Rc::default();
+        monitor.connect_changed(move |_| {
+            version.set(version.get() + 1);
+            if let Some(source) = pending.take() {
+                source.remove();
+            }
+            let (pending_done, prebuild) = (pending.clone(), prebuild.clone());
+            pending.set(Some(glib::timeout_add_local_once(
+                REBUILD_AFTER,
+                move || {
+                    pending_done.set(None);
+                    prebuild();
+                },
+            )));
+        });
 
         let weak = Rc::downgrade(&launcher.0);
         launcher.0.clipboard.set_back(move || {
@@ -310,7 +382,7 @@ impl Launcher {
 
     /// 클립보드 기록에서 모든 앱으로 돌아온다
     fn back_from_clipboard(&self) {
-        self.fill();
+        self.prepare();
         fit_panel(&self.0.window, &self.0.panel);
         self.0.panel.add_css_class("shown");
         self.0.window.present();
@@ -328,8 +400,7 @@ impl Launcher {
     }
 
     pub fn show(&self) {
-        // 열 때마다 앱 목록을 새로 읽는다 (그사이 설치·삭제된 앱 반영)
-        self.fill();
+        self.prepare();
         fit_panel(&self.0.window, &self.0.panel);
         self.0.window.present();
         self.focus_search();
@@ -338,6 +409,69 @@ impl Launcher {
         glib::timeout_add_local_once(Duration::from_millis(16), move || {
             panel.add_css_class("shown");
         });
+    }
+
+    /// 만들어 둔 패널이 지금의 앱 목록과 입력 모드에 맞는지
+    fn is_fresh(&self) -> bool {
+        let touch = self.0.window.has_css_class(TOUCH_CLASS);
+        let version = self.0.apps_version.get();
+        self.0
+            .built
+            .borrow()
+            .as_ref()
+            .is_some_and(|built| built.apps_version == version && built.touch == touch)
+    }
+
+    /// 패널을 띄우기 전에 부른다. 만들어 둔 패널이 맞으면 고르던 것만 처음으로 되돌리고, 아니면 다시 만든다
+    fn prepare(&self) {
+        if self.is_fresh() {
+            self.reset();
+        } else {
+            self.fill();
+        }
+    }
+
+    /// 패널이 떠 있지 않은 동안 미리 만들어 둔다
+    fn prebuild(&self) {
+        if !self.0.window.is_visible() && !self.is_fresh() {
+            self.fill();
+        }
+    }
+
+    /// 만들어 둔 패널을 막 만든 것처럼 되돌린다: 검색어와 고른 분류를 지우고, 맨 위로 올리고, 최근에 쓴 앱 줄을
+    /// 고친다
+    fn reset(&self) {
+        let built = self.0.built.borrow();
+        let Some(built) = built.as_ref() else {
+            return;
+        };
+        let recent = recent_apps(&built.apps);
+        if *built.recent.borrow() != recent {
+            while let Some(child) = built.recent_grid.first_child() {
+                built.recent_grid.remove(&child);
+            }
+            for &index in &recent {
+                built.recent_grid.append(&tile(&built.apps[index]));
+            }
+            built.recent.replace(recent);
+        }
+        for chip in &built.chips {
+            chip.set_active(false);
+        }
+        // 검색 칸은 바뀐 글을 조금 늦게 알리므로(search-changed) 거르는 글은 여기서 바로 지운다
+        built.search.set_text("");
+        built.query.borrow_mut().clear();
+        if built.touch {
+            // 터치 모드의 칸은 눌러야 포커스를 받는다 (`prepare_search`)
+            built.search.set_can_focus(false);
+        }
+        (built.refresh)();
+        for scroller in &built.scrollers {
+            scroller.hadjustment().set_value(0.0);
+            scroller.vadjustment().set_value(0.0);
+        }
+        // 지난번에 누른 칸에 포커스가 남지 않게 한다. 띄울 때 GTK가 새 패널에서처럼 다시 정한다
+        gtk::prelude::GtkWindowExt::set_focus(&self.0.window, None::<&gtk::Widget>);
     }
 
     pub fn hide(&self) {
@@ -359,6 +493,8 @@ impl Launcher {
         let inner = &self.0;
         let tr = &inner.tr;
         clear(&inner.panel);
+        let apps_version = inner.apps_version.get();
+        let touch = inner.window.has_css_class(TOUCH_CLASS);
         let apps = Rc::new(installed_apps());
 
         // 검색 칸: 앱 아이콘과 큰 글씨 (macOS 응용 프로그램 창의 머리)
@@ -412,13 +548,9 @@ impl Launcher {
         inner.panel.append(&separator());
 
         // 최근에 쓴 앱 한 줄과 모든 앱
-        let recent: Vec<usize> = recent_ids()
-            .iter()
-            .filter_map(|id| apps.iter().position(|app| &app.id == id))
-            .take(RECENT_COUNT)
-            .collect();
+        let recent = Rc::new(RefCell::new(recent_apps(&apps)));
         let recent_grid = grid();
-        for &index in &recent {
+        for &index in recent.borrow().iter() {
             recent_grid.append(&tile(&apps[index]));
         }
         let recent_line = separator();
@@ -477,11 +609,12 @@ impl Launcher {
                 recent_line.clone(),
                 empty.clone(),
             );
-            let has_recent = !recent.is_empty();
+            let recent = recent.clone();
             Rc::new(move || {
                 all_grid.invalidate_filter();
                 // 최근 줄은 거르지 않을 때만 보인다
                 let browsing = query.borrow().is_empty() && category.borrow().is_none();
+                let has_recent = !recent.borrow().is_empty();
                 recent_grid.set_visible(browsing && has_recent);
                 recent_line.set_visible(browsing && has_recent);
                 let any = (0..apps.len()).any(|index| matches(index));
@@ -499,6 +632,8 @@ impl Launcher {
         });
         // 칩은 하나만 고른다. 고른 칩을 다시 누르면 고르지 않은 상태로 돌아간다
         let all_chips = chips.downgrade();
+        let chip_widgets: Vec<gtk::ToggleButton> =
+            chip_buttons.iter().map(|(_, chip)| chip.clone()).collect();
         for (kind, chip) in chip_buttons {
             let (category, refresh, all_chips) =
                 (category.clone(), refresh.clone(), all_chips.clone());
@@ -534,26 +669,40 @@ impl Launcher {
         });
         let this = self.clone();
         let opened = apps.clone();
+        let placed = recent.clone();
         recent_grid.connect_child_activated(move |_, child| {
-            if let Some(app) = usize::try_from(child.index())
+            let index = usize::try_from(child.index())
                 .ok()
-                .and_then(|position| recent.get(position))
-                .and_then(|&index| opened.get(index))
-            {
+                .and_then(|position| placed.borrow().get(position).copied());
+            if let Some(app) = index.and_then(|index| opened.get(index)) {
                 this.open(app);
             }
         });
         // 검색 칸의 Enter는 보이는 첫 앱을 연다
         let this = self.clone();
+        let listed = apps.clone();
         search.connect_activate(move |_| {
-            if let Some(app) = (0..apps.len())
+            if let Some(app) = (0..listed.len())
                 .find(|&index| matches(index))
-                .and_then(|index| apps.get(index))
+                .and_then(|index| listed.get(index))
             {
                 this.open(app);
             }
         });
-        inner.search.replace(Some(search));
+        inner.search.replace(Some(search.clone()));
+        let refresh: Rc<dyn Fn()> = refresh;
+        inner.built.replace(Some(Built {
+            apps_version,
+            touch,
+            apps,
+            search,
+            query,
+            chips: chip_widgets,
+            scrollers: [chip_scroller, scroller],
+            recent_grid,
+            recent,
+            refresh,
+        }));
     }
 }
 
