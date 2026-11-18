@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# TB375FC: 키보드 커버(Lenovo Keyboard Pack)가 지구본 키를 가진 키보드라고 컴포지터(bunt-comp)에 알린다.
+#
+# 이 키보드의 아래 줄은 Ctrl, 지구본, Alt, 스페이스, Alt, Ctrl이다. ⌘(Command, Windows 키)에 해당하는 키가 없어서
+# ⌘가 든 buntOS 단축키(⌘스페이스, ⌘Tab, ⇧⌘3·4·5)를 하나도 누를 수 없었다. 지구본 키는 KEY_KBD_LAYOUT_NEXT를 낸다
+# (패치 0033의 pogo_media_keys, HID 사용 코드 0x390). 컴포지터는 BUNTOS_KEYBOARD_KIND=globe인 키보드의 그 키를 ⌘로
+# 받는다 (buntOS의 comp/src/keyboard_kind.rs). Alt는 그대로 ⌥다. 입력 소스는 Caps Lock 키와 ⌃스페이스로 바꾼다.
+#
+# - 드라이버는 실제로 없는 키(KEY_LEFTMETA)도 키 목록에 알리므로 컴포지터가 키 목록으로는 가리지 못한다. 그래서 여기서
+#   이름과 ID로 고른다. 값은 드라이버(패치 0034)가 정한 것이다: 이름 "Lenovo Keyboard Pack", 17ef:6175.
+# - 터치패드는 이름이 "Lenovo Keyboard Pack Touchpad"이고 키보드가 아니라서(ID_INPUT_KEYBOARD가 없다) 걸리지 않는다.
+# - ID_INPUT_KEYBOARD는 60-input-id.rules가 단다. 이 파일은 그 뒤에 돈다.
+# - 컴포지터는 키보드가 붙을 때 속성을 읽는다. 이 규칙을 나중에 넣은 기기에서는 다시 로그인해야 쓰인다.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", ATTRS{name}=="Lenovo Keyboard Pack", ATTRS{id/vendor}=="17ef", ATTRS{id/product}=="6175", ENV{BUNTOS_KEYBOARD_KIND}="globe"
