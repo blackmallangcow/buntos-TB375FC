@@ -14,7 +14,7 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `firmware/` | 기기에서 받은 원천(파티션 백업, vendor 파일)에서 펌웨어와 보정값을 고른다(`manifest.tsv`). 뽑은 파일은 저장소에 넣지 않는다 |
 | `mesa/build.sh` | Mesa 26.3을 이미지와 같은 Debian 스냅숏의 컨테이너에서 빌드해 꾸러미로 만든다 |
 | `upower/` | 직충전 중에도 남은 시간이 나오도록 고친 UPower 데몬을 같은 방식으로 꾸러미로 만든다(패치와 `build.sh`) |
-| `vaapi/` | 비디오 디코더(`mt6897-vdec`)를 VA-API로 내는 libva 드라이버(`mt6897_va.c`, VP9 Profile 0)와 시험 프로그램(`va-vp9-test.c`). Firefox는 시스템 libavcodec의 VA-API로 이 드라이버를 쓴다. 아직 꾸러미로 만들지 않았고 이미지에 넣지 않는다([비디오 디코딩 조사](../../docs/tb375fc/video-decode.md) 7.4절) |
+| `vaapi/` | 비디오 디코더(`mt6897-vdec`)를 VA-API로 내는 libva 드라이버(`mt6897_va.c`, VP9 Profile 0)와 시험 프로그램(`va-vp9-test.c`). `build.sh`가 꾸러미 `buntos-tb375fc-vaapi`로 만든다 |
 | `mkosi.conf` | mkosi 보드 프로필(`tools/image/build.sh lenovo-tb375fc`). Debian 커널 대신 `kernel/tb375fc/build.sh image`가 만든 커널 .deb를 넣고, 루트 파티션 파일과 UKI에서 꺼낸 커널·initrd를 따로 낸다 |
 
 
@@ -30,18 +30,21 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `buntos-bluetooth.service` | `btmtkbeif`를 올리고 `bluetooth-up`이 어댑터에 주소를 넣는다. 주소는 처음 켤 때 만들어 `/var/lib/buntos/bluetooth-address`에 둔다. 공장 주소를 쓰려면 이 파일을 바꾼다 | Wi-Fi 뒤 |
 | `buntos-sound.service` | AFE, MT6368 코덱, 앰프, 카드를 올리고 `persist`의 앰프 보정값을 읽기 전용으로 읽어 넣는다. 못 읽으면 드라이버가 앰프를 -30 dB 아래로 묶는다 | 로그인 화면 뒤 |
 | `buntos-charge.service` | 온도 감시(`charge-guard`: 배터리 40도, 커넥터 55도)를 먼저 걸고 충전 드라이버를 올린다. 끄려면 `systemctl stop`(이번 부팅), `systemctl disable`(다음 부팅부터) | 로그인 화면 뒤 |
+| `buntos-video.service` | 전압 요청 블록(`mtk-dvfsrc`), 비디오 코프로세서(`mt6897-vcp`), 디코더(`mt6897-vdec`)를 차례대로 올린다(`libexec/buntos/video-up`). 디코더 노드가 꺼진 커널이면 아무것도 하지 않는다 | 로그인 화면 뒤 |
 
 전원 키: `logind.conf.d/50-tb375fc.conf`가 누르면 잠들게 하고, 10초 잡기는 커널이 한다(패치 0186). 컴퓨터에 꽂힌 USB 가젯은 컨트롤러가 잠들지 못하게 해서 `system-sleep/buntos-usb-gadget`가 잠든 동안 뗀다. 자세한 것은 [체크리스트 9.7절](../../docs/tb375fc/bringup-checklist.md)이다.
 
 잠든 동안 충전: 충전기가 꽂혀 있으면 잠자기가 `libexec/buntos/charge-sleep`으로 간다(`systemd-suspend.service.d/50-buntos-charge-sleep.conf`). 순정처럼 RTC 알람으로 10초마다 화면 없이 깨어, 충전 드라이버가 온도와 전압을 다시 보고 깨어 있을 때와 같이 충전하게 한 뒤 다시 잠든다(패치 0205~0208). 차지 펌프가 도는 동안은 잠들지 않고 화면만 끈 채 깨어 있다. 키, 덮개, 충전기 뽑기에 끝나고, 기록은 `/var/log/buntos-charge/sleep.log`에 남는다. `charge-guard`의 30초 타이머는 잠든 시간을 세지 않으므로, `buntos-charge.service`가 도는 동안은 `charge-sleep`이 세 번 깰 때마다(30초) `charge-guard check`로 한 번 보게 한다. 충전기가 없으면 예전과 같은 잠자기다.
 
-Wi-Fi, 소리, 충전은 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
+Wi-Fi, 소리, 충전, 비디오는 `multi-user.target` 앞이라, 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다(`buntos-slot-keep.service`).
 
 LK의 덤프: 순정 LK는 패닉이나 워치독 뒤에 pstore 자리와 하드웨어 상태를 `expdb` 파티션 앞에 적고, 그 뒤의 모든 부팅에서 그 사본을 pstore 자리에 덮는다. 남겨 두면 직전 부팅의 커널 기록(`console-ramoops-0`)이 넘어오지 않으므로, `buntos-kedump-clear.service`(`libexec/buntos/kedump-clear`)가 부팅 때 덤프를 `/var/lib/buntos/kedump`에 gzip으로 보관하고(새것 둘, root만 읽는다) 머리를 0으로 한다. 덤프에는 장치 트리와 메모리 조각이 들어 있으니 밖에 올리지 않는다.
 
 GPU의 클럭은 평소 542 MHz까지만 쓴다(`mkosi.extra/usr/lib/modprobe.d/90-buntos-tb375fc-gpu.conf`, 그 위에서는 전원부 소리가 난다). 스크롤처럼 다음 프레임을 곧바로 그리는 일은 프레임이 떨어져도 드라이버가 이 상한을 풀지 않으므로, 컴포지터의 프레임 바닥이 GPU의 최소 클럭을 올린다: 사람이 화면을 움직이는 동안 프레임이 초당 60 아래로 떨어지면 올리고, 지켜지거나 움직임이 멈추면 푼다(buntOS 설계안 8.2절). `mkosi.extra/usr/lib/udev/rules.d/90-buntos-tb375fc-gpu.rules`가 그 파일(devfreq `min_freq`)을 render 그룹에 연다. 올릴 수 있는 클럭을 묶으려면 `/etc/buntos/comp.toml`의 `[gpu] min-fps-max-mhz`를 쓴다.
 
 GPU에는 Mesa 26.3이 있어야 한다(G615는 26.3부터 돈다. 이미지의 Debian 스냅숏은 26.1이다). `mesa/build.sh`가 꾸러미 `buntos-mesa`로 만들어 `/opt/mesa`에 넣고 `/etc/ld.so.conf.d/00-opt-mesa.conf`로 Debian의 Mesa보다 먼저 찾게 한다. GPU 펌웨어(`arm/mali/arch11.8/mali_csffw.bin`)는 Debian의 `firmware-misc-nonfree`에 있다.
+
+비디오 디코더: 칩의 디코더는 순정 비디오 펌웨어가 돌리고, 커널 드라이버(패치 0222)가 V4L2 디코더로 낸다. `vaapi/build.sh`가 그것을 VA-API로 내는 드라이버를 꾸러미 `buntos-tb375fc-vaapi`로 만들어 libva의 드라이버 폴더에 넣는다. libva가 GPU 드라이버 이름(`panthor`)으로 찾으므로 그 이름으로도 둔다. Firefox(arm64)는 내장 VA-API가 없어 시스템 `libavcodec63`의 VA-API로 이 드라이버를 쓴다. 지금은 VP9뿐이고, YouTube가 VP9를 주려면 Firefox에서 AV1을 꺼야 한다(`media.av1.enabled`, 기본값은 건드리지 않는다). 전압 요청 블록을 켜 두는 동안 VCORE가 0.05 V 높다. 끄려면 `systemctl disable buntos-video.service` 뒤 재부팅한다([비디오 디코딩 조사](../../docs/tb375fc/video-decode.md) 7.4절).
 
 UPower 1.91.5는 PPS 충전기를 쓰는 동안 USB 포트의 `online` 값 2를 받지 못해 충전 속도를 0으로 둔다. 그래서 직충전 중에는 남은 시간이 나오지 않는다. `upower/build.sh`가 고친 데몬을 꾸러미 `buntos-upower`로 만들어 `/opt/upower`에 넣고, systemd drop-in이 그 데몬을 띄운다. Debian의 `upower`는 그대로 둔다. 꾸러미를 지우면 Debian의 데몬으로 돌아가고, UPower에 이 고침이 들어오면 폴더와 `mkosi.conf`의 항목을 지운다.
 

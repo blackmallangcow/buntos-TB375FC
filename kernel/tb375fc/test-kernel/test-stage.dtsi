@@ -459,13 +459,52 @@
 };
 
 // 비디오 디코더 1단계: MDP 쪽 IOMMU와 SMI, 디코더 코어의 larb(docs/tb375fc/video-decode.md 7.1절).
-// 클럭 게이트만 켠다(레지스터를 건드리지 않고 등록만 한다). smi_mdp_common, larb4, mdp_iommu, vcp는 꺼 둔 채 부팅한다:
-// larb가 붙으면 genpd가 VDE0·VDE1을 켰다 끄고, 화면이 같은 IOMMU를 우회로 지나고 있다.
+// 클럭 게이트는 레지스터를 건드리지 않고 등록만 한다.
 &vdecsys {
 	status = "okay";
 };
 
-// 3단계: 디코더 앞단(larb5)의 게이트. vdecsys와 같이 등록만 한다. 디코더와 화면 쪽 IOMMU·larb5 노드는 꺼 둔 채 부팅한다
+// 3단계: 디코더 앞단(larb5)의 게이트. vdecsys와 같이 등록만 한다.
 &vdecsys_soc {
+	status = "okay";
+};
+
+// 비디오 디코더(docs/tb375fc/video-decode.md 7.4절): 두 IOMMU와 SMI, larb4·larb5, VCP, 전압 요청 블록(DVFSRC), 디코더.
+// 노드는 부팅 때부터 켜 두고, 드라이버(mtk_dvfsrc, mt6897_vcp, mt6897_vdec)는 명령줄의 modprobe.blacklist로 막아
+// buntos-video.service가 로그인 화면 뒤에 차례대로 올린다. larb가 붙으면 genpd가 VDE0·VDE1을 한 번 켰다 끄고,
+// 디코더와 VCP 장치가 생기면서 IOMMU가 초기화된다. 화면은 같은 IOMMU를 우회로 지난다.
+&smi_mdp_common {
+	status = "okay";
+};
+
+&larb4 {
+	status = "okay";
+};
+
+&mdp_iommu {
+	status = "okay";
+};
+
+&vcp {
+	status = "okay";
+};
+
+&smi_disp_common {
+	status = "okay";
+};
+
+&larb5 {
+	status = "okay";
+};
+
+&disp_iommu {
+	status = "okay";
+};
+
+&dvfsrc {
+	status = "okay";
+};
+
+&vdec {
 	status = "okay";
 };

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 비디오 디코더의 드라이버를 로그인 화면을 띄운 뒤에 차례대로 올린다.
+# 적재에서 멈추면 슬롯의 재시도가 줄어 안드로이드로 돌아갈 길이 남는다.
+[Unit]
+Description=Load the video decoder drivers
+After=greetd.service buntos-display.service buntos-gpu.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+ExecStart=/usr/libexec/buntos/video-up
+
+[Install]
+WantedBy=multi-user.target
