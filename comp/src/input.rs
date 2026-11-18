@@ -29,6 +29,7 @@ use smithay::{
 use crate::{
     caps_lock::{self, Step},
     dbus::Command,
+    keyboard_kind::EVDEV_OFFSET,
     prefs::KeyRepeat,
     screenshot::AreaSelection,
     session_lock,
@@ -184,7 +185,15 @@ impl BuntState {
         let pressed = event.state() == KeyState::Pressed;
         // 사람이 앱에 글을 치는지 (agent_guard.rs의 R3): 포커스가 앱의 표면이고 단축키로 가로채지 않은 키다
         let to_app = self.keyboard_focus().is_some() && !self.focus_on_shell();
+        // 지구본 키를 ⌘로 쓰는 키보드에서는 그 키를 ⌘로 바꿔 받는다 (keyboard_kind.rs). 누름과 뗌이 같은
+        // 코드로 바뀌므로 그 뒤로는 ⌘ 키와 똑같다
         let code = event.key_code();
+        let code = Keycode::new(
+            self.keyboard_kinds.remap(
+                || event.device().id(),
+                code.raw().saturating_sub(EVDEV_OFFSET),
+            ) + EVDEV_OFFSET,
+        );
         // Caps Lock 키는 짧게 누른 것인지 뗄 때에야 알므로 키보드 상태와 앱에 보내지 않고 따로 받는다
         if self.caps_lock_key(code, pressed) {
             self.agent_guard
@@ -194,7 +203,7 @@ impl BuntState {
         }
         let hit = keyboard.input::<Option<(Hit, Keycode)>, _>(
             self,
-            event.key_code(),
+            code,
             event.state(),
             serial,
             time,
