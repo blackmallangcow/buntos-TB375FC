@@ -139,6 +139,9 @@ pub struct Session {
     pub input_method: Vec<String>,
     #[serde(default)]
     pub startup: Vec<Vec<String>>,
+    /// 세션이 끝날 때 화면(Wayland 소켓)이 사라지기 전에, 하나씩 끝날 때까지 기다리며 실행하는 명령
+    #[serde(default)]
+    pub finish: Vec<Vec<String>>,
     pub terminal: Vec<String>,
     /// 잠금 화면(ext-session-lock 클라이언트). 잠금 프로토콜을 쓸 수 있는 클라이언트로 띄운다.
     /// 비면 화면을 잠그지 않는다 (로그인 화면)
@@ -192,6 +195,20 @@ mod tests {
         assert!(!config.session.terminal.is_empty());
         assert!(!config.session.input_method.is_empty());
         assert!(config.effects.blur);
+        // 세션이 시작할 때 포털을 직접 띄우고, 끝날 때 화면보다 먼저 내린다
+        let portals = |commands: &[Vec<String>], verb: &str| {
+            commands.iter().flatten().any(|word| {
+                word.contains(verb)
+                    && word.contains("xdg-desktop-portal.service")
+                    && word.contains("xdg-desktop-portal-gtk.service")
+            })
+        };
+        assert!(portals(&config.session.prepare, "--no-block start"));
+        assert!(portals(&config.session.finish, "stop"));
+        // finish가 없는 옛 설정 파일은 끝날 때 아무것도 실행하지 않는다
+        let old: Config =
+            toml::from_str(&DEFAULT.replace("finish = [", "finish-unknown = [")).unwrap();
+        assert!(old.session.finish.is_empty());
         // 사용자 세션은 화면을 잠그고, 셸이 끝나도 남는다
         assert!(!config.session.lock.is_empty());
         assert!(!config.session.exit_with_shell);

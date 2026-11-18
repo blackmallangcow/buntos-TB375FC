@@ -47,6 +47,7 @@ const TRANSLATIONS: &Sources = &[
 
 fn main() -> glib::ExitCode {
     deny_ptrace();
+    without_portals();
     let mut args = std::env::args();
     let program = args.next().unwrap_or_else(|| "bunt-lock".into());
     let preview = match args.next().as_deref() {
@@ -127,6 +128,34 @@ fn deny_ptrace() {
     }
 }
 
+/// 잠금 화면은 데스크톱 포털(xdg-desktop-portal)을 쓰지 않는다. GTK는 뜨면서 포털을 부르고 답을 25초씩 세 번까지
+/// 기다리는데, 포털은 사용자 세션의 D-Bus 서비스라 늦거나 멈출 수 있고 같은 사용자의 다른 프로그램이 그 이름을
+/// 차지할 수도 있다. 잠금 화면은 그것과 상관없이 떠야 한다(2026-11-17 TB375FC: 포털이 멈춘 동안 잠금 화면이
+/// 91초 동안 뜨지 못했다). 포털에서 받던 것은 GTK 설정(글꼴, 밝게·어둡게, 커서 크기)뿐인데, 이 화면은 로그인
+/// 화면처럼 모양을 CSS로 정하고 포인터는 컴포지터가 그리므로 화면이 달라지지 않는다. 로그인 화면도 같은 값으로
+/// 뜬다(greeter-session). GTK가 뜨기 전에 불러야 한다
+fn without_portals() {
+    let flags = gdk_debug_without_portals(std::env::var("GDK_DEBUG").ok().as_deref());
+    // 안전: main의 첫머리라 환경을 읽거나 쓰는 다른 스레드가 아직 없다
+    unsafe { std::env::set_var("GDK_DEBUG", flags) };
+}
+
+/// 지금의 GDK_DEBUG 값에 포털 끄기를 더한 값. 개발할 때 준 다른 값은 그대로 둔다
+fn gdk_debug_without_portals(current: Option<&str>) -> String {
+    const NO_PORTALS: &str = "no-portals";
+    match current.map(str::trim) {
+        None | Some("") => NO_PORTALS.to_owned(),
+        Some(flags)
+            if flags
+                .split([',', ':', ';', ' ', '\t'])
+                .any(|flag| flag == NO_PORTALS) =>
+        {
+            flags.to_owned()
+        }
+        Some(flags) => format!("{flags},{NO_PORTALS}"),
+    }
+}
+
 fn load_style() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(STYLE);
@@ -146,6 +175,25 @@ mod tests {
     #[test]
     fn every_language_has_the_same_messages() {
         bunt_i18n::check_same_messages(TRANSLATIONS).unwrap();
+    }
+
+    #[test]
+    fn portals_are_turned_off_and_other_debug_flags_stay() {
+        assert_eq!(gdk_debug_without_portals(None), "no-portals");
+        assert_eq!(gdk_debug_without_portals(Some("")), "no-portals");
+        assert_eq!(
+            gdk_debug_without_portals(Some("frames")),
+            "frames,no-portals"
+        );
+        assert_eq!(
+            gdk_debug_without_portals(Some("frames:no-portals")),
+            "frames:no-portals"
+        );
+        // 포털을 억지로 쓰게 하는 값(portals)은 다른 값이다
+        assert_eq!(
+            gdk_debug_without_portals(Some("portals")),
+            "portals,no-portals"
+        );
     }
 
     #[test]

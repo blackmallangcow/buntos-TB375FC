@@ -648,6 +648,10 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             tracing::warn!("failed to flush clients: {err}");
         }
     })?;
+    // 클라이언트의 연결이 아직 살아 있을 때 실행한다. 이 함수가 끝나면 화면(Wayland 소켓)이 사라진다
+    for command in state.config.session.finish.clone() {
+        state.run_and_wait(&command);
+    }
     state.hand_over_screens();
     Ok(())
 }
