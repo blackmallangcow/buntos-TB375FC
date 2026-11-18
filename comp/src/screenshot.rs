@@ -169,8 +169,10 @@ pub struct AreaSelection {
     /// 누른 자리. 누르기 전이면 None
     start: Option<Point<f64, Logical>>,
     current: Point<f64, Logical>,
-    /// 고르기 전의 커서. 마치면 되돌린다
+    /// 고르기 전의 커서. 마치면 되돌린다. 고르는 동안 앱이 청한 커서도 여기에 둔다
     cursor: CursorImageStatus,
+    /// 포인터의 커서를 고르기가 정하는 중이다(십자, 손가락, 잡을 것). ⇧⌘5의 도구 막대 위에서는 막대가 정한다
+    holds_cursor: bool,
     fill: SolidColorBuffer,
     /// 위, 아래, 왼쪽, 오른쪽 테두리
     border: [SolidColorBuffer; 4],
@@ -207,11 +209,25 @@ impl AreaSelection {
             start: None,
             current,
             cursor,
+            holds_cursor: true,
             fill: SolidColorBuffer::new((0, 0), SELECTION_FILL),
             border: std::array::from_fn(|_| SolidColorBuffer::new((0, 0), SELECTION_BORDER)),
             tint: SolidColorBuffer::new((0, 0), WINDOW_TINT),
             editable: None,
         }
+    }
+
+    /// 앱이나 smithay가 포인터의 커서를 바꾸려 한다. 고르기가 커서를 정하는 중이면 그 커서를 마친 뒤에 쓸
+    /// 것으로 받아 두고 true를 돌려준다: 그때는 화면의 커서를 바꾸지 않는다.
+    ///
+    /// 고르는 동안 포인터 움직임은 앱에 보내지 않으므로 처음 움직일 때 포인터가 앱을 떠나고, smithay는 그때
+    /// 커서를 기본 화살표로 되돌린다. 이것을 그대로 받으면 ⇧⌘4의 십자가 움직이자마자 화살표가 되어 고르기가
+    /// 풀린 것처럼 보인다
+    pub fn keeps_cursor(&mut self, image: &CursorImageStatus) -> bool {
+        if self.holds_cursor {
+            self.cursor = image.clone();
+        }
+        self.holds_cursor
     }
 
     /// 키를 컴포지터가 받는지. ⇧⌘5의 선택 영역을 띄운 동안에는 도구 막대가 받는다(Enter는 찍고 Esc는 닫는다)
@@ -504,10 +520,12 @@ impl BuntState {
     /// 아니고 포인터가 도구 막대 위에 있으면 막대가 받게 false를 돌려준다
     pub fn screenshot_pointer_moved(&mut self, pos: Point<f64, Logical>) -> bool {
         let to_toolbar = self.toolbar_gets_pointer(pos);
-        let Some(selection) = &self.screenshot_area else {
+        let Some(selection) = &mut self.screenshot_area else {
             return false;
         };
-        if selection.editable.is_some() && to_toolbar {
+        // 도구 막대 위에서는 막대(셸)가 커서를 정하고, 그 밖에서는 고르기가 정한다
+        selection.holds_cursor = !(selection.editable.is_some() && to_toolbar);
+        if !selection.holds_cursor {
             return false;
         }
         // ⇧⌘5의 선택 영역에서는 포인터가 그 자리에서 잡을 것의 커서가 된다
@@ -1344,5 +1362,30 @@ mod tests {
         assert_eq!(&bytes[1..4], b"PNG");
         // IHDR의 너비와 높이
         assert_eq!(&bytes[16..24], &[0, 0, 0, 2, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn a_selection_keeps_its_cursor_until_the_toolbar_takes_the_pointer() {
+        let mut selection = AreaSelection::new(
+            false,
+            false,
+            0,
+            (0.0, 0.0).into(),
+            CursorImageStatus::default_named(),
+        );
+        // 포인터가 앱을 떠나며 smithay가 화살표로 되돌리려 해도, 앱이 다른 커서를 청해도 십자를 지킨다.
+        // 청한 커서는 마친 뒤에 쓸 것으로 적어 둔다
+        assert!(selection.keeps_cursor(&CursorImageStatus::Named(CursorIcon::Text)));
+        assert!(matches!(
+            selection.cursor,
+            CursorImageStatus::Named(CursorIcon::Text)
+        ));
+        // ⇧⌘5의 도구 막대 위에서는 막대가 커서를 정한다
+        selection.holds_cursor = false;
+        assert!(!selection.keeps_cursor(&CursorImageStatus::Named(CursorIcon::Pointer)));
+        assert!(matches!(
+            selection.cursor,
+            CursorImageStatus::Named(CursorIcon::Text)
+        ));
     }
 }
