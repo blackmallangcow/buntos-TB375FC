@@ -79,8 +79,11 @@ const RESTART_DELAY: Duration = Duration::from_millis(500);
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(10);
 /// 이만큼 돈 뒤에 끝났으면 기다리는 시간을 처음 값으로 되돌린다
 const STABLE_RUN: Duration = Duration::from_secs(60);
-/// 띄운 잠금 화면이 이 안에 잠금 표면을 보이지 않으면 멈춘 것으로 보고 끝낸 뒤 다시 띄운다
-const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// 띄운 잠금 화면이 이 안에 잠금 표면을 보이지 않으면 멈춘 것으로 보고 끝낸 뒤 다시 띄운다. 잠금 화면이
+/// 뜨면서 D-Bus 호출 하나의 답을 기다릴 수 있는 시간(GLib과 GTK의 25초)보다 길어야 한다: 짧으면 기다리던
+/// 것을 끝내고 다시 띄워 같은 기다림을 처음부터 되풀이하므로, 기다림이 풀릴 때까지 잠금 화면이 뜨지 못한다.
+/// 전에는 20초라, 포털을 25초씩 기다리던 잠금 화면이 91초 동안 뜨지 못했다(TB375FC, 2026-11-17)
+const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// 잠자기 직전 잠긴 장면을 그리지 못해도 이만큼 뒤에는 잠자기를 놓는다. logind는 늦어도 InhibitDelayMaxSec
 /// (기본 5초) 뒤에는 잠든다
 const SLEEP_WAIT: Duration = Duration::from_secs(3);
@@ -708,6 +711,14 @@ impl Dispatch<ExtSessionLockV1, SessionLockState> for BuntState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 잠금 화면이 D-Bus 호출 하나의 답을 끝까지 기다려도 감시가 그것을 끝내지 않는다
+    #[test]
+    fn the_start_watchdog_outlasts_one_dbus_reply_wait() {
+        // GLib(GDBus)의 기본값이자 GTK가 포털에 쓰는 값
+        const DBUS_REPLY_TIMEOUT: Duration = Duration::from_secs(25);
+        assert!(START_TIMEOUT > DBUS_REPLY_TIMEOUT);
+    }
 
     #[test]
     fn only_escape_hatches_run_while_locked() {
