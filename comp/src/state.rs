@@ -1837,6 +1837,14 @@ impl SeatHandler for BuntState {
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        // 스크린샷 영역을 고르는 동안에는 고르기의 커서를 지킨다 (screenshot.rs의 keeps_cursor)
+        if self
+            .screenshot_area
+            .as_mut()
+            .is_some_and(|selection| selection.keeps_cursor(&image))
+        {
+            return;
+        }
         self.cursor_status = image;
     }
 
