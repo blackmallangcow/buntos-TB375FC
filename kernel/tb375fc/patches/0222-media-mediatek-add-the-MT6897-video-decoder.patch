@@ -44,7 +44,29 @@ MT6895. What was learned on a Lenovo TB375FC:
   key frame. It only showed with real video and an application that
   takes frames more slowly than the decoder makes them.
 - A start can wait inside the firmware for a frame buffer, so frames out
-  and stream in run on two work queues.
+  and stream in do not run on the same queue.
+- An application like Firefox takes one frame at a time: it waits for a
+  frame before it sends the next picture. The CPUs are then idle most of
+  the time, and copying a frame out as ordinary work ran at the lowest
+  CPU clock (17 ms for a 3840x2160 frame that takes 2 ms). The copy runs
+  in a thread with a real-time priority, a block at a time. The frame
+  buffers are mapped as ordinary memory instead of the uncached mapping
+  of coherent memory, and the buffers of the application are ordinary
+  pages (vb2-dma-sg), written back from the cache after each frame for
+  whoever takes them as a dma-buf.
+- Between the messages of a frame the CPUs have nothing to do, and out
+  of a deep idle state every answer to the firmware comes late, 2.4 ms a
+  frame in all. While frames are decoded the driver asks for no idle
+  state that takes more than 100 us to leave.
+- A stop of the stream queue empties the list of frames that wait to be
+  copied. The copy runs without the lock of that list, so the frame
+  being copied may be gone when the copy ends: the list is then left
+  alone (it was taken off a list that had been emptied, and four
+  gigabytes were moved). FFmpeg's V4L2 wrapper stops the stream queue
+  first when it closes, a seek does the same.
+- A queue that does not start gives its buffers back as queued, not as
+  faulty. FFmpeg's wrapper starts the frame queue before the headers are
+  found; that start is refused.
 - The lists of frames in the shared structure are read only in the
   firmware's "frames are out" message, while it waits for the answer,
   and after a reset; the list of read stream buffers after a start. A
@@ -70,14 +92,17 @@ and 3840x2160).
 The same Big Buck Bunny clips in MP4 and WebM decode to the same frames
 through GStreamer 1.28 (v4l2h264dec, v4l2h265dec, v4l2vp9dec,
 v4l2av1dec).
+Stops of the stream queue while frames come out (120 of them, at
+different points), clients killed in the middle and refused starts
+leave no warning.
 ---
  drivers/media/platform/mediatek/Kconfig            |    1 +
  drivers/media/platform/mediatek/Makefile           |    1 +
- .../media/platform/mediatek/mt6897-vdec/Kconfig    |   18 +
+ .../media/platform/mediatek/mt6897-vdec/Kconfig    |   19 +
  .../media/platform/mediatek/mt6897-vdec/Makefile   |    2 +
  .../platform/mediatek/mt6897-vdec/mt6897-vdec-fw.h |  231 +++
- .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 1916 ++++++++++++++++++++
- 6 files changed, 2169 insertions(+)
+ .../platform/mediatek/mt6897-vdec/mt6897-vdec.c    | 2033 ++++++++++++++++++++
+ 6 files changed, 2287 insertions(+)
 
 diff --git a/drivers/media/platform/mediatek/Kconfig b/drivers/media/platform/mediatek/Kconfig
 index 84104e2cd..b05570e8b 100644
@@ -99,10 +124,10 @@ index 38e6ba917..e2e8b5412 100644
 +obj-y += mt6897-vdec/
 diff --git a/drivers/media/platform/mediatek/mt6897-vdec/Kconfig b/drivers/media/platform/mediatek/mt6897-vdec/Kconfig
 new file mode 100644
-index 000000000..d6f13b8bb
+index 000000000..3fbabd6ec
 --- /dev/null
 +++ b/drivers/media/platform/mediatek/mt6897-vdec/Kconfig
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,19 @@
 +# SPDX-License-Identifier: GPL-2.0-only
 +config VIDEO_MEDIATEK_MT6897_VDEC
 +	tristate "MediaTek MT6897 video decoder"
@@ -111,6 +136,7 @@ index 000000000..d6f13b8bb
 +	depends on MTK_MT6897_VCP
 +	depends on COMMON_CLK && OF
 +	select VIDEOBUF2_DMA_CONTIG
++	select VIDEOBUF2_DMA_SG
 +	select V4L2_MEM2MEM_DEV
 +	select MFD_SYSCON
 +	help
@@ -368,10 +394,10 @@ index 000000000..28cec4000
 +#endif
 diff --git a/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
 new file mode 100644
-index 000000000..2356976df
+index 000000000..c2079b0aa
 --- /dev/null
 +++ b/drivers/media/platform/mediatek/mt6897-vdec/mt6897-vdec.c
-@@ -0,0 +1,1916 @@
+@@ -0,0 +1,2033 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * MediaTek MT6897 video decoder: a V4L2 stateful decoder on the stock video
@@ -393,14 +419,17 @@ index 000000000..2356976df
 +#include <linux/delay.h>
 +#include <linux/dma-mapping.h>
 +#include <linux/iommu.h>
++#include <linux/kthread.h>
 +#include <linux/mfd/syscon.h>
 +#include <linux/module.h>
 +#include <linux/of.h>
 +#include <linux/of_platform.h>
 +#include <linux/platform_device.h>
 +#include <linux/pm_domain.h>
++#include <linux/pm_qos.h>
 +#include <linux/pm_runtime.h>
 +#include <linux/regmap.h>
++#include <linux/sched.h>
 +#include <linux/soc/mediatek/mt6897-vcp.h>
 +#include <linux/workqueue.h>
 +#include <media/v4l2-device.h>
@@ -408,6 +437,7 @@ index 000000000..2356976df
 +#include <media/v4l2-ioctl.h>
 +#include <media/v4l2-mem2mem.h>
 +#include <media/videobuf2-dma-contig.h>
++#include <media/videobuf2-dma-sg.h>
 +
 +#include "mt6897-vdec-fw.h"
 +
@@ -417,6 +447,9 @@ index 000000000..2356976df
 +#define VDEC_RETRY_MS		5
 +#define VDEC_EXTRA_FB		4	/* frame buffers beyond what the stream needs */
 +#define VDEC_CMD_TIMEOUT_MS	3000
++/* While frames are decoded: no CPU idle state that takes longer to leave */
++#define VDEC_CPU_LATENCY_US	100
++#define VDEC_IDLE_MS		200
 +#define VDEC_BS_TAG		0x6275746f62730000ULL
 +#define VDEC_FB_TAG		0x6275746f66620000ULL
 +#define VDEC_INST_TAG		0x6275746f73000001ULL
@@ -472,6 +505,7 @@ index 000000000..2356976df
 +	dma_addr_t iova;
 +	size_t size;
 +	struct device *dev;
++	struct sg_table *sgt;	/* pages of a frame buffer, mapped as ordinary memory */
 +};
 +
 +/* A piece of working memory of the firmware */
@@ -506,7 +540,7 @@ index 000000000..2356976df
 +	struct video_device vfd;
 +	struct v4l2_m2m_dev *m2m;
 +	struct workqueue_struct *wq;		/* stream in, drain: in order */
-+	struct workqueue_struct *frame_wq;	/* frames out: a start may wait for them */
++	struct kthread_worker *frame_worker;	/* frames out: a start may wait for them */
 +	struct mutex lock;		/* the video device and its queues */
 +	struct mt6897_vdec_ctx *ctx;	/* the one open session */
 +};
@@ -532,6 +566,7 @@ index 000000000..2356976df
 +	size_t fb_luma, fb_size;
 +	u8 shown[VDEC_MAX_FB];		/* frame buffers with a frame, oldest first */
 +	unsigned int shown_count;
++	unsigned int shown_gen;		/* counts the times the list was emptied */
 +	struct vb2_v4l2_buffer *src_busy[VB2_MAX_FRAME];
 +	struct vb2_v4l2_buffer *src_cur;	/* in a start command right now */
 +	bool src_cur_read;
@@ -549,8 +584,11 @@ index 000000000..2356976df
 +	unsigned int dpb;
 +	u32 cap_sequence, out_sequence;
 +
-+	struct work_struct decode_work, frame_work, drain_work;
++	struct work_struct decode_work, drain_work;
++	struct kthread_work frame_work;
 +	struct delayed_work retry_work;
++	struct pm_qos_request qos;
++	struct delayed_work idle_work;
 +};
 +
 +static inline struct mt6897_vdec_ctx *file_to_ctx(struct file *file)
@@ -570,15 +608,44 @@ index 000000000..2356976df
 +		m->dev = vdec->dev;
 +		m->size = size;
 +	}
++	m->sgt = NULL;
 +	m->cpu = dma_alloc_coherent(m->dev, m->size, &m->iova, GFP_KERNEL);
 +	return m->cpu ? 0 : -ENOMEM;
 +}
 +
 +static void vdec_mem_free(struct vdec_mem *m)
 +{
-+	if (m->cpu)
++	if (m->cpu && m->sgt) {
++		dma_vunmap_noncontiguous(m->dev, m->cpu);
++		dma_free_noncontiguous(m->dev, m->size, m->sgt, DMA_FROM_DEVICE);
++	} else if (m->cpu) {
 +		dma_free_coherent(m->dev, m->size, m->cpu, m->iova);
++	}
 +	m->cpu = NULL;
++	m->sgt = NULL;
++}
++
++/*
++ * A frame buffer: the hardware writes it and the kernel reads every frame out
++ * of it, sixteen bytes at a time and not in the order of the memory. Through
++ * the uncached mapping of coherent memory that reading takes as long as the
++ * decoding. So the pages are mapped as ordinary memory, and the cache is told
++ * before each frame is read that the hardware has written.
++ */
++static int vdec_fb_alloc(struct mt6897_vdec_dev *vdec, struct vdec_mem *m, size_t size)
++{
++	m->dev = vdec->dev;
++	m->size = size;
++	m->sgt = dma_alloc_noncontiguous(m->dev, size, DMA_FROM_DEVICE, GFP_KERNEL, 0);
++	if (!m->sgt)
++		return vdec_mem_alloc(vdec, m, VDEC_MEM_HW, size);
++	m->cpu = dma_vmap_noncontiguous(m->dev, size, m->sgt);
++	if (!m->cpu) {
++		dma_free_noncontiguous(m->dev, size, m->sgt, DMA_FROM_DEVICE);
++		return vdec_mem_alloc(vdec, m, VDEC_MEM_HW, size);
++	}
++	m->iova = sg_dma_address(m->sgt->sgl);
++	return 0;
 +}
 +
 +static int vdec_work_alloc(struct mt6897_vdec_ctx *ctx, struct vdec_mem_obj *mem)
@@ -692,7 +759,7 @@ index 000000000..2356976df
 +						   retry_work);
 +
 +	if (xchg(&ctx->give_again, false))
-+		queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
++		kthread_queue_work(ctx->vdec->frame_worker, &ctx->frame_work);
 +	vdec_kick(ctx);
 +}
 +
@@ -768,7 +835,7 @@ index 000000000..2356976df
 +	mutex_unlock(&ctx->ring_lock);
 +
 +	if (work)
-+		queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
++		kthread_queue_work(ctx->vdec->frame_worker, &ctx->frame_work);
 +}
 +
 +/* Bitstream buffers the firmware has read */
@@ -1159,6 +1226,7 @@ index 000000000..2356976df
 +	for (i = 0; i < ctx->fb_count; i++)
 +		ctx->fb[i].state = 0;
 +	ctx->shown_count = 0;
++	ctx->shown_gen++;
 +	ctx->need_fb = false;
 +	for (i = 0; i < ARRAY_SIZE(ctx->src_busy); i++) {
 +		if (ctx->src_busy[i])
@@ -1352,7 +1420,7 @@ index 000000000..2356976df
 +			vdec_mem_free(&ctx->fb[i].mem);
 +		ctx->fb_count = 0;
 +		for (i = 0; i < want; i++) {
-+			ret = vdec_mem_alloc(ctx->vdec, &ctx->fb[i].mem, VDEC_MEM_HW, ctx->fb_size);
++			ret = vdec_fb_alloc(ctx->vdec, &ctx->fb[i].mem, ctx->fb_size);
 +			if (ret)
 +				return ret;
 +			ctx->fb[i].state = 0;
@@ -1379,16 +1447,22 @@ index 000000000..2356976df
 +
 +/* Frames out */
 +
-+/* Blocks of 16 pixels by @block lines, in raster order, to lines */
++/*
++ * Blocks of 16 pixels by @block lines, in raster order, to lines. A block at a
++ * time: each block is read in the order of its memory.
++ */
 +static void vdec_detile(u8 *dst, const u8 *src, u32 stride, u32 lines, u32 block)
 +{
-+	u32 cols = stride / 16, x, y;
++	u32 cols = stride / 16, x, y, i;
 +
-+	for (y = 0; y < lines; y++) {
-+		const u8 *row = src + (size_t)(y / block) * cols * block * 16 + (y % block) * 16;
++	for (y = 0; y < lines; y += block) {
++		for (x = 0; x < cols; x++) {
++			u8 *out = dst + (size_t)y * stride + x * 16;
 +
-+		for (x = 0; x < cols; x++)
-+			memcpy(dst + (size_t)y * stride + x * 16, row + (size_t)x * block * 16, 16);
++			for (i = 0; i < block; i++)
++				memcpy(out + (size_t)i * stride, src + i * 16, 16);
++			src += block * 16;
++		}
 +	}
 +}
 +
@@ -1405,7 +1479,7 @@ index 000000000..2356976df
 +}
 +
 +/* Copy shown frames to the application and hand used frame buffers back to the firmware */
-+static void vdec_frame_work(struct work_struct *work)
++static void vdec_frame_work(struct kthread_work *work)
 +{
 +	struct mt6897_vdec_ctx *ctx = container_of(work, struct mt6897_vdec_ctx, frame_work);
 +	struct v4l2_m2m_ctx *m2m = ctx->fh.m2m_ctx;
@@ -1415,7 +1489,9 @@ index 000000000..2356976df
 +
 +	for (;;) {
 +		struct vdec_fb *fb;
++		unsigned int gen;
 +		u64 timestamp;
++		bool gone;
 +		u8 *out;
 +
 +		mutex_lock(&ctx->ring_lock);
@@ -1425,6 +1501,7 @@ index 000000000..2356976df
 +		}
 +		fb = &ctx->fb[ctx->shown[0]];
 +		timestamp = fb->timestamp;
++		gen = ctx->shown_gen;
 +		mutex_unlock(&ctx->ring_lock);
 +
 +		dst = v4l2_m2m_dst_buf_remove(m2m);
@@ -1432,20 +1509,44 @@ index 000000000..2356976df
 +			break;		/* comes back when the application queues a buffer */
 +		out = vb2_plane_vaddr(&dst->vb2_buf, 0);
 +		if (out && vb2_plane_size(&dst->vb2_buf, 0) >= w * h * 3 / 2) {
++			/*
++			 * The kernel never writes a frame buffer, so nothing has
++			 * to be written back before the hardware has it again.
++			 */
++			if (fb->mem.sgt)
++				dma_sync_sgtable_for_cpu(fb->mem.dev, fb->mem.sgt, DMA_FROM_DEVICE);
 +			vdec_detile(out, fb->mem.cpu, w, h, 32);
 +			vdec_detile(out + w * h, fb->mem.cpu + ctx->fb_luma, w, h / 2, 16);
++			/*
++			 * The frame is in the cache of this CPU. Whoever takes the
++			 * buffer as a dma-buf, the GPU for one, reads the pages.
++			 */
++			dma_sync_sgtable_for_device(ctx->vdec->dev,
++						    vb2_dma_sg_plane_desc(&dst->vb2_buf, 0),
++						    DMA_BIDIRECTIONAL);
 +			vb2_set_plane_payload(&dst->vb2_buf, 0, w * h * 3 / 2);
 +		}
++		/*
++		 * The copy ran without the lock. A stop of the stream in the
++		 * meantime emptied the list and dropped this frame: then there
++		 * is nothing to take off the list, and the frame is not shown.
++		 */
++		mutex_lock(&ctx->ring_lock);
++		gone = ctx->shown_gen != gen || !ctx->shown_count;
++		if (!gone) {
++			fb->state &= ~VDEC_FB_SHOWN;
++			memmove(ctx->shown, ctx->shown + 1, --ctx->shown_count);
++		}
++		mutex_unlock(&ctx->ring_lock);
++		if (gone)
++			dev_dbg(ctx->vdec->dev, "a stop dropped a frame during its copy\n");
++
 +		dst->vb2_buf.timestamp = timestamp;
 +		dst->field = V4L2_FIELD_NONE;
 +		dst->flags &= ~V4L2_BUF_FLAG_LAST;
 +		dst->sequence = ctx->cap_sequence++;
-+		v4l2_m2m_buf_done(dst, out ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
-+
-+		mutex_lock(&ctx->ring_lock);
-+		fb->state &= ~VDEC_FB_SHOWN;
-+		memmove(ctx->shown, ctx->shown + 1, --ctx->shown_count);
-+		mutex_unlock(&ctx->ring_lock);
++		v4l2_m2m_buf_done(dst, out && !gone ? VB2_BUF_STATE_DONE :
++							    VB2_BUF_STATE_ERROR);
 +	}
 +
 +	/* A frame buffer that is copied and that the firmware let go of goes back to it */
@@ -1475,7 +1576,7 @@ index 000000000..2356976df
 +		vdec_fw_reset(ctx, VDEC_RESET_DRAIN);
 +	ctx->drained = true;
 +	mutex_unlock(&ctx->cmd_lock);
-+	queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
++	kthread_queue_work(ctx->vdec->frame_worker, &ctx->frame_work);
 +}
 +
 +/* Bitstream in */
@@ -1497,6 +1598,13 @@ index 000000000..2356976df
 +	src = v4l2_m2m_next_src_buf(m2m);
 +	if (!src)
 +		goto finish;
++	/*
++	 * The firmware and the kernel exchange several messages for a frame,
++	 * and between them the CPUs have nothing to do. Out of a deep idle
++	 * state each answer comes late: more than 2 ms a frame all told.
++	 */
++	cpu_latency_qos_update_request(&ctx->qos, VDEC_CPU_LATENCY_US);
++	mod_delayed_work(system_wq, &ctx->idle_work, msecs_to_jiffies(VDEC_IDLE_MS));
 +	src->sequence = ctx->out_sequence++;
 +	mutex_lock(&ctx->cmd_lock);
 +
@@ -1579,6 +1687,15 @@ index 000000000..2356976df
 +	v4l2_m2m_job_finish(vdec->m2m, m2m);
 +	if (ctx->draining)
 +		queue_work(vdec->wq, &ctx->drain_work);
++}
++
++/* No frame for a while: the CPUs may sleep deeply again */
++static void vdec_idle_work(struct work_struct *work)
++{
++	struct mt6897_vdec_ctx *ctx = container_of(to_delayed_work(work), struct mt6897_vdec_ctx,
++						   idle_work);
++
++	cpu_latency_qos_update_request(&ctx->qos, PM_QOS_DEFAULT_VALUE);
 +}
 +
 +static void vdec_device_run(void *priv)
@@ -1785,7 +1902,7 @@ index 000000000..2356976df
 +		ctx->drained = false;
 +		ctx->last_sent = false;
 +		vb2_clear_last_buffer_dequeued(cap);
-+		queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
++		kthread_queue_work(ctx->vdec->frame_worker, &ctx->frame_work);
 +		v4l2_m2m_try_schedule(ctx->fh.m2m_ctx);
 +	}
 +	return 0;
@@ -1855,10 +1972,11 @@ index 000000000..2356976df
 +	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, to_vb2_v4l2_buffer(vb));
 +	/* A frame may be waiting for this buffer */
 +	if (!V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type))
-+		queue_work(ctx->vdec->frame_wq, &ctx->frame_work);
++		kthread_queue_work(ctx->vdec->frame_worker, &ctx->frame_work);
 +}
 +
-+static void vdec_return_buffers(struct mt6897_vdec_ctx *ctx, struct vb2_queue *vq)
++static void vdec_return_buffers(struct mt6897_vdec_ctx *ctx, struct vb2_queue *vq,
++				enum vb2_buffer_state state)
 +{
 +	struct vb2_v4l2_buffer *vbuf;
 +
@@ -1867,7 +1985,7 @@ index 000000000..2356976df
 +						       v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
 +		if (!vbuf)
 +			return;
-+		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
++		v4l2_m2m_buf_done(vbuf, state);
 +	}
 +}
 +
@@ -1897,8 +2015,12 @@ index 000000000..2356976df
 +			mutex_unlock(&ctx->cmd_lock);
 +		}
 +	}
-+	if (ret)
-+		vdec_return_buffers(ctx, vq);
++	if (ret) {
++		dev_dbg(ctx->vdec->dev, "start of the %s queue failed: %d\n",
++			V4L2_TYPE_IS_OUTPUT(vq->type) ? "stream" : "frame", ret);
++		/* A queue that did not start gives its buffers back as they came */
++		vdec_return_buffers(ctx, vq, VB2_BUF_STATE_QUEUED);
++	}
 +	return ret;
 +}
 +
@@ -1911,7 +2033,7 @@ index 000000000..2356976df
 +	cancel_delayed_work_sync(&ctx->retry_work);
 +	if (!V4L2_TYPE_IS_OUTPUT(vq->type))
 +		ctx->fbs_ready = false;
-+	cancel_work_sync(&ctx->frame_work);
++	kthread_cancel_work_sync(&ctx->frame_work);
 +
 +	mutex_lock(&ctx->cmd_lock);
 +	if (ctx->fw_open && ctx->header && ctx->fw_has_fbs && !ctx->dead) {
@@ -1935,12 +2057,13 @@ index 000000000..2356976df
 +		}
 +	}
 +	ctx->shown_count = 0;
++	ctx->shown_gen++;
 +	ctx->need_fb = false;
 +	mutex_unlock(&ctx->ring_lock);
 +	ctx->draining = false;
 +	ctx->drained = false;
 +	ctx->last_sent = false;
-+	vdec_return_buffers(ctx, vq);
++	vdec_return_buffers(ctx, vq, VB2_BUF_STATE_ERROR);
 +}
 +
 +static const struct vb2_ops vdec_qops = {
@@ -1976,7 +2099,14 @@ index 000000000..2356976df
 +	dst_vq->drv_priv = ctx;
 +	dst_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
 +	dst_vq->ops = &vdec_qops;
-+	dst_vq->mem_ops = &vb2_dma_contig_memops;
++	/*
++	 * Frames are written by the kernel, not by the hardware: ordinary pages,
++	 * which the kernel and the application read and write through the cache.
++	 * Coherent memory is uncached here, and a frame took longer to copy
++	 * into it than to decode.
++	 */
++	dst_vq->mem_ops = &vb2_dma_sg_memops;
++	dst_vq->bidirectional = 1;
 +	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 +	dst_vq->lock = &vdec->lock;
 +	dst_vq->dev = vdec->dev;
@@ -2010,15 +2140,18 @@ index 000000000..2356976df
 +	init_completion(&ctx->done);
 +	init_completion(&ctx->res_done);
 +	INIT_WORK(&ctx->decode_work, vdec_decode_work);
-+	INIT_WORK(&ctx->frame_work, vdec_frame_work);
++	kthread_init_work(&ctx->frame_work, vdec_frame_work);
 +	INIT_WORK(&ctx->drain_work, vdec_drain_work);
 +	INIT_DELAYED_WORK(&ctx->retry_work, vdec_retry_work);
++	INIT_DELAYED_WORK(&ctx->idle_work, vdec_idle_work);
++	cpu_latency_qos_add_request(&ctx->qos, PM_QOS_DEFAULT_VALUE);
 +	vdec_default_formats(ctx);
 +	v4l2_fh_init(&ctx->fh, video_devdata(file));
 +	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(vdec->m2m, ctx, vdec_queue_init);
 +	if (IS_ERR(ctx->fh.m2m_ctx)) {
 +		ret = PTR_ERR(ctx->fh.m2m_ctx);
 +		v4l2_fh_exit(&ctx->fh);
++		cpu_latency_qos_remove_request(&ctx->qos);
 +		kfree(ctx);
 +		goto unlock;
 +	}
@@ -2040,13 +2173,15 @@ index 000000000..2356976df
 +	mutex_lock(&vdec->lock);
 +	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 +	cancel_work_sync(&ctx->drain_work);
-+	cancel_work_sync(&ctx->frame_work);
++	kthread_cancel_work_sync(&ctx->frame_work);
 +	vdec_fw_close(ctx);
 +	/* The firmware is gone now: nothing queues work any more */
 +	cancel_work_sync(&ctx->drain_work);
-+	cancel_work_sync(&ctx->frame_work);
++	kthread_cancel_work_sync(&ctx->frame_work);
 +	cancel_work_sync(&ctx->decode_work);
 +	cancel_delayed_work_sync(&ctx->retry_work);
++	cancel_delayed_work_sync(&ctx->idle_work);
++	cpu_latency_qos_remove_request(&ctx->qos);
 +	vdec->ctx = NULL;
 +	mutex_unlock(&vdec->lock);
 +	v4l2_fh_del(&ctx->fh, file);
@@ -2203,11 +2338,19 @@ index 000000000..2356976df
 +	vdec->wq = alloc_ordered_workqueue(VDEC_NAME, 0);
 +	if (!vdec->wq)
 +		return -ENOMEM;
-+	vdec->frame_wq = alloc_ordered_workqueue(VDEC_NAME "-frame", 0);
-+	if (!vdec->frame_wq) {
-+		ret = -ENOMEM;
++	/*
++	 * Copying a frame out has a deadline, the next frame, and is all the CPU
++	 * does for a frame. As ordinary work it runs in short bursts on an idle
++	 * CPU at its lowest clock, where a 4K frame takes 17 ms to copy instead
++	 * of 2. A thread with a real-time priority gets the clock at once.
++	 */
++	vdec->frame_worker = kthread_run_worker(0, VDEC_NAME "-frame");
++	if (IS_ERR(vdec->frame_worker)) {
++		ret = PTR_ERR(vdec->frame_worker);
++		vdec->frame_worker = NULL;
 +		goto free_wq;
 +	}
++	sched_set_fifo_low(vdec->frame_worker->task);
 +	ret = v4l2_device_register(dev, &vdec->v4l2_dev);
 +	if (ret)
 +		goto free_wq;
@@ -2237,8 +2380,8 @@ index 000000000..2356976df
 +unregister_v4l2:
 +	v4l2_device_unregister(&vdec->v4l2_dev);
 +free_wq:
-+	if (vdec->frame_wq)
-+		destroy_workqueue(vdec->frame_wq);
++	if (vdec->frame_worker)
++		kthread_destroy_worker(vdec->frame_worker);
 +	destroy_workqueue(vdec->wq);
 +	return ret;
 +}
@@ -2250,7 +2393,7 @@ index 000000000..2356976df
 +	video_unregister_device(&vdec->vfd);
 +	v4l2_m2m_release(vdec->m2m);
 +	v4l2_device_unregister(&vdec->v4l2_dev);
-+	destroy_workqueue(vdec->frame_wq);
++	kthread_destroy_worker(vdec->frame_worker);
 +	destroy_workqueue(vdec->wq);
 +}
 +
