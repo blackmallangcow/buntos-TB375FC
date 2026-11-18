@@ -1050,6 +1050,39 @@ if [[ "$greeter" != NONE ]]; then
 	console | grep -a -q -E "^E2E_LOGOUT_[1-9][0-9]*_[0-9]+$" || fail "로그아웃한 뒤 로그인 화면이 뜨지 않았다"
 	console | grep -a -q -E "^E2E_LOGOUT_[0-9]+_[1-9][0-9]*$" || fail "로그아웃할 때 컴포지터가 모드를 다시 설정했다"
 	echo "로그아웃: ${SECONDS}초, 모드를 다시 설정하지 않았다"
+
+	# 곧바로 다시 로그인: 로그아웃 뒤 10초(UserStopDelaySec) 안에는 앞 세션의 사용자 관리자와 D-Bus가 남는다.
+	# 그때 포털 구현(xdg-desktop-portal-gtk)을 누가 부르면 화면이 없어 뜨지 못하고, dbus-daemon은 그 활성화를
+	# 120초 동안 쥔다. 새 세션이 그것을 풀지 못하면 셸(GTK)이 포털을 25초씩 세 번 기다린 뒤에야 뜬다
+	# (comp/data/comp.toml의 prepare와 finish). 로그아웃할 때 포털을 먼저 내리므로 그런 활성화가 저절로 생기지
+	# 않는다. 여기서는 일부러 만든 뒤 들어가, 셸이 포털을 기다리지 않는지 본다
+	bus="sudo -u $user DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+	echo "$bus busctl --user --timeout=1 call org.freedesktop.impl.portal.desktop.gtk /org/freedesktop/portal/desktop org.freedesktop.DBus.Peer Ping >/dev/null 2>&1; echo \"E2E_HELD_\$(journalctl -b -q --no-pager _UID=1000 | grep -c 'cannot open display')_\$(journalctl -b -q --no-pager | grep -c 'Cannot get portal')\"" >&3
+	wait_for "^E2E_HELD_[0-9]+_[0-9]+$" || fail "남은 D-Bus에 포털 구현을 불러 보지 못했다"
+	[[ "$(console | grep -a -E "^E2E_HELD_[0-9]+_[0-9]+$" | tail -1)" =~ ^E2E_HELD_([0-9]+)_([0-9]+)$ ]]
+	held=${BASH_REMATCH[1]}
+	# 바쁜 컴퓨터에서는 앞의 시험에서 앱이 포털을 기다리다 시간이 초과됐을 수 있다. 여기서 늘어난 것만 본다
+	waited=${BASH_REMATCH[2]}
+	for attempt in 1 2 3; do
+		python3 -I "$repo/tools/image/qmp.py" "$work/qmp.sock" keys:esc sleep:0.5 "type:$password" sleep:0.5 keys:ret ||
+			fail "QMP로 암호를 치지 못했다"
+		echo "for i in \$(seq 40); do pgrep -u $user -x bunt-shell >/dev/null && break; sleep 1; done; echo \"E2E_RELOGIN${attempt}_\$(pgrep -c -u $user -x bunt-shell)\"" >&3
+		wait_for "^E2E_RELOGIN${attempt}_[0-9]+$" || fail "다시 로그인한 결과를 받지 못했다"
+		if console | grep -a -q -E "^E2E_RELOGIN${attempt}_[1-9][0-9]*$"; then
+			break
+		fi
+		((attempt < 3)) || fail "로그아웃한 뒤 암호로 다시 들어가지 못했다"
+	done
+	# 셸이 뜬 뒤(메뉴 막대와 Dock을 읽을 수 있다) 포털 시간 초과가 늘지 않아야 한다. 포털을 기다렸으면 셸이
+	# 읽히기 전에 세 번 남는다
+	echo "for i in \$(seq 300); do $agent >/tmp/e2e-shell 2>&1 && [ \$(grep -c 'ref=e' /tmp/e2e-shell) -ge 10 ] && break; sleep 1; done; echo \"E2E_RESHELL_\$(grep -c 'ref=e' /tmp/e2e-shell)_\$(journalctl -b -q --no-pager | grep -c 'Cannot get portal')_\$($bus systemctl --user is-active xdg-desktop-portal.service xdg-desktop-portal-gtk.service | grep -c -x active)\"" >&3
+	wait_for "^E2E_RESHELL_[0-9]+_[0-9]+_[0-9]+$" || fail "다시 로그인한 뒤 셸을 확인하지 못했다"
+	reshell=$(console | grep -a -E "^E2E_RESHELL_[0-9]+_[0-9]+_[0-9]+$" | tail -1)
+	[[ "$reshell" =~ ^E2E_RESHELL_([0-9]+)_([0-9]+)_([0-9]+)$ ]]
+	((BASH_REMATCH[1] >= 10)) || fail "다시 로그인한 뒤 셸에 메뉴 막대 항목과 Dock이 없다 ($reshell)"
+	((BASH_REMATCH[2] == waited)) || fail "다시 로그인한 셸이 포털을 기다리다 시간이 초과됐다 ($reshell, 앞에는 ${waited}번)"
+	((BASH_REMATCH[3] == 2)) || fail "다시 로그인한 뒤 포털과 그 구현이 떠 있지 않다 ($reshell)"
+	echo "다시 로그인(${attempt}번째): ${SECONDS}초, 쥐고 있던 활성화 ${held}개, 포털 시간 초과 없음"
 fi
 
 echo 'systemctl poweroff' >&3
