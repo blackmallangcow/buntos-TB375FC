@@ -14,6 +14,7 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `firmware/` | 기기에서 받은 원천(파티션 백업, vendor 파일)에서 펌웨어와 보정값을 고른다(`manifest.tsv`). 뽑은 파일은 저장소에 넣지 않는다 |
 | `mesa/build.sh` | Mesa 26.3을 이미지와 같은 Debian 스냅숏의 컨테이너에서 빌드해 꾸러미로 만든다 |
 | `upower/` | 직충전 중에도 남은 시간이 나오도록 고친 UPower 데몬을 같은 방식으로 꾸러미로 만든다(패치와 `build.sh`) |
+| `vaapi/` | 비디오 디코더(`mt6897-vdec`)를 VA-API로 내는 libva 드라이버(`mt6897_va.c`, VP9 Profile 0)와 시험 프로그램(`va-vp9-test.c`). Firefox는 시스템 libavcodec의 VA-API로 이 드라이버를 쓴다. 아직 꾸러미로 만들지 않았고 이미지에 넣지 않는다([비디오 디코딩 조사](../../docs/tb375fc/video-decode.md) 7.4절) |
 | `mkosi.conf` | mkosi 보드 프로필(`tools/image/build.sh lenovo-tb375fc`). Debian 커널 대신 `kernel/tb375fc/build.sh image`가 만든 커널 .deb를 넣고, 루트 파티션 파일과 UKI에서 꺼낸 커널·initrd를 따로 낸다 |
 
 
