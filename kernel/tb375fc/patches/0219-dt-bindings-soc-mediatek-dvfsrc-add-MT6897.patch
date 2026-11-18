@@ -1,4 +1,5 @@
-dt-bindings: soc: mediatek: dvfsrc: add MT6897
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: soc: mediatek: dvfsrc: add MT6897
 
 The MT6897 has the same block, at 0x1c00f000. Its registers sit where
 those of the MT8196 do; the fields the kernel writes are those of the

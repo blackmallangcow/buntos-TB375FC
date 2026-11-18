@@ -1,4 +1,5 @@
-dt-bindings: media: mediatek: add the MT6897 video decoder
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: media: mediatek: add the MT6897 video decoder
 
 The decoder has a front end and a core, each in a power domain of its
 own and behind a different IOMMU, so the front end is a child node with

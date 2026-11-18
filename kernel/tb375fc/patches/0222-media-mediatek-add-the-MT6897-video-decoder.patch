@@ -1,4 +1,5 @@
-media: mediatek: add the MT6897 video decoder
+From: buntOS contributors
+Subject: [PATCH] media: mediatek: add the MT6897 video decoder
 
 A V4L2 stateful decoder on the stock video firmware of the MT6897. The
 firmware runs on the video coprocessor (mt6897-vcp) and drives the
