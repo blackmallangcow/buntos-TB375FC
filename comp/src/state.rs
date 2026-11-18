@@ -181,6 +181,8 @@ pub struct BuntState {
     /// Caps Lock 키로 입력 소스를 바꿀 때 그 키를 누르고 있는 상태와, 길게 누른 것을 아는 타이머 (caps_lock.rs)
     pub caps_key: crate::caps_lock::CapsKey,
     pub caps_timer: Option<RegistrationToken>,
+    /// 붙어 있는 키보드의 종류. 지구본 키를 ⌘로 쓰는 키보드를 가린다 (keyboard_kind.rs)
+    pub keyboard_kinds: crate::keyboard_kind::KeyboardKinds,
     /// 수정 키만 누르는 중 (⌃⇧ 같은 조합 단축키)
     pub modifier_chord: Option<ModifierChord>,
     /// 키 처리가 끝난 뒤 할 수정 키 조합 단축키
@@ -391,6 +393,7 @@ impl BuntState {
             key_repeat: None,
             caps_key: crate::caps_lock::CapsKey::default(),
             caps_timer: None,
+            keyboard_kinds: crate::keyboard_kind::KeyboardKinds::default(),
             modifier_chord: None,
             chord_hit: None,
             keyboard_shortcuts_inhibit_state,

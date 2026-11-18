@@ -91,6 +91,7 @@ use crate::{
     frame_floor::{GpuFloor, IDLE_RELEASE, INTERACTIVE_FOR},
     gpu::{GSK_RENDERER, Rendering, renderer_name},
     handover::{self, Wanted},
+    keyboard_kind::{self, KeyboardKind},
     prefs::{ModePref, PointerPrefs, SecondaryClick, TouchpadPrefs},
     render::{self, OutputRenderElements},
     screenshot,
@@ -1240,10 +1241,24 @@ impl BuntState {
         if let Some(keyboard) = self.seat.get_keyboard() {
             device.led_update(keyboard.led_state().into());
         }
+        // 키보드의 종류는 기기의 BSP가 udev 속성으로 알린다 (keyboard_kind.rs)
+        // 안전: udev 장치는 libinput 장치(device)가 사는 동안 쓴다
+        let kind = unsafe { device.udev_device() }.and_then(|udev| {
+            udev.property_value(keyboard_kind::PROPERTY)
+                .map(|kind| kind.to_string_lossy().into_owned())
+        });
+        let kind = KeyboardKind::from_property(kind.as_deref());
+        if kind != KeyboardKind::Standard {
+            tracing::info!("keyboard device: {} ({kind:?})", device.name());
+        }
+        self.keyboard_kinds
+            .added(smithay::backend::input::Device::id(&device), kind);
         self.backend.keyboard_devices.push(device);
     }
 
     fn keyboard_device_removed(&mut self, device: &InputDevice) {
+        self.keyboard_kinds
+            .removed(&smithay::backend::input::Device::id(device));
         self.backend
             .keyboard_devices
             .retain(|known| known != device);

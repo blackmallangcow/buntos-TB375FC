@@ -24,6 +24,7 @@ mod grabs;
 mod handover;
 mod ime;
 mod input;
+mod keyboard_kind;
 mod libinput_source;
 mod panels;
 mod prefs;
