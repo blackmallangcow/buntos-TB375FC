@@ -8,12 +8,28 @@
 # 기다린다. 그래서 mtk-dvfsrc가 먼저다. 그다음 펌웨어가 도는 비디오 코프로세서(mt6897-vcp), 끝으로 디코더
 # (mt6897-vdec)다. 디코더는 세션이 열릴 때만 코프로세서를 켠다.
 #
+# 그 앞에 디코더 쪽 버스(mtk-smi)와 IOMMU(mtk_iommu)를 올린다. 이 둘은 화면이 아직 부트로더가 차려 둔 그대로
+# 나가는 동안 붙으면 화면이 깨진다(흰 바탕에 세로줄, 컴포지터가 화면을 다시 설정할 때까지). 화면 드라이버가
+# 초기화된 것만으로는 모자라고, 컴포지터가 첫 화면을 낸 뒤여야 한다. 그래서 내장하지 않고, 화면 출력이 켜진
+# 것을 본 뒤에 여기서 올린다.
+#
 # 디코더 노드가 꺼진 커널이면 아무것도 하지 않는다. 드라이버가 안 뜨면 Firefox는 소프트웨어로 푼다.
 set -u
 
 tree=/sys/firmware/devicetree/base/soc
 [ "$(tr -d '\0' 2>/dev/null <"$tree/video-codec@16000000/status")" = okay ] || exit 0
 
+# 컴포지터가 화면을 다시 설정하면 DSI 커넥터가 enabled가 된다. 화면이 끝내 안 켜지면(화면 노드가 꺼진 커널)
+# 깨질 화면도 없으니 그대로 간다
+for _ in $(seq 1 600); do
+	grep -qsx enabled /sys/class/drm/card*-DSI-*/enabled && break
+	sleep 0.1
+done
+sleep 1
+
+# 내장인 커널에서는 이미 있다
+modprobe -q mtk-smi
+modprobe -q mtk_iommu
 modprobe mtk-dvfsrc || exit 1
 # 전압 요청 블록이 붙은 뒤에야 디코더가 붙는다
 for _ in $(seq 1 50); do

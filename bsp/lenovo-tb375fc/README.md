@@ -30,7 +30,7 @@ TB375FC(와 같은 하드웨어인 TB373FU)의 LK가 읽는 부트 이미지와 
 | `buntos-bluetooth.service` | `btmtkbeif`를 올리고 `bluetooth-up`이 어댑터에 주소를 넣는다. 주소는 처음 켤 때 만들어 `/var/lib/buntos/bluetooth-address`에 둔다. 공장 주소를 쓰려면 이 파일을 바꾼다 | Wi-Fi 뒤 |
 | `buntos-sound.service` | AFE, MT6368 코덱, 앰프, 카드를 올리고 `persist`의 앰프 보정값을 읽기 전용으로 읽어 넣는다. 못 읽으면 드라이버가 앰프를 -30 dB 아래로 묶는다 | 로그인 화면 뒤 |
 | `buntos-charge.service` | 온도 감시(`charge-guard`: 배터리 40도, 커넥터 55도)를 먼저 걸고 충전 드라이버를 올린다. 끄려면 `systemctl stop`(이번 부팅), `systemctl disable`(다음 부팅부터) | 로그인 화면 뒤 |
-| `buntos-video.service` | 전압 요청 블록(`mtk-dvfsrc`), 비디오 코프로세서(`mt6897-vcp`), 디코더(`mt6897-vdec`)를 차례대로 올린다(`libexec/buntos/video-up`). 디코더 노드가 꺼진 커널이면 아무것도 하지 않는다 | 로그인 화면 뒤 |
+| `buntos-video.service` | 디코더 쪽 버스와 IOMMU(`mtk-smi`, `mtk_iommu`), 전압 요청 블록(`mtk-dvfsrc`), 비디오 코프로세서(`mt6897-vcp`), 디코더(`mt6897-vdec`)를 차례대로 올린다(`libexec/buntos/video-up`). 컴포지터가 화면을 처음 설정한 뒤(DSI 커넥터가 `enabled`)까지 기다린다. 그 전에 올리면 부팅 화면이 깨진다. 디코더 노드가 꺼진 커널이면 아무것도 하지 않는다 | 로그인 화면이 뜬 뒤 |
 
 전원 키: `logind.conf.d/50-tb375fc.conf`가 누르면 잠들게 하고, 10초 잡기는 커널이 한다(패치 0186). 컴퓨터에 꽂힌 USB 가젯은 컨트롤러가 잠들지 못하게 해서 `system-sleep/buntos-usb-gadget`가 잠든 동안 뗀다. 자세한 것은 [체크리스트 9.7절](../../docs/tb375fc/bringup-checklist.md)이다.
 
