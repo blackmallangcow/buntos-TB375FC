@@ -1,0 +1,71 @@
+From: Antonio Lamb <antoniolamb@users.noreply.github.com>
+Subject: [PATCH] drm/panel: novatek-nt36532: prefer 120 Hz on the TB375FC
+
+The Novatek active pen on the TB375FC only reports at 120 Hz. At the
+driver's preferred 144 Hz the controller emits the stylus detect event but
+never fills the stylus record, so the pen is silent.
+
+120 Hz still supports finger touch and palm rejection. 144 Hz remains
+selectable; put 120 Hz first so it is the default for the pen.
+
+Signed-off-by: Antonio Lamb <antoniolamb@users.noreply.github.com>
+---
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -595,16 +595,19 @@
+  * Each link carries half of the active area and its own porches, and the DSI
+  * hosts of bonded links split the timings of the mode between them. Hence the
+  * doubled horizontal porches.
++ *
++ * 120 Hz first: the Novatek active pen only reports at 120 Hz on this
++ * tablet. 144 Hz remains selectable for users who do not use the pen.
+  */
+ static const struct panel_mode tb375fc_modes[] = {
+ 	{
+ 		.mode = {
+-			.clock = (2944 + (36 + 6 + 31) * 2) *
+-				 (1840 + 26 + 2 + 182) * 144 / 1000,
++			.clock = (2944 + (90 + 10 + 88) * 2) *
++				 (1840 + 26 + 2 + 182) * 120 / 1000,
+ 			.hdisplay = 2944,
+-			.hsync_start = 2944 + 36 * 2,
+-			.hsync_end = 2944 + (36 + 6) * 2,
+-			.htotal = 2944 + (36 + 6 + 31) * 2,
++			.hsync_start = 2944 + 90 * 2,
++			.hsync_end = 2944 + (90 + 10) * 2,
++			.htotal = 2944 + (90 + 10 + 88) * 2,
+ 			.vdisplay = 1840,
+ 			.vsync_start = 1840 + 26,
+ 			.vsync_end = 1840 + 26 + 2,
+@@ -612,16 +615,16 @@
+ 			.width_mm = 273,
+ 			.height_mm = 171,
+ 		},
+-		.rate_ctrl = { 0x80, 0x00 },
++		.rate_ctrl = { 0x91, 0x40 },
+ 	},
+ 	{
+ 		.mode = {
+-			.clock = (2944 + (90 + 10 + 88) * 2) *
+-				 (1840 + 26 + 2 + 182) * 120 / 1000,
++			.clock = (2944 + (36 + 6 + 31) * 2) *
++				 (1840 + 26 + 2 + 182) * 144 / 1000,
+ 			.hdisplay = 2944,
+-			.hsync_start = 2944 + 90 * 2,
+-			.hsync_end = 2944 + (90 + 10) * 2,
+-			.htotal = 2944 + (90 + 10 + 88) * 2,
++			.hsync_start = 2944 + 36 * 2,
++			.hsync_end = 2944 + (36 + 6) * 2,
++			.htotal = 2944 + (36 + 6 + 31) * 2,
+ 			.vdisplay = 1840,
+ 			.vsync_start = 1840 + 26,
+ 			.vsync_end = 1840 + 26 + 2,
+@@ -629,7 +632,7 @@
+ 			.width_mm = 273,
+ 			.height_mm = 171,
+ 		},
+-		.rate_ctrl = { 0x91, 0x40 },
++		.rate_ctrl = { 0x80, 0x00 },
+ 	},
+ 	{
+ 		.mode = {

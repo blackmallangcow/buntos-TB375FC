@@ -314,3 +314,6 @@
 #      세션 하나, H.264·HEVC·VP9·AV1(8비트). 디코더 클럭 먹스를 펌웨어와 함께 쓰는 절차(먹스 켜기 알림, 하드웨어 투표, 빠른 소스의 PLL)도 여기서 한다
 0221-dt-bindings-media-mediatek-add-the-MT6897-video-decoder.patch
 0222-media-mediatek-add-the-MT6897-video-decoder.patch
+
+# 0230 TB375FC pen: the stylus only reports at 120 Hz, so make 120 Hz the default
+0230-drm-panel-novatek-nt36532-prefer-120-Hz-on-the-TB375FC.patch
