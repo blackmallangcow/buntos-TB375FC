@@ -440,7 +440,7 @@ if [[ "$agent_refs" != NONE ]]; then
 	check "터미널에서 고른 글이 없으면 Ctrl+C가 인터럽트다" "$answer" "ctrl-v 0"
 	keys keys:meta_l+w sleep:2
 	guest terminal
-	check "터미널에서 ⌘W로 창을 닫는다" "$answer" "pasted 0"
+	check "터미널에서 ⌘W로 창을 닫는다" "$answer" "ctrl-v 0"
 	# 조합 키만으로 된 입력 소스 전환(Windows의 Ctrl+Shift): 다른 키 없이 눌렀다 떼면 바뀌고, 사이에
 	# 다른 키가 끼면(⌃⇧A) 그대로다
 	guest chord-prepare
