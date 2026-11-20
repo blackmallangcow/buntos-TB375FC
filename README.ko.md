@@ -140,6 +140,10 @@ Debian 13 arm64에서 빌드합니다. 이 프로젝트는 맥에서 Lima VM을 
 >
 > 지켜야 할 자료가 있는 기기에는 쓰지 마십시오.
 
+## buntOS용 앱 만들기
+
+buntOS에서 쓸 앱을 만들거나 꾸러미로 낸다면 [docs/dev/app-development.md](docs/dev/app-development.md)를 보세요. 앱이 기댈 수 있는 것과 조심할 것을 적었습니다: Wayland 전용(XWayland 없음), 앱 ID와 `.desktop` 파일, ⌘ 단축키가 앱의 Ctrl 단축키로 가는 방식, 한글 입력과 화면 키보드를 위한 text-input-v3, 터치와 펜, 클립보드, 알림과 포털, AI 에이전트를 위한 접근성, 설치 형식과 아키텍처, 그리고 이 태블릿의 사정입니다.
+
 ## 업스트림
 
 패치는 업스트림에 낼 수 있는 꼴로 씁니다. 대기열의 고침 하나(MT6363 VSRAM LDO 레지스터)가 리눅스 7.4용 regulator 트리에 들어갔습니다. 나머지는 기기에서 시험한 뒤 보냅니다.

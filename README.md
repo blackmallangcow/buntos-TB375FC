@@ -140,6 +140,10 @@ There is no installer yet. The steps the project followed, in order, are in [doc
 >
 > Do not use these images on a device that holds data you need to protect.
 
+## Making apps for buntOS
+
+If you write or package apps for buntOS, see [docs/dev/app-development.md](docs/dev/app-development.md), in Korean. It covers what apps can rely on and what to watch for: Wayland only (there is no XWayland), the app ID and the `.desktop` file, how ⌘ shortcuts reach apps as their Ctrl shortcuts, text-input-v3 for Korean input and the on-screen keyboard, touch and the pen, the clipboard, notifications and portals, accessibility for the AI agent, and the package formats and architectures, with notes for this tablet.
+
 ## Upstream
 
 The patches are written so that they can go upstream. One fix from the queue (the MT6363 VSRAM LDO registers) has been applied to the regulator tree for Linux 7.4. More will be sent after device testing.
