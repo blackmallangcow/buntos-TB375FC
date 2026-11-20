@@ -1,5 +1,7 @@
 # 기여 안내
 
+보안 취약점은 공개 이슈나 PR로 올리지 말고 [SECURITY.md](SECURITY.md)의 안내를 따라 비공개로 제보해 주세요.
+
 ## DCO 서명
 
 buntOS는 기여 조건으로 [Developer Certificate of Origin](https://developercertificate.org/)(DCO)을 씁니다. 리눅스 커널과 같은 방식입니다. 모든 커밋 메시지 끝에 다음 줄을 붙여 주세요.
