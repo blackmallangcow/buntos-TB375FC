@@ -1,47 +1,49 @@
-# 기여 안내
+<p align="right"><strong>English</strong> · <a href="CONTRIBUTING.ko.md">한국어</a></p>
 
-보안 취약점은 공개 이슈나 PR로 올리지 말고 [SECURITY.md](SECURITY.md)의 안내를 따라 비공개로 제보해 주세요.
+# Contributing
 
-## DCO 서명
+Report security vulnerabilities privately by following [SECURITY.md](SECURITY.md), not in public issues or pull requests.
 
-buntOS는 기여 조건으로 [Developer Certificate of Origin](https://developercertificate.org/)(DCO)을 씁니다. 리눅스 커널과 같은 방식입니다. 모든 커밋 메시지 끝에 다음 줄을 붙여 주세요.
+## DCO sign-off
+
+buntOS requires the [Developer Certificate of Origin](https://developercertificate.org/) (DCO) for contributions, the same way the Linux kernel does. Add this line at the end of every commit message:
 
 ```
-Signed-off-by: 이름 <이메일>
+Signed-off-by: Your Name <your.email@example.com>
 ```
 
-`git commit -s`를 쓰면 자동으로 붙습니다. 이 줄은 DCO의 내용에 동의하며, 해당 기여를 이 저장소의 라이선스로 제출할 권리가 있다는 뜻입니다.
+`git commit -s` adds it for you. The line states that you agree to the DCO and have the right to submit the contribution under this repository's license.
 
-## 라이선스 표기
+## License headers
 
-새 파일에는 SPDX 헤더를 답니다. 헤더를 달 수 없는 파일은 `REUSE.toml`에 표기합니다.
+Add an SPDX header to every new file. A file that cannot carry a header is annotated in `REUSE.toml`.
 
-| 대상 | `SPDX-License-Identifier` |
+| Target | `SPDX-License-Identifier` |
 |---|---|
-| 핵심 컴포넌트(컴포지터, 셸, 에이전트) | `GPL-3.0-or-later` |
-| 외부 앱이 링크하는 SDK·프로토콜 크레이트 | `MIT OR Apache-2.0` |
-| 문서 | `CC-BY-SA-4.0` |
+| Core components (compositor, shell, agent) | `GPL-3.0-or-later` |
+| SDK and protocol crates that external apps link against | `MIT OR Apache-2.0` |
+| Documentation | `CC-BY-SA-4.0` |
 
-Rust 파일의 예:
+Example for a Rust file:
 
 ```rust
 // SPDX-FileCopyrightText: 2026 buntOS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 ```
 
-- 다른 프로젝트의 코드를 가져오면 원래 저작권 표기와 라이선스를 헤더에 함께 적습니다. 예: `comp/src/grabs.rs`는 Smithay 예제에서 가져와 `GPL-3.0-or-later AND MIT`입니다
-- 어떤 라이선스를 처음 쓰게 되면 원문을 `LICENSES/`에 추가합니다 (`reuse download <SPDX-ID>`)
-- 코드 디렉터리는 `REUSE.toml`에 `GPL-3.0-or-later` 기본 표기가 있습니다. reuse가 한글이 든 파일의 헤더를 읽지 못할 때가 있어서입니다. 그래도 새 파일에는 헤더를 답니다
-- 제출 전에 `reuse lint`로 확인합니다. CI도 같은 검사를 합니다
+- When you bring in code from another project, keep its original copyright notice and license in the header. Example: `comp/src/grabs.rs` comes from a Smithay example and is `GPL-3.0-or-later AND MIT`.
+- The first time a license is used, add its text to `LICENSES/` (`reuse download <SPDX-ID>`).
+- Code directories have a default `GPL-3.0-or-later` annotation in `REUSE.toml`, because reuse sometimes fails to read the header of a file that contains Korean text. Still add a header to new files.
+- Run `reuse lint` before you submit. CI runs the same check.
 
-## 커널과 DTS
+## Kernel and DTS
 
-커널 패치와 DTS는 업스트림(linux-mediatek 등) 제출을 기본으로 하며, 업스트림 규칙(커널 코드는 GPL-2.0, DTS는 이중 라이선스 관례)을 따릅니다. 자세한 내용은 [설계안](docs/design/ARCHITECTURE.md) 4.2.2를 참고하세요.
+Kernel patches and DTS changes are submitted upstream (linux-mediatek and others) by default and follow upstream rules: kernel code is GPL-2.0, and DTS files follow the dual-license convention. See section 4.2.2 of the [design document](docs/design/ARCHITECTURE.md) (in Korean).
 
-## 펌웨어
+## Firmware
 
-재배포할 수 없는 펌웨어는 저장소와 이미지에 넣지 않습니다. 설계안 2.1절의 규칙을 따릅니다.
+Firmware that cannot be redistributed is not put in the repository or in images. Follow the rules in section 2.1 of the design document.
 
-## 설계 문서
+## Design documents
 
-설계 문서는 현재 한국어로 작성합니다. 설계를 바꾸면 `docs/design/`의 설계안과 결정 자료를 함께 갱신합니다.
+Design documents are currently written in Korean. When you change a design, update the design document and the decision notes in `docs/design/` together.
