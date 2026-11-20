@@ -9,10 +9,12 @@ selected. The key is let through like any other key, so the program
 gets ^C, or ctrl+c in the form it asked for with the kitty keyboard
 protocol.
 
-The selection is cancelled after copying, so pressing the key again
-interrupts, as in Windows Terminal. Repeats of the key press that
-copied are swallowed: holding the key a little too long must not
-interrupt the program right after copying from it.
+The selection is left as it is after copying, as clipboard-copy does.
+Cancelling it would make the next press interrupt, and with an input
+method (input-method-v2) key repeat arrives as release and press pairs
+that foot cannot tell from new presses, so holding the key after
+copying would interrupt the program the text was copied from. Typing
+or clicking cancels the selection as usual.
 
 Unbound by default. Requested upstream in
 https://codeberg.org/dnkl/foot/issues/1333 (open), where the maintainer
@@ -31,22 +33,19 @@ index 221258d..bc9a875 100644
      [BIND_ACTION_PRIMARY_PASTE] = "primary-paste",
      [BIND_ACTION_SEARCH_START] = "search-start",
 diff --git a/doc/foot.ini.5.scd b/doc/foot.ini.5.scd
-index 8bedf45..fdd320b 100644
+index 8bedf45..cd1c485 100644
 --- a/doc/foot.ini.5.scd
 +++ b/doc/foot.ini.5.scd
-@@ -1355,6 +1355,16 @@ e.g. *search-start=none*.
+@@ -1355,6 +1355,13 @@ e.g. *search-start=none*.
  	Copies the current selection into the _clipboard_. Default: _Control+Shift+c_
  	_XF86Copy_.
  
 +*clipboard-copy-or-cancel*
-+	Copies the current selection into the _clipboard_, and cancels the
-+	selection. When nothing is selected, the key is not consumed, but
-+	sent to the application like any other key. Bound to
-+	*Control+c*, it copies with the same key as most other
-+	applications, and still interrupts the running program when
-+	nothing is selected. Pressing the key again after copying sends
-+	it to the application, but holding it down does not. Default:
-+	_none_.
++	Copies the current selection into the _clipboard_. When nothing is
++	selected, the key is not consumed, but sent to the application
++	like any other key. Bound to *Control+c*, it copies with the same
++	key as most other applications, and still interrupts the running
++	program when nothing is selected. Default: _none_.
 +
  *clipboard-paste*
  	Pastes from the _clipboard_. Default: _Control+Shift+v_ _XF86Paste_.
@@ -64,35 +63,23 @@ index 6469af7..197ea05 100644
  # primary-paste=Shift+Insert
  # search-start=Control+Shift+r
 diff --git a/input.c b/input.c
-index f6ba9de..12ad472 100644
+index f6ba9de..7bff59c 100644
 --- a/input.c
 +++ b/input.c
-@@ -181,6 +181,29 @@ execute_binding(struct seat *seat, struct terminal *term,
+@@ -181,6 +181,17 @@ execute_binding(struct seat *seat, struct terminal *term,
          selection_to_clipboard(seat, term, serial);
          return true;
  
 +    case BIND_ACTION_CLIPBOARD_COPY_OR_CANCEL:
-+        if (term->selection.coords.start.row >= 0 &&
-+            term->selection.coords.end.row >= 0)
++        /* No selection: don't consume the key (e.g. ctrl+c is sent as ^C) */
++        if (term->selection.coords.start.row < 0 ||
++            term->selection.coords.end.row < 0)
 +        {
-+            /* Cancel the selection, so that the next key press is let through */
-+            selection_to_clipboard(seat, term, serial);
-+            selection_cancel(term);
-+            seat->kbd.repeat.copied = true;
-+            return true;
++            return false;
 +        }
 +
-+        /*
-+         * Swallow the repeats of the key press that copied: holding
-+         * the key a little too long must not cancel the running
-+         * program
-+         */
-+        if (seat->kbd.repeat.dont_re_repeat && seat->kbd.repeat.copied)
-+            return true;
-+
-+        /* No selection: don't consume the key (e.g. ctrl+c is sent as ^C) */
-+        seat->kbd.repeat.copied = false;
-+        return false;
++        selection_to_clipboard(seat, term, serial);
++        return true;
 +
      case BIND_ACTION_CLIPBOARD_PASTE:
          selection_from_clipboard(seat, term, serial);
@@ -109,15 +96,3 @@ index 4d40a66..8b3ba0c 100644
      BIND_ACTION_CLIPBOARD_PASTE,
      BIND_ACTION_PRIMARY_PASTE,
      BIND_ACTION_SEARCH_START,
-diff --git a/wayland.h b/wayland.h
-index 11a3836..1d1ff5e 100644
---- a/wayland.h
-+++ b/wayland.h
-@@ -133,6 +133,7 @@ struct seat {
-             int fd;
- 
-             bool dont_re_repeat;
-+            bool copied; /* clipboard-copy-or-cancel copied on this key */
-             int32_t delay;
-             int32_t rate;
-             uint32_t key;
