@@ -66,9 +66,9 @@ These were tested on the device.
 | Area | State |
 |---|---|
 | Boot | The stock bootloader (LK) boots mainline Linux 7.2.12 from slot `_b`. The root file system (btrfs) is on a new partition in the internal UFS storage, and Android stays on slot `_a`. |
-| Display | The 2944×1840 dual-DSI panel with DSC runs through mediatek-drm at 144, 120, 60 or 30 Hz, with backlight control. |
+| Display | The 2944×1840 dual-DSI panel with DSC runs through mediatek-drm at 120 Hz by default, or at 144, 60 or 30 Hz chosen in Settings, with backlight control. |
 | GPU | Mali-G615 MC6 runs on panthor with Mesa 26.3, and the compositor draws with GLES. A GPU clock policy keeps everyday work at or below 542 MHz, where the GPU supply stays quiet. The cap lifts for GPU-bound work. |
-| Input | Touchscreen and pogo-pin keyboard cover. Its touchpad does tap to click and two-finger scrolling. The cover sensor, power key and volume keys work. |
+| Input | Touchscreen and pogo-pin keyboard cover. Its touchpad does tap to click and two-finger scrolling. The cover sensor, power key and volume keys work. The active pen (Lenovo Tab Pen Plus) reports position, pressure, tilt and hover at 120 Hz; a contributor checked it on the device. |
 | Wireless | Wi-Fi works on 2.4 and 5 GHz (station mode, WPA2) through a new mt76 variant for the MT6897 connectivity subsystem. Bluetooth works with AirPods and a BLE keyboard. |
 | Audio | The four speakers and the built-in microphone work through PipeWire. |
 | Power | USB-C charging, including PPS direct charging at about 40 W, and the battery gauge. The tablet keeps charging while asleep. Other power features that work: suspend-to-idle with power-key wake, a 10-second forced power-off, CPU idle states and thermal throttling. |
@@ -77,7 +77,7 @@ These were tested on the device.
 ## Not done yet
 
 - **Input and ports:**
-  - The stylus driver is written but not tested on the device.
+  - Pen input on the desktop: the compositor does not use pen events yet, and the pen reports nothing at 144 Hz.
   - USB-C headphones, USB host mode and DisplayPort Alt Mode.
 - **Sensors and media:**
   - Cameras and the fingerprint reader.
