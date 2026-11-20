@@ -29,6 +29,7 @@ x86-64와 arm64 QEMU 이미지를 같은 레시피로 빌드해 셸까지 부팅
 - 결정 자료와 근거: [docs/design/DECISION-BRIEF.md](docs/design/DECISION-BRIEF.md)
 - 디자인 스펙(UI 규칙과 토큰): [docs/design/DESIGN-SPEC.md](docs/design/DESIGN-SPEC.md)
 - 개발 환경과 이미지 빌드: [docs/dev/environment.md](docs/dev/environment.md)
+- buntOS용 앱 개발 안내(앱을 만들 때 고려할 것): [docs/dev/app-development.md](docs/dev/app-development.md)
 
 ## 핵심 방향
 
