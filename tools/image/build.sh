@@ -45,8 +45,8 @@ if [[ -n "${BUNTOS_TOOLS_TREE:-}" ]]; then
 	extra+=(--tools-tree="$BUNTOS_TOOLS_TREE")
 fi
 
-# 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, bunt-packages, buntd-agent와 bunt, bunt-greeter와 bunt-lock)를 빌드해
-# 이미지에 넣을 트리로 모은다.
+# 자체 컴포넌트(bunt-comp, bunt-shell, bunt-settings, bunt-packages, buntd-agent와 bunt, bunt-greeter와 bunt-lock)와 고친
+# foot(image/foot)을 빌드해 이미지에 넣을 트리로 모은다.
 # 지금은 빌드 VM과 아키텍처가 같은 보드만 지원한다. 다른 아키텍처는 CI에서 빌드한다.
 stage_components() {
 	local arch host
@@ -93,6 +93,13 @@ stage_components() {
 			cp -a "$repo/$crate/data/root/." "$out/stage/"
 		fi
 	done
+	# 터미널 foot: 터미널에서도 Ctrl+C·Ctrl+V로 복사하고 붙이도록 고친 판과 그 설정(image/foot). Debian의 foot을
+	# 덮고, apt-guard가 경로를 돌려(GUARD_DIVERT) Debian이 foot을 올려도 이것이 남는다. 처음 한 번 몇 분 걸리고, 소스
+	# 판과 패치가 그대로면 다시 빌드하지 않는다
+	local foot
+	foot=$("$repo/image/foot/build.sh" | tail -n 1)
+	install -D -m 0755 "$foot" "$out/stage/usr/bin/foot"
+	install -D -m 0644 "$repo/image/foot/foot.ini" "$out/stage/etc/xdg/foot/foot.ini"
 	install -D -m 0644 "$repo/settings/data/org.buntos.Settings.desktop" \
 		"$out/stage/usr/share/applications/org.buntos.Settings.desktop"
 	install -D -m 0644 "$repo/packages/data/org.buntos.PackageManager.desktop" \
