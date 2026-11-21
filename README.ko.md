@@ -150,7 +150,7 @@ buntOS에서 쓸 앱을 만들거나 꾸러미로 낸다면 [docs/dev/app-develo
 
 ## 기여
 
-기여는 DCO(Developer Certificate of Origin) 서명으로 받습니다. [CONTRIBUTING.md](CONTRIBUTING.md)를 보십시오.
+기여는 DCO(Developer Certificate of Origin) 서명으로 받습니다. [CONTRIBUTING.ko.md](CONTRIBUTING.ko.md)를 보십시오.
 
 ## 라이선스
 

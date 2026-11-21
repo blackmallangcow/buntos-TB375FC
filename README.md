@@ -150,7 +150,7 @@ The patches are written so that they can go upstream. One fix from the queue (th
 
 ## Contributing
 
-Contributions are accepted under the Developer Certificate of Origin; see [CONTRIBUTING.md](CONTRIBUTING.md), in Korean.
+Contributions are accepted under the Developer Certificate of Origin; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
