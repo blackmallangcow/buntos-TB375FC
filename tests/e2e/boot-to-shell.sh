@@ -146,6 +146,13 @@ if [[ "$system_state" == degraded ]]; then
 	wait_for "^E2E_DONE_6$" || true
 	console | grep -a "^E2E_2F " | sed 's/^E2E_2F /실패한 유닛: /'
 fi
+# 스왑 파일(설계안 8.1절): 디스크에 남는 공간이 있으면 처음 켤 때 만들어 켜고, 모자라면 만들지 않는다. 어느 쪽이든 두 유닛은
+# 실패하지 않아야 한다. 표시는 셸이 계산하게 한다(입력 줄의 에코와 구분된다)
+echo 'set -- $(systemctl is-failed buntos-swapfile.service swap-swapfile.swap); echo "E2E_SWAP_$((0 + 1)) $1 $2 $(swapon --show=NAME,SIZE --noheadings | tr -s " " | head -n 1)"' >&3
+wait_for "^E2E_SWAP_1 " || fail "스왑 파일 유닛의 상태를 읽지 못했다"
+swap_line=$(console | grep -a "^E2E_SWAP_1 " | tail -1)
+[[ "$swap_line" != *failed* ]] || fail "스왑 파일 유닛이 실패했다: ${swap_line#E2E_SWAP_1 }"
+echo "스왑(만드는 서비스, 스왑 유닛, 켜진 스왑): ${swap_line#E2E_SWAP_1 }"
 if [[ -n "${E2E_LOG_DIR:-}" ]]; then
 	# 게스트 저널을 부팅부터 끝까지 저널 포트로 보낸다. 시험이 어디서 멈춰도 그때까지의 저널이 남는다. 시스템
 	# 상태를 읽은 뒤에 보낸다(바로 보내면 이 명령의 메아리가 systemctl의 답 줄에 끼어 상태 줄을 찾지 못하고
