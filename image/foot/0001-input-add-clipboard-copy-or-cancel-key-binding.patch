@@ -1,0 +1,98 @@
+From: buntOS contributors
+Subject: [PATCH] input: add clipboard-copy-or-cancel key binding
+
+A key binding that copies the selection to the clipboard when there is
+one, and otherwise does not consume the key. Bound to Control+c, it
+copies with the same key as most other applications (and as Windows
+Terminal), and still interrupts the running program when nothing is
+selected. The key is let through like any other key, so the program
+gets ^C, or ctrl+c in the form it asked for with the kitty keyboard
+protocol.
+
+The selection is left as it is after copying, as clipboard-copy does.
+Cancelling it would make the next press interrupt, and with an input
+method (input-method-v2) key repeat arrives as release and press pairs
+that foot cannot tell from new presses, so holding the key after
+copying would interrupt the program the text was copied from. Typing
+or clicking cancels the selection as usual.
+
+Unbound by default. Requested upstream in
+https://codeberg.org/dnkl/foot/issues/1333 (open), where the maintainer
+found it acceptable if unbound by default.
+---
+diff --git a/config.c b/config.c
+index 221258d..bc9a875 100644
+--- a/config.c
++++ b/config.c
+@@ -159,6 +159,7 @@ static const char *const binding_action_map[] = {
+     [BIND_ACTION_SCROLLBACK_HOME] = "scrollback-home",
+     [BIND_ACTION_SCROLLBACK_END] = "scrollback-end",
+     [BIND_ACTION_CLIPBOARD_COPY] = "clipboard-copy",
++    [BIND_ACTION_CLIPBOARD_COPY_OR_CANCEL] = "clipboard-copy-or-cancel",
+     [BIND_ACTION_CLIPBOARD_PASTE] = "clipboard-paste",
+     [BIND_ACTION_PRIMARY_PASTE] = "primary-paste",
+     [BIND_ACTION_SEARCH_START] = "search-start",
+diff --git a/doc/foot.ini.5.scd b/doc/foot.ini.5.scd
+index 8bedf45..cd1c485 100644
+--- a/doc/foot.ini.5.scd
++++ b/doc/foot.ini.5.scd
+@@ -1355,6 +1355,13 @@ e.g. *search-start=none*.
+ 	Copies the current selection into the _clipboard_. Default: _Control+Shift+c_
+ 	_XF86Copy_.
+ 
++*clipboard-copy-or-cancel*
++	Copies the current selection into the _clipboard_. When nothing is
++	selected, the key is not consumed, but sent to the application
++	like any other key. Bound to *Control+c*, it copies with the same
++	key as most other applications, and still interrupts the running
++	program when nothing is selected. Default: _none_.
++
+ *clipboard-paste*
+ 	Pastes from the _clipboard_. Default: _Control+Shift+v_ _XF86Paste_.
+ 
+diff --git a/foot.ini b/foot.ini
+index 6469af7..197ea05 100644
+--- a/foot.ini
++++ b/foot.ini
+@@ -205,6 +205,7 @@
+ # scrollback-home=none
+ # scrollback-end=none
+ # clipboard-copy=Control+Shift+c XF86Copy
++# clipboard-copy-or-cancel=none
+ # clipboard-paste=Control+Shift+v XF86Paste
+ # primary-paste=Shift+Insert
+ # search-start=Control+Shift+r
+diff --git a/input.c b/input.c
+index f6ba9de..7bff59c 100644
+--- a/input.c
++++ b/input.c
+@@ -181,6 +181,17 @@ execute_binding(struct seat *seat, struct terminal *term,
+         selection_to_clipboard(seat, term, serial);
+         return true;
+ 
++    case BIND_ACTION_CLIPBOARD_COPY_OR_CANCEL:
++        /* No selection: don't consume the key (e.g. ctrl+c is sent as ^C) */
++        if (term->selection.coords.start.row < 0 ||
++            term->selection.coords.end.row < 0)
++        {
++            return false;
++        }
++
++        selection_to_clipboard(seat, term, serial);
++        return true;
++
+     case BIND_ACTION_CLIPBOARD_PASTE:
+         selection_from_clipboard(seat, term, serial);
+         term_reset_view(term);
+diff --git a/key-binding.h b/key-binding.h
+index 4d40a66..8b3ba0c 100644
+--- a/key-binding.h
++++ b/key-binding.h
+@@ -19,6 +19,7 @@ enum bind_action_normal {
+     BIND_ACTION_SCROLLBACK_HOME,
+     BIND_ACTION_SCROLLBACK_END,
+     BIND_ACTION_CLIPBOARD_COPY,
++    BIND_ACTION_CLIPBOARD_COPY_OR_CANCEL,
+     BIND_ACTION_CLIPBOARD_PASTE,
+     BIND_ACTION_PRIMARY_PASTE,
+     BIND_ACTION_SEARCH_START,

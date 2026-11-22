@@ -158,3 +158,10 @@ path = ["bsp/lenovo-tb375fc/upower/*.patch"]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 buntOS contributors"
 SPDX-License-Identifier = "GPL-2.0-or-later"
+
+# foot에 붙이는 패치는 foot의 라이선스(MIT)를 따른다. 업스트림에 그대로 낼 수 있게 한다
+[[annotations]]
+path = ["image/foot/*.patch"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 buntOS contributors"
+SPDX-License-Identifier = "MIT"

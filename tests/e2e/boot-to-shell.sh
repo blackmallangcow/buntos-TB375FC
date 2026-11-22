@@ -146,6 +146,13 @@ if [[ "$system_state" == degraded ]]; then
 	wait_for "^E2E_DONE_6$" || true
 	console | grep -a "^E2E_2F " | sed 's/^E2E_2F /실패한 유닛: /'
 fi
+# 스왑 파일(설계안 8.1절): 디스크에 남는 공간이 있으면 처음 켤 때 만들어 켜고, 모자라면 만들지 않는다. 어느 쪽이든 두 유닛은
+# 실패하지 않아야 한다. 표시는 셸이 계산하게 한다(입력 줄의 에코와 구분된다)
+echo 'set -- $(systemctl is-failed buntos-swapfile.service swap-swapfile.swap); echo "E2E_SWAP_$((0 + 1)) $1 $2 $(swapon --show=NAME,SIZE --noheadings | tr -s " " | head -n 1)"' >&3
+wait_for "^E2E_SWAP_1 " || fail "스왑 파일 유닛의 상태를 읽지 못했다"
+swap_line=$(console | grep -a "^E2E_SWAP_1 " | tail -1)
+[[ "$swap_line" != *failed* ]] || fail "스왑 파일 유닛이 실패했다: ${swap_line#E2E_SWAP_1 }"
+echo "스왑(만드는 서비스, 스왑 유닛, 켜진 스왑): ${swap_line#E2E_SWAP_1 }"
 if [[ -n "${E2E_LOG_DIR:-}" ]]; then
 	# 게스트 저널을 부팅부터 끝까지 저널 포트로 보낸다. 시험이 어디서 멈춰도 그때까지의 저널이 남는다. 시스템
 	# 상태를 읽은 뒤에 보낸다(바로 보내면 이 명령의 메아리가 systemctl의 답 줄에 끼어 상태 줄을 찾지 못하고
@@ -420,9 +427,28 @@ if [[ "$agent_refs" != NONE ]]; then
 	keys keys:meta_l+a sleep:0.3 keys:meta_l+c sleep:0.5 keys:alt+ret sleep:5 keys:meta_l+v sleep:1 keys:ret sleep:1.5
 	guest terminal
 	check "터미널에서 ⌘V로 붙여 실행한다" "$answer" "pasted 1"
+	# 터미널의 Ctrl+V와 Ctrl+C (고친 foot과 그 설정, image/foot): Ctrl+V는 붙여넣기다. Ctrl+C는 고른 글이 있으면
+	# 복사하고 고른 표시를 남겨 누르고 있어도(입력기가 되풀이를 새 누름으로 보낸다) 인터럽트하지 않으며, 고른 글이
+	# 없으면 인터럽트다. 글은 ⌘F(foot의 검색)에 찾을 말을 Ctrl+V로 붙이고 ↩로 마쳐 고른다. foot은 클립보드가 바뀌어도
+	# 고른 표시를 지우지 않으므로, 고른 뒤 클립보드를 다른 글로 바꾼다. 고른 표시는 Esc(foot이 보내는 키)로 지운다
+	guest terminal-clip command
+	keys keys:ctrl+v sleep:1 keys:ret sleep:1.5
+	guest terminal
+	check "터미널에서 Ctrl+V로 붙여 실행한다" "$answer" "ctrl-v 1"
+	guest terminal-clip sleep
+	keys keys:ctrl+v sleep:1 keys:ret sleep:1
+	guest terminal-clip ctrl-v
+	keys keys:meta_l+f sleep:0.5 keys:ctrl+v sleep:0.5 keys:ret sleep:0.5
+	guest terminal-clip other
+	keys down:ctrl sleep:0.05 down:c sleep:1.2 up:c sleep:0.05 up:ctrl sleep:0.5
+	guest terminal-copy
+	check "터미널에서 고른 글을 Ctrl+C로 복사하고, 누르고 있어도 인터럽트하지 않는다" "$answer" "ctrl-v 1"
+	keys keys:esc sleep:0.5 keys:ctrl+c sleep:1
+	guest terminal-copy
+	check "터미널에서 고른 글이 없으면 Ctrl+C가 인터럽트다" "$answer" "ctrl-v 0"
 	keys keys:meta_l+w sleep:2
 	guest terminal
-	check "터미널에서 ⌘W로 창을 닫는다" "$answer" "pasted 0"
+	check "터미널에서 ⌘W로 창을 닫는다" "$answer" "ctrl-v 0"
 	# 조합 키만으로 된 입력 소스 전환(Windows의 Ctrl+Shift): 다른 키 없이 눌렀다 떼면 바뀌고, 사이에
 	# 다른 키가 끼면(⌃⇧A) 그대로다
 	guest chord-prepare
