@@ -5,7 +5,8 @@
 # e2e 6번 게스트 쪽 도우미: 키보드 단축키 (ARCHITECTURE 9.2, 5.3). 키는 호스트가 QMP로 가상 키보드에
 # 넣고(boot-to-shell.sh), 이 스크립트는 준비와 확인만 한다. 그래서 키가 실제 입력과 같은 길(libinput →
 # 컴포지터 단축키 → 앱)을 거친다. 직렬 콘솔의 root로 실행하며 마지막 줄이 답이다.
-# 사용법: shortcuts.sh prepare | value | focus | screenshots | dbus | terminal-prepare | terminal |
+# 사용법: shortcuts.sh prepare | value | focus | screenshots | dbus | terminal-prepare | terminal | terminal-clip <글> |
+#         terminal-copy |
 #         chord-prepare | input-method | caps-lock | chord-reset | minimize-button | restore-dock | switcher |
 #         preview | toolbar | volume-prepare | volume
 set -u
@@ -35,6 +36,16 @@ compositor() {
 		busctl --user call org.buntos.Compositor /org/buntos/Compositor org.buntos.Compositor1 "$@" 2>&1
 }
 audio() { sudo -u "$user" XDG_RUNTIME_DIR=/run/user/1000 "$@"; }
+# 세션의 Wayland에 붙는 프로그램(wl-copy, wl-paste)을 시험 계정으로 돌린다
+W() {
+	local socket display=
+	for socket in /run/user/1000/wayland-*; do
+		[[ "$socket" == *.lock ]] && continue
+		display=${socket##*/}
+		break
+	done
+	sudo -u "$user" env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$display" "$@"
+}
 document() { A snapshot --app org.gnome.TextEditor -i | grep -m1 textbox | grep -o 'ref=e[0-9]*' | cut -d= -f2; }
 # 셸의 Dock에서 그 이름의 단추 (최소화한 창은 창 제목이 이름이다)
 dock_button() { A snapshot --app bunt-shell -i | grep -aF "button \"$1\"" | grep -o 'ref=e[0-9]*' | head -1 | cut -d= -f2; }
@@ -66,6 +77,21 @@ terminal-prepare)
 terminal)
 	# 터미널에서 실행한 명령이 만든 파일의 글과 떠 있는 터미널(foot) 수
 	echo "$(cat /tmp/e2e-foot 2>/dev/null) $(pgrep -c -x foot)"
+	;;
+terminal-clip)
+	# 클립보드에 글을 넣는다. 호스트가 직렬 콘솔로 넘기는 인자라 셸 기호가 있는 글은 이름으로 받는다. wl-copy는 창을 띄우지
+	# 않아 포커스가 그대로이고, 뒤에 남아 내용을 내주므로 출력을 닫는다
+	case "$2" in
+	command) text="echo ctrl-v >/tmp/e2e-foot" ;;
+	sleep) text="sleep 987" ;;
+	*) text=$2 ;;
+	esac
+	printf '%s' "$text" | W wl-copy >/dev/null 2>&1
+	echo ready
+	;;
+terminal-copy)
+	# 클립보드의 글과 터미널에서 도는 sleep 987의 수
+	echo "$(W timeout 5 wl-paste -n 2>/dev/null) $(pgrep -c -x -f 'sleep 987')"
 	;;
 chord-prepare)
 	# 입력 소스 전환을 조합 키만(⌃⇧, Windows의 입력 언어 전환)으로 바꾸고 입력기를 영문에 둔다

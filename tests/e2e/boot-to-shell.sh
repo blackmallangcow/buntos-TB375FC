@@ -420,9 +420,28 @@ if [[ "$agent_refs" != NONE ]]; then
 	keys keys:meta_l+a sleep:0.3 keys:meta_l+c sleep:0.5 keys:alt+ret sleep:5 keys:meta_l+v sleep:1 keys:ret sleep:1.5
 	guest terminal
 	check "터미널에서 ⌘V로 붙여 실행한다" "$answer" "pasted 1"
+	# 터미널의 Ctrl+V와 Ctrl+C (고친 foot과 그 설정, image/foot): Ctrl+V는 붙여넣기다. Ctrl+C는 고른 글이 있으면
+	# 복사하고 고른 표시를 남겨 누르고 있어도(입력기가 되풀이를 새 누름으로 보낸다) 인터럽트하지 않으며, 고른 글이
+	# 없으면 인터럽트다. 글은 ⌘F(foot의 검색)에 찾을 말을 Ctrl+V로 붙이고 ↩로 마쳐 고른다. foot은 클립보드가 바뀌어도
+	# 고른 표시를 지우지 않으므로, 고른 뒤 클립보드를 다른 글로 바꾼다. 고른 표시는 Esc(foot이 보내는 키)로 지운다
+	guest terminal-clip command
+	keys keys:ctrl+v sleep:1 keys:ret sleep:1.5
+	guest terminal
+	check "터미널에서 Ctrl+V로 붙여 실행한다" "$answer" "ctrl-v 1"
+	guest terminal-clip sleep
+	keys keys:ctrl+v sleep:1 keys:ret sleep:1
+	guest terminal-clip ctrl-v
+	keys keys:meta_l+f sleep:0.5 keys:ctrl+v sleep:0.5 keys:ret sleep:0.5
+	guest terminal-clip other
+	keys down:ctrl sleep:0.05 down:c sleep:1.2 up:c sleep:0.05 up:ctrl sleep:0.5
+	guest terminal-copy
+	check "터미널에서 고른 글을 Ctrl+C로 복사하고, 누르고 있어도 인터럽트하지 않는다" "$answer" "ctrl-v 1"
+	keys keys:esc sleep:0.5 keys:ctrl+c sleep:1
+	guest terminal-copy
+	check "터미널에서 고른 글이 없으면 Ctrl+C가 인터럽트다" "$answer" "ctrl-v 0"
 	keys keys:meta_l+w sleep:2
 	guest terminal
-	check "터미널에서 ⌘W로 창을 닫는다" "$answer" "pasted 0"
+	check "터미널에서 ⌘W로 창을 닫는다" "$answer" "ctrl-v 0"
 	# 조합 키만으로 된 입력 소스 전환(Windows의 Ctrl+Shift): 다른 키 없이 눌렀다 떼면 바뀌고, 사이에
 	# 다른 키가 끼면(⌃⇧A) 그대로다
 	guest chord-prepare
