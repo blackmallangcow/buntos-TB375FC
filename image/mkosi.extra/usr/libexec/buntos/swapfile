@@ -1,0 +1,63 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 스왑 파일 /swap/swapfile을 만든다. 없을 때만 한 번 돈다(buntos-swapfile.service). 켜는 것은 swap-swapfile.swap이다.
+#
+# 까닭(설계안 8.1절): 스왑이 없으면 앱의 익명 메모리도, GPU 드라이버가 shmem으로 잡은 버퍼도 RAM에서 내보낼 곳이 없다.
+# 메모리가 모자라면 커널은 프로그램 파일만 버렸다가 다시 읽기를 되풀이해 시스템 전체가 멈춘 듯 느려진다(TB375FC
+# 2026-11-22: 쓸 수 있는 메모리 151 MiB, CPU 시간의 79 %가 커널의 회수). Panthor는 스왑이 있을 때만 GPU 버퍼를 돌려준다.
+#
+# - 크기: RAM의 절반을 GiB로 반올림해 2~8 GiB. /etc/buntos/swap.conf의 SIZE_GIB=<수>로 바꾸고, 0이면 만들지 않는다
+# - 루트가 btrfs면 /swap을 따로 된 서브볼륨으로 둔다. 루트의 스냅숏(apt-guard)에 스왑 파일이 들어가지 않고, 켜진
+#   스왑 파일이 스냅숏을 막지 않는다. 스냅숏에서 되살린 루트에는 그 자리에 빈 폴더가 남으므로 지우고 다시 만든다
+# - 남는 공간이 크기 + 4 GiB보다 적으면 만들지 않는다. 디스크를 채우지 않는다
+#
+# 사용법: swapfile [루트]   (루트는 시험할 때만 준다. 기본은 /)
+set -euo pipefail
+
+root=${1:-/}
+root=${root%/}
+dir=$root/swap
+file=$dir/swapfile
+conf=$root/etc/buntos/swap.conf
+
+say() { echo "swapfile: $*"; }
+
+[ -e "$file" ] && exit 0
+
+size_gib=
+if [ -r "$conf" ]; then
+	size_gib=$(sed -n 's/^SIZE_GIB=\([0-9][0-9]*\)$/\1/p' "$conf" | tail -n 1)
+fi
+if [ -z "$size_gib" ]; then
+	ram_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+	size_gib=$(((ram_kib / 2 + 524288) / 1048576))
+	((size_gib >= 2)) || size_gib=2
+	((size_gib <= 8)) || size_gib=8
+fi
+if ((size_gib == 0)); then
+	say "SIZE_GIB=0 in $conf, no swap file"
+	exit 0
+fi
+
+avail_mib=$(df --output=avail -BM "${root:-/}" | tail -n 1 | tr -dc '0-9')
+if ((avail_mib < (size_gib + 4) * 1024)); then
+	say "only $((avail_mib / 1024)) GiB free, not making a ${size_gib} GiB swap file"
+	exit 0
+fi
+
+if [ "$(findmnt -no FSTYPE --target "${root:-/}")" = btrfs ]; then
+	if [ -d "$dir" ] && ! btrfs subvolume show "$dir" >/dev/null 2>&1; then
+		# 스냅숏이 서브볼륨 자리에 남긴 빈 폴더. 비어 있지 않으면 rmdir이 실패해 여기서 멈춘다
+		rmdir "$dir"
+	fi
+	[ -d "$dir" ] || btrfs subvolume create "$dir" >/dev/null
+	btrfs filesystem mkswapfile --size "${size_gib}g" "$file" >/dev/null
+else
+	mkdir -p "$dir"
+	fallocate -l "${size_gib}G" "$file"
+	chmod 600 "$file"
+	mkswap -q "$file"
+fi
+say "made a ${size_gib} GiB swap file at $file"

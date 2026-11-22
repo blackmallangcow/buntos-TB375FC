@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 buntOS contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 스왑 파일이 없으면 만든다(/usr/libexec/buntos/swapfile, 설계안 8.1절). swap-swapfile.swap이 끌어오고, 파일이 생긴
+# 뒤로는 조건 때문에 돌지 않는다. 공간이 모자라 만들지 않으면 실패로 끝내지 않고, 스왑 유닛도 조건으로 건너뛴다
+
+[Unit]
+Description=Make the swap file
+Documentation=file:/usr/libexec/buntos/swapfile
+DefaultDependencies=no
+ConditionPathExists=!/swap/swapfile
+RequiresMountsFor=/swap
+After=systemd-remount-fs.service
+Before=swap-swapfile.swap shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/buntos/swapfile
