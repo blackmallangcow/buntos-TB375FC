@@ -1,0 +1,29 @@
+From: buntOS contributors
+Subject: [PATCH] iommu/mediatek: let the MT6897 camera masters attach without their larb
+
+The camera DMA engines of the MT6897 reach the multimedia IOMMUs through
+SMI larb14, whose ports come up with their MMU bit set. Neither the larb nor
+the camera SMI sub-commons behind it are described yet. Let masters on
+larb14 attach the way the video coprocessor does: without a larb device,
+and linked to the SMI common of the IOMMU instead, which keeps the IOMMU
+powered while they run.
+---
+diff --git a/drivers/iommu/mtk_iommu.c b/drivers/iommu/mtk_iommu.c
+index 10e19d5c6..4a275a5cc 100644
+--- a/drivers/iommu/mtk_iommu.c
++++ b/drivers/iommu/mtk_iommu.c
+@@ -1775,8 +1775,12 @@ static const unsigned int mt6897_larb_region_msk[ARRAY_SIZE(mt6897_multi_dom)][M
+ #endif
+ };
+ 
+-/* larb31 stands for the masters without a larb: see the binding header */
+-#define MT6897_NOLARB_MSK	BIT(31)
++/*
++ * larb31 stands for the masters without a larb: see the binding header. larb14,
++ * the one of the camera DMA, is not described yet, so its masters attach the
++ * same way; its ports come up with the MMU on.
++ */
++#define MT6897_NOLARB_MSK	(BIT(31) | BIT(14))
+ 
+ static const struct mtk_iommu_plat_data mt6897_data_disp = {
+ 	.m4u_plat	= M4U_MT6897,

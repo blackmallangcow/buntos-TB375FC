@@ -402,6 +402,9 @@
 			 <&camsys_main CLK_CAM_MAIN_CAMSV_TOP>,
 			 <&camsys_main CLK_CAM_MAIN_CAMSV_A>;
 		clock-names = "cam", "seninf", "camtg", "camsv", "camsv-a";
+		// 앞 카메라 4단계: camsv1의 명령 큐 읽기(포트 0)와 이미지 쓰기(포트 1). 시험 모듈이 이 장치로 버퍼를 매핑한다
+		iommus = <&disp_iommu MTK_M4U_ID(14, 0)>,
+			 <&disp_iommu MTK_M4U_ID(14, 1)>;
 		status = "disabled";
 	};
 };

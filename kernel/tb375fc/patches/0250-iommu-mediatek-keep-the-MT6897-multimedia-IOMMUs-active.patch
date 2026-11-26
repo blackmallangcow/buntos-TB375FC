@@ -1,0 +1,93 @@
+From: buntOS contributors
+Subject: [PATCH] iommu/mediatek: keep the MT6897 multimedia IOMMUs active
+
+The multimedia IOMMUs of the MT6897 are in the MM_INFRA power domain and
+run on the MMINFRA SMI clock, which stay on for the display whether or not
+this driver suspends the IOMMUs. A suspended IOMMU keeps translating with
+the entries in its TLB, but mtk_iommu_tlb_flush_range_sync() skips the
+flush for it and leaves the flush to the next runtime resume. A master that
+writes through it in between can still use the translations of buffers
+that have been unmapped and freed.
+
+On a Lenovo TB375FC the display IOMMU had not been resumed once since boot,
+as none of its masters had attached. A camera DMA test wrote one frame
+through it into a buffer, freed the buffer, and wrote the next frame into a
+new buffer at the same address. Only the first part of that frame reached
+the new buffer, and the kernel then oopsed while freeing it and in the slab
+allocator: most likely the stale entries sent the rest to the pages of the
+first buffer, which the kernel had reused. The test borrowed the buffer of
+another master and so did not hold the IOMMU active itself, but nothing in
+the hardware keeps a master from writing while the IOMMU is suspended.
+
+Add a flag that takes a runtime PM reference at probe, so that these IOMMUs
+stay active and every unmap flushes their TLB. System sleep suspends and
+resumes them as before.
+---
+diff --git a/drivers/iommu/mtk_iommu.c b/drivers/iommu/mtk_iommu.c
+index e032eafca..10e19d5c6 100644
+--- a/drivers/iommu/mtk_iommu.c
++++ b/drivers/iommu/mtk_iommu.c
+@@ -170,6 +170,12 @@
+ #define HYP_SHADOW_PGTABLE		BIT(23)
+ /* The secure monitor sets up the banks that the kernel does not own */
+ #define SEC_BANK_IN_ATF			BIT(24)
++/*
++ * The power domain and the bus clock of the IOMMU stay on for other users, so
++ * a suspended IOMMU still translates with its TLB: keep it active, or an unmap
++ * would skip the TLB flush.
++ */
++#define PM_KEEP_ACTIVE			BIT(25)
+ 
+ #define MTK_IOMMU_HAS_FLAG_MASK(pdata, _x, mask)	\
+ 				((((pdata)->flags) & (mask)) == (_x))
+@@ -1538,13 +1544,22 @@ static int mtk_iommu_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto out_sysfs_remove;
+ 
++	if (MTK_IOMMU_HAS_FLAG(data->plat_data, PM_KEEP_ACTIVE)) {
++		ret = pm_runtime_resume_and_get(dev);
++		if (ret)
++			goto out_device_unregister;
++	}
++
+ 	if (MTK_IOMMU_IS_TYPE(data->plat_data, MTK_IOMMU_TYPE_MM)) {
+ 		ret = component_master_add_with_match(dev, &mtk_iommu_com_ops, match);
+ 		if (ret)
+-			goto out_device_unregister;
++			goto out_runtime_put;
+ 	}
+ 	return ret;
+ 
++out_runtime_put:
++	if (MTK_IOMMU_HAS_FLAG(data->plat_data, PM_KEEP_ACTIVE))
++		pm_runtime_put_sync(dev);
+ out_device_unregister:
+ 	iommu_device_unregister(&data->iommu);
+ out_sysfs_remove:
+@@ -1580,6 +1595,8 @@ static void mtk_iommu_remove(struct platform_device *pdev)
+ 		for (i = 0; i < MTK_LARB_NR_MAX; i++)
+ 			put_device(data->larb_imu[i].dev);
+ 	}
++	if (MTK_IOMMU_HAS_FLAG(data->plat_data, PM_KEEP_ACTIVE))
++		pm_runtime_put_sync(&pdev->dev);
+ 	pm_runtime_disable(&pdev->dev);
+ 	for (i = 0; i < data->plat_data->banks_num; i++) {
+ 		bank = &data->bank[i];
+@@ -1765,7 +1782,7 @@ static const struct mtk_iommu_plat_data mt6897_data_disp = {
+ 	.m4u_plat	= M4U_MT6897,
+ 	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
+ 			  PGTABLE_PA_35_EN | TLB_SYNC_EN | HYP_SHADOW_PGTABLE |
+-			  SEC_BANK_IN_ATF | MTK_IOMMU_TYPE_MM,
++			  SEC_BANK_IN_ATF | PM_KEEP_ACTIVE | MTK_IOMMU_TYPE_MM,
+ 	.hw_list	= &m4ulist,
+ 	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
+ 	.banks_num	= 1,
+@@ -1780,7 +1797,7 @@ static const struct mtk_iommu_plat_data mt6897_data_mdp = {
+ 	.m4u_plat	= M4U_MT6897,
+ 	.flags		= HAS_BCLK | OUT_ORDER_WR_EN | IOVA_34_EN | SHARE_PGTABLE |
+ 			  PGTABLE_PA_35_EN | TLB_SYNC_EN | HYP_SHADOW_PGTABLE |
+-			  SEC_BANK_IN_ATF | MTK_IOMMU_TYPE_MM,
++			  SEC_BANK_IN_ATF | PM_KEEP_ACTIVE | MTK_IOMMU_TYPE_MM,
+ 	.hw_list	= &m4ulist,
+ 	.inv_sel_reg	= REG_MMU_INV_SEL_GEN2,
+ 	.banks_num	= 1,

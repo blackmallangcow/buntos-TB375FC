@@ -340,3 +340,9 @@
 #      seninf1 → mux1 → cam-mux 0의 고정 길. 받는 쪽(camsv)이 아직 없어 debugfs로 켜고 끄고 상태를 본다
 0248-dt-bindings-media-mediatek-add-the-MT6897-sensor-interface.patch
 0249-media-mediatek-add-a-driver-for-the-MT6897-sensor-interface.patch
+
+# 0250~0251 IOMMU. 0250: MT6897의 멀티미디어 IOMMU는 화면 때문에 전원과 클럭이 늘 켜져 있어, 리눅스가 재워도 TLB로 번역한다.
+#      재운 채로 두면 매핑을 풀 때 TLB 비우기를 건너뛰어, 카메라 DMA 시험이 풀린 페이지에 써서 커널이 망가졌다. 깨워 둔다.
+#      0251: 카메라 DMA(larb14)의 마스터를 larb 없이 붙인다. larb14와 카메라 SMI 서브커먼 노드는 아직 없다
+0250-iommu-mediatek-keep-the-MT6897-multimedia-IOMMUs-active.patch
+0251-iommu-mediatek-let-the-MT6897-camera-masters-attach-without-their-larb.patch
