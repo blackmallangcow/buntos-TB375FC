@@ -71,6 +71,7 @@ These were tested on the device.
 | Input | Touchscreen and pogo-pin keyboard cover. Its touchpad does tap to click and two-finger scrolling. The cover sensor, power key and volume keys work. The active pen (Lenovo Tab Pen Plus) reports position, pressure, tilt and hover at 120 Hz; a contributor checked it on the device. |
 | Wireless | Wi-Fi works on 2.4 and 5 GHz (station mode, WPA2) through a new mt76 variant for the MT6897 connectivity subsystem. Bluetooth works with AirPods and a BLE keyboard. |
 | Audio | The four speakers and the built-in microphone work through PipeWire. |
+| Video | Hardware video decoding runs on the stock video firmware: a stateful V4L2 decoder for H.264, HEVC, VP9 and AV1 up to 4K, and a VA-API driver that lets Firefox play VP9 in hardware. 1440p60 plays through; 4K60 drops a few frames. |
 | Power | USB-C charging, including PPS direct charging at about 40 W, and the battery gauge. The tablet keeps charging while asleep. Other power features that work: suspend-to-idle with power-key wake, a 10-second forced power-off, CPU idle states and thermal throttling. |
 | Desktop | The buntOS compositor, shell, settings and on-screen keyboard run, with Korean input. So do the usual apps (Firefox, Files, Terminal and others). |
 
@@ -82,7 +83,6 @@ These were tested on the device.
 - **Sensors and media:**
   - Cameras and the fingerprint reader.
   - Auto-rotation and the ambient light sensor, which sit behind the SCP sensor hub.
-  - Hardware video decoding.
 - **Power:**
   - Turning the display off when idle.
   - Deeper sleep. Suspend-to-idle uses about 1.2 % of the battery per hour.
