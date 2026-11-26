@@ -80,7 +80,7 @@ python3 -I tools/hw/dts_enabled.py out/merged.dts       # 켜진 노드의 compa
 | 무선 | MediaTek connsys 통합 Wi-Fi·Bluetooth·GPS(`wifi@18000000`, `bt@18000000`, `gps@18c00000`). 펌웨어 `connsys_wifi.img`, `connsys_bt.img`, `connsys_gnss.img` | `mediatek,wifi`, `mediatek,bt`, `mediatek,mt6897-gps` | 외장 칩이 아니라 SoC 통합형이다. 휴대기기용 connsys는 업스트림 드라이버가 없는 것으로 안다(4.2.1-4, 2d에서 확인) |
 | 센서 | 센서 허브 SCP(`scp@1c400000`, 펌웨어 `scp.img`), 홀 센서 둘(`hall_1`, `hall_2`: 키보드 커버), SAR 센서 TYHX HX9036·HX9031AS | `mediatek,scp`, `tyhx,hx9031as` | 가속도·조도 센서는 SCP 뒤에 있는 것으로 보인다(확인 필요) |
 | 키보드 커버 | 포고 핀 키보드(Tinno), 3핀(전원, 접지, 데이터 한 줄). 키보드 전원 GPIO61, 붙음 GPIO26(`hall_2`) | `tinno,tn_keyboard`, `mediatek,keyboard_gpio` | 드라이버 대기열(0032~0036) |
-| 카메라 | 이미지 센서 둘(I2C 0x10 두 곳), AF GT9772B, EEPROM 둘, 플래시 OCP811 | `mediatek,imgsensor` | 범위 밖 |
+| 카메라 | 이미지 센서 둘(장치 트리의 I2C 주소는 둘 다 0x10), AF GT9772B, EEPROM 둘, 플래시 OCP811. 앞 센서는 기기에서 SmartSens SC820CS(I2C 9번 0x36)로 확인했다(2026-11-26) | `mediatek,imgsensor` | 앞 카메라만 계획 중([앞 카메라](../tb375fc/camera.md)), 뒤는 범위 밖 |
 | 진동·지문 | `regulator-vibrator`와 Goodix 지문(`mediatek,goodix-fp`, `mediatek,finger-goodix`) 노드가 켜져 있다 | 장치 트리 | MediaTek 참조 보드의 노드가 남은 것일 수 있다. 실물은 기기에서 확인 |
 | 보안 | GenieZone 위의 Trusty·Nebula, Trustonic Kinibi(`trustonic,mobicore`), Microtrust(`microtrust,utos`) 노드가 켜져 있다 | 장치 트리 | buntOS에는 필요 없다 |
 

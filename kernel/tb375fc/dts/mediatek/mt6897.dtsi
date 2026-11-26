@@ -2110,6 +2110,25 @@
 		};
 
 		/*
+		 * Camera clock blocks. They answer only while their power domains
+		 * are on, and the CAM_VCORE and CAM_MAIN domains take gates of
+		 * them to come up, so they carry no power-domains property.
+		 */
+		camsys_main: clock-controller@1a000000 {
+			compatible = "mediatek,mt6897-camsys-main", "syscon";
+			reg = <0 0x1a000000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		cam_vcore: clock-controller@1b204000 {
+			compatible = "mediatek,mt6897-cam-vcore", "syscon";
+			reg = <0 0x1b204000 0 0x1000>;
+			#clock-cells = <1>;
+			status = "disabled";
+		};
+
+		/*
 		 * System Power Manager. A domain joins here with its first
 		 * consumer. The driver does not touch a domain at probe and
 		 * cannot touch one that is not listed, which keeps the display

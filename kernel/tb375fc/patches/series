@@ -317,3 +317,21 @@
 
 # 0230 TB375FC pen: the stylus only reports at 120 Hz, so make 120 Hz the default
 0230-drm-panel-novatek-nt36532-prefer-120-Hz-on-the-TB375FC.patch
+
+# 0240~0243 앞 카메라 1단계(docs/tb375fc/camera.md 5.1절). MT6368 VSIM2(두 카메라의 입출력 전원)와 SmartSens SC820CS
+#      센서 드라이버. 설정표와 켜는 순서는 레노버 소스의 벤더 드라이버를 따른다. 수신부(seninf)가 아직 없어 드라이버는
+#      센서를 알아보고 켜고 끄기만 한다
+0240-dt-bindings-regulator-mt6368-add-VSIM2.patch
+0241-regulator-mt6368-add-the-VSIM2-LDO.patch
+0242-dt-bindings-media-i2c-add-the-SmartSens-SC820CS.patch
+0243-media-i2c-add-a-driver-for-the-SmartSens-SC820CS.patch
+
+# 0244~0246 앞 카메라 2단계(docs/tb375fc/camera.md 5.2절). 카메라 클럭 블록 camsys_main과 cam_vcore의 게이트.
+#      CAM_VCORE·CAM_MAIN 전원 도메인이 이 게이트를 켜야 올라오므로 상태를 읽지 않는 연산을 쓰고, 드라이버는 커널에 넣는다
+0244-dt-bindings-clock-mediatek-add-the-MT6897-camera-clock-gates.patch
+0245-clk-mediatek-gate-add-no-set-clear-inverted-ops-without-a-status-read.patch
+0246-clk-mediatek-add-the-MT6897-camera-clock-gates.patch
+
+# 0247 전원 제어기가 도메인을 하나라도 켜기 전에 모든 도메인의 공급과 클럭을 먼저 찾는다. CAM_MAIN의 domain-supply가 첫 probe를
+#      중간에 미루면, 이미 켠 화면 쪽 도메인(MM_INFRA, DIS0, OVL0)을 정리하며 껐다가 다시 켜서 화면 반쪽이 IOMMU 오류로 검게 됐다
+0247-pmdomain-mediatek-get-domain-supplies-and-clocks-before-adding-domains.patch

@@ -1,0 +1,140 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: media: i2c: add the SmartSens SC820CS
+
+Add the SmartSens vendor prefix and a binding for the SC820CS, an 8
+megapixel raw Bayer sensor with a four lane MIPI CSI-2 D-PHY output. It
+is the front camera of the Lenovo TB375FC.
+---
+diff --git a/Documentation/devicetree/bindings/media/i2c/smartsens,sc820cs.yaml b/Documentation/devicetree/bindings/media/i2c/smartsens,sc820cs.yaml
+new file mode 100644
+index 000000000..c8c4d62b4
+--- /dev/null
++++ b/Documentation/devicetree/bindings/media/i2c/smartsens,sc820cs.yaml
+@@ -0,0 +1,114 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/media/i2c/smartsens,sc820cs.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: SmartSens SC820CS 8 megapixel MIPI CSI-2 sensor
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++description:
++  The SC820CS is a raw Bayer image sensor with a MIPI CSI-2 D-PHY data
++  interface and a CCI (I2C compatible) control bus. Its pixel array is
++  3264x2448.
++
++allOf:
++  - $ref: /schemas/media/video-interface-devices.yaml#
++
++properties:
++  compatible:
++    const: smartsens,sc820cs
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    description: Reference to the 24 MHz MCLK.
++    maxItems: 1
++
++  dovdd-supply:
++    description: I/O supply, 1.8 V.
++
++  avdd-supply:
++    description: Analog supply.
++
++  dvdd-supply:
++    description: Digital core supply.
++
++  reset-gpios:
++    description: Reference to the GPIO connected to the reset pin.
++    maxItems: 1
++
++  port:
++    $ref: /schemas/graph.yaml#/$defs/port-base
++    additionalProperties: false
++    description:
++      Output port node, single endpoint describing the CSI-2 transmitter.
++
++    properties:
++      endpoint:
++        $ref: /schemas/media/video-interfaces.yaml#
++        unevaluatedProperties: false
++
++        properties:
++          data-lanes:
++            items:
++              - const: 1
++              - const: 2
++              - const: 3
++              - const: 4
++
++          link-frequencies: true
++
++        required:
++          - data-lanes
++          - link-frequencies
++
++    required:
++      - endpoint
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - dovdd-supply
++  - avdd-supply
++  - dvdd-supply
++  - reset-gpios
++  - port
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        camera@36 {
++            compatible = "smartsens,sc820cs";
++            reg = <0x36>;
++
++            clocks = <&camera_mclk>;
++            reset-gpios = <&pio 118 GPIO_ACTIVE_LOW>;
++
++            avdd-supply = <&camera_avdd>;
++            dovdd-supply = <&camera_dovdd>;
++            dvdd-supply = <&camera_dvdd>;
++
++            orientation = <0>;
++
++            port {
++                endpoint {
++                    data-lanes = <1 2 3 4>;
++                    link-frequencies = /bits/ 64 <330000000>;
++                };
++            };
++        };
++    };
++
++...
+diff --git a/Documentation/devicetree/bindings/vendor-prefixes.yaml b/Documentation/devicetree/bindings/vendor-prefixes.yaml
+index d5df85660..3ca1c4b5f 100644
+--- a/Documentation/devicetree/bindings/vendor-prefixes.yaml
++++ b/Documentation/devicetree/bindings/vendor-prefixes.yaml
+@@ -1549,6 +1549,8 @@ patternProperties:
+     description: SmartLabs LLC
+   "^smartrg,.*":
+     description: SmartRG, Inc.
++  "^smartsens,.*":
++    description: SmartSens Technology (Shanghai) Co., Ltd.
+   "^smi,.*":
+     description: Silicon Motion Technology Corporation
+   "^smsc,.*":

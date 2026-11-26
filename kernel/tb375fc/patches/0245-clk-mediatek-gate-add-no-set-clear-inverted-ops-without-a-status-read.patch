@@ -1,0 +1,37 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: gate: add no-set-clear inverted ops without a status read
+
+Add ops for a gate in a single register where a set bit opens it, without
+.is_enabled, for the same reason as the other ops without a status read:
+the block only answers while its power domain is on, and the domain needs
+the gate to come up. The cam_vcore block of MT6897 has such a gate.
+---
+diff --git a/drivers/clk/mediatek/clk-gate.c b/drivers/clk/mediatek/clk-gate.c
+index e381dba0b..8239d3826 100644
+--- a/drivers/clk/mediatek/clk-gate.c
++++ b/drivers/clk/mediatek/clk-gate.c
+@@ -259,6 +259,12 @@ const struct clk_ops mtk_clk_gate_hwv_ops_setclr_no_status = {
+ };
+ EXPORT_SYMBOL_GPL(mtk_clk_gate_hwv_ops_setclr_no_status);
+ 
++const struct clk_ops mtk_clk_gate_ops_no_setclr_inv_no_status = {
++	.enable		= mtk_cg_enable_inv_no_setclr,
++	.disable	= mtk_cg_disable_inv_no_setclr,
++};
++EXPORT_SYMBOL_GPL(mtk_clk_gate_ops_no_setclr_inv_no_status);
++
+ const struct clk_ops mtk_clk_gate_ops_no_setclr = {
+ 	.is_enabled	= mtk_cg_bit_is_cleared,
+ 	.enable		= mtk_cg_enable_no_setclr,
+diff --git a/drivers/clk/mediatek/clk-gate.h b/drivers/clk/mediatek/clk-gate.h
+index 360e7d5cc..236104620 100644
+--- a/drivers/clk/mediatek/clk-gate.h
++++ b/drivers/clk/mediatek/clk-gate.h
+@@ -24,6 +24,7 @@ extern const struct clk_ops mtk_clk_gate_hwv_ops_setclr_inv;
+ extern const struct clk_ops mtk_clk_gate_ops_setclr_no_status;
+ extern const struct clk_ops mtk_clk_gate_ops_setclr_inv_no_status;
+ extern const struct clk_ops mtk_clk_gate_hwv_ops_setclr_no_status;
++extern const struct clk_ops mtk_clk_gate_ops_no_setclr_inv_no_status;
+ 
+ struct mtk_gate_regs {
+ 	u32 sta_ofs;
