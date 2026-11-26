@@ -299,6 +299,40 @@
 			};
 		};
 
+		// 앞 카메라(docs/tb375fc/camera.md 2단계). 순정의 클럭 목록을 따른다: 기본 클럭은 켜기 전에, 이름에 '-'가 있는
+		// 클럭(카메라 클럭 블록의 GALS·larb 게이트)은 켠 뒤 버스 보호를 풀기 전에 켠다. 소비자는 꺼 둔 시험 노드뿐이라
+		// 부팅 때는 꺼진 채로 둔다. 순정의 "ccu"는 topckgen 19번(camtg7)을 가리키는데, CCU의 클럭은 VLP 19번(ccusys)이다
+		power-domain@MT6897_POWER_DOMAIN_CAM_VCORE {
+			reg = <MT6897_POWER_DOMAIN_CAM_VCORE>;
+			clocks = <&topckgen CLK_TOP_CAM>,
+				 <&topckgen CLK_TOP_DPE>,
+				 <&vlpckgen CLK_VLP_CCUSYS>,
+				 <&topckgen CLK_TOP_CCU_AHB>,
+				 <&cam_vcore CLK_CAM_VCORE_MM0_SUBCOMMON_DCM_DIS>;
+			clock-names = "cam", "dpe", "ccu", "ccu_ahb", "cam_vcore-0";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#power-domain-cells = <1>;
+
+			power-domain@MT6897_POWER_DOMAIN_CAM_MAIN {
+				reg = <MT6897_POWER_DOMAIN_CAM_MAIN>;
+				clocks = <&camsys_main CLK_CAM_MAIN_CAM2MM0_GALS>,
+					 <&camsys_main CLK_CAM_MAIN_CAM2MM1_GALS>,
+					 <&camsys_main CLK_CAM_MAIN_CAM2MM2_GALS>,
+					 <&camsys_main CLK_CAM_MAIN_CAM2SYS_GALS>,
+					 <&camsys_main CLK_CAM_MAIN_LARB13>,
+					 <&camsys_main CLK_CAM_MAIN_LARB14>,
+					 <&camsys_main CLK_CAM_MAIN_LARB27>,
+					 <&camsys_main CLK_CAM_MAIN_LARB29>;
+				clock-names = "cam_main-0", "cam_main-1", "cam_main-2",
+					      "cam_main-3", "cam_main-4", "cam_main-5",
+					      "cam_main-6", "cam_main-7";
+				// 순정의 cam-main-supply. 늘 켜 두는 vmm이다
+				domain-supply = <&mt6319_6_vbuck1>;
+				#power-domain-cells = <0>;
+			};
+		};
+
 		// VCP의 도메인(2단계). LK가 켜 둔 채 넘기지만 꺼진 도메인으로 등록하고, 소비자(vcp 노드)는 꺼 둔 채 부팅한다
 		power-domain@MT6897_POWER_DOMAIN_MM_PROC_DORMANT {
 			reg = <MT6897_POWER_DOMAIN_MM_PROC_DORMANT>;
@@ -322,6 +356,37 @@
 				#power-domain-cells = <0>;
 			};
 		};
+	};
+
+	// CSI 수신부의 아날로그 쪽. 순정에서도 부모가 없고 클럭도 없다
+	power-domain@MT6897_POWER_DOMAIN_CSI_RX {
+		reg = <MT6897_POWER_DOMAIN_CSI_RX>;
+		#power-domain-cells = <0>;
+	};
+};
+
+&camsys_main {
+	status = "okay";
+};
+
+&cam_vcore {
+	status = "okay";
+};
+
+/ {
+	// 앞 카메라 2단계의 시험 노드. 꺼 둔 채 부팅하고, 시험 모듈(.handoff의 camtest)이 손으로 올릴 때만 이 노드로 장치를 만든다
+	camera-power-test {
+		compatible = "buntos,mt6897-camera-power-test";
+		power-domains = <&scpsys MT6897_POWER_DOMAIN_CSI_RX>,
+				<&scpsys MT6897_POWER_DOMAIN_CAM_MAIN>;
+		power-domain-names = "csi-rx", "cam-main";
+		clocks = <&camsys_main CLK_CAM_MAIN_CAM>,
+			 <&camsys_main CLK_CAM_MAIN_SENINF>,
+			 <&camsys_main CLK_CAM_MAIN_CAMTG>,
+			 <&camsys_main CLK_CAM_MAIN_CAMSV_TOP>,
+			 <&camsys_main CLK_CAM_MAIN_CAMSV_A>;
+		clock-names = "cam", "seninf", "camtg", "camsv", "camsv-a";
+		status = "disabled";
 	};
 };
 

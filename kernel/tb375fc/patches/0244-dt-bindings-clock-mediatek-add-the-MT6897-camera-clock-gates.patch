@@ -1,0 +1,68 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: clock: mediatek: add the MT6897 camera clock gates
+
+Add the camsys_main and cam_vcore clock gate blocks of the MediaTek MT6897
+camera, with their clock identifiers. The identifiers follow the tables of
+the MediaTek vendor driver (OnePlus Pad GPL release, clk-mt6897-cam.c).
+
+Like the video encoder blocks, they carry no power-domains property: the
+CAM_VCORE and CAM_MAIN power domains take gates of these blocks to come
+up, so a power domain and its clock controller would wait for each other.
+---
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+index 2db4978f7..993dbf842 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6897-clock.yaml
+@@ -40,6 +40,8 @@ properties:
+   compatible:
+     items:
+       - enum:
++          - mediatek,mt6897-cam-vcore
++          - mediatek,mt6897-camsys-main
+           - mediatek,mt6897-imp-iic-wrap-c
+           - mediatek,mt6897-imp-iic-wrap-en
+           - mediatek,mt6897-imp-iic-wrap-es
+diff --git a/include/dt-bindings/clock/mediatek,mt6897-clock.h b/include/dt-bindings/clock/mediatek,mt6897-clock.h
+index e69935329..a03a14992 100644
+--- a/include/dt-bindings/clock/mediatek,mt6897-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6897-clock.h
+@@ -573,4 +573,39 @@
+ #define CLK_VEN2_CKE5_GALS		5
+ #define CLK_VEN2_CKE6_GALS_SRAM		6
+ 
++/* CAMSYS_MAIN */
++#define CLK_CAM_MAIN_LARB13		0
++#define CLK_CAM_MAIN_LARB14		1
++#define CLK_CAM_MAIN_LARB27		2
++#define CLK_CAM_MAIN_LARB29		3
++#define CLK_CAM_MAIN_CAM		4
++#define CLK_CAM_MAIN_CAM_SUBA		5
++#define CLK_CAM_MAIN_CAM_SUBB		6
++#define CLK_CAM_MAIN_CAM_SUBC		7
++#define CLK_CAM_MAIN_CAM_MRAW		8
++#define CLK_CAM_MAIN_CAMTG		9
++#define CLK_CAM_MAIN_SENINF		10
++#define CLK_CAM_MAIN_CAMSV_TOP		11
++#define CLK_CAM_MAIN_ADLRD		12
++#define CLK_CAM_MAIN_ADLWR		13
++#define CLK_CAM_MAIN_UISP		14
++#define CLK_CAM_MAIN_FAKE_ENG		15
++#define CLK_CAM_MAIN_CAM2MM0_GALS	16
++#define CLK_CAM_MAIN_CAM2MM1_GALS	17
++#define CLK_CAM_MAIN_CAM2SYS_GALS	18
++#define CLK_CAM_MAIN_CAM2MM2_GALS	19
++#define CLK_CAM_MAIN_CCUSYS		20
++#define CLK_CAM_MAIN_IPS		21
++#define CLK_CAM_MAIN_CAM_DPE		22
++#define CLK_CAM_MAIN_CAM_ASG		23
++#define CLK_CAM_MAIN_CAMSV_A		24
++#define CLK_CAM_MAIN_CAMSV_B		25
++#define CLK_CAM_MAIN_CAMSV_C		26
++#define CLK_CAM_MAIN_CAMSV_D		27
++#define CLK_CAM_MAIN_CAMSV_E		28
++#define CLK_CAM_MAIN_CAMSV		29
++
++/* CAM_VCORE */
++#define CLK_CAM_VCORE_MM0_SUBCOMMON_DCM_DIS	0
++
+ #endif /* _DT_BINDINGS_CLK_MEDIATEK_MT6897_H */

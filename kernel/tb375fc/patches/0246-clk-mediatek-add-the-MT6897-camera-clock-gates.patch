@@ -1,0 +1,188 @@
+From: buntOS contributors
+Subject: [PATCH] clk: mediatek: add the MT6897 camera clock gates
+
+Add the camsys_main and cam_vcore blocks of MT6897, with the registers and
+bits of the MediaTek driver in the OnePlus MT6897 kernel
+(clk-mt6897-cam.c). camsys_main has 24 gates in its first gate register
+and 6 in its second, cleared to open; cam_vcore has one bit that turns
+off the dynamic clock management of the multimedia sub-common, set to
+take effect.
+
+The CAM_VCORE power domain takes the cam_vcore gate and the CAM_MAIN
+domain eight camsys_main gates (the GALS bridges and the larbs) to come
+up, as in the vendor device tree, so the gates have no status read and
+the driver should be built in when those domains are in the device tree.
+The other raw, YUV, MRAW and IPE camera blocks are left out.
+---
+diff --git a/drivers/clk/mediatek/Kconfig b/drivers/clk/mediatek/Kconfig
+index 16a826017..03abdea64 100644
+--- a/drivers/clk/mediatek/Kconfig
++++ b/drivers/clk/mediatek/Kconfig
+@@ -385,6 +385,16 @@ config COMMON_CLK_MT6897
+ 	  generators and the pericfg_ao clock gates. Some PLLs, muxes and
+ 	  gates are switched through the hardware voter.
+ 
++config COMMON_CLK_MT6897_CAMSYS
++	tristate "Clock driver for MediaTek MT6897 camsys"
++	depends on COMMON_CLK_MT6897
++	default COMMON_CLK_MT6897
++	help
++	  This driver supports the MediaTek MT6897 clock gates of the camera
++	  blocks camsys_main and cam_vcore. The CAM_VCORE and CAM_MAIN power
++	  domains need gates of these blocks to come up, so build it in if
++	  they are listed in the device tree.
++
+ config COMMON_CLK_MT6897_IMP_IIC_WRAP
+ 	tristate "Clock driver for MediaTek MT6897 imp_iic_wrap"
+ 	depends on COMMON_CLK_MT6897
+diff --git a/drivers/clk/mediatek/Makefile b/drivers/clk/mediatek/Makefile
+index 02225361b..827a5a6d2 100644
+--- a/drivers/clk/mediatek/Makefile
++++ b/drivers/clk/mediatek/Makefile
+@@ -36,6 +36,7 @@ obj-$(CONFIG_COMMON_CLK_MT6797_VDECSYS) += clk-mt6797-vdec.o
+ obj-$(CONFIG_COMMON_CLK_MT6797_VENCSYS) += clk-mt6797-venc.o
+ obj-$(CONFIG_COMMON_CLK_MT6897) += clk-mt6897-apmixedsys.o clk-mt6897-topckgen.o \
+ 				   clk-mt6897-vlpckgen.o clk-mt6897-peri_ao.o
++obj-$(CONFIG_COMMON_CLK_MT6897_CAMSYS) += clk-mt6897-cam.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_IMP_IIC_WRAP) += clk-mt6897-imp_iic_wrap.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_MDPSYS) += clk-mt6897-mdpsys.o
+ obj-$(CONFIG_COMMON_CLK_MT6897_MMSYS) += clk-mt6897-mmsys.o
+diff --git a/drivers/clk/mediatek/clk-mt6897-cam.c b/drivers/clk/mediatek/clk-mt6897-cam.c
+new file mode 100644
+index 000000000..a0eae614c
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6897-cam.c
+@@ -0,0 +1,133 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ * Author: Benjamin Chao <benjamin.chao@mediatek.com>
++ *
++ * Copyright (c) 2026 buntOS contributors
++ */
++#include <dt-bindings/clock/mediatek,mt6897-clock.h>
++
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++/*
++ * These blocks only answer while their power domain is on. The CAM_VCORE and
++ * CAM_MAIN power domains take gates of these blocks to come up, so the blocks
++ * cannot use runtime PM, and their gates have no .is_enabled, see the ops in
++ * clk-gate.c. A consumer has to power the domain up before it enables a gate.
++ */
++static const struct mtk_gate_regs cam_m0_cg_regs = {
++	.set_ofs = 0x4,
++	.clr_ofs = 0x8,
++	.sta_ofs = 0x0,
++};
++
++static const struct mtk_gate_regs cam_m1_cg_regs = {
++	.set_ofs = 0x50,
++	.clr_ofs = 0x54,
++	.sta_ofs = 0x4c,
++};
++
++#define GATE_CAM_M0(_id, _name, _parent, _shift) {		\
++		.id = _id,					\
++		.name = _name,					\
++		.parent_name = _parent,				\
++		.regs = &cam_m0_cg_regs,			\
++		.shift = _shift,				\
++		.ops = &mtk_clk_gate_ops_setclr_no_status,	\
++	}
++
++#define GATE_CAM_M1(_id, _name, _parent, _shift) {		\
++		.id = _id,					\
++		.name = _name,					\
++		.parent_name = _parent,				\
++		.regs = &cam_m1_cg_regs,			\
++		.shift = _shift,				\
++		.ops = &mtk_clk_gate_ops_setclr_no_status,	\
++	}
++
++static const struct mtk_gate cam_m_clks[] = {
++	GATE_CAM_M0(CLK_CAM_MAIN_LARB13, "cam_m_larb13", "cam", 0),
++	GATE_CAM_M0(CLK_CAM_MAIN_LARB14, "cam_m_larb14", "cam", 1),
++	GATE_CAM_M0(CLK_CAM_MAIN_LARB27, "cam_m_larb27", "cam", 2),
++	GATE_CAM_M0(CLK_CAM_MAIN_LARB29, "cam_m_larb29", "cam", 3),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM, "cam_m_cam", "cam", 4),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM_SUBA, "cam_m_cam_suba", "cam", 5),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM_SUBB, "cam_m_cam_subb", "cam", 6),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM_SUBC, "cam_m_cam_subc", "cam", 7),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM_MRAW, "cam_m_cam_mraw", "cam", 8),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAMTG, "cam_m_camtg", "camtm", 9),
++	GATE_CAM_M0(CLK_CAM_MAIN_SENINF, "cam_m_seninf", "cam", 10),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAMSV_TOP, "cam_m_camsv", "cam", 11),
++	GATE_CAM_M0(CLK_CAM_MAIN_ADLRD, "cam_m_adlrd", "cam", 12),
++	GATE_CAM_M0(CLK_CAM_MAIN_ADLWR, "cam_m_adlwr", "cam", 13),
++	GATE_CAM_M0(CLK_CAM_MAIN_UISP, "cam_m_uisp", "cam", 14),
++	GATE_CAM_M0(CLK_CAM_MAIN_FAKE_ENG, "cam_m_fake_eng", "cam", 15),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM2MM0_GALS, "cam_m_cam2mm0_gals", "cam", 16),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM2MM1_GALS, "cam_m_cam2mm1_gals", "cam", 17),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM2SYS_GALS, "cam_m_cam2sys_gals", "cam", 18),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM2MM2_GALS, "cam_m_cam2mm2_gals", "cam", 19),
++	GATE_CAM_M0(CLK_CAM_MAIN_CCUSYS, "cam_m_ccusys", "vlp_ccusys", 20),
++	GATE_CAM_M0(CLK_CAM_MAIN_IPS, "cam_m_ips", "cam", 21),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM_DPE, "cam_m_cam_dpe", "cam", 26),
++	GATE_CAM_M0(CLK_CAM_MAIN_CAM_ASG, "cam_m_cam_asg", "cam", 27),
++	GATE_CAM_M1(CLK_CAM_MAIN_CAMSV_A, "cam_m_camsv_a", "cam", 0),
++	GATE_CAM_M1(CLK_CAM_MAIN_CAMSV_B, "cam_m_camsv_b", "cam", 1),
++	GATE_CAM_M1(CLK_CAM_MAIN_CAMSV_C, "cam_m_camsv_c", "cam", 2),
++	GATE_CAM_M1(CLK_CAM_MAIN_CAMSV_D, "cam_m_camsv_d", "cam", 3),
++	GATE_CAM_M1(CLK_CAM_MAIN_CAMSV_E, "cam_m_camsv_e", "cam", 4),
++	GATE_CAM_M1(CLK_CAM_MAIN_CAMSV, "cam_m_camsv_con", "cam", 5),
++};
++
++static const struct mtk_clk_desc cam_m_mcd = {
++	.clks = cam_m_clks,
++	.num_clks = ARRAY_SIZE(cam_m_clks),
++};
++
++/* One register: a set bit turns off the dynamic clock management */
++static const struct mtk_gate_regs cam_vcore_cg_regs = {
++	.set_ofs = 0x2c,
++	.clr_ofs = 0x2c,
++	.sta_ofs = 0x2c,
++};
++
++static const struct mtk_gate cam_vcore_clks[] = {
++	{
++		.id = CLK_CAM_VCORE_MM0_SUBCOMMON_DCM_DIS,
++		.name = "cam_v_subcommon_dcm_dis",
++		.parent_name = "mminfra",
++		.regs = &cam_vcore_cg_regs,
++		.shift = 1,
++		.ops = &mtk_clk_gate_ops_no_setclr_inv_no_status,
++	},
++};
++
++static const struct mtk_clk_desc cam_vcore_mcd = {
++	.clks = cam_vcore_clks,
++	.num_clks = ARRAY_SIZE(cam_vcore_clks),
++};
++
++static const struct of_device_id of_match_clk_mt6897_cam[] = {
++	{ .compatible = "mediatek,mt6897-cam-vcore", .data = &cam_vcore_mcd },
++	{ .compatible = "mediatek,mt6897-camsys-main", .data = &cam_m_mcd },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, of_match_clk_mt6897_cam);
++
++static struct platform_driver clk_mt6897_cam_drv = {
++	.probe = mtk_clk_simple_probe,
++	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "clk-mt6897-cam",
++		.of_match_table = of_match_clk_mt6897_cam,
++	},
++};
++module_platform_driver(clk_mt6897_cam_drv);
++
++MODULE_DESCRIPTION("MediaTek MT6897 camera clocks driver");
++MODULE_LICENSE("GPL");
