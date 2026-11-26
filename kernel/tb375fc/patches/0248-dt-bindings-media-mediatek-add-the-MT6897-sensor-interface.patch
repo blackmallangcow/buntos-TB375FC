@@ -1,0 +1,165 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: media: mediatek: add the MT6897 sensor interface
+
+Add the sensor interface (seninf) of the MT6897, the MIPI CSI-2 receiver
+with its CSI RX analog front ends (CSI PHY 3.0). It has two register
+regions, one interrupt, five clocks, two power domains and a fuse cell with
+the termination trims of CSI port 0. Port 0 of the graph is CSI port 0 as
+a four-lane D-PHY port, port 1 the output to the camera DMA engines.
+---
+diff --git a/Documentation/devicetree/bindings/media/mediatek,mt6897-seninf.yaml b/Documentation/devicetree/bindings/media/mediatek,mt6897-seninf.yaml
+new file mode 100644
+index 000000000..f0810b699
+--- /dev/null
++++ b/Documentation/devicetree/bindings/media/mediatek,mt6897-seninf.yaml
+@@ -0,0 +1,150 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/media/mediatek,mt6897-seninf.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6897 sensor interface
++
++maintainers:
++  - buntOS contributors <buntos@localhost>
++
++description:
++  The sensor interface (seninf) of the MT6897 receives MIPI CSI-2 from camera
++  sensors through its CSI RX analog front ends (CSI PHY 3.0) and routes the
++  pixels to the camera DMA engines. Each CSI port can run as one four-lane
++  D-PHY port or as two two-lane halves.
++
++properties:
++  compatible:
++    const: mediatek,mt6897-seninf
++
++  reg:
++    items:
++      - description: seninf units, muxes and cam-muxes
++      - description: CSI RX analog front ends, D-PHY and CSI-2 MACs
++
++  reg-names:
++    items:
++      - const: base
++      - const: ana-rx
++
++  interrupts:
++    maxItems: 1
++
++  clocks:
++    items:
++      - description: seninf clock gate of the camera block
++      - description: camera block clock gate
++      - description: camera timing generator clock gate
++      - description: test model and timestamp clock
++      - description: CSI receive clock
++
++  clock-names:
++    items:
++      - const: seninf
++      - const: cam
++      - const: camtg
++      - const: camtm
++      - const: csi
++
++  power-domains:
++    items:
++      - description: the camera block
++      - description: the CSI RX analog front ends
++
++  power-domain-names:
++    items:
++      - const: cam-main
++      - const: csi-rx
++
++  nvmem-cells:
++    items:
++      - description: termination trims of CSI port 0
++
++  nvmem-cell-names:
++    items:
++      - const: csi0
++
++  ports:
++    $ref: /schemas/graph.yaml#/properties/ports
++
++    properties:
++      port@0:
++        $ref: /schemas/graph.yaml#/$defs/port-base
++        unevaluatedProperties: false
++        description: CSI port 0
++
++        properties:
++          endpoint:
++            $ref: video-interfaces.yaml#
++            unevaluatedProperties: false
++
++            properties:
++              data-lanes:
++                items:
++                  - const: 1
++                  - const: 2
++                  - const: 3
++                  - const: 4
++
++            required:
++              - data-lanes
++
++      port@1:
++        $ref: /schemas/graph.yaml#/properties/port
++        description: Output to the camera DMA engines
++
++    required:
++      - port@0
++
++required:
++  - compatible
++  - reg
++  - reg-names
++  - interrupts
++  - clocks
++  - clock-names
++  - power-domains
++  - power-domain-names
++  - ports
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/interrupt-controller/arm-gic.h>
++    #include <dt-bindings/interrupt-controller/irq.h>
++
++    soc {
++        #address-cells = <2>;
++        #size-cells = <2>;
++
++        seninf@1a00e000 {
++            compatible = "mediatek,mt6897-seninf";
++            reg = <0 0x1a00e000 0 0x18000>, <0 0x11c80000 0 0x30000>;
++            reg-names = "base", "ana-rx";
++            interrupts = <GIC_SPI 502 IRQ_TYPE_LEVEL_HIGH>;
++            clocks = <&camsys_main 10>, <&camsys_main 4>, <&camsys_main 9>,
++                     <&topckgen 81>, <&topckgen 33>;
++            clock-names = "seninf", "cam", "camtg", "camtm", "csi";
++            power-domains = <&scpsys 17>, <&scpsys 30>;
++            power-domain-names = "cam-main", "csi-rx";
++            nvmem-cells = <&csi_trim0>;
++            nvmem-cell-names = "csi0";
++
++            ports {
++                #address-cells = <1>;
++                #size-cells = <0>;
++
++                port@0 {
++                    reg = <0>;
++
++                    endpoint {
++                        data-lanes = <1 2 3 4>;
++                        remote-endpoint = <&sensor_out>;
++                    };
++                };
++            };
++        };
++    };

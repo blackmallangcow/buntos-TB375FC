@@ -286,6 +286,11 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 
+			/* Termination trims of CSI port 0, for the seninf */
+			csi_trim0: csi-trim@1d4 {
+				reg = <0x1d4 0x4>;
+			};
+
 			lvts_calib2: calib@2d4 {
 				reg = <0x2d4 0x28>;
 			};
@@ -2119,6 +2124,40 @@
 			reg = <0 0x1a000000 0 0x1000>;
 			#clock-cells = <1>;
 			status = "disabled";
+		};
+
+		/*
+		 * Sensor interface, the CSI-2 receiver. The second region holds
+		 * the CSI RX analog front ends, the D-PHY and the CSI-2 MACs.
+		 */
+		seninf: seninf@1a00e000 {
+			compatible = "mediatek,mt6897-seninf";
+			reg = <0 0x1a00e000 0 0x18000>, <0 0x11c80000 0 0x30000>;
+			reg-names = "base", "ana-rx";
+			interrupts = <GIC_SPI 502 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&camsys_main CLK_CAM_MAIN_SENINF>,
+				 <&camsys_main CLK_CAM_MAIN_CAM>,
+				 <&camsys_main CLK_CAM_MAIN_CAMTG>,
+				 <&topckgen CLK_TOP_CAMTM>,
+				 <&topckgen CLK_TOP_SENINF>;
+			clock-names = "seninf", "cam", "camtg", "camtm", "csi";
+			assigned-clocks = <&topckgen CLK_TOP_SENINF>;
+			assigned-clock-rates = <312000000>;
+			power-domains = <&scpsys MT6897_POWER_DOMAIN_CAM_MAIN>,
+					<&scpsys MT6897_POWER_DOMAIN_CSI_RX>;
+			power-domain-names = "cam-main", "csi-rx";
+			nvmem-cells = <&csi_trim0>;
+			nvmem-cell-names = "csi0";
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				seninf_port0: port@0 {
+					reg = <0>;
+				};
+			};
 		};
 
 		cam_vcore: clock-controller@1b204000 {

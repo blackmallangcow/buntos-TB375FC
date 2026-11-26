@@ -335,3 +335,8 @@
 # 0247 전원 제어기가 도메인을 하나라도 켜기 전에 모든 도메인의 공급과 클럭을 먼저 찾는다. CAM_MAIN의 domain-supply가 첫 probe를
 #      중간에 미루면, 이미 켠 화면 쪽 도메인(MM_INFRA, DIS0, OVL0)을 정리하며 껐다가 다시 켜서 화면 반쪽이 IOMMU 오류로 검게 됐다
 0247-pmdomain-mediatek-get-domain-supplies-and-clocks-before-adding-domains.patch
+
+# 0248~0249 앞 카메라 3단계(docs/tb375fc/camera.md 5.3절). seninf(CSI 수신부)의 바인딩과 드라이버. CSI 포트 0, D-PHY 4레인,
+#      seninf1 → mux1 → cam-mux 0의 고정 길. 받는 쪽(camsv)이 아직 없어 debugfs로 켜고 끄고 상태를 본다
+0248-dt-bindings-media-mediatek-add-the-MT6897-sensor-interface.patch
+0249-media-mediatek-add-a-driver-for-the-MT6897-sensor-interface.patch

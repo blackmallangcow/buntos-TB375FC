@@ -1,0 +1,1421 @@
+From: buntOS contributors
+Subject: [PATCH] media: mediatek: add a driver for the MT6897 sensor interface
+
+Add a V4L2 subdevice driver for the MIPI CSI-2 receiver of the MT6897. It
+supports CSI port 0 as one four-lane D-PHY port over both halves of the
+port, routed through seninf1, mux1 and cam-mux 0, with RAW8, RAW10 and
+RAW12 Bayer formats under 2.5 Gbit/s per lane. The driver creates the media
+device, binds the sensor through the fwnode graph, and powers the block and
+its two power domains only while it streams.
+
+The register sequence follows MediaTek's isp7sp seninf driver for CSI PHY
+3.0 in the OnePlus MT6897 kernel modules. The D-PHY receive timing is the
+one the stock driver of the SC820CS sensor asks for. With the vendor
+default, which leaves the HS trail handling off, every packet from that
+sensor arrives with a CRC error. The termination trims come from the fuses
+when their checksum holds.
+
+No DMA engine takes the cam-mux output yet. For bring-up, debugfs has a
+stream file that starts and stops the sensor and the receiver, and a status
+file with the CSI-2 and mux counters.
+---
+diff --git a/drivers/media/platform/mediatek/Kconfig b/drivers/media/platform/mediatek/Kconfig
+index b05570e8b..8d72c634b 100644
+--- a/drivers/media/platform/mediatek/Kconfig
++++ b/drivers/media/platform/mediatek/Kconfig
+@@ -7,4 +7,5 @@ source "drivers/media/platform/mediatek/mdp/Kconfig"
+ source "drivers/media/platform/mediatek/vcodec/Kconfig"
+ source "drivers/media/platform/mediatek/vpu/Kconfig"
+ source "drivers/media/platform/mediatek/mdp3/Kconfig"
++source "drivers/media/platform/mediatek/mt6897-seninf/Kconfig"
+ source "drivers/media/platform/mediatek/mt6897-vdec/Kconfig"
+diff --git a/drivers/media/platform/mediatek/Makefile b/drivers/media/platform/mediatek/Makefile
+index e2e8b5412..bb90c3408 100644
+--- a/drivers/media/platform/mediatek/Makefile
++++ b/drivers/media/platform/mediatek/Makefile
+@@ -4,4 +4,5 @@ obj-y += mdp/
+ obj-y += vcodec/
+ obj-y += vpu/
+ obj-y += mdp3/
++obj-y += mt6897-seninf/
+ obj-y += mt6897-vdec/
+diff --git a/drivers/media/platform/mediatek/mt6897-seninf/Kconfig b/drivers/media/platform/mediatek/mt6897-seninf/Kconfig
+new file mode 100644
+index 000000000..3e039241f
+--- /dev/null
++++ b/drivers/media/platform/mediatek/mt6897-seninf/Kconfig
+@@ -0,0 +1,16 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config VIDEO_MEDIATEK_MT6897_SENINF
++	tristate "MediaTek MT6897 sensor interface (seninf)"
++	depends on ARCH_MEDIATEK || COMPILE_TEST
++	depends on VIDEO_DEV
++	depends on PM
++	select MEDIA_CONTROLLER
++	select VIDEO_V4L2_SUBDEV_API
++	select V4L2_FWNODE
++	help
++	  Say y or m here for the MIPI CSI-2 receiver of the MT6897, the
++	  sensor interface (seninf) with its CSI RX analog front ends. It
++	  supports CSI port 0 as a four-lane D-PHY port for now.
++
++	  To compile this driver as a module, choose M here: the module will
++	  be called mt6897-seninf.
+diff --git a/drivers/media/platform/mediatek/mt6897-seninf/Makefile b/drivers/media/platform/mediatek/mt6897-seninf/Makefile
+new file mode 100644
+index 000000000..2be77f65e
+--- /dev/null
++++ b/drivers/media/platform/mediatek/mt6897-seninf/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_VIDEO_MEDIATEK_MT6897_SENINF) += mt6897-seninf.o
+diff --git a/drivers/media/platform/mediatek/mt6897-seninf/mt6897-seninf.c b/drivers/media/platform/mediatek/mt6897-seninf/mt6897-seninf.c
+new file mode 100644
+index 000000000..dbad0ecc9
+--- /dev/null
++++ b/drivers/media/platform/mediatek/mt6897-seninf/mt6897-seninf.c
+@@ -0,0 +1,1344 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek MT6897 sensor interface (seninf)
++ *
++ * The seninf block receives MIPI CSI-2 from camera sensors through the CSI RX
++ * analog front ends (CSI PHY 3.0), unpacks the packets in a CSI-2 MAC and a
++ * seninf unit, and routes the pixels through a mux and a cam-mux to the
++ * camera DMA engines.
++ *
++ * This driver supports one path for now: CSI port 0 as a four-lane D-PHY port
++ * over both of its halves (A and B), seninf1, mux1 and cam-mux 0. The register
++ * sequence follows MediaTek's isp7sp seninf driver for CSI PHY 3.0
++ * (mtk_cam-seninf-hw_phy_3_0.c in the OnePlus MT6897 kernel modules).
++ *
++ * Nothing takes the cam-mux output yet. For bring-up, debugfs has a "stream"
++ * file that starts and stops the sensor and the receiver, and a "status" file
++ * with the receiver counters.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/clk.h>
++#include <linux/debugfs.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/kstrtox.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/mutex.h>
++#include <linux/nvmem-consumer.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/pm_runtime.h>
++#include <linux/property.h>
++#include <linux/seq_file.h>
++#include <linux/units.h>
++
++#include <media/media-device.h>
++#include <media/media-entity.h>
++#include <media/mipi-csi2.h>
++#include <media/v4l2-async.h>
++#include <media/v4l2-common.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
++#include <media/v4l2-mc.h>
++#include <media/v4l2-subdev.h>
++
++/* The "base" region */
++#define SENINF_TOP_CTRL2			0x0004
++#define  SENINF_TOP_AFIFOA_POP_HALF_EN		BIT(0)
++#define SENINF_TOP_MUX_CTRL_0			0x0010
++#define  SENINF_TOP_MUX1_SRC_SEL		GENMASK(4, 0)
++
++#define SENINF1					0x0200
++#define SENINF_CTRL				0x00
++#define  SENINF_EN				BIT(0)
++#define SENINF_CSI2_CTRL			0x10
++#define  SENINF_CSI2_EN				BIT(0)
++#define  SENINF_CSI2_SW_RST			BIT(4)
++
++#define SENINF1_CSI2				0x0a00
++#define SENINF_CSI2_PRBS			0x00
++#define SENINF_CSI2_S_DI_CTRL(n)		(0x20 + 4 * (n))
++#define  CSI2_S_DT_SEL				GENMASK(21, 16)
++#define  CSI2_S_VC_SEL				GENMASK(12, 8)
++#define  CSI2_S_DT_INTERLEAVE_MODE		GENMASK(5, 4)
++#define  CSI2_S_VC_INTERLEAVE_EN		BIT(0)
++#define SENINF_CSI2_CH_CTRL(n)			(0x60 + 4 * (n))
++#define  CSI2_CH_S0_GRP_EN			BIT(8)
++#define SENINF_CSI2_IRQ_STATUS			0xc8
++
++#define SENINF_NUM_MUX				13
++#define SENINF_MUX(n)				(0x0d00 + 0x1000 * (n))
++#define SENINF_MUX_CTRL_0			0x00
++#define  MUX_EN					BIT(0)
++#define  MUX_IRQ_SW_RST				BIT(1)
++#define  MUX_SW_RST				BIT(2)
++#define SENINF_MUX_CTRL_1			0x04
++#define  MUX_SRC_SEL				GENMASK(3, 0)
++#define  MUX_SRC_CSI				8
++#define  MUX_PIX_MODE_SEL			GENMASK(10, 8)
++#define SENINF_MUX_OPT				0x08
++#define  MUX_VS_SPLIT_EN			BIT(3)
++#define  MUX_HSYNC_POL				BIT(16)
++#define  MUX_VSYNC_POL				BIT(17)
++#define SENINF_MUX_IRQ_STATUS			0x18
++#define SENINF_MUX_SIZE				0x30
++#define SENINF_MUX_SIZE_MON_CTRL		0xa8
++#define  MUX_SIZE_MON_EN				BIT(0)
++#define SENINF_MUX_SIZE_MON(n)			(0xb0 + 4 * (n))
++#define SENINF_MUX_VC_SEL0			0x100
++#define  MUX_B0_VC_SEL				GENMASK(4, 0)
++#define  MUX_B0_VC_REF_EN			BIT(7)
++
++#define SENINF_NUM_CAM_MUX			43
++#define SENINF_CAM_MUX(n)			(0x17000 + 0x40 * (n))
++#define CAM_MUX_CTRL				0x00
++#define  CAM_MUX_SRC_SEL			GENMASK(6, 0)
++#define  CAM_MUX_EN				BIT(7)
++#define  CAM_MUX_CHK_PIX_MODE			GENMASK(10, 8)
++#define  CAM_MUX_NEXT_SRC_SEL			GENMASK(22, 16)
++#define  CAM_MUX_SRC_IDLE			0x7f
++#define CAM_MUX_OPT				0x04
++#define  CAM_MUX_VC_SEL				GENMASK(4, 0)
++#define  CAM_MUX_VC_SEL_EN			BIT(7)
++#define  CAM_MUX_DT_SEL				GENMASK(13, 8)
++#define  CAM_MUX_DT_SEL_EN			BIT(15)
++#define  CAM_MUX_TAG_PAGE_SEL			GENMASK(26, 24)
++#define CAM_MUX_IRQ_STATUS			0x0c
++#define  CAM_MUX_IRQ_CLEAR			0x103	/* hsize, vsize, vsync */
++#define CAM_MUX_CHK_CTL				0x14
++#define  CAM_MUX_EXP_HSIZE			GENMASK(15, 0)
++#define  CAM_MUX_EXP_VSIZE			GENMASK(31, 16)
++#define CAM_MUX_CHK_RES				0x18
++#define CAM_MUX_TAG_VC_SEL			0x20
++#define  CAM_MUX_TAG_VC				GENMASK(4, 0)
++#define  CAM_MUX_TAG_VC_EN			BIT(7)
++#define CAM_MUX_TAG_DT_SEL			0x24
++#define  CAM_MUX_TAG_DT				GENMASK(5, 0)
++#define  CAM_MUX_TAG_DT_EN			BIT(7)
++
++#define SENINF_CAM_MUX_GCSR			0x17f00
++#define CAM_MUX_GCSR_DYN_CTRL			0x04
++#define  CAM_MUX_GCSR_PAGE_OUTER		BIT(7)
++#define CAM_MUX_GCSR_MUX_EN			0x80
++#define CAM_MUX_GCSR_VSYNC_IRQ_STS		0xd8
++
++/* The "ana-rx" region, CSI port 0 */
++#define CSI0A					0x0000
++#define CSI0B					0x1000
++#define CDPHY_RX_ANA_0				0x00
++#define  ANA_BG_CORE_EN				BIT(0)
++#define  ANA_BG_LPF_EN				BIT(1)
++#define  ANA_CPHY_HSMODE_EN			GENMASK(7, 6)
++#define  ANA_DPHY_CKSEL				GENMASK(10, 8)
++#define  ANA_DPHY_CKMODE_EN			GENMASK(14, 12)
++#define  ANA_DPHY_L2_CKMODE_EN			BIT(14)
++#define  ANA_CPHY_EN				BIT(20)
++#define  ANA_CPHY_CDR_FIRST_EDGE_EN		GENMASK(22, 21)
++#define CDPHY_RX_ANA_1				0x04
++#define  ANA_BG_LPRX_VTL_SEL			GENMASK(2, 0)
++#define  ANA_BG_LPRX_VTH_SEL			GENMASK(6, 4)
++#define  ANA_BG_VREF_SEL			GENMASK(11, 8)
++#define  ANA_EQ_DES_VREF_SEL			GENMASK(18, 16)
++#define CDPHY_RX_ANA_2				0x08
++#define  ANA_CPHY_CDR_SELF_CAL_EN		GENMASK(17, 16)
++#define  ANA_BG_ALP_RX_VTL_SEL			GENMASK(26, 24)
++#define  ANA_BG_ALP_RX_VTH_SEL			GENMASK(30, 28)
++#define CDPHY_RX_ANA_HSRT(n)			(0x08 + 4 * (n)) /* ANA_2..ANA_4 */
++#define  ANA_HSRT_CODE_P			GENMASK(4, 0)
++#define  ANA_HSRT_CODE_N			GENMASK(12, 8)
++#define  ANA_HSRT_CODE_DEFAULT			0x10
++#define CDPHY_RX_ANA_5				0x14
++#define  ANA_EQ_BW				GENMASK(1, 0)
++#define  ANA_EQ_IS				GENMASK(3, 2)
++#define  ANA_EQ_DG0_EN				BIT(4)
++#define  ANA_EQ_DG1_EN				BIT(5)
++#define  ANA_EQ_LATCH_EN			BIT(6)
++#define  ANA_EQ_SR0				GENMASK(11, 8)
++#define  ANA_EQ_SR1				GENMASK(15, 12)
++#define CDPHY_RX_ANA_CDR(n)			(0x18 + 4 * (n)) /* ANA_6, ANA_7 */
++#define  ANA_CDR_AB_WIDTH			GENMASK(5, 0)
++#define  ANA_CDR_BC_WIDTH			GENMASK(13, 8)
++#define  ANA_CDR_CA_WIDTH			GENMASK(21, 16)
++#define  ANA_CDR_CK_DELAY			GENMASK(29, 24)
++#define CDPHY_RX_ANA_8				0x20
++#define  ANA_RESERVE				GENMASK(15, 0)
++#define  ANA_EQ_OS_CAL_EN			GENMASK(21, 16)
++#define CDPHY_RX_ANA_9				0x24
++#define  ANA_OS_CAL_CPLT			GENMASK(21, 16)
++#define CDPHY_RX_ANA_AD_0			0x48
++#define CDPHY_RX_ANA_SETTING_0			0xf0
++#define  ANA_REF_CK_SEL				BIT(3)
++#define  ANA_ASYNC_FIFO_GATING_SEL		GENMASK(7, 4)
++#define CDPHY_RX_ANA_SETTING_1			0xf4
++#define  ANA_AFIFO_DUMMY_VALID_EN		BIT(2)
++#define  ANA_ASYNC_OPTION			GENMASK(7, 4)
++#define  ANA_AFIFO_DUMMY_PREPARE_NUM		GENMASK(19, 16)
++#define  ANA_AFIFO_DUMMY_VALID_NUM		GENMASK(23, 20)
++#define  ANA_AFIFO_DUMMY_GAP_NUM		GENMASK(29, 24)
++#define CDPHY_RX_ASYM_AFIFO_CTRL_0		0x100
++#define  ANA_L0_AFIFO_FLUSH_EN			BIT(0)
++#define  ANA_L1_AFIFO_FLUSH_EN			BIT(8)
++
++#define DPHY_RX					0x2000
++#define DPHY_RX_LANE_EN				0x00
++#define  DPHY_LC0_EN				BIT(0)
++#define  DPHY_LC1_EN				BIT(1)
++#define  DPHY_LD_EN				GENMASK(11, 8)
++#define DPHY_RX_LANE_SELECT			0x04
++#define  DPHY_LC0_SEL				GENMASK(2, 0)
++#define  DPHY_LC1_SEL				GENMASK(6, 4)
++#define  DPHY_LD0_SEL				GENMASK(10, 8)
++#define  DPHY_LD1_SEL				GENMASK(14, 12)
++#define  DPHY_LD2_SEL				GENMASK(18, 16)
++#define  DPHY_LD3_SEL				GENMASK(22, 20)
++#define  DPHY_CK_DATA_MUX_EN			BIT(31)
++#define DPHY_RX_HS_RX_EN_SW			0x08
++#define  DPHY_PN_SWAP_EN			GENMASK(17, 12)
++#define DPHY_RX_CLOCK_LANE(n)			(0x10 + 4 * (n))
++#define  DPHY_LC_HS_PREPARE			GENMASK(7, 0)
++#define  DPHY_LC_HS_SETTLE			GENMASK(23, 16)
++#define  DPHY_LC_HS_PREPARE_EN			BIT(28)
++#define DPHY_RX_DATA_LANE(n)			(0x20 + 4 * (n))
++#define  DPHY_LD_HS_PREPARE			GENMASK(7, 0)
++#define  DPHY_LD_HS_TRAIL			GENMASK(17, 8)
++#define  DPHY_LD_HS_SETTLE			GENMASK(25, 18)
++#define  DPHY_LD_HS_PREPARE_EN			BIT(28)
++#define  DPHY_LD_HS_TRAIL_EN			BIT(29)
++#define DPHY_RX_DESKEW_CTRL			0x50
++#define  DPHY_DESKEW_EN				BIT(8)
++#define DPHY_RX_DESKEW_LANE(n)			(0x60 + 4 * (n))
++#define  DPHY_DESKEW_DELAY_EN			BIT(0)
++#define DPHY_RX_IRQ_EN				0x94
++#define  DPHY_IRQ_SOT_SYNC_ERR			GENMASK(3, 0)
++#define DPHY_RX_IRQ_CLR				0x98
++#define DPHY_RX_IRQ_STATUS			0x9c
++#define DPHY_RX_STATUS_2			0xb0
++#define DPHY_RX_SPARE0				0xf0
++#define DPHY_DPHYV21_CTRL			0x180
++#define  DPHY_SYNC_METH_SEL			BIT(3)
++
++#define CPHY_RX					0x3000
++#define CPHY_RX_DETECT_CTRL_POST		0x18
++#define  CPHY_DATA_VALID_POST_EN		BIT(4)
++
++#define CSIRX_MAC_TOP				0x4000
++#define MAC_TOP_CTRL				0x00
++#define  MAC_TOP_SW_RST				BIT(0)
++#define  MAC_TOP_8PIX_SHARE_16PIX		BIT(16)
++#define MAC_TOP_PHY_CTRL_CSI0			0x40
++#define  MAC_TOP_DPHY_EN			BIT(0)
++#define  MAC_TOP_CPHY_EN			BIT(1)
++#define  MAC_TOP_CPHY_MODE			GENMASK(9, 8)
++
++#define CSIRX_MAC_CSI2				0x5000
++#define MAC_CSI2_EN				0x00
++#define  MAC_CSI2_LANE_EN			GENMASK(3, 0)
++#define MAC_CSI2_OPT				0x04
++#define  MAC_CSI2_CPHY_SEL			BIT(0)
++#define  MAC_CSI2_ECC_EN			BIT(1)
++#define  MAC_CSI2_B2P_EN			BIT(2)
++#define  MAC_CSI2_IMG_PACKET_EN			BIT(4)
++#define  MAC_CSI2_SPEC_V2P0_SEL			BIT(5)
++#define  MAC_CSI2_MULTI_FRAME_VLD_EN		BIT(7)
++#define  MAC_CSI2_VS_OUTPUT_MODE		BIT(8)
++#define  MAC_CSI2_VS_OUTPUT_LEN_SEL		BIT(9)
++#define  MAC_CSI2_8_16_PIXEL_SEL		BIT(16)
++#define MAC_CSI2_HDR_MODE_0			0x08
++#define  MAC_CSI2_HEADER_MODE			GENMASK(7, 0)
++#define  MAC_CSI2_HEADER_LEN			GENMASK(10, 8)
++#define MAC_CSI2_RESYNC_MERGE_CTRL		0x10
++#define  MAC_CSI2_RESYNC_CYCLE_CNT		GENMASK(4, 0)
++#define  MAC_CSI2_RESYNC_CYCLE_CNT_OPT		BIT(8)
++#define  MAC_CSI2_RESYNC_LRTE_EN		BIT(11)
++#define  MAC_CSI2_RESYNC_DMY_EN			GENMASK(15, 12)
++#define  MAC_CSI2_RESYNC_DMY_CYCLE		GENMASK(27, 16)
++#define  MAC_CSI2_RESYNC_DMY_CNT		GENMASK(31, 28)
++#define MAC_CSI2_IRQ_EN				0xc0
++#define  MAC_CSI2_IRQ_CLR_MODE			BIT(31)
++#define MAC_CSI2_IRQ_STATUS			0xc8
++#define MAC_CSI2_LINE_FRAME_NUM			0xd0
++#define MAC_CSI2_PACKET_STATUS			0xd4
++#define MAC_CSI2_PACKET_CNT_STATUS		0xdc
++#define MAC_CSI2_DBG_CTRL			0xe0
++#define  MAC_CSI2_DBG_PACKET_CNT_EN		BIT(17)
++#define MAC_CSI2_DT0				0x104
++#define  MAC_CSI2_RAW10_DT			GENMASK(5, 0)
++#define  MAC_CSI2_RAW12_DT			GENMASK(13, 8)
++#define  MAC_CSI2_RAW14_DT			GENMASK(21, 16)
++#define  MAC_CSI2_RAW16_DT			GENMASK(29, 24)
++#define MAC_CSI2_FORCEDT0			0x110
++
++/* Pixels per clock as 2^n; the vendor default */
++#define SENINF_PIX_MODE				3
++
++/*
++ * D-PHY receive timing. These are the values the stock driver of the SC820CS
++ * sensor asks the vendor seninf driver for (data and clock settle 0x28, trail
++ * 0x40, in cycles of the 312 MHz seninf clock), written here in nanoseconds.
++ * The data settle sits in the middle of the D-PHY window at about 660 Mbit/s
++ * per lane. Without HS trail handling every packet of that sensor arrives
++ * with a CRC error, so the trail is always on.
++ */
++#define SENINF_DPHY_DATA_SETTLE_NS		128
++#define SENINF_DPHY_CLK_SETTLE_NS		128
++#define SENINF_DPHY_TRAIL_NS			205
++
++/* The EQ settings below are the vendor's for data rates under 2.5 Gbit/s */
++#define SENINF_MAX_LANE_RATE			(2500 * HZ_PER_MHZ)
++
++enum {
++	SENINF_PAD_SINK,
++	SENINF_PAD_SOURCE,
++	SENINF_NUM_PADS,
++};
++
++static const char * const seninf_clk_names[] = {
++	"seninf", "cam", "camtg", "camtm", "csi",
++};
++
++#define SENINF_CLK_CSI				4
++
++static const char * const seninf_pd_names[] = { "cam-main", "csi-rx" };
++
++struct seninf_format {
++	u32 code;
++	u8 dt;
++	u8 bpp;
++};
++
++static const struct seninf_format seninf_formats[] = {
++	{ MEDIA_BUS_FMT_SBGGR10_1X10, MIPI_CSI2_DT_RAW10, 10 },
++	{ MEDIA_BUS_FMT_SGBRG10_1X10, MIPI_CSI2_DT_RAW10, 10 },
++	{ MEDIA_BUS_FMT_SGRBG10_1X10, MIPI_CSI2_DT_RAW10, 10 },
++	{ MEDIA_BUS_FMT_SRGGB10_1X10, MIPI_CSI2_DT_RAW10, 10 },
++	{ MEDIA_BUS_FMT_SBGGR8_1X8, MIPI_CSI2_DT_RAW8, 8 },
++	{ MEDIA_BUS_FMT_SGBRG8_1X8, MIPI_CSI2_DT_RAW8, 8 },
++	{ MEDIA_BUS_FMT_SGRBG8_1X8, MIPI_CSI2_DT_RAW8, 8 },
++	{ MEDIA_BUS_FMT_SRGGB8_1X8, MIPI_CSI2_DT_RAW8, 8 },
++	{ MEDIA_BUS_FMT_SBGGR12_1X12, MIPI_CSI2_DT_RAW12, 12 },
++	{ MEDIA_BUS_FMT_SGBRG12_1X12, MIPI_CSI2_DT_RAW12, 12 },
++	{ MEDIA_BUS_FMT_SGRBG12_1X12, MIPI_CSI2_DT_RAW12, 12 },
++	{ MEDIA_BUS_FMT_SRGGB12_1X12, MIPI_CSI2_DT_RAW12, 12 },
++};
++
++struct mt6897_seninf {
++	struct device *dev;
++	void __iomem *base;
++	void __iomem *ana;
++	struct clk_bulk_data clks[ARRAY_SIZE(seninf_clk_names)];
++	struct dev_pm_domain_list *pds;
++	unsigned long csi_rate;
++	unsigned int num_lanes;
++	u32 trims;		/* CSI0 termination trims from the fuses */
++	bool have_trims;
++
++	struct media_device mdev;
++	struct v4l2_device v4l2_dev;
++	struct v4l2_subdev sd;
++	struct media_pad pads[SENINF_NUM_PADS];
++	struct v4l2_async_notifier notifier;
++
++	struct mutex debugfs_lock;	/* serializes the debugfs stream file */
++	struct dentry *debugfs;
++};
++
++static inline struct mt6897_seninf *sd_to_seninf(struct v4l2_subdev *sd)
++{
++	return container_of(sd, struct mt6897_seninf, sd);
++}
++
++static const struct seninf_format *seninf_find_format(u32 code)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(seninf_formats); i++)
++		if (seninf_formats[i].code == code)
++			return &seninf_formats[i];
++	return NULL;
++}
++
++/* ---- registers --------------------------------------------------------- */
++
++static void seninf_update(void __iomem *reg, u32 mask, u32 val)
++{
++	writel((readl(reg) & ~mask) | (val & mask), reg);
++}
++
++#define seninf_field(reg, mask, val)	seninf_update(reg, mask, FIELD_PREP(mask, val))
++
++#define R_TOP(s, off)		((s)->base + (off))
++#define R_S1(s, off)		((s)->base + SENINF1 + (off))
++#define R_CSI2(s, off)		((s)->base + SENINF1_CSI2 + (off))
++#define R_MUX(s, n, off)		((s)->base + SENINF_MUX(n) + (off))
++#define R_CAM_MUX(s, n, off)	((s)->base + SENINF_CAM_MUX(n) + (off))
++#define R_GCSR(s, off)		((s)->base + SENINF_CAM_MUX_GCSR + (off))
++#define R_ANA(s, half, off)	((s)->ana + (half) + (off))
++#define R_DPHY(s, off)		((s)->ana + DPHY_RX + (off))
++#define R_MACT(s, off)		((s)->ana + CSIRX_MAC_TOP + (off))
++#define R_MACC(s, off)		((s)->ana + CSIRX_MAC_CSI2 + (off))
++
++static u32 seninf_ns_to_cycles(struct mt6897_seninf *seninf, u32 ns)
++{
++	return DIV_ROUND_UP_ULL((u64)ns * seninf->csi_rate, NSEC_PER_SEC);
++}
++
++/* What the vendor does when the first user powers seninf up */
++static void seninf_hw_idle(struct mt6897_seninf *seninf)
++{
++	unsigned int i, page;
++
++	for (i = 0; i < SENINF_NUM_MUX; i++)
++		seninf_update(R_MUX(seninf, i, SENINF_MUX_CTRL_0), MUX_EN, 0);
++
++	for (i = 0; i < SENINF_NUM_CAM_MUX; i++) {
++		seninf_field(R_CAM_MUX(seninf, i, CAM_MUX_CTRL), CAM_MUX_NEXT_SRC_SEL,
++			     CAM_MUX_SRC_IDLE);
++		seninf_field(R_CAM_MUX(seninf, i, CAM_MUX_CTRL), CAM_MUX_SRC_SEL,
++			     CAM_MUX_SRC_IDLE);
++		seninf_update(R_CAM_MUX(seninf, i, CAM_MUX_CTRL), CAM_MUX_EN, 0);
++		for (page = 0; page < 4; page++) {
++			seninf_field(R_CAM_MUX(seninf, i, CAM_MUX_OPT),
++				     CAM_MUX_TAG_PAGE_SEL, page);
++			writel(0, R_CAM_MUX(seninf, i, CAM_MUX_TAG_VC_SEL));
++			writel(0, R_CAM_MUX(seninf, i, CAM_MUX_TAG_DT_SEL));
++		}
++		writel(CAM_MUX_IRQ_CLEAR, R_CAM_MUX(seninf, i, CAM_MUX_IRQ_STATUS));
++	}
++}
++
++static void seninf_ana_power(struct mt6897_seninf *seninf, u32 half, bool on)
++{
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_8), ANA_EQ_OS_CAL_EN, 0);
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_0), ANA_BG_LPF_EN, 0);
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_0), ANA_BG_CORE_EN, 0);
++	fsleep(200);
++	if (!on)
++		return;
++
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_0), ANA_BG_CORE_EN,
++		      ANA_BG_CORE_EN);
++	fsleep(30);
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_0), ANA_BG_LPF_EN,
++		      ANA_BG_LPF_EN);
++	udelay(1);
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_8), ANA_EQ_OS_CAL_EN,
++		      ANA_EQ_OS_CAL_EN);
++	udelay(1);
++}
++
++static void seninf_ana_hsrt(struct mt6897_seninf *seninf, u32 half,
++			    const u32 code[3])
++{
++	unsigned int i;
++
++	for (i = 0; i < 3; i++) {
++		seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_HSRT(i)),
++			     ANA_HSRT_CODE_P, code[i]);
++		seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_HSRT(i)),
++			     ANA_HSRT_CODE_N, code[i]);
++	}
++}
++
++static void seninf_ana_init(struct mt6897_seninf *seninf, u32 half)
++{
++	static const u32 hsrt_default[3] = {
++		ANA_HSRT_CODE_DEFAULT, ANA_HSRT_CODE_DEFAULT, ANA_HSRT_CODE_DEFAULT,
++	};
++	unsigned int i;
++
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_1), ANA_BG_LPRX_VTL_SEL, 4);
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_1), ANA_BG_LPRX_VTH_SEL, 4);
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_2), ANA_BG_ALP_RX_VTL_SEL, 4);
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_2), ANA_BG_ALP_RX_VTH_SEL, 4);
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_1), ANA_BG_VREF_SEL, 8);
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_1), ANA_EQ_DES_VREF_SEL, 2);
++
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_5), ANA_EQ_BW, 1);
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_5), ANA_EQ_IS, 1);
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_5), ANA_EQ_LATCH_EN,
++		      ANA_EQ_LATCH_EN);
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_5),
++		      ANA_EQ_DG0_EN | ANA_EQ_DG1_EN | ANA_EQ_SR0 | ANA_EQ_SR1, 0);
++
++	/* 50 ohm termination, replaced by the fuse trims if there are any */
++	seninf_ana_hsrt(seninf, half, hsrt_default);
++
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_0),
++		      ANA_CPHY_CDR_FIRST_EDGE_EN, 0);
++	seninf_update(R_ANA(seninf, half, CDPHY_RX_ANA_2),
++		      ANA_CPHY_CDR_SELF_CAL_EN, 0);
++	for (i = 0; i < 2; i++) {
++		void __iomem *reg = R_ANA(seninf, half, CDPHY_RX_ANA_CDR(i));
++
++		seninf_field(reg, ANA_CDR_CK_DELAY, 4);
++		seninf_field(reg, ANA_CDR_AB_WIDTH, 9);
++		seninf_field(reg, ANA_CDR_BC_WIDTH, 9);
++		seninf_field(reg, ANA_CDR_CA_WIDTH, 9);
++	}
++	seninf_field(R_ANA(seninf, half, CDPHY_RX_ANA_8), ANA_RESERVE, 0x400);
++}
++
++static void seninf_dphy_timing(struct mt6897_seninf *seninf)
++{
++	u32 settle = min(seninf_ns_to_cycles(seninf, SENINF_DPHY_DATA_SETTLE_NS),
++			 0xffU);
++	u32 settle_ck = min(seninf_ns_to_cycles(seninf, SENINF_DPHY_CLK_SETTLE_NS),
++			    0xffU);
++	u32 trail = min(seninf_ns_to_cycles(seninf, SENINF_DPHY_TRAIL_NS), 0x3ffU);
++	unsigned int i;
++
++	dev_dbg(seninf->dev, "D-PHY settle %u, clock settle %u, trail %u cycles\n",
++		settle, settle_ck, trail);
++
++	for (i = 0; i < 4; i++) {
++		void __iomem *reg = R_DPHY(seninf, DPHY_RX_DATA_LANE(i));
++
++		seninf_field(reg, DPHY_LD_HS_SETTLE, settle);
++		seninf_field(reg, DPHY_LD_HS_PREPARE, 0);
++		seninf_field(reg, DPHY_LD_HS_TRAIL, trail);
++		seninf_update(reg, DPHY_LD_HS_TRAIL_EN, DPHY_LD_HS_TRAIL_EN);
++	}
++	for (i = 0; i < 2; i++)
++		seninf_field(R_DPHY(seninf, DPHY_RX_CLOCK_LANE(i)), DPHY_LC_HS_SETTLE,
++			     settle_ck);
++
++	seninf_update(R_DPHY(seninf, DPHY_RX_DESKEW_CTRL), DPHY_DESKEW_EN,
++		      DPHY_DESKEW_EN);
++	for (i = 0; i < 4; i++)
++		seninf_update(R_DPHY(seninf, DPHY_RX_DESKEW_LANE(i)),
++			      DPHY_DESKEW_DELAY_EN, 0);
++
++	for (i = 0; i < 4; i++)
++		seninf_update(R_DPHY(seninf, DPHY_RX_DATA_LANE(i)),
++			      DPHY_LD_HS_PREPARE_EN, DPHY_LD_HS_PREPARE_EN);
++	for (i = 0; i < 2; i++) {
++		void __iomem *reg = R_DPHY(seninf, DPHY_RX_CLOCK_LANE(i));
++
++		seninf_field(reg, DPHY_LC_HS_PREPARE, 0);
++		seninf_update(reg, DPHY_LC_HS_PREPARE_EN, DPHY_LC_HS_PREPARE_EN);
++	}
++
++	/* The vendor sets this for D-PHY too */
++	seninf_update(seninf->ana + CPHY_RX + CPHY_RX_DETECT_CTRL_POST,
++		      CPHY_DATA_VALID_POST_EN, CPHY_DATA_VALID_POST_EN);
++}
++
++static void seninf_mac_setup(struct mt6897_seninf *seninf)
++{
++	seninf_update(R_MACT(seninf, MAC_TOP_CTRL), MAC_TOP_8PIX_SHARE_16PIX, 0);
++	seninf_update(R_MACT(seninf, MAC_TOP_PHY_CTRL_CSI0), MAC_TOP_CPHY_EN, 0);
++	seninf_update(R_MACT(seninf, MAC_TOP_PHY_CTRL_CSI0), MAC_TOP_DPHY_EN,
++		      MAC_TOP_DPHY_EN);
++	seninf_field(R_MACT(seninf, MAC_TOP_PHY_CTRL_CSI0), MAC_TOP_CPHY_MODE, 0);
++
++	seninf_update(R_MACC(seninf, MAC_CSI2_OPT), MAC_CSI2_CPHY_SEL, 0);
++	seninf_field(R_MACC(seninf, MAC_CSI2_EN), MAC_CSI2_LANE_EN,
++		     GENMASK(seninf->num_lanes - 1, 0));
++	seninf_update(R_MACC(seninf, MAC_CSI2_OPT),
++		      MAC_CSI2_8_16_PIXEL_SEL | MAC_CSI2_ECC_EN | MAC_CSI2_B2P_EN |
++		      MAC_CSI2_IMG_PACKET_EN | MAC_CSI2_SPEC_V2P0_SEL |
++		      MAC_CSI2_MULTI_FRAME_VLD_EN | MAC_CSI2_VS_OUTPUT_MODE |
++		      MAC_CSI2_VS_OUTPUT_LEN_SEL,
++		      MAC_CSI2_ECC_EN | MAC_CSI2_B2P_EN | MAC_CSI2_IMG_PACKET_EN |
++		      MAC_CSI2_SPEC_V2P0_SEL | MAC_CSI2_MULTI_FRAME_VLD_EN);
++	seninf_field(R_MACC(seninf, MAC_CSI2_RESYNC_MERGE_CTRL),
++		     MAC_CSI2_RESYNC_CYCLE_CNT, 0x1f);
++	seninf_update(R_MACC(seninf, MAC_CSI2_RESYNC_MERGE_CTRL),
++		      MAC_CSI2_RESYNC_CYCLE_CNT_OPT, MAC_CSI2_RESYNC_CYCLE_CNT_OPT);
++	/* Only the clear mode: the status bits latch, no interrupt is raised */
++	writel(MAC_CSI2_IRQ_CLR_MODE, R_MACC(seninf, MAC_CSI2_IRQ_EN));
++	seninf_update(R_MACC(seninf, MAC_CSI2_DBG_CTRL), MAC_CSI2_DBG_PACKET_CNT_EN,
++		      MAC_CSI2_DBG_PACKET_CNT_EN);
++	seninf_update(R_MACC(seninf, MAC_CSI2_HDR_MODE_0),
++		      MAC_CSI2_HEADER_MODE | MAC_CSI2_HEADER_LEN, 0);
++	seninf_update(R_MACC(seninf, MAC_CSI2_RESYNC_MERGE_CTRL),
++		      MAC_CSI2_RESYNC_DMY_CYCLE | MAC_CSI2_RESYNC_DMY_CNT |
++		      MAC_CSI2_RESYNC_DMY_EN | MAC_CSI2_RESYNC_LRTE_EN, 0);
++}
++
++static void seninf_ana_dphy_mode(struct mt6897_seninf *seninf)
++{
++	static const u32 halves[] = { CSI0A, CSI0B };
++	unsigned int i;
++
++	seninf_field(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_SETTING_1), ANA_ASYNC_OPTION, 4);
++	seninf_field(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_SETTING_1),
++		     ANA_AFIFO_DUMMY_VALID_NUM, 3);
++	seninf_update(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_SETTING_1),
++		      ANA_AFIFO_DUMMY_VALID_EN, ANA_AFIFO_DUMMY_VALID_EN);
++	seninf_field(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_SETTING_1),
++		     ANA_AFIFO_DUMMY_PREPARE_NUM, 4);
++	seninf_field(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_SETTING_1),
++		     ANA_AFIFO_DUMMY_GAP_NUM, 4);
++	seninf_field(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_SETTING_0),
++		     ANA_ASYNC_FIFO_GATING_SEL, 2);
++
++	for (i = 0; i < ARRAY_SIZE(halves); i++) {
++		void __iomem *reg = R_ANA(seninf, halves[i], CDPHY_RX_ANA_0);
++
++		seninf_update(reg, ANA_CPHY_EN, 0);
++		seninf_update(reg, ANA_DPHY_CKMODE_EN, 0);
++		seninf_update(reg, ANA_DPHY_CKSEL, ANA_DPHY_CKSEL);
++	}
++	/* The clock lane is pair 2 of the A half */
++	seninf_update(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_0), ANA_DPHY_L2_CKMODE_EN,
++		      ANA_DPHY_L2_CKMODE_EN);
++	for (i = 0; i < ARRAY_SIZE(halves); i++)
++		seninf_update(R_ANA(seninf, halves[i], CDPHY_RX_ANA_0),
++			      ANA_CPHY_HSMODE_EN, ANA_CPHY_HSMODE_EN);
++
++	/* Equalizer for less than 2.5 Gbit/s per lane */
++	for (i = 0; i < ARRAY_SIZE(halves); i++) {
++		void __iomem *reg = R_ANA(seninf, halves[i], CDPHY_RX_ANA_5);
++
++		seninf_update(reg, ANA_EQ_SR1 | ANA_EQ_SR0 | ANA_EQ_DG1_EN |
++			      ANA_EQ_DG0_EN | ANA_EQ_BW, 0);
++		seninf_update(reg, ANA_EQ_LATCH_EN, ANA_EQ_LATCH_EN);
++		seninf_field(reg, ANA_EQ_IS, 1);
++	}
++
++	for (i = 0; i < ARRAY_SIZE(halves); i++)
++		seninf_ana_power(seninf, halves[i], true);
++}
++
++static void seninf_dphy_lanes(struct mt6897_seninf *seninf)
++{
++	unsigned int i;
++
++	seninf_update(R_DPHY(seninf, DPHY_RX_LANE_EN), DPHY_LC0_EN | DPHY_LC1_EN |
++		      DPHY_LD_EN, DPHY_LC0_EN | DPHY_LD_EN);
++	/* The vendor's fixed wiring of a four-lane port 0 */
++	seninf_field(R_DPHY(seninf, DPHY_RX_LANE_SELECT), DPHY_LC0_SEL, 2);
++	seninf_field(R_DPHY(seninf, DPHY_RX_LANE_SELECT), DPHY_LC1_SEL, 0);
++	seninf_field(R_DPHY(seninf, DPHY_RX_LANE_SELECT), DPHY_LD0_SEL, 1);
++	seninf_field(R_DPHY(seninf, DPHY_RX_LANE_SELECT), DPHY_LD1_SEL, 3);
++	seninf_field(R_DPHY(seninf, DPHY_RX_LANE_SELECT), DPHY_LD2_SEL, 0);
++	seninf_field(R_DPHY(seninf, DPHY_RX_LANE_SELECT), DPHY_LD3_SEL, 4);
++	for (i = 0; i < 2; i++) {
++		u32 half = i ? CSI0B : CSI0A;
++
++		seninf_update(R_ANA(seninf, half, CDPHY_RX_ASYM_AFIFO_CTRL_0),
++			      ANA_L0_AFIFO_FLUSH_EN | ANA_L1_AFIFO_FLUSH_EN,
++			      ANA_L0_AFIFO_FLUSH_EN | ANA_L1_AFIFO_FLUSH_EN);
++	}
++	seninf_update(R_DPHY(seninf, DPHY_RX_LANE_SELECT), DPHY_CK_DATA_MUX_EN,
++		      DPHY_CK_DATA_MUX_EN);
++	seninf_update(R_DPHY(seninf, DPHY_RX_HS_RX_EN_SW), DPHY_PN_SWAP_EN, 0);
++	seninf_update(R_DPHY(seninf, DPHY_DPHYV21_CTRL), DPHY_SYNC_METH_SEL,
++		      DPHY_SYNC_METH_SEL);
++	writel(0xf1, R_DPHY(seninf, DPHY_RX_SPARE0));
++	for (i = 0; i < 4; i++)
++		seninf_update(R_DPHY(seninf, DPHY_RX_DESKEW_LANE(i)),
++			      DPHY_DESKEW_DELAY_EN, 0);
++	writel(DPHY_IRQ_SOT_SYNC_ERR, R_DPHY(seninf, DPHY_RX_IRQ_EN));
++}
++
++static void seninf_mux_setup(struct mt6897_seninf *seninf)
++{
++	u32 val;
++
++	seninf_update(R_MUX(seninf, 0, SENINF_MUX_CTRL_0), MUX_EN, MUX_EN);
++	seninf_field(R_MUX(seninf, 0, SENINF_MUX_CTRL_1), MUX_SRC_SEL, MUX_SRC_CSI);
++	seninf_field(R_MUX(seninf, 0, SENINF_MUX_CTRL_1), MUX_PIX_MODE_SEL,
++		     SENINF_PIX_MODE);
++	seninf_update(R_MUX(seninf, 0, SENINF_MUX_OPT),
++		      MUX_VS_SPLIT_EN | MUX_HSYNC_POL | MUX_VSYNC_POL,
++		      MUX_VS_SPLIT_EN);
++	val = readl(R_MUX(seninf, 0, SENINF_MUX_CTRL_0));
++	writel(val | MUX_IRQ_SW_RST | MUX_SW_RST, R_MUX(seninf, 0, SENINF_MUX_CTRL_0));
++	writel(val & ~(MUX_IRQ_SW_RST | MUX_SW_RST),
++	       R_MUX(seninf, 0, SENINF_MUX_CTRL_0));
++	/* mux1 takes seninf1 */
++	seninf_field(R_TOP(seninf, SENINF_TOP_MUX_CTRL_0), SENINF_TOP_MUX1_SRC_SEL, 0);
++	seninf_field(R_MUX(seninf, 0, SENINF_MUX_VC_SEL0), MUX_B0_VC_SEL, 0);
++	seninf_update(R_MUX(seninf, 0, SENINF_MUX_VC_SEL0), MUX_B0_VC_REF_EN,
++		      MUX_B0_VC_REF_EN);
++	/* The frame size monitor, for the status file */
++	seninf_update(R_MUX(seninf, 0, SENINF_MUX_SIZE_MON_CTRL), MUX_SIZE_MON_EN,
++		      MUX_SIZE_MON_EN);
++}
++
++/* cam-mux 0, on the register page that is selected now */
++static void seninf_cam_mux_page(struct mt6897_seninf *seninf,
++				const struct v4l2_mbus_framefmt *fmt, u8 dt)
++{
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_OPT), CAM_MUX_VC_SEL, 0);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_OPT), CAM_MUX_DT_SEL, dt);
++	seninf_update(R_CAM_MUX(seninf, 0, CAM_MUX_OPT),
++		      CAM_MUX_VC_SEL_EN | CAM_MUX_DT_SEL_EN,
++		      CAM_MUX_VC_SEL_EN | CAM_MUX_DT_SEL_EN);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_OPT), CAM_MUX_TAG_PAGE_SEL, 0);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_TAG_VC_SEL), CAM_MUX_TAG_VC, 0);
++	seninf_update(R_CAM_MUX(seninf, 0, CAM_MUX_TAG_VC_SEL), CAM_MUX_TAG_VC_EN,
++		      CAM_MUX_TAG_VC_EN);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_TAG_DT_SEL), CAM_MUX_TAG_DT, dt);
++	seninf_update(R_CAM_MUX(seninf, 0, CAM_MUX_TAG_DT_SEL), CAM_MUX_TAG_DT_EN,
++		      CAM_MUX_TAG_DT_EN);
++	/* virtual mux 0 is mux1 */
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_CTRL), CAM_MUX_SRC_SEL, 0);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_CHK_CTL), CAM_MUX_EXP_HSIZE,
++		     fmt->width);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_CHK_CTL), CAM_MUX_EXP_VSIZE,
++		     fmt->height);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_CTRL), CAM_MUX_CHK_PIX_MODE,
++		     SENINF_PIX_MODE);
++	seninf_update(R_CAM_MUX(seninf, 0, CAM_MUX_CTRL), CAM_MUX_EN, CAM_MUX_EN);
++	writel(CAM_MUX_IRQ_CLEAR, R_CAM_MUX(seninf, 0, CAM_MUX_IRQ_STATUS));
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_CTRL), CAM_MUX_NEXT_SRC_SEL, 0);
++}
++
++static void seninf_rx_start(struct mt6897_seninf *seninf,
++			    const struct v4l2_mbus_framefmt *fmt, u8 dt)
++{
++	unsigned int i;
++
++	/* Reset seninf1's CSI-2 unit and the CSI-RX MAC */
++	seninf_update(R_S1(seninf, SENINF_CSI2_CTRL), SENINF_CSI2_SW_RST,
++		      SENINF_CSI2_SW_RST);
++	udelay(1);
++	seninf_update(R_S1(seninf, SENINF_CSI2_CTRL), SENINF_CSI2_SW_RST, 0);
++	seninf_update(R_MACT(seninf, MAC_TOP_CTRL), MAC_TOP_SW_RST, MAC_TOP_SW_RST);
++	udelay(1);
++	seninf_update(R_MACT(seninf, MAC_TOP_CTRL), MAC_TOP_SW_RST, 0);
++
++	/* Virtual channel 0 and the data type of the format */
++	for (i = 0; i < 8; i++)
++		writel(0, R_CSI2(seninf, SENINF_CSI2_S_DI_CTRL(i)));
++	for (i = 0; i < 4; i++)
++		writel(0, R_CSI2(seninf, SENINF_CSI2_CH_CTRL(i)));
++	writel(0, R_MACC(seninf, MAC_CSI2_FORCEDT0));
++	seninf_field(R_MACC(seninf, MAC_CSI2_DT0), MAC_CSI2_RAW10_DT, MIPI_CSI2_DT_RAW10);
++	seninf_field(R_MACC(seninf, MAC_CSI2_DT0), MAC_CSI2_RAW12_DT, MIPI_CSI2_DT_RAW12);
++	seninf_field(R_MACC(seninf, MAC_CSI2_DT0), MAC_CSI2_RAW14_DT, MIPI_CSI2_DT_RAW14);
++	seninf_field(R_MACC(seninf, MAC_CSI2_DT0), MAC_CSI2_RAW16_DT, MIPI_CSI2_DT_RAW16);
++	seninf_field(R_CSI2(seninf, SENINF_CSI2_S_DI_CTRL(0)), CSI2_S_DT_SEL, dt);
++	seninf_field(R_CSI2(seninf, SENINF_CSI2_S_DI_CTRL(0)), CSI2_S_VC_SEL, 0);
++	seninf_field(R_CSI2(seninf, SENINF_CSI2_S_DI_CTRL(0)),
++		     CSI2_S_DT_INTERLEAVE_MODE, 1);
++	seninf_update(R_CSI2(seninf, SENINF_CSI2_S_DI_CTRL(0)),
++		      CSI2_S_VC_INTERLEAVE_EN, CSI2_S_VC_INTERLEAVE_EN);
++	seninf_update(R_CSI2(seninf, SENINF_CSI2_CH_CTRL(0)), CSI2_CH_S0_GRP_EN,
++		      CSI2_CH_S0_GRP_EN);
++
++	seninf_ana_init(seninf, CSI0A);
++	seninf_ana_init(seninf, CSI0B);
++	if (seninf->have_trims) {
++		const u32 a[3] = {
++			(seninf->trims >> 27) & 0x1f,
++			(seninf->trims >> 22) & 0x1f,
++			(seninf->trims >> 17) & 0x1f,
++		};
++		const u32 b[3] = {
++			(seninf->trims >> 12) & 0x1f,
++			(seninf->trims >> 7) & 0x1f,
++			(seninf->trims >> 2) & 0x1f,
++		};
++
++		seninf_ana_hsrt(seninf, CSI0A, a);
++		seninf_ana_hsrt(seninf, CSI0B, b);
++	}
++
++	seninf_dphy_timing(seninf);
++	seninf_mac_setup(seninf);
++
++	seninf_update(R_TOP(seninf, SENINF_TOP_CTRL2), SENINF_TOP_AFIFOA_POP_HALF_EN,
++		      SENINF_TOP_AFIFOA_POP_HALF_EN);
++	seninf_update(R_S1(seninf, SENINF_CSI2_CTRL), SENINF_CSI2_EN, SENINF_CSI2_EN);
++	seninf_update(R_S1(seninf, SENINF_CTRL), SENINF_EN, SENINF_EN);
++
++	seninf_ana_dphy_mode(seninf);
++	seninf_dphy_lanes(seninf);
++
++	seninf_mux_setup(seninf);
++	/* The cam-mux registers come in two pages; set both */
++	seninf_update(R_GCSR(seninf, CAM_MUX_GCSR_DYN_CTRL), CAM_MUX_GCSR_PAGE_OUTER,
++		      CAM_MUX_GCSR_PAGE_OUTER);
++	seninf_cam_mux_page(seninf, fmt, dt);
++	seninf_update(R_GCSR(seninf, CAM_MUX_GCSR_DYN_CTRL), CAM_MUX_GCSR_PAGE_OUTER, 0);
++	seninf_cam_mux_page(seninf, fmt, dt);
++}
++
++static void seninf_rx_stop(struct mt6897_seninf *seninf)
++{
++	seninf_update(R_MUX(seninf, 0, SENINF_MUX_CTRL_0), MUX_EN, 0);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_CTRL), CAM_MUX_NEXT_SRC_SEL,
++		     CAM_MUX_SRC_IDLE);
++	seninf_field(R_CAM_MUX(seninf, 0, CAM_MUX_CTRL), CAM_MUX_SRC_SEL,
++		     CAM_MUX_SRC_IDLE);
++	seninf_update(R_CAM_MUX(seninf, 0, CAM_MUX_CTRL), CAM_MUX_EN, 0);
++	writel(CAM_MUX_IRQ_CLEAR, R_CAM_MUX(seninf, 0, CAM_MUX_IRQ_STATUS));
++
++	writel(0, R_CSI2(seninf, SENINF_CSI2_PRBS));
++	seninf_ana_power(seninf, CSI0A, false);
++	seninf_ana_power(seninf, CSI0B, false);
++	seninf_update(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_SETTING_0), ANA_REF_CK_SEL, 0);
++
++	seninf_update(R_S1(seninf, SENINF_CTRL), SENINF_EN, 0);
++	seninf_update(R_S1(seninf, SENINF_CSI2_CTRL), SENINF_CSI2_EN, 0);
++	seninf_update(R_TOP(seninf, SENINF_TOP_CTRL2), SENINF_TOP_AFIFOA_POP_HALF_EN, 0);
++	seninf_update(R_DPHY(seninf, DPHY_RX_LANE_EN), DPHY_LC0_EN | DPHY_LD_EN, 0);
++}
++
++/* ---- the subdev --------------------------------------------------------- */
++
++static const struct v4l2_mbus_framefmt seninf_default_fmt = {
++	.code = MEDIA_BUS_FMT_SBGGR10_1X10,
++	.width = 1632,
++	.height = 1224,
++	.field = V4L2_FIELD_NONE,
++	.colorspace = V4L2_COLORSPACE_RAW,
++	.xfer_func = V4L2_XFER_FUNC_NONE,
++	.ycbcr_enc = V4L2_YCBCR_ENC_601,
++	.quantization = V4L2_QUANTIZATION_FULL_RANGE,
++};
++
++static int seninf_init_state(struct v4l2_subdev *sd,
++			     struct v4l2_subdev_state *state)
++{
++	*v4l2_subdev_state_get_format(state, SENINF_PAD_SINK) = seninf_default_fmt;
++	*v4l2_subdev_state_get_format(state, SENINF_PAD_SOURCE) = seninf_default_fmt;
++	return 0;
++}
++
++static int seninf_enum_mbus_code(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_mbus_code_enum *code)
++{
++	if (code->pad == SENINF_PAD_SOURCE) {
++		if (code->index)
++			return -EINVAL;
++		code->code = v4l2_subdev_state_get_format(state,
++							  SENINF_PAD_SINK)->code;
++		return 0;
++	}
++
++	if (code->index >= ARRAY_SIZE(seninf_formats))
++		return -EINVAL;
++	code->code = seninf_formats[code->index].code;
++	return 0;
++}
++
++static int seninf_set_fmt(struct v4l2_subdev *sd,
++			  struct v4l2_subdev_state *state,
++			  struct v4l2_subdev_format *format)
++{
++	struct v4l2_mbus_framefmt *fmt = &format->format;
++
++	/* The source pad passes on what comes in */
++	if (format->pad == SENINF_PAD_SOURCE)
++		return v4l2_subdev_get_fmt(sd, state, format);
++
++	if (format->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
++	    v4l2_subdev_is_streaming(sd))
++		return -EBUSY;
++
++	if (!seninf_find_format(fmt->code))
++		fmt->code = seninf_default_fmt.code;
++	fmt->width = clamp(fmt->width, 1U, 0xffffU);
++	fmt->height = clamp(fmt->height, 1U, 0xffffU);
++	fmt->field = V4L2_FIELD_NONE;
++
++	*v4l2_subdev_state_get_format(state, SENINF_PAD_SINK) = *fmt;
++	*v4l2_subdev_state_get_format(state, SENINF_PAD_SOURCE) = *fmt;
++	return 0;
++}
++
++static int seninf_enable_streams(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state, u32 pad,
++				 u64 streams_mask)
++{
++	struct mt6897_seninf *seninf = sd_to_seninf(sd);
++	const struct v4l2_mbus_framefmt *fmt;
++	const struct seninf_format *sfmt;
++	struct v4l2_subdev *source;
++	struct media_pad *remote;
++	s64 link_freq;
++	int ret;
++
++	remote = media_pad_remote_pad_first(&seninf->pads[SENINF_PAD_SINK]);
++	if (!remote)
++		return -ENOLINK;
++	source = media_entity_to_v4l2_subdev(remote->entity);
++
++	fmt = v4l2_subdev_state_get_format(state, SENINF_PAD_SINK);
++	sfmt = seninf_find_format(fmt->code);
++	if (!sfmt)
++		return -EINVAL;
++
++	link_freq = v4l2_get_link_freq(remote, sfmt->bpp, 2 * seninf->num_lanes);
++	if (link_freq < 0) {
++		dev_err(seninf->dev, "no link frequency from %s: %lld\n",
++			source->name, link_freq);
++		return link_freq;
++	}
++	if (2 * link_freq >= SENINF_MAX_LANE_RATE) {
++		dev_err(seninf->dev, "%lld bit/s per lane is not supported yet\n",
++			2 * link_freq);
++		return -EINVAL;
++	}
++	dev_dbg(seninf->dev, "%ux%u data type 0x%02x, %lld bit/s per lane\n",
++		fmt->width, fmt->height, sfmt->dt, 2 * link_freq);
++
++	ret = pm_runtime_resume_and_get(seninf->dev);
++	if (ret)
++		return ret;
++
++	seninf_rx_start(seninf, fmt, sfmt->dt);
++
++	ret = v4l2_subdev_enable_streams(source, remote->index, BIT_ULL(0));
++	if (ret) {
++		dev_err(seninf->dev, "starting %s failed: %d\n", source->name, ret);
++		seninf_rx_stop(seninf);
++		pm_runtime_put(seninf->dev);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int seninf_disable_streams(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *state, u32 pad,
++				  u64 streams_mask)
++{
++	struct mt6897_seninf *seninf = sd_to_seninf(sd);
++	struct media_pad *remote;
++	int ret;
++
++	remote = media_pad_remote_pad_first(&seninf->pads[SENINF_PAD_SINK]);
++	if (remote) {
++		ret = v4l2_subdev_disable_streams(media_entity_to_v4l2_subdev(remote->entity),
++						  remote->index, BIT_ULL(0));
++		if (ret)
++			dev_err(seninf->dev, "stopping the source failed: %d\n", ret);
++	}
++
++	seninf_rx_stop(seninf);
++	pm_runtime_put(seninf->dev);
++	return 0;
++}
++
++static const struct v4l2_subdev_video_ops seninf_video_ops = {
++	.s_stream = v4l2_subdev_s_stream_helper,
++};
++
++static const struct v4l2_subdev_pad_ops seninf_pad_ops = {
++	.enum_mbus_code = seninf_enum_mbus_code,
++	.get_fmt = v4l2_subdev_get_fmt,
++	.set_fmt = seninf_set_fmt,
++	.link_validate = v4l2_subdev_link_validate_default,
++	.enable_streams = seninf_enable_streams,
++	.disable_streams = seninf_disable_streams,
++};
++
++static const struct v4l2_subdev_ops seninf_subdev_ops = {
++	.video = &seninf_video_ops,
++	.pad = &seninf_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops seninf_internal_ops = {
++	.init_state = seninf_init_state,
++};
++
++static const struct media_entity_operations seninf_entity_ops = {
++	.link_validate = v4l2_subdev_link_validate,
++	.get_fwnode_pad = v4l2_subdev_get_fwnode_pad_1_to_1,
++};
++
++/* ---- the sensor --------------------------------------------------------- */
++
++static int seninf_notify_bound(struct v4l2_async_notifier *notifier,
++			       struct v4l2_subdev *source,
++			       struct v4l2_async_connection *asc)
++{
++	struct mt6897_seninf *seninf =
++		container_of(notifier, struct mt6897_seninf, notifier);
++
++	dev_dbg(seninf->dev, "bound %s\n", source->name);
++	return v4l2_create_fwnode_links_to_pad(source,
++					       &seninf->pads[SENINF_PAD_SINK],
++					       MEDIA_LNK_FL_ENABLED |
++					       MEDIA_LNK_FL_IMMUTABLE);
++}
++
++static int seninf_notify_complete(struct v4l2_async_notifier *notifier)
++{
++	struct mt6897_seninf *seninf =
++		container_of(notifier, struct mt6897_seninf, notifier);
++
++	return v4l2_device_register_subdev_nodes(&seninf->v4l2_dev);
++}
++
++static const struct v4l2_async_notifier_operations seninf_notify_ops = {
++	.bound = seninf_notify_bound,
++	.complete = seninf_notify_complete,
++};
++
++static int seninf_parse_endpoint(struct mt6897_seninf *seninf)
++{
++	struct v4l2_fwnode_endpoint vep = { .bus_type = V4L2_MBUS_CSI2_DPHY };
++	struct v4l2_async_connection *asc;
++	struct fwnode_handle *ep;
++	int ret;
++
++	ep = fwnode_graph_get_endpoint_by_id(dev_fwnode(seninf->dev), 0, 0,
++					     FWNODE_GRAPH_ENDPOINT_NEXT);
++	if (!ep)
++		return dev_err_probe(seninf->dev, -ENODEV,
++				     "no endpoint on port 0\n");
++
++	ret = v4l2_fwnode_endpoint_parse(ep, &vep);
++	if (ret) {
++		dev_err_probe(seninf->dev, ret, "parsing the endpoint failed\n");
++		goto out;
++	}
++	if (vep.bus.mipi_csi2.num_data_lanes != 4) {
++		ret = dev_err_probe(seninf->dev, -EINVAL,
++				    "only four data lanes are supported\n");
++		goto out;
++	}
++	seninf->num_lanes = vep.bus.mipi_csi2.num_data_lanes;
++
++	asc = v4l2_async_nf_add_fwnode_remote(&seninf->notifier, ep,
++					      struct v4l2_async_connection);
++	if (IS_ERR(asc))
++		ret = dev_err_probe(seninf->dev, PTR_ERR(asc),
++				    "adding the sensor failed\n");
++out:
++	fwnode_handle_put(ep);
++	return ret;
++}
++
++/*
++ * The fuses hold termination trims for the six pins of each half of CSI port
++ * 0, with a checksum in the low five bits. Use them only when the checksum
++ * holds, as the vendor driver checks them. The value itself stays private.
++ */
++static int seninf_read_trims(struct mt6897_seninf *seninf)
++{
++	u32 val, sum, check;
++	int ret;
++
++	ret = nvmem_cell_read_u32(seninf->dev, "csi0", &val);
++	if (ret == -EPROBE_DEFER)
++		return ret;
++	if (ret) {
++		dev_info(seninf->dev, "no CSI trim fuses, using the defaults\n");
++		return 0;
++	}
++
++	sum = ((val >> 27) & 0x1f) + ((val >> 22) & 0x1f) + ((val >> 17) & 0x1f) +
++	      ((val >> 12) & 0x1f) + ((val >> 7) & 0x1f);
++	if (!sum) {
++		dev_info(seninf->dev, "the CSI trim fuses are blank, using the defaults\n");
++		return 0;
++	}
++	check = (((sum >> 4) & 0xf) + (sum & 0xf)) & 0x1f;
++	if (check != (val & 0x1f)) {
++		dev_warn(seninf->dev,
++			 "the CSI trim fuses fail their checksum, using the defaults\n");
++		return 0;
++	}
++
++	seninf->trims = val;
++	seninf->have_trims = true;
++	dev_info(seninf->dev, "using the CSI trims from the fuses\n");
++	return 0;
++}
++
++/* ---- debugfs ------------------------------------------------------------ */
++
++static int seninf_status_show(struct seq_file *m, void *data)
++{
++	struct mt6897_seninf *seninf = m->private;
++	u32 frame;
++
++	/* Reading a block that is powered off would hang the bus */
++	if (pm_runtime_get_if_in_use(seninf->dev) <= 0) {
++		seq_puts(m, "powered off\n");
++		return 0;
++	}
++
++	frame = readl(R_MACC(seninf, MAC_CSI2_LINE_FRAME_NUM));
++	seq_printf(m, "mac: packets %u, frame %u, line %u, irq 0x%08x, last packet 0x%08x\n",
++		   readl(R_MACC(seninf, MAC_CSI2_PACKET_CNT_STATUS)) & 0xffff,
++		   frame >> 16, frame & 0xffff,
++		   readl(R_MACC(seninf, MAC_CSI2_IRQ_STATUS)),
++		   readl(R_MACC(seninf, MAC_CSI2_PACKET_STATUS)));
++	seq_printf(m, "dphy: sot sync irq 0x%lx, sot errors 0x%08x, lp A 0x%03x B 0x%03x\n",
++		   FIELD_GET(DPHY_IRQ_SOT_SYNC_ERR,
++			     readl(R_DPHY(seninf, DPHY_RX_IRQ_STATUS))),
++		   readl(R_DPHY(seninf, DPHY_RX_STATUS_2)),
++		   readl(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_AD_0)) & 0x333,
++		   readl(R_ANA(seninf, CSI0B, CDPHY_RX_ANA_AD_0)) & 0x333);
++	seq_printf(m, "seninf1: irq 0x%08x\n",
++		   readl(R_CSI2(seninf, SENINF_CSI2_IRQ_STATUS)));
++	seq_printf(m, "mux1: size 0x%08x, irq 0x%08x, monitor 0x%08x 0x%08x 0x%08x 0x%08x\n",
++		   readl(R_MUX(seninf, 0, SENINF_MUX_SIZE)),
++		   readl(R_MUX(seninf, 0, SENINF_MUX_IRQ_STATUS)),
++		   readl(R_MUX(seninf, 0, SENINF_MUX_SIZE_MON(0))),
++		   readl(R_MUX(seninf, 0, SENINF_MUX_SIZE_MON(1))),
++		   readl(R_MUX(seninf, 0, SENINF_MUX_SIZE_MON(2))),
++		   readl(R_MUX(seninf, 0, SENINF_MUX_SIZE_MON(3))));
++	seq_printf(m, "cam-mux 0: received 0x%08x, irq 0x%08x, enabled 0x%08x, vsync 0x%08x\n",
++		   readl(R_CAM_MUX(seninf, 0, CAM_MUX_CHK_RES)),
++		   readl(R_CAM_MUX(seninf, 0, CAM_MUX_IRQ_STATUS)),
++		   readl(R_GCSR(seninf, CAM_MUX_GCSR_MUX_EN)),
++		   readl(R_GCSR(seninf, CAM_MUX_GCSR_VSYNC_IRQ_STS)));
++	seq_printf(m, "offset calibration done: A 0x%02lx B 0x%02lx\n",
++		   FIELD_GET(ANA_OS_CAL_CPLT, readl(R_ANA(seninf, CSI0A, CDPHY_RX_ANA_9))),
++		   FIELD_GET(ANA_OS_CAL_CPLT, readl(R_ANA(seninf, CSI0B, CDPHY_RX_ANA_9))));
++
++	/* Clear the latched bits so that the next read shows new events */
++	writel(0xffffffff, R_MACC(seninf, MAC_CSI2_IRQ_STATUS));
++	writel(0xffffffff, R_DPHY(seninf, DPHY_RX_IRQ_CLR));
++	writel(0xffffffff, R_CSI2(seninf, SENINF_CSI2_IRQ_STATUS));
++	writel(CAM_MUX_IRQ_CLEAR, R_MUX(seninf, 0, SENINF_MUX_IRQ_STATUS));
++	writel(CAM_MUX_IRQ_CLEAR, R_CAM_MUX(seninf, 0, CAM_MUX_IRQ_STATUS));
++
++	pm_runtime_put(seninf->dev);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(seninf_status);
++
++static int seninf_stream_start(struct mt6897_seninf *seninf)
++{
++	struct v4l2_subdev_format format = {
++		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
++	};
++	struct v4l2_subdev *source;
++	struct media_pad *remote;
++	int ret;
++
++	remote = media_pad_remote_pad_first(&seninf->pads[SENINF_PAD_SINK]);
++	if (!remote)
++		return -ENOLINK;
++	source = media_entity_to_v4l2_subdev(remote->entity);
++
++	/* Take over the sensor's format, as link validation would demand */
++	format.pad = remote->index;
++	ret = v4l2_subdev_call_state_active(source, pad, get_fmt, &format);
++	if (ret)
++		return ret;
++	format.pad = SENINF_PAD_SINK;
++	ret = v4l2_subdev_call_state_active(&seninf->sd, pad, set_fmt, &format);
++	if (ret)
++		return ret;
++
++	return v4l2_subdev_enable_streams(&seninf->sd, SENINF_PAD_SOURCE, BIT_ULL(0));
++}
++
++static ssize_t seninf_stream_write(struct file *file, const char __user *buf,
++				   size_t count, loff_t *ppos)
++{
++	struct mt6897_seninf *seninf = file->private_data;
++	bool on;
++	int ret;
++
++	ret = kstrtobool_from_user(buf, count, &on);
++	if (ret)
++		return ret;
++
++	mutex_lock(&seninf->debugfs_lock);
++	if (on)
++		ret = seninf_stream_start(seninf);
++	else
++		ret = v4l2_subdev_disable_streams(&seninf->sd, SENINF_PAD_SOURCE,
++						  BIT_ULL(0));
++	mutex_unlock(&seninf->debugfs_lock);
++
++	return ret ? ret : count;
++}
++
++static const struct file_operations seninf_stream_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = seninf_stream_write,
++	.llseek = noop_llseek,
++};
++
++/* ---- power and probe ----------------------------------------------------- */
++
++static int seninf_runtime_suspend(struct device *dev)
++{
++	struct mt6897_seninf *seninf = dev_get_drvdata(dev);
++
++	clk_bulk_disable_unprepare(ARRAY_SIZE(seninf->clks), seninf->clks);
++	return 0;
++}
++
++static int seninf_runtime_resume(struct device *dev)
++{
++	struct mt6897_seninf *seninf = dev_get_drvdata(dev);
++	int ret;
++
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(seninf->clks), seninf->clks);
++	if (ret)
++		return ret;
++
++	seninf_hw_idle(seninf);
++	return 0;
++}
++
++static DEFINE_RUNTIME_DEV_PM_OPS(seninf_pm_ops, seninf_runtime_suspend,
++				 seninf_runtime_resume, NULL);
++
++static int seninf_probe(struct platform_device *pdev)
++{
++	static const struct dev_pm_domain_attach_data pd_data = {
++		.pd_names = seninf_pd_names,
++		.num_pd_names = ARRAY_SIZE(seninf_pd_names),
++	};
++	struct device *dev = &pdev->dev;
++	struct mt6897_seninf *seninf;
++	unsigned int i;
++	int ret;
++
++	seninf = devm_kzalloc(dev, sizeof(*seninf), GFP_KERNEL);
++	if (!seninf)
++		return -ENOMEM;
++	seninf->dev = dev;
++	platform_set_drvdata(pdev, seninf);
++
++	seninf->base = devm_platform_ioremap_resource_byname(pdev, "base");
++	if (IS_ERR(seninf->base))
++		return PTR_ERR(seninf->base);
++	seninf->ana = devm_platform_ioremap_resource_byname(pdev, "ana-rx");
++	if (IS_ERR(seninf->ana))
++		return PTR_ERR(seninf->ana);
++
++	for (i = 0; i < ARRAY_SIZE(seninf_clk_names); i++)
++		seninf->clks[i].id = seninf_clk_names[i];
++	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(seninf->clks), seninf->clks);
++	if (ret)
++		return dev_err_probe(dev, ret, "getting the clocks failed\n");
++	seninf->csi_rate = clk_get_rate(seninf->clks[SENINF_CLK_CSI].clk);
++	if (!seninf->csi_rate)
++		return dev_err_probe(dev, -EINVAL, "the CSI clock has no rate\n");
++
++	ret = devm_pm_domain_attach_list(dev, &pd_data, &seninf->pds);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "attaching the power domains failed\n");
++	if (ret != ARRAY_SIZE(seninf_pd_names))
++		return dev_err_probe(dev, -ENODEV, "found %d of %zu power domains\n",
++				     ret, ARRAY_SIZE(seninf_pd_names));
++
++	ret = seninf_read_trims(seninf);
++	if (ret)
++		return dev_err_probe(dev, ret, "reading the CSI trims failed\n");
++
++	ret = devm_mutex_init(dev, &seninf->debugfs_lock);
++	if (ret)
++		return ret;
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++
++	seninf->mdev.dev = dev;
++	strscpy(seninf->mdev.model, "MediaTek MT6897 seninf",
++		sizeof(seninf->mdev.model));
++	media_device_init(&seninf->mdev);
++	seninf->v4l2_dev.mdev = &seninf->mdev;
++	ret = v4l2_device_register(dev, &seninf->v4l2_dev);
++	if (ret)
++		goto err_mdev;
++
++	v4l2_subdev_init(&seninf->sd, &seninf_subdev_ops);
++	seninf->sd.internal_ops = &seninf_internal_ops;
++	seninf->sd.owner = THIS_MODULE;
++	seninf->sd.dev = dev;
++	seninf->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	strscpy(seninf->sd.name, dev_name(dev), sizeof(seninf->sd.name));
++	seninf->sd.entity.function = MEDIA_ENT_F_VID_IF_BRIDGE;
++	seninf->sd.entity.ops = &seninf_entity_ops;
++	seninf->pads[SENINF_PAD_SINK].flags = MEDIA_PAD_FL_SINK |
++					      MEDIA_PAD_FL_MUST_CONNECT;
++	seninf->pads[SENINF_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
++	ret = media_entity_pads_init(&seninf->sd.entity, SENINF_NUM_PADS,
++				     seninf->pads);
++	if (ret)
++		goto err_v4l2;
++	ret = v4l2_subdev_init_finalize(&seninf->sd);
++	if (ret)
++		goto err_entity;
++	ret = v4l2_device_register_subdev(&seninf->v4l2_dev, &seninf->sd);
++	if (ret)
++		goto err_subdev;
++
++	ret = media_device_register(&seninf->mdev);
++	if (ret)
++		goto err_unreg_subdev;
++
++	v4l2_async_nf_init(&seninf->notifier, &seninf->v4l2_dev);
++	seninf->notifier.ops = &seninf_notify_ops;
++	ret = seninf_parse_endpoint(seninf);
++	if (ret)
++		goto err_nf;
++	ret = v4l2_async_nf_register(&seninf->notifier);
++	if (ret)
++		goto err_nf;
++
++	seninf->debugfs = debugfs_create_dir(dev_name(dev), NULL);
++	debugfs_create_file("status", 0400, seninf->debugfs, seninf,
++			    &seninf_status_fops);
++	debugfs_create_file("stream", 0200, seninf->debugfs, seninf,
++			    &seninf_stream_fops);
++
++	dev_info(dev, "CSI port 0, %u lanes, CSI clock %lu Hz\n",
++		 seninf->num_lanes, seninf->csi_rate);
++	return 0;
++
++err_nf:
++	v4l2_async_nf_cleanup(&seninf->notifier);
++	media_device_unregister(&seninf->mdev);
++err_unreg_subdev:
++	v4l2_device_unregister_subdev(&seninf->sd);
++err_subdev:
++	v4l2_subdev_cleanup(&seninf->sd);
++err_entity:
++	media_entity_cleanup(&seninf->sd.entity);
++err_v4l2:
++	v4l2_device_unregister(&seninf->v4l2_dev);
++err_mdev:
++	media_device_cleanup(&seninf->mdev);
++	return ret;
++}
++
++static void seninf_remove(struct platform_device *pdev)
++{
++	struct mt6897_seninf *seninf = platform_get_drvdata(pdev);
++
++	debugfs_remove_recursive(seninf->debugfs);
++	v4l2_async_nf_unregister(&seninf->notifier);
++	v4l2_async_nf_cleanup(&seninf->notifier);
++	media_device_unregister(&seninf->mdev);
++	v4l2_device_unregister_subdev(&seninf->sd);
++	v4l2_subdev_cleanup(&seninf->sd);
++	media_entity_cleanup(&seninf->sd.entity);
++	v4l2_device_unregister(&seninf->v4l2_dev);
++	media_device_cleanup(&seninf->mdev);
++}
++
++static const struct of_device_id seninf_of_match[] = {
++	{ .compatible = "mediatek,mt6897-seninf" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, seninf_of_match);
++
++static struct platform_driver seninf_driver = {
++	.probe = seninf_probe,
++	.remove = seninf_remove,
++	.driver = {
++		.name = "mt6897-seninf",
++		.of_match_table = seninf_of_match,
++		.pm = pm_ptr(&seninf_pm_ops),
++	},
++};
++module_platform_driver(seninf_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6897 sensor interface");
++MODULE_LICENSE("GPL");

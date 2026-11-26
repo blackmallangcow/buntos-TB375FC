@@ -373,6 +373,22 @@
 	status = "okay";
 };
 
+// 앞 카메라 3단계. seninf(CSI 수신부)를 켜고 앞 센서를 CSI 포트 0에 잇는다. 하드웨어는 스트림을 켤 때만 켠다
+&seninf {
+	status = "okay";
+};
+
+&seninf_port0 {
+	seninf_in0: endpoint {
+		data-lanes = <1 2 3 4>;
+		remote-endpoint = <&front_camera_out>;
+	};
+};
+
+&front_camera_out {
+	remote-endpoint = <&seninf_in0>;
+};
+
 / {
 	// 앞 카메라 2단계의 시험 노드. 꺼 둔 채 부팅하고, 시험 모듈(.handoff의 camtest)이 손으로 올릴 때만 이 노드로 장치를 만든다
 	camera-power-test {
