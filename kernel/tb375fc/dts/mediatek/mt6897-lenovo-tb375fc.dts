@@ -21,6 +21,7 @@
 
 	aliases {
 		i2c5 = &i2c5;
+		i2c9 = &i2c9;
 		i2c10 = &i2c10;
 		serial0 = &uart0;
 		spmi0 = &spmi_m;
@@ -162,6 +163,30 @@
 		regulator-boot-on;
 		off-on-delay-us = <80000>;
 		status = "disabled";
+	};
+
+	/*
+	 * Camera supplies switched by GPIOs, as in the stock tree: GPIO36 is
+	 * the analog supply of both cameras, GPIO37 the digital supply of the
+	 * front one. Their voltages are not known; 2.8 V and 1.2 V are the
+	 * usual ones for these supplies.
+	 */
+	cam_avdd: regulator-cam-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&pio 36 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	cam1_dvdd: regulator-cam1-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam1_dvdd";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		gpio = <&pio 37 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
 	};
 
 	/*
@@ -673,6 +698,42 @@
 	};
 };
 
+&i2c9 {
+	clock-frequency = <400000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c9_pins>;
+	status = "okay";
+
+	/*
+	 * Front camera. The stock tree lists an S5K4H7 and an SC820CS for this
+	 * place; this unit answered as the SC820CS. The power on order and its
+	 * delays are in the driver. The CSI-2 receiver is not described yet,
+	 * so the endpoint has no remote.
+	 */
+	front_camera: camera@36 {
+		compatible = "smartsens,sc820cs";
+		reg = <0x36>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam1_mclk_pins>;
+		clocks = <&topckgen CLK_TOP_CAMTG4>;
+		assigned-clocks = <&topckgen CLK_TOP_CAMTG4>;
+		assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_192M_D8>;
+		assigned-clock-rates = <24000000>;
+		avdd-supply = <&cam_avdd>;
+		dovdd-supply = <&mt6368_vsim2>;
+		dvdd-supply = <&cam1_dvdd>;
+		reset-gpios = <&pio 118 GPIO_ACTIVE_LOW>;
+		orientation = <0>;
+
+		port {
+			front_camera_out: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <330000000>;
+			};
+		};
+	};
+};
+
 &i2c10 {
 	clock-frequency = <400000>;
 
@@ -769,6 +830,19 @@
 			pinmux = <PINMUX_GPIO82__FUNC_GPIO82>;
 			input-enable;
 			bias-pull-up = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	cam1_mclk_pins: cam1-mclk-pins {
+		pins-mclk {
+			pinmux = <PINMUX_GPIO126__FUNC_CMMCLK3>;
+		};
+	};
+
+	i2c9_pins: i2c9-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO155__FUNC_SCL9>,
+				 <PINMUX_GPIO156__FUNC_SDA9>;
 		};
 	};
 
@@ -906,6 +980,17 @@
 				 <PINMUX_GPIO202__FUNC_CONN_BT_DATA>;
 			drive-strength = <4>;
 		};
+	};
+
+	/*
+	 * The rear camera shares AVDD and DOVDD with the front one. Hold its
+	 * reset low, as the stock tree does, while it has no driver.
+	 */
+	rear-camera-reset-hog {
+		gpio-hog;
+		gpios = <116 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "rear-camera-reset";
 	};
 };
 
@@ -1204,13 +1289,14 @@
 	/*
 	 * MT6368 second PMIC, with the rails the stock tree keeps on: among
 	 * them USB's analog supply and the GPU core, which stays on until a
-	 * GPU driver takes it. The stock tree leaves the others to their
+	 * GPU driver takes it. vsim2, the I/O supply of both cameras, is here
+	 * for the front camera. The stock tree leaves the others to their
 	 * users, such as vibr (the vibrator and the camera autofocus), vfp
-	 * (the fingerprint sensor), vmc and vmch-eint-* (the SD card) and
-	 * vsim2 (the cameras); leaving them
-	 * out of this node keeps Linux from touching them. As on the MT6363,
-	 * no voltage limits are given and the names come from the stock
-	 * consumers where there is one.
+	 * (the fingerprint sensor) and vmc and vmch-eint-* (the SD card);
+	 * leaving them out of this node keeps Linux from touching them. As on
+	 * the MT6363, no voltage limits are given, so a rail keeps the voltage
+	 * the PMIC holds (vsim2 reads 1.8 V plus a 60 mV calibration step),
+	 * and the names come from the stock consumers where there is one.
 	 */
 	mt6368: pmic@5 {
 		compatible = "mediatek,mt6368";
@@ -1287,6 +1373,12 @@
 				regulator-name = "mt6368_vio28";
 				regulator-enable-ramp-delay = <680>;
 				regulator-always-on;
+			};
+
+			mt6368_vsim2: vsim2 {
+				regulator-name = "mt6368_vsim2";
+				regulator-enable-ramp-delay = <680>;
+				regulator-allowed-modes = <0 2>;
 			};
 
 			mt6368_vtp: vtp {

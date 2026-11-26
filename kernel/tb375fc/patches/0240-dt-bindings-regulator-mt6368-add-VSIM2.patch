@@ -1,0 +1,19 @@
+From: buntOS contributors
+Subject: [PATCH] dt-bindings: regulator: mt6368: add VSIM2
+
+VSIM2 is an LDO like VIBR, with the same register layout and voltage
+table. On the Lenovo TB375FC it is the I/O supply of both cameras.
+---
+diff --git a/Documentation/devicetree/bindings/regulator/mediatek,mt6368-regulator.yaml b/Documentation/devicetree/bindings/regulator/mediatek,mt6368-regulator.yaml
+index ffacaaf6e..d0877cd97 100644
+--- a/Documentation/devicetree/bindings/regulator/mediatek,mt6368-regulator.yaml
++++ b/Documentation/devicetree/bindings/regulator/mediatek,mt6368-regulator.yaml
+@@ -50,7 +50,7 @@ patternProperties:
+   "^v(ant|aud|aux)18$":
+     $ref: "#/$defs/ldo-common"
+ 
+-  "^v(cn33-[12]|efuse|fp|ibr|io28|tp|usb)$":
++  "^v(cn33-[12]|efuse|fp|ibr|io28|sim2|tp|usb)$":
+     $ref: "#/$defs/ldo-common"
+ 
+   "^vmc(h)?$":

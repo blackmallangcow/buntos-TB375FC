@@ -317,3 +317,11 @@
 
 # 0230 TB375FC pen: the stylus only reports at 120 Hz, so make 120 Hz the default
 0230-drm-panel-novatek-nt36532-prefer-120-Hz-on-the-TB375FC.patch
+
+# 0240~0243 앞 카메라 1단계(docs/tb375fc/camera.md 5.1절). MT6368 VSIM2(두 카메라의 입출력 전원)와 SmartSens SC820CS
+#      센서 드라이버. 설정표와 켜는 순서는 레노버 소스의 벤더 드라이버를 따른다. 수신부(seninf)가 아직 없어 드라이버는
+#      센서를 알아보고 켜고 끄기만 한다
+0240-dt-bindings-regulator-mt6368-add-VSIM2.patch
+0241-regulator-mt6368-add-the-VSIM2-LDO.patch
+0242-dt-bindings-media-i2c-add-the-SmartSens-SC820CS.patch
+0243-media-i2c-add-a-driver-for-the-SmartSens-SC820CS.patch
