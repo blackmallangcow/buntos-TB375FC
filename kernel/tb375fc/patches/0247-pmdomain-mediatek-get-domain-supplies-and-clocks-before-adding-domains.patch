@@ -1,0 +1,92 @@
+From: buntOS contributors
+Subject: [PATCH] pmdomain: mediatek: get domain supplies and clocks before adding domains
+
+scpsys_probe() adds the domains one by one and powers on each domain that
+is not MTK_SCPD_KEEP_DEFAULT_OFF as it is added. The supply and the clocks
+of a domain are looked up only when that domain is added, so a supplier
+that is not ready yet defers the probe halfway through, and the cleanup
+powers off the domains that were already powered on. The next probe
+powers them on again.
+
+That power cycle reaches hardware the bootloader left running. On the
+Lenovo TB375FC (MT6897) the CAM_MAIN domain takes its supply from an
+MT6319 buck that registers after the first probe. By then the first probe
+has powered on MM_INFRA, DIS0_SHUTDOWN and OVL0_SHUTDOWN, which hold part
+of the display path scanning out the boot framebuffer; the cleanup powers
+them off and the second probe on again. Once the display IOMMU is set up
+later, the display faults on every frame at the addresses of its buffers
+and half of the panel stays black. In nine boots with different sets of
+camera domains, the faults came exactly in the boots where the first probe
+deferred.
+
+Get the supplies and clocks of all domains, subdomains included, before
+adding any domain, so that a missing supplier defers the probe before any
+domain is touched. The references are dropped right away and taken again
+as before when the domains are added. With this change the TB375FC boots
+with all camera domains, the domains are registered once, and the display
+IOMMU reports no faults.
+---
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index 9fd09bd80..0f798aee2 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -1278,6 +1278,48 @@ static const struct of_device_id scpsys_of_match[] = {
+ 	{ }
+ };
+ 
++/*
++ * Get the supplies and clocks of all domains before adding any. Domains that
++ * are not default off are powered on as they are added, so a supplier that is
++ * not ready yet would defer the probe halfway, and the cleanup would power
++ * those domains off again, even when the bootloader left hardware running in
++ * them.
++ */
++static int scpsys_check_suppliers(struct scpsys *scpsys, struct device_node *np)
++{
++	int i, n, ret;
++
++	for_each_available_child_of_node_scoped(np, node) {
++		if (of_property_present(node, "domain-supply")) {
++			struct regulator *supply;
++
++			supply = of_regulator_get_optional(scpsys->dev, node, "domain");
++			if (IS_ERR(supply))
++				return dev_err_probe(scpsys->dev, PTR_ERR(supply),
++						     "%pOF: failed to get power supply\n",
++						     node);
++			regulator_put(supply);
++		}
++
++		n = of_count_phandle_with_args(node, "clocks", "#clock-cells");
++		for (i = 0; i < n; i++) {
++			struct clk *clk = of_clk_get(node, i);
++
++			if (IS_ERR(clk))
++				return dev_err_probe(scpsys->dev, PTR_ERR(clk),
++						     "%pOF: failed to get clk at index %d\n",
++						     node, i);
++			clk_put(clk);
++		}
++
++		ret = scpsys_check_suppliers(scpsys, node);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
+ static int scpsys_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -1337,6 +1379,10 @@ static int scpsys_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	ret = scpsys_check_suppliers(scpsys, np);
++	if (ret)
++		return ret;
++
+ 	ret = -ENODEV;
+ 	for_each_available_child_of_node_scoped(np, node) {
+ 		struct generic_pm_domain *domain;

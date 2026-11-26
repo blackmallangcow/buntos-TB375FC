@@ -331,3 +331,7 @@
 0244-dt-bindings-clock-mediatek-add-the-MT6897-camera-clock-gates.patch
 0245-clk-mediatek-gate-add-no-set-clear-inverted-ops-without-a-status-read.patch
 0246-clk-mediatek-add-the-MT6897-camera-clock-gates.patch
+
+# 0247 전원 제어기가 도메인을 하나라도 켜기 전에 모든 도메인의 공급과 클럭을 먼저 찾는다. CAM_MAIN의 domain-supply가 첫 probe를
+#      중간에 미루면, 이미 켠 화면 쪽 도메인(MM_INFRA, DIS0, OVL0)을 정리하며 껐다가 다시 켜서 화면 반쪽이 IOMMU 오류로 검게 됐다
+0247-pmdomain-mediatek-get-domain-supplies-and-clocks-before-adding-domains.patch
