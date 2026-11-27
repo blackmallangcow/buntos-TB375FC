@@ -5,14 +5,16 @@ Add the sensor interface (seninf) of the MT6897, the MIPI CSI-2 receiver
 with its CSI RX analog front ends (CSI PHY 3.0). It has two register
 regions, one interrupt, five clocks, two power domains and a fuse cell with
 the termination trims of CSI port 0. Port 0 of the graph is CSI port 0 as
-a four-lane D-PHY port, port 1 the output to the camera DMA engines.
+a four-lane D-PHY port, port 1 the output to the camera DMA engines. It
+also names the video coprocessor, which has to run while the camera block
+is powered.
 ---
 diff --git a/Documentation/devicetree/bindings/media/mediatek,mt6897-seninf.yaml b/Documentation/devicetree/bindings/media/mediatek,mt6897-seninf.yaml
 new file mode 100644
-index 000000000..f0810b699
+index 000000000..4deaf7148
 --- /dev/null
 +++ b/Documentation/devicetree/bindings/media/mediatek,mt6897-seninf.yaml
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,159 @@
 +# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 +%YAML 1.2
 +---
@@ -81,6 +83,13 @@ index 000000000..f0810b699
 +    items:
 +      - const: csi0
 +
++  mediatek,vcp:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      The video coprocessor (VCP). Once its firmware scales the multimedia
++      clocks, the camera block takes register writes only while that firmware
++      runs, so the coprocessor has to run while the power domains are on.
++
 +  ports:
 +    $ref: /schemas/graph.yaml#/properties/ports
 +
@@ -122,6 +131,7 @@ index 000000000..f0810b699
 +  - clock-names
 +  - power-domains
 +  - power-domain-names
++  - mediatek,vcp
 +  - ports
 +
 +additionalProperties: false
@@ -147,6 +157,7 @@ index 000000000..f0810b699
 +            power-domain-names = "cam-main", "csi-rx";
 +            nvmem-cells = <&csi_trim0>;
 +            nvmem-cell-names = "csi0";
++            mediatek,vcp = <&vcp>;
 +
 +            ports {
 +                #address-cells = <1>;

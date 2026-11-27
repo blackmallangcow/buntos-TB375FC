@@ -2148,6 +2148,7 @@
 			power-domain-names = "cam-main", "csi-rx";
 			nvmem-cells = <&csi_trim0>;
 			nvmem-cell-names = "csi0";
+			mediatek,vcp = <&vcp>;
 			status = "disabled";
 
 			ports {
