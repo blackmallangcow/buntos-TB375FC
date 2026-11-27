@@ -13,9 +13,11 @@ firmware (MMDVFS), the first register write into the CAM_MAIN power domain
 ends in an asynchronous SError while that firmware is stopped. With the
 coprocessor running, the same power-up works. MediaTek's driver wakes the
 coprocessor before it powers its domains (mtk_mmdvfs_enable_vcp()), so this
-driver holds the coprocessor while the domains are on. It powers the
-domains itself, without device links and synchronously, and the PM core
-leaves them alone in system sleep: genpd would otherwise power them up on
+driver holds the coprocessor while the domains are on. Its runtime PM
+callbacks start the coprocessor, power the domains and enable the clocks in
+that order, synchronously and without device links, because the driver core
+also resumes the device whenever a child node is added. The PM core leaves
+the domains alone in system sleep: genpd would otherwise power them up on
 every resume, with the coprocessor stopped.
 
 The register sequence follows MediaTek's isp7sp seninf driver for CSI PHY
@@ -82,10 +84,10 @@ index 000000000..2be77f65e
 +obj-$(CONFIG_VIDEO_MEDIATEK_MT6897_SENINF) += mt6897-seninf.o
 diff --git a/drivers/media/platform/mediatek/mt6897-seninf/mt6897-seninf.c b/drivers/media/platform/mediatek/mt6897-seninf/mt6897-seninf.c
 new file mode 100644
-index 000000000..e10da42f1
+index 000000000..bd212ae4a
 --- /dev/null
 +++ b/drivers/media/platform/mediatek/mt6897-seninf/mt6897-seninf.c
-@@ -0,0 +1,1406 @@
+@@ -0,0 +1,1391 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * MediaTek MT6897 sensor interface (seninf)
@@ -945,49 +947,6 @@ index 000000000..e10da42f1
 +	return 0;
 +}
 +
-+/*
-+ * The coprocessor first, then the power domains, then the device with its
-+ * clocks, some of which are gates inside CAM_MAIN. All of it synchronous, so
-+ * that the domains are off before the coprocessor may stop.
-+ */
-+static int seninf_power_get(struct mt6897_seninf *seninf)
-+{
-+	unsigned int i;
-+	int ret;
-+
-+	ret = mt6897_vcp_start(seninf->vcp);
-+	if (ret)
-+		return ret;
-+
-+	for (i = 0; i < seninf->pds->num_pds; i++) {
-+		ret = pm_runtime_resume_and_get(seninf->pds->pd_devs[i]);
-+		if (ret)
-+			goto err_pds;
-+	}
-+
-+	ret = pm_runtime_resume_and_get(seninf->dev);
-+	if (ret)
-+		goto err_pds;
-+
-+	return 0;
-+
-+err_pds:
-+	while (i--)
-+		pm_runtime_put_sync(seninf->pds->pd_devs[i]);
-+	mt6897_vcp_stop(seninf->vcp);
-+	return ret;
-+}
-+
-+static void seninf_power_put(struct mt6897_seninf *seninf)
-+{
-+	unsigned int i = seninf->pds->num_pds;
-+
-+	pm_runtime_put_sync(seninf->dev);
-+	while (i--)
-+		pm_runtime_put_sync(seninf->pds->pd_devs[i]);
-+	mt6897_vcp_stop(seninf->vcp);
-+}
-+
 +static int seninf_enable_streams(struct v4l2_subdev *sd,
 +				 struct v4l2_subdev_state *state, u32 pad,
 +				 u64 streams_mask)
@@ -1024,7 +983,7 @@ index 000000000..e10da42f1
 +	dev_dbg(seninf->dev, "%ux%u data type 0x%02x, %lld bit/s per lane\n",
 +		fmt->width, fmt->height, sfmt->dt, 2 * link_freq);
 +
-+	ret = seninf_power_get(seninf);
++	ret = pm_runtime_resume_and_get(seninf->dev);
 +	if (ret)
 +		return ret;
 +
@@ -1034,7 +993,7 @@ index 000000000..e10da42f1
 +	if (ret) {
 +		dev_err(seninf->dev, "starting %s failed: %d\n", source->name, ret);
 +		seninf_rx_stop(seninf);
-+		seninf_power_put(seninf);
++		pm_runtime_put_sync(seninf->dev);
 +		return ret;
 +	}
 +
@@ -1058,7 +1017,7 @@ index 000000000..e10da42f1
 +	}
 +
 +	seninf_rx_stop(seninf);
-+	seninf_power_put(seninf);
++	pm_runtime_put_sync(seninf->dev);
 +	return 0;
 +}
 +
@@ -1303,25 +1262,53 @@ index 000000000..e10da42f1
 +
 +/* ---- power and probe ----------------------------------------------------- */
 +
++/*
++ * The coprocessor first, then the power domains, then the clocks, some of
++ * which are gates inside CAM_MAIN, and the reverse on the way down. All of it
++ * lives here because the driver core resumes this device on its own as well,
++ * whenever a child such as the media or a subdevice node is added. It is all
++ * synchronous, so that the domains are off before the coprocessor may stop.
++ */
 +static int seninf_runtime_suspend(struct device *dev)
 +{
 +	struct mt6897_seninf *seninf = dev_get_drvdata(dev);
++	unsigned int i = seninf->pds->num_pds;
 +
 +	clk_bulk_disable_unprepare(ARRAY_SIZE(seninf->clks), seninf->clks);
++	while (i--)
++		pm_runtime_put_sync(seninf->pds->pd_devs[i]);
++	mt6897_vcp_stop(seninf->vcp);
 +	return 0;
 +}
 +
 +static int seninf_runtime_resume(struct device *dev)
 +{
 +	struct mt6897_seninf *seninf = dev_get_drvdata(dev);
++	unsigned int i;
 +	int ret;
 +
-+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(seninf->clks), seninf->clks);
++	ret = mt6897_vcp_start(seninf->vcp);
 +	if (ret)
 +		return ret;
 +
++	for (i = 0; i < seninf->pds->num_pds; i++) {
++		ret = pm_runtime_resume_and_get(seninf->pds->pd_devs[i]);
++		if (ret)
++			goto err_pds;
++	}
++
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(seninf->clks), seninf->clks);
++	if (ret)
++		goto err_pds;
++
 +	seninf_hw_idle(seninf);
 +	return 0;
++
++err_pds:
++	while (i--)
++		pm_runtime_put_sync(seninf->pds->pd_devs[i]);
++	mt6897_vcp_stop(seninf->vcp);
++	return ret;
 +}
 +
 +static DEFINE_RUNTIME_DEV_PM_OPS(seninf_pm_ops, seninf_runtime_suspend,
@@ -1372,7 +1359,7 @@ index 000000000..e10da42f1
 +	if (ret != ARRAY_SIZE(seninf_pd_names))
 +		return dev_err_probe(dev, -ENODEV, "found %d of %zu power domains\n",
 +				     ret, ARRAY_SIZE(seninf_pd_names));
-+	/* System sleep leaves the domains to seninf_power_get() and _put() */
++	/* System sleep leaves the domains to the runtime PM callbacks */
 +	for (i = 0; i < seninf->pds->num_pds; i++)
 +		dev_pm_syscore_device(seninf->pds->pd_devs[i], true);
 +
