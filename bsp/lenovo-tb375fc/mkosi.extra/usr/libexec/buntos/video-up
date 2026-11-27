@@ -38,6 +38,9 @@ for _ in $(seq 1 50); do
 done
 modprobe mt6897-vcp || exit 1
 modprobe mt6897-vdec || exit 1
+# 카메라 수신부(seninf)도 코프로세서에 기댄다. 명령줄이 자동 적재를 막고 여기서 코프로세서 뒤에 올린다.
+# 카메라 노드가 꺼진 커널에서는 아무것에도 붙지 않는다
+modprobe -q mt6897-seninf || :
 
 for _ in $(seq 1 50); do
 	for name in /sys/class/video4linux/video*/name; do
