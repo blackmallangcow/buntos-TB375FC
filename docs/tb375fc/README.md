@@ -18,6 +18,7 @@
 | [video-decode.md](video-decode.md) | 하드웨어 비디오 디코딩의 가능성 조사와 단계 계획: 디코더와 VCP, 벤더 소스, 업스트림, 부트 체인, Firefox로 가는 길(코드 없음, 기기는 읽기만) |
 | [camera.md](camera.md) | 앞 카메라 조사와 단계 계획: 센서 확인(SC820CS), 전원과 제어 줄, seninf·camsv, 벤더 소스와 업스트림, libcamera 소프트 ISP까지 |
 | [community-port.md](community-port.md) | 이 기기의 커뮤니티 mainline 포트 분석: 커밋, 우리 계획과 겹침, 부팅과 기록, 협력할 일 |
+| [pen-investigation.md](pen-investigation.md) | 외부 Fedora·LineageOS 포트에서 수집한 펜 조사 결과: 144 Hz 게이트, 압력은 정상, 가상 접촉(phantom contact), 미해결 과제 |
 | [../hw/lenovo-tb375fc.md](../hw/lenovo-tb375fc.md) | 펌웨어에서 읽은 하드웨어 실측(장치 트리, 부트 이미지, 커널), 중국판·글로벌판 비교 |
 | [../design/ARCHITECTURE.md](../design/ARCHITECTURE.md) | buntOS 설계안(4.2절 실기기, 12장 Phase 0 실측 항목) |
 
